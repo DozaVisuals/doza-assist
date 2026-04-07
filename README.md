@@ -4,6 +4,14 @@ A local-first AI-powered interview transcription and editing tool for documentar
 
 Built for video production workflows — transcribe interviews, discover clips with AI, highlight and organize selects, and export pre-cut timelines directly to Final Cut Pro.
 
+<!-- Add your demo video here:
+https://github.com/user-attachments/assets/YOUR_VIDEO_ID
+or embed a GIF: ![Demo](demo.gif) -->
+
+## Why I Built This
+
+I'm a documentary filmmaker and I needed a way to find story beats and soundbites across hours of interview footage without uploading client material to cloud services. Existing tools were either too expensive, too slow, or required sending sensitive footage to third-party servers. So I built something that runs entirely on my Mac, uses AI locally, and exports directly to my Final Cut Pro timeline.
+
 ---
 
 ## Features
@@ -97,6 +105,7 @@ Open **http://localhost:5050**
 
 ### AI Setup (optional but recommended)
 
+**Local with Ollama (free, private — recommended):**
 ```bash
 # Install and start Ollama
 brew install ollama
@@ -105,6 +114,14 @@ ollama serve
 # Pull a model (gemma4 recommended)
 ollama pull gemma4
 ```
+
+**Cloud with Claude API (higher quality, optional):**
+If you want better AI analysis quality, you can use Anthropic's Claude API as an alternative backend. Transcription still runs locally — only the AI analysis and chat use the API.
+```bash
+export ANTHROPIC_API_KEY=sk-ant-your-key-here
+# Add to ~/.zshrc to persist
+```
+The app automatically tries Ollama first and falls back to Claude if configured.
 
 ---
 

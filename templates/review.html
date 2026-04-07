@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review: {{ project.name }} - Doza Visuals</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        /* Override some styles for client-facing cleanliness */
+        .review-logo {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+        .submit-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            padding: 1rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            z-index: 100;
+            transform: translateY(100%);
+            transition: transform 0.3s ease;
+        }
+        .submit-bar.visible {
+            transform: translateY(0);
+        }
+        body { padding-bottom: 80px; }
+        .note-input {
+            width: 100%;
+            margin-top: 0.5rem;
+            padding: 0.4rem 0.6rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            font-family: var(--font);
+            font-size: 0.8rem;
+            display: none;
+        }
+        .review-segment.highlighted .note-input {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+<header class="app-header">
+    <div class="review-logo">
+        <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" width="22" height="22">
+            <rect width="28" height="28" rx="6" fill="#4a9eff"/>
+            <path d="M7 8h4v12H7V8zm5 0h3.5c3 0 5.5 2.5 5.5 6s-2.5 6-5.5 6H12V8z" fill="#000" fill-opacity="0.9"/>
+        </svg>
+        <span>Doza Visuals</span>
+    </div>
+</header>
+
+<div class="container" style="max-width: 900px;">
+    <div class="review-header">
+        <h1>{{ project.name }}</h1>
+        <p>
+            Review the transcript below and click on any moments you'd like us to include in the final edit.
+            Your selections will be sent directly to our editing timeline.
+        </p>
+    </div>
+
+    <div class="review-instructions">
+        <strong>How to use:</strong> Click any line to highlight it as a "must use" moment. 
+        You can add a note to explain why you like it. When you're done, hit "Submit Selects" at the bottom.
+    </div>
+
+    <div id="transcript">
+        {% for seg in project.transcript.segments %}
+        <div class="review-segment" 
+             data-index="{{ loop.index0 }}"
+             data-start="{{ seg.start }}" 
+             data-end="{{ seg.end }}"
+             onclick="toggleHighlight(this)">
+            <span class="segment-tc">{{ seg.start_formatted[:8] }}</span>
+            <span class="segment-speaker {% if seg.speaker == project.interviewer_name %}speaker-1{% else %}speaker-2{% endif %}">
+                {{ seg.speaker }}
+            </span>
+            <div style="flex: 1;">
+                <span class="segment-text">{{ seg.text }}</span>
+                <input type="text" class="note-input" placeholder="Add a note (optional)..." 
+                       onclick="event.stopPropagation()">
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Submit Bar -->
+<div class="submit-bar" id="submitBar">
+    <div>
+        <span id="selectCount" style="font-weight: 600; font-size: 1.1rem;">0</span>
+        <span style="color: var(--text-secondary);"> moments selected</span>
+    </div>
+    <div class="btn-group">
+        <button class="btn" onclick="clearAll()">Clear All</button>
+        <button class="btn btn-primary" onclick="submitSelects()">Submit Selects</button>
+    </div>
+</div>
+
+<!-- Thank You Modal -->
+<div class="modal-overlay" id="thankYouModal">
+    <div class="modal" style="text-align: center;">
+        <svg viewBox="0 0 48 48" fill="none" width="48" height="48" style="margin-bottom: 1rem;">
+            <circle cx="24" cy="24" r="24" fill="var(--green-dim)"/>
+            <path d="M16 24l6 6 12-12" stroke="var(--green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <h2>Selects Submitted!</h2>
+        <p style="color: var(--text-secondary); margin-top: 0.5rem;">
+            Your selections have been sent to the editing team. 
+            These will appear as markers on the timeline in Final Cut Pro.
+        </p>
+        <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 1rem;">
+            You can close this tab. If you need to make changes, just revisit this link.
+        </p>
+    </div>
+</div>
+
+<script>
+const PROJECT_ID = '{{ project.id }}';
+let highlighted = new Set();
+
+function toggleHighlight(el) {
+    const index = el.dataset.index;
+    if (highlighted.has(index)) {
+        highlighted.delete(index);
+        el.classList.remove('highlighted');
+    } else {
+        highlighted.add(index);
+        el.classList.add('highlighted');
+        // Focus the note input
+        const noteInput = el.querySelector('.note-input');
+        if (noteInput) {
+            setTimeout(() => noteInput.focus(), 100);
+        }
+    }
+    updateCount();
+}
+
+function updateCount() {
+    document.getElementById('selectCount').textContent = highlighted.size;
+    const bar = document.getElementById('submitBar');
+    if (highlighted.size > 0) {
+        bar.classList.add('visible');
+    } else {
+        bar.classList.remove('visible');
+    }
+}
+
+function clearAll() {
+    highlighted.clear();
+    document.querySelectorAll('.review-segment').forEach(el => {
+        el.classList.remove('highlighted');
+        el.querySelector('.note-input').value = '';
+    });
+    updateCount();
+}
+
+async function submitSelects() {
+    const selects = [];
+    highlighted.forEach(idx => {
+        const el = document.querySelector(`.review-segment[data-index="${idx}"]`);
+        if (el) {
+            selects.push({
+                start: parseFloat(el.dataset.start),
+                end: parseFloat(el.dataset.end),
+                text: el.querySelector('.segment-text').textContent.trim(),
+                note: el.querySelector('.note-input').value.trim(),
+            });
+        }
+    });
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/selects`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ selects }),
+        });
+        
+        if (res.ok) {
+            document.getElementById('thankYouModal').classList.add('active');
+        } else {
+            alert('Something went wrong. Please try again.');
+        }
+    } catch (err) {
+        alert('Connection error. Please check your internet and try again.');
+    }
+}
+</script>
+
+</body>
+</html>

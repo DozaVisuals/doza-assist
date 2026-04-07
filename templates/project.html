@@ -1,0 +1,1923 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project.name }} - Doza Assist</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="app-header">
+    <a href="{% if is_shared %}#{% else %}/{% endif %}" class="app-logo">
+        <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="28" height="28" rx="6" fill="#4a9eff"/>
+            <path d="M7 8h4v12H7V8zm5 0h3.5c3 0 5.5 2.5 5.5 6s-2.5 6-5.5 6H12V8z" fill="#000" fill-opacity="0.9"/>
+        </svg>
+        <span>{% if is_shared %}Doza Visuals{% else %}Doza Assist{% endif %}</span>
+    </a>
+    <div class="btn-group">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+            <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        </button>
+        {% if not is_shared %}
+        <button class="btn btn-sm" onclick="copyShareLink()" title="Copy shareable link">Share</button>
+        <button class="btn btn-sm" onclick="deleteProject()" style="color: var(--red);">Delete</button>
+        {% endif %}
+    </div>
+</header>
+
+<div class="container-wide">
+    <div class="page-title-area">
+        <div>
+            <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+                <h1 class="page-title">{% if is_multi %}Workspace{% else %}{{ project.name }}{% endif %}</h1>
+                {% if not is_shared %}
+                <!-- Project Selector -->
+                <div class="project-selector" id="projectSelector">
+                    <button class="project-selector-btn" onclick="toggleProjectDropdown()">
+                        {% if is_multi %}
+                            {{ projects | length }} projects
+                        {% else %}
+                            {{ project.name }}
+                        {% endif %}
+                        <svg viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M6 8L1 3h10z"/></svg>
+                    </button>
+                    <div class="project-dropdown" id="projectDropdown">
+                        <div class="project-dropdown-header">Select Projects</div>
+                        {% for p in all_projects %}
+                        <label class="project-dropdown-item">
+                            <input type="checkbox" value="{{ p.id }}"
+                                   {% if p.id in active_ids %}checked{% endif %}
+                                   onchange="updateProjectSelection()">
+                            <span class="project-dropdown-name">{{ p.name }}</span>
+                            <span class="project-dropdown-detail">{{ p.filename }}</span>
+                        </label>
+                        {% endfor %}
+                        <div class="project-dropdown-footer">
+                            <button class="btn btn-sm btn-primary" onclick="applyProjectSelection()">Apply</button>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            <p class="page-subtitle">
+                {% if is_multi %}
+                    {% for p in projects %}{{ p.name }}{% if not loop.last %} + {% endif %}{% endfor %}
+                {% else %}
+                    {% if project.client_name %}{{ project.client_name }} &bull; {% endif %}
+                    {{ project.filename }}
+                    {% if project.file_size_formatted %} &bull; {{ project.file_size_formatted }}{% endif %}
+                    {% if project.transcript %} &bull; {{ project.transcript.segments | length }} segments{% endif %}
+                    {% if not is_shared %} &bull; <a href="#" onclick="event.preventDefault(); revealInFinder();" style="color: var(--accent); text-decoration: none; font-size: 0.85rem;">Reveal in Finder</a>{% endif %}
+                {% endif %}
+            </p>
+            {% if not project.source_exists %}
+            <div style="margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: var(--red-dim); border: 1px solid rgba(248, 113, 113, 0.2); border-radius: var(--radius); font-size: 0.8rem; color: var(--red);">
+                Source file not found. It may have been moved or deleted. Transcription will not work until the file is accessible again.
+            </div>
+            {% endif %}
+        </div>
+        <div class="btn-group">
+            {% if project.status == 'uploaded' %}
+            <button class="btn btn-primary" id="transcribeBtn" onclick="startTranscription()">
+                Transcribe
+            </button>
+            {% elif project.status == 'transcribed' %}
+            <button class="btn btn-purple" id="analyzeBtn" onclick="runAnalysis()">
+                AI Analysis
+            </button>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if project.status == 'uploaded' %}
+    <!-- Pre-transcription state -->
+    <div class="card">
+        <div class="empty-state" id="preTranscribe">
+            <h3>Ready to transcribe</h3>
+            <p>Click "Transcribe" to process this file with speaker diarization.</p>
+            <p style="margin-top: 0.5rem; font-size: 0.8rem;">Estimated time: ~1 min per 10 min of audio</p>
+        </div>
+        <div id="transcribeProgress" style="display:none; padding: 2rem; text-align:center;">
+            <div class="spinner" style="margin: 0 auto 1rem;"></div>
+            <p>Transcribing... this may take a few minutes.</p>
+            <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;">
+                Running WhisperX with speaker diarization
+            </p>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: 60%"></div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if project.transcript %}
+    <!-- Tabs -->
+    <div class="tabs">
+        <button class="tab active" onclick="switchTab('transcript')">Transcript</button>
+        <button class="tab" onclick="switchTab('clips')">Clips</button>
+        <button class="tab" onclick="switchTab('analysis')">AI Analysis</button>
+        <button class="tab" onclick="switchTab('chat')">Chat</button>
+        <button class="tab" onclick="switchTab('export')">Export</button>
+    </div>
+
+    <!-- Persistent 2-column: Player left + Tab content right -->
+    <div class="page-two-col">
+
+    <!-- Left Column: Player (persists across all tabs) -->
+    <div class="player-col" id="playerCol">
+        {% if is_video %}
+        <div class="video-player-box">
+            <video id="videoPreview" preload="metadata" src="/project/{{ project.id }}/media" class="video-preview-main"></video>
+        </div>
+        {% endif %}
+        {% if not is_video %}
+        <audio id="audioPlayer" preload="metadata" src="/project/{{ project.id }}/media"></audio>
+        {% endif %}
+
+        <div class="player-controls-box">
+            <div class="player-inner">
+                <button class="player-play-btn" id="playBtn" onclick="togglePlay()" title="Play / Pause">
+                    <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><polygon points="6,3 20,12 6,21"/></svg>
+                    <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" width="18" height="18" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                </button>
+                <span class="player-time" id="playerCurrentTime">00:00</span>
+                <div class="player-track" id="playerTrack" onclick="seekPlayer(event)">
+                    <div class="player-progress" id="playerProgress"></div>
+                </div>
+                <span class="player-time" id="playerDuration">00:00</span>
+                <button class="player-speed-btn" id="speedBtn" onclick="cycleSpeed()" title="Playback speed">1x</button>
+            </div>
+        </div>
+
+        <div class="left-section">
+            <div class="card-title" style="margin-bottom: 0.5rem;">Speakers</div>
+            <div id="speakerList">
+                {% set speakers = [] %}
+                {% for seg in project.transcript.segments %}
+                    {% if seg.speaker not in speakers %}
+                        {% if speakers.append(seg.speaker) %}{% endif %}
+                    {% endif %}
+                {% endfor %}
+                {% for speaker in speakers %}
+                <div class="speaker-row" data-original="{{ speaker }}">
+                    <div style="width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: {% if loop.index == 1 %}var(--green){% elif loop.index == 2 %}var(--purple){% elif loop.index == 3 %}var(--orange){% else %}var(--accent){% endif %};"></div>
+                    <input type="text" class="speaker-input" value="{{ speaker }}" onchange="renameSpeaker('{{ speaker }}', this.value)">
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="left-section">
+            <div class="card-title" style="margin-bottom: 0.35rem;">Selections</div>
+            <p style="font-size: 1.5rem; font-weight: 600; line-height: 1;"><span id="selectCount">0</span></p>
+            <p style="font-size: 0.75rem; color: var(--text-muted);">labeled sections</p>
+        </div>
+
+        <div class="left-section">
+            <div style="display: flex; flex-direction: column; gap: 0.4rem;">
+                <button class="btn btn-sm btn-primary" onclick="exportFCPXML('labels')">Export Clips to FCPX</button>
+                <button class="btn btn-sm" onclick="downloadSRT()">Download SRT</button>
+                <button class="btn btn-sm" onclick="downloadTXT()">Download Text</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Column: Tab Content -->
+    <div class="content-col">
+
+    <!-- Color Label Toolbar (visible on Transcript + Clips tabs) -->
+    <div class="label-toolbar" id="labelToolbar">
+            <div class="label-swatches">
+                <button class="label-swatch" data-color="blue" onclick="toggleBrush('blue')">
+                    <span class="swatch-dot" style="background: var(--accent);"></span>
+                    <input class="swatch-label" type="text" value="Blue" data-color="blue" onclick="event.stopPropagation()" onchange="renameLabel('blue', this.value)">
+                </button>
+                <button class="label-swatch" data-color="green" onclick="toggleBrush('green')">
+                    <span class="swatch-dot" style="background: var(--green);"></span>
+                    <input class="swatch-label" type="text" value="Green" data-color="green" onclick="event.stopPropagation()" onchange="renameLabel('green', this.value)">
+                </button>
+                <button class="label-swatch" data-color="purple" onclick="toggleBrush('purple')">
+                    <span class="swatch-dot" style="background: var(--purple);"></span>
+                    <input class="swatch-label" type="text" value="Purple" data-color="purple" onclick="event.stopPropagation()" onchange="renameLabel('purple', this.value)">
+                </button>
+                <button class="label-swatch" data-color="orange" onclick="toggleBrush('orange')">
+                    <span class="swatch-dot" style="background: var(--orange);"></span>
+                    <input class="swatch-label" type="text" value="Orange" data-color="orange" onclick="event.stopPropagation()" onchange="renameLabel('orange', this.value)">
+                </button>
+                <button class="label-swatch" data-color="red" onclick="toggleBrush('red')">
+                    <span class="swatch-dot" style="background: var(--red);"></span>
+                    <input class="swatch-label" type="text" value="Red" data-color="red" onclick="event.stopPropagation()" onchange="renameLabel('red', this.value)">
+                </button>
+            </div>
+            <div class="label-actions">
+                <button class="btn btn-sm" onclick="clearAllLabels()" title="Remove all color labels">Clear</button>
+            </div>
+        </div>
+
+    <!-- Transcript Tab -->
+    <div class="tab-content active" id="tab-transcript">
+                <div class="transcript-container" id="transcriptContainer">
+                    {% for para in paragraphs %}
+                    <div class="para-block" data-start="{{ para.start }}" data-project="{{ para.project_id or project.id }}">
+                        <div class="para-header">
+                            <span class="para-speaker {% if para.speaker == project.interviewer_name %}speaker-1{% else %}speaker-2{% endif %}" onclick="cycleSpeaker(this)" title="Click to change speaker">{{ para.speaker }}</span>
+                            <span class="para-header-sep">|</span>
+                            <span class="para-tc" onclick="jumpTo({{ para.start }}, '{{ para.project_id or project.id }}')" title="Jump to {{ para.start_formatted }}">{{ para.start_formatted }}</span>
+                            {% if is_multi %}
+                            <span class="para-project-badge" style="color: var(--{{ para.project_color or 'accent' }});">{{ para.project_name or project.name }}</span>
+                            {% endif %}
+                        </div>
+                        <p class="para-text">
+                            {% for seg in para.segments %}
+                                {% if seg.words %}
+                                    {% for w in seg.words %}
+                                        <span class="tw" data-s="{{ w.start }}" data-e="{{ w.end }}" onclick="jumpTo({{ w.start }})">{{ w.word }}</span>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="tw" data-s="{{ seg.start }}" data-e="{{ seg.end }}" onclick="jumpTo({{ seg.start }})"> {{ seg.text }}</span>
+                                {% endif %}
+                            {% endfor %}
+                        </p>
+                    </div>
+                    {% endfor %}
+                </div>
+    </div>
+
+    <!-- Clips Tab -->
+    <div class="tab-content" id="tab-clips">
+                <div class="clips-header">
+                    <div style="display: flex; align-items: center; gap: 0.75rem;">
+                        <span class="card-title">Clip Library</span>
+                        <span id="clipsTotal" style="font-size: 0.8rem; color: var(--text-muted);">0 clips</span>
+                        <span id="clipsSelectedCount" style="font-size: 0.8rem; color: var(--accent); display: none;"></span>
+                    </div>
+                    <div class="btn-group">
+                        <label class="clip-select-all" title="Select all / none">
+                            <input type="checkbox" id="clipSelectAll" onchange="toggleAllClipChecks(this.checked)"> All
+                        </label>
+                        <button class="btn btn-sm btn-primary" id="exportSelectedBtn" onclick="exportSelectedClips()" style="display: none;">Export Selected to FCPX</button>
+                        <button class="btn btn-sm" onclick="exportFCPXML('labels')">Export All to FCPX</button>
+                    </div>
+                </div>
+                <div class="clips-grid" id="clipsGrid">
+                    <div class="empty-state" id="clipsEmpty">
+                        <h3>No clips yet</h3>
+                        <p>Highlight sections in the Transcript tab or ask the AI in Chat to discover clips.</p>
+                    </div>
+                </div>
+    </div>
+
+    <!-- Analysis Tab -->
+    <div class="tab-content" id="tab-analysis">
+        {% if project.analysis %}
+
+        <div class="btn-group" style="margin-bottom: 1.5rem;">
+            <button class="btn btn-sm btn-green" onclick="addAllAnalysisClips()">Add All Clips</button>
+        </div>
+
+        <!-- Summary -->
+        {% if project.analysis.summary %}
+        <div class="analysis-summary">
+            {% if project.analysis.suggested_title %}
+            <h2 class="analysis-title">{{ project.analysis.suggested_title }}</h2>
+            {% endif %}
+            <p>{{ project.analysis.summary }}</p>
+        </div>
+        {% endif %}
+
+        <!-- Story Beats -->
+        {% if project.analysis.get('story_beats', []) %}
+        <div class="analysis-section-header">Story Beats</div>
+        <div class="analysis-list">
+            {% for beat in project.analysis.story_beats %}
+            <div class="analysis-item" data-clip-start="{{ beat.start }}" data-clip-end="{{ beat.end }}">
+                <div style="flex:1; min-width:0;">
+                    <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;">
+                        <div class="analysis-item-left">
+                            <button class="analysis-play" onclick="playAnalysisItem(this)" title="Play / Pause">
+                                <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                                <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                            </button>
+                            <div>
+                                <div class="analysis-item-title">{{ beat.label }}</div>
+                                <div class="analysis-item-desc">{{ beat.description }}</div>
+                            </div>
+                        </div>
+                        <div class="analysis-item-right">
+                            <span class="analysis-item-tc">{{ beat.start }}</span>
+                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ beat.start }}'), parseTc('{{ beat.end }}'), '{{ beat.label | replace("'", "") }}')">+ Clip</button>
+                        </div>
+                    </div>
+                    <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Social Clips -->
+        {% if project.analysis.get('social_clips', []) %}
+        <div class="analysis-section-header">Social Clips</div>
+        <div class="analysis-list">
+            {% for clip in project.analysis.social_clips %}
+            <div class="analysis-item" data-clip-start="{{ clip.start }}" data-clip-end="{{ clip.end }}">
+                <div style="flex:1; min-width:0;">
+                    <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;">
+                        <div class="analysis-item-left">
+                            <button class="analysis-play" onclick="playAnalysisItem(this)" title="Play / Pause">
+                                <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                                <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                            </button>
+                            <div>
+                                <div class="analysis-item-title">{{ clip.title }}</div>
+                                <div class="analysis-item-desc">{{ clip.why }}</div>
+                                {% if clip.platform %}<span class="analysis-platform">{{ clip.platform }}</span>{% endif %}
+                            </div>
+                        </div>
+                        <div class="analysis-item-right">
+                            <span class="analysis-item-tc">{{ clip.start }} – {{ clip.end }}</span>
+                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ clip.start }}'), parseTc('{{ clip.end }}'), '{{ clip.title | replace("'", "") }}')">+ Clip</button>
+                        </div>
+                    </div>
+                    <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Soundbites -->
+        {% if project.analysis.get('strongest_soundbites', []) %}
+        <div class="analysis-section-header">Soundbites</div>
+        <div class="analysis-list">
+            {% for sb in project.analysis.strongest_soundbites %}
+            <div class="analysis-item" data-clip-start="{{ sb.start }}" data-clip-end="{{ sb.start }}">
+                <div style="flex:1; min-width:0;">
+                    <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;">
+                        <div class="analysis-item-left">
+                            <button class="analysis-play" onclick="playAnalysisItem(this)" title="Play / Pause">
+                                <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                                <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                            </button>
+                            <div>
+                                <div class="analysis-item-title" style="font-style: italic;">"{{ sb.text }}"</div>
+                                <div class="analysis-item-desc">{{ sb.why }}</div>
+                            </div>
+                        </div>
+                        <div class="analysis-item-right">
+                            <span class="analysis-item-tc">{{ sb.start }}</span>
+                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}')">+ Clip</button>
+                        </div>
+                    </div>
+                    <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% else %}
+        <div class="card">
+            <div class="empty-state" id="preAnalysis">
+                <h3>Run AI Analysis</h3>
+                <p>Analyze the transcript for story structure and social media clip opportunities.</p>
+                <button class="btn btn-purple" style="margin-top: 1rem;" onclick="runAnalysis()">
+                    Run Analysis
+                </button>
+            </div>
+            <div id="analysisProgress" style="display:none; padding: 2rem; text-align:center;">
+                <div class="spinner" style="margin: 0 auto 1rem;"></div>
+                <p>Analyzing transcript with AI...</p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Chat Tab -->
+    <div class="tab-content" id="tab-chat">
+                <div class="card chat-card">
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="chat-welcome">
+                            <h3>Ask about the transcript</h3>
+                            <p>Find clips, explore themes, discover soundbites, or ask anything about this interview.</p>
+                            <div class="chat-suggestions">
+                                <button class="chat-suggestion" onclick="sendSuggestion(this)">What are the most emotional moments?</button>
+                                <button class="chat-suggestion" onclick="sendSuggestion(this)">Find 3 clips for Instagram Reels</button>
+                                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the strongest opening hook?</button>
+                                <button class="chat-suggestion" onclick="sendSuggestion(this)">Find controversial or surprising statements</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <input type="text" class="chat-input" id="chatInput" placeholder="Ask about the transcript..."
+                               onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }">
+                        <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                        </button>
+                    </div>
+                </div>
+    </div>
+
+    <!-- Export Tab -->
+    <div class="tab-content" id="tab-export">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+            <div class="card">
+                <div class="card-title" style="margin-bottom: 1rem;">FCPX Export</div>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                    Exports create a timeline in Final Cut Pro with each clip pre-cut at the in/out points.
+                    The source media is referenced — just import the .fcpxml and your selects are ready to edit.
+                </p>
+                <div class="form-row" style="margin-bottom: 1rem;">
+                    <div class="form-group">
+                        <label class="form-label">Framerate</label>
+                        <select class="form-input" id="framerate">
+                            <option value="23.976" selected>23.976 fps</option>
+                            <option value="24">24 fps</option>
+                            <option value="25">25 fps (PAL)</option>
+                            <option value="29.97">29.97 fps</option>
+                            <option value="30">30 fps</option>
+                            <option value="59.94">59.94 fps</option>
+                            <option value="60">60 fps</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Export Mode</label>
+                        <select class="form-input" id="exportMode">
+                            <option value="cuts" selected>Pre-cut Timeline</option>
+                            <option value="both">Cuts + Markers</option>
+                            <option value="markers">Markers Only</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    <button class="btn btn-primary" onclick="exportFCPXML('labels')">
+                        Export Clips to FCPX
+                    </button>
+                    <button class="btn btn-green" onclick="exportFCPXML('social')">
+                        Export AI Social Clips to FCPX
+                    </button>
+                    <button class="btn btn-purple" onclick="exportFCPXML('story')">
+                        Export AI Story Beats to FCPX
+                    </button>
+                    <button class="btn" onclick="exportFCPXML('all')">
+                        Export All to FCPX
+                    </button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title" style="margin-bottom: 1rem;">Other Formats</div>
+                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    <button class="btn" onclick="downloadJSON()">Download Transcript JSON</button>
+                    <button class="btn" onclick="downloadSRT()">Download SRT Subtitles</button>
+                    <button class="btn" onclick="downloadTXT()">Download Plain Text</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    </div><!-- /content-col -->
+    </div><!-- /page-two-col -->
+    {% endif %}
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Theme Toggle ──
+function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('doza-theme', next);
+}
+// Restore saved theme
+(function() {
+    const saved = localStorage.getItem('doza-theme');
+    if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+
+const PROJECT_ID = '{{ project.id }}';
+const PROJECT = {{ project | tojson }};
+const PROJECT_IDS = {{ active_ids | tojson }};
+const PROJECTS_META = {{ projects_meta | tojson }};
+const IS_MULTI = {{ 'true' if is_multi else 'false' }};
+const IS_SHARED = {{ 'true' if is_shared else 'false' }};
+
+// For multi-project, chat/labels use combined ID string
+const COMBINED_ID = PROJECT_IDS.join(',');
+
+// Project selector
+function toggleProjectDropdown() {
+    document.getElementById('projectDropdown').classList.toggle('open');
+}
+
+function applyProjectSelection() {
+    const checks = document.querySelectorAll('#projectDropdown input[type=checkbox]:checked');
+    const ids = Array.from(checks).map(c => c.value);
+    if (ids.length === 0) { showToast('Select at least one project'); return; }
+    window.location.href = '/project/' + ids.join(',');
+}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', (e) => {
+    const sel = document.getElementById('projectSelector');
+    if (sel && !sel.contains(e.target)) {
+        document.getElementById('projectDropdown').classList.remove('open');
+    }
+});
+
+// ── Tab Switching ──
+function switchTab(tab) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + tab).classList.add('active');
+    document.querySelectorAll('.tab').forEach(t => {
+        if (t.getAttribute('onclick')?.includes("'" + tab + "'")) {
+            t.classList.add('active');
+        }
+    });
+
+    // Show label toolbar only on transcript and clips tabs
+    const toolbar = document.getElementById('labelToolbar');
+    if (toolbar) {
+        toolbar.style.display = (tab === 'transcript' || tab === 'clips') ? '' : 'none';
+    }
+}
+
+// ── Audio Player ──
+// Use the video element as the primary player if present, otherwise the audio element
+const audio = document.getElementById('videoPreview') || document.getElementById('audioPlayer');
+const playBtn = document.getElementById('playBtn');
+const playIcon = document.getElementById('playIcon');
+const pauseIcon = document.getElementById('pauseIcon');
+const playerProgress = document.getElementById('playerProgress');
+const playerCurrentTime = document.getElementById('playerCurrentTime');
+const playerDuration = document.getElementById('playerDuration');
+const transcriptContainer = document.getElementById('transcriptContainer');
+const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
+let speedIndex = 2; // default 1x
+let lastActiveSegment = null;
+let userScrolled = false;
+let scrollTimeout = null;
+
+if (audio) {
+    audio.addEventListener('loadedmetadata', () => {
+        playerDuration.textContent = fmtTime(audio.duration);
+    });
+
+    audio.addEventListener('timeupdate', () => {
+        if (!audio.duration) return;
+        const pct = (audio.currentTime / audio.duration) * 100;
+        playerProgress.style.width = pct + '%';
+        playerCurrentTime.textContent = fmtTime(audio.currentTime);
+        highlightActiveSegment(audio.currentTime);
+    });
+
+    audio.addEventListener('play', () => { playIcon.style.display='none'; pauseIcon.style.display=''; });
+    audio.addEventListener('pause', () => { playIcon.style.display=''; pauseIcon.style.display='none'; });
+    audio.addEventListener('ended', () => { playIcon.style.display=''; pauseIcon.style.display='none'; });
+}
+
+// Detect manual scrolling to pause auto-scroll
+if (transcriptContainer) {
+    transcriptContainer.addEventListener('scroll', () => {
+        userScrolled = true;
+        clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => { userScrolled = false; }, 3000);
+    }, { passive: true });
+}
+
+function togglePlay() {
+    if (!audio) return;
+    if (audio.paused) audio.play();
+    else audio.pause();
+}
+
+function seekPlayer(e) {
+    if (!audio || !audio.duration) return;
+    const track = document.getElementById('playerTrack');
+    const rect = track.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    audio.currentTime = pct * audio.duration;
+}
+
+let currentAudioProject = PROJECT_ID;
+
+function parseTc(val) {
+    // Handle both seconds (42.0) and timecodes ("00:00:42")
+    if (typeof val === 'number') return val;
+    val = String(val).trim();
+    if (val.includes(':')) {
+        const parts = val.split(':').map(Number);
+        if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        if (parts.length === 2) return parts[0] * 60 + parts[1];
+    }
+    return parseFloat(val) || 0;
+}
+
+function jumpTo(seconds, projectId) {
+    seconds = parseTc(seconds);
+    if (!audio) return;
+
+    // Switch audio source if needed (multi-project)
+    if (projectId && projectId !== currentAudioProject) {
+        audio.pause();
+        audio.src = `/project/${projectId}/media`;
+        currentAudioProject = projectId;
+        // Update the now-playing indicator
+        const indicator = document.getElementById('playerProjectName');
+        if (indicator) {
+            const meta = PROJECTS_META.find(p => p.id === projectId);
+            indicator.textContent = meta ? meta.name : '';
+            indicator.style.display = IS_MULTI ? '' : 'none';
+        }
+        audio.addEventListener('loadedmetadata', function onLoad() {
+            audio.removeEventListener('loadedmetadata', onLoad);
+            audio.currentTime = seconds;
+            audio.play();
+        });
+        audio.load();
+        return;
+    }
+
+    audio.currentTime = seconds;
+    if (audio.paused) audio.play();
+}
+
+// ── Analysis item playback + scrub ──
+let activeAnalysisItem = null;
+
+function playAnalysisItem(btn) {
+    const item = btn.closest('.analysis-item');
+    const start = parseTc(item.dataset.clipStart);
+    let end = parseTc(item.dataset.clipEnd);
+    if (end <= start) end = start + 15;
+
+    // Toggle pause if same item is playing
+    if (activeAnalysisItem === item && !audio.paused) {
+        audio.pause();
+        item.classList.remove('analysis-playing');
+        return;
+    }
+
+    // Resume if same item was paused
+    if (activeAnalysisItem === item && audio.paused) {
+        item.classList.add('analysis-playing');
+        audio.play();
+        return;
+    }
+
+    // New item — stop previous, start this one
+    document.querySelectorAll('.analysis-item.analysis-playing').forEach(el => el.classList.remove('analysis-playing'));
+    activeAnalysisItem = item;
+    item.classList.add('analysis-playing');
+    audio.currentTime = start;
+    audio.play();
+}
+
+function scrubAnalysisItem(e, scrubEl) {
+    const item = scrubEl.closest('.analysis-item');
+    const start = parseTc(item.dataset.clipStart);
+    let end = parseTc(item.dataset.clipEnd);
+    if (end <= start) end = start + 15;
+
+    const rect = scrubEl.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const seekTo = start + pct * (end - start);
+
+    // Clear previous
+    document.querySelectorAll('.analysis-item.analysis-playing').forEach(el => el.classList.remove('analysis-playing'));
+    activeAnalysisItem = item;
+    item.classList.add('analysis-playing');
+
+    audio.currentTime = seekTo;
+    audio.play();
+}
+
+// Update scrub bars on timeupdate
+if (audio) {
+    audio.addEventListener('timeupdate', () => {
+        if (!activeAnalysisItem) return;
+        const start = parseTc(activeAnalysisItem.dataset.clipStart);
+        let end = parseTc(activeAnalysisItem.dataset.clipEnd);
+        if (end <= start) end = start + 15;
+
+        const fill = activeAnalysisItem.querySelector('.analysis-scrub-fill');
+        if (!fill) return;
+
+        if (audio.currentTime >= end) {
+            // Clip finished
+            fill.style.width = '100%';
+            activeAnalysisItem.classList.remove('analysis-playing');
+            activeAnalysisItem = null;
+            audio.pause();
+            setTimeout(() => { fill.style.width = '0%'; }, 400);
+        } else if (audio.currentTime >= start) {
+            const pct = ((audio.currentTime - start) / (end - start)) * 100;
+            fill.style.width = pct + '%';
+        }
+    });
+}
+
+function cycleSpeed() {
+    speedIndex = (speedIndex + 1) % speeds.length;
+    const rate = speeds[speedIndex];
+    audio.playbackRate = rate;
+    document.getElementById('speedBtn').textContent = rate + 'x';
+}
+
+function fmtTime(s) {
+    if (!s || isNaN(s)) return '00:00';
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = Math.floor(s % 60);
+    if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+    return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+
+// ── Word-level highlighting ──
+// Build a sorted index of all timed words for fast binary-search lookup
+const allWords = Array.from(document.querySelectorAll('.tw[data-s]'));
+let lastActiveWord = null;
+
+function highlightActiveSegment(currentTime) {
+    // Remove previous highlight
+    if (lastActiveWord) lastActiveWord.classList.remove('tw-active');
+
+    // Binary search for the current word
+    let lo = 0, hi = allWords.length - 1, active = null;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const s = parseFloat(allWords[mid].dataset.s);
+        const e = parseFloat(allWords[mid].dataset.e);
+        if (currentTime >= s && currentTime < e) { active = allWords[mid]; break; }
+        else if (currentTime < s) hi = mid - 1;
+        else lo = mid + 1;
+    }
+
+    // Fallback linear scan if binary search missed (overlapping timestamps)
+    if (!active) {
+        for (let i = 0; i < allWords.length; i++) {
+            const s = parseFloat(allWords[i].dataset.s);
+            const e = parseFloat(allWords[i].dataset.e);
+            if (currentTime >= s && currentTime < e) { active = allWords[i]; break; }
+            if (s > currentTime) break;
+        }
+    }
+
+    if (active) {
+        active.classList.add('tw-active');
+        lastActiveWord = active;
+
+        // Auto-scroll to keep active word visible
+        if (!userScrolled && transcriptContainer) {
+            const containerRect = transcriptContainer.getBoundingClientRect();
+            const wordRect = active.getBoundingClientRect();
+            const visibleTop = containerRect.top + containerRect.height * 0.3;
+            const visibleBottom = containerRect.top + containerRect.height * 0.7;
+            if (wordRect.top < visibleTop || wordRect.bottom > visibleBottom) {
+                active.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+    }
+
+    // Highlight the active paragraph block
+    document.querySelectorAll('.para-block').forEach(pb => {
+        const s = parseFloat(pb.dataset.start);
+        // Find the last word in this block to get its end time
+        const words = pb.querySelectorAll('.tw[data-e]');
+        const e = words.length ? parseFloat(words[words.length - 1].dataset.e) : s;
+        if (currentTime >= s && currentTime < e) {
+            pb.classList.add('para-active');
+        } else {
+            pb.classList.remove('para-active');
+        }
+    });
+}
+
+// ── Paragraph Selection (for FCPX export) ──
+let selectedSegments = new Set();
+
+function togglePara(el) {
+    const block = el.closest('.para-block');
+    if (!block) return;
+    const start = block.dataset.start;
+    if (selectedSegments.has(start)) {
+        selectedSegments.delete(start);
+        block.classList.remove('selected');
+    } else {
+        selectedSegments.add(start);
+        block.classList.add('selected');
+    }
+    document.getElementById('selectCount').textContent = selectedSegments.size;
+}
+
+function selectAll() {
+    document.querySelectorAll('.para-block').forEach(el => {
+        selectedSegments.add(el.dataset.start);
+        el.classList.add('selected');
+    });
+    document.getElementById('selectCount').textContent = selectedSegments.size;
+}
+
+function clearSelections() {
+    selectedSegments.clear();
+    document.querySelectorAll('.para-block').forEach(el => el.classList.remove('selected'));
+    document.getElementById('selectCount').textContent = '0';
+}
+
+// ── Color Label System ──
+let activeBrush = 'blue';  // Auto-select first color
+let isDragging = false;
+let dragStartWord = null;
+let dragCurrentWord = null;
+let colorLabels = {{ (project.color_labels or {})|tojson }};
+let labelSections = [];
+let sectionIdCounter = 0;
+
+// Auto-activate first swatch + painting mode on load
+document.body.classList.add('painting-mode');
+document.body.setAttribute('data-brush', 'blue');
+{
+    const firstSwatch = document.querySelector('.label-swatch[data-color="blue"]');
+    if (firstSwatch) firstSwatch.classList.add('active');
+}
+
+// Initialize from saved data
+(function initLabels() {
+    // Restore label names
+    Object.entries(colorLabels).forEach(([color, name]) => {
+        const input = document.querySelector(`.swatch-label[data-color="${color}"]`);
+        if (input) input.value = name;
+    });
+    // Restore labeled sections
+    const saved = {{ (project.labeled_sections or [])|tojson }};
+    saved.forEach(sec => {
+        const id = ++sectionIdCounter;
+        const section = { id, start: sec.start, end: sec.end, color: sec.color, text: sec.text || '' };
+        labelSections.push(section);
+    });
+    renderAllHighlights();
+    updateSelectCount();
+})();
+
+function toggleBrush(color) {
+    const wasActive = activeBrush === color;
+    document.querySelectorAll('.label-swatch').forEach(s => s.classList.remove('active'));
+    if (wasActive) {
+        activeBrush = null;
+        document.body.classList.remove('painting-mode');
+        document.body.removeAttribute('data-brush');
+    } else {
+        activeBrush = color;
+        document.querySelector(`.label-swatch[data-color="${color}"]`).classList.add('active');
+        document.body.classList.add('painting-mode');
+        document.body.setAttribute('data-brush', color);
+    }
+}
+
+function renameLabel(color, name) {
+    colorLabels[color] = name.trim() || color;
+    // Update rendered badges
+    document.querySelectorAll(`.label-range-tag[data-color="${color}"] .label-range-name`).forEach(el => {
+        el.textContent = colorLabels[color];
+    });
+    saveLabels();
+}
+
+// ── Word-level drag selection ──
+
+// Find the closest .tw word from any element (handles clicks on child nodes, labels, etc.)
+function getWordFromEvent(e) {
+    // Direct hit
+    let word = e.target.closest('.tw');
+    if (word) return word;
+
+    // If we hit a non-word element, find the nearest word by position
+    const x = e.clientX, y = e.clientY;
+    const words = transcriptContainer.querySelectorAll('.tw');
+    let closest = null, closestDist = Infinity;
+    for (const w of words) {
+        const r = w.getBoundingClientRect();
+        // Only consider words roughly on the same line (within 20px vertically)
+        if (y < r.top - 20 || y > r.bottom + 20) continue;
+        const dx = Math.max(r.left - x, 0, x - r.right);
+        const dy = Math.max(r.top - y, 0, y - r.bottom);
+        const dist = dx + dy;
+        if (dist < closestDist) {
+            closestDist = dist;
+            closest = w;
+        }
+    }
+    return closestDist < 50 ? closest : null;
+}
+
+let previewedWords = new Set();
+
+if (transcriptContainer) {
+    transcriptContainer.addEventListener('mousedown', (e) => {
+        if (!activeBrush) return;
+        const word = getWordFromEvent(e);
+        if (!word) return;
+        e.preventDefault();
+        // Prevent text selection during drag
+        document.body.style.userSelect = 'none';
+        document.body.style.webkitUserSelect = 'none';
+        isDragging = true;
+        dragStartWord = word;
+        dragCurrentWord = word;
+        updateDragPreview();
+    });
+
+    transcriptContainer.addEventListener('mousemove', (e) => {
+        if (!isDragging || !activeBrush) return;
+        e.preventDefault();
+        const word = getWordFromEvent(e);
+        if (word && word !== dragCurrentWord) {
+            dragCurrentWord = word;
+            updateDragPreview();
+        }
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!isDragging) return;
+        isDragging = false;
+        document.body.style.userSelect = '';
+        document.body.style.webkitUserSelect = '';
+        clearDragPreview();
+        if (dragStartWord && dragCurrentWord && activeBrush) {
+            commitSelection(dragStartWord, dragCurrentWord, activeBrush);
+        }
+        dragStartWord = null;
+        dragCurrentWord = null;
+    });
+}
+
+function updateDragPreview() {
+    const range = getWordRange(dragStartWord, dragCurrentWord);
+    const newSet = new Set(range);
+
+    // Remove preview from words no longer in range
+    for (const w of previewedWords) {
+        if (!newSet.has(w)) w.classList.remove('tw-drag-preview');
+    }
+    // Add preview to new words in range
+    for (const w of newSet) {
+        if (!previewedWords.has(w)) w.classList.add('tw-drag-preview');
+    }
+    previewedWords = newSet;
+}
+
+function clearDragPreview() {
+    for (const w of previewedWords) w.classList.remove('tw-drag-preview');
+    previewedWords.clear();
+}
+
+function getWordRange(startWord, endWord) {
+    // Get ordered range of words between start and end
+    const startIdx = allWords.indexOf(startWord);
+    const endIdx = allWords.indexOf(endWord);
+    if (startIdx === -1 || endIdx === -1) return [];
+    const lo = Math.min(startIdx, endIdx);
+    const hi = Math.max(startIdx, endIdx);
+    return allWords.slice(lo, hi + 1);
+}
+
+function commitSelection(startWord, endWord, color) {
+    const range = getWordRange(startWord, endWord);
+    if (range.length === 0) return;
+
+    const startTime = parseFloat(range[0].dataset.s);
+    const endTime = parseFloat(range[range.length - 1].dataset.e);
+    const text = range.map(w => w.textContent).join('').trim();
+
+    // Check if clicking on an existing selection to remove it
+    if (range.length <= 2) {
+        const existing = findSectionAt(startTime);
+        if (existing && existing.color === color) {
+            removeSection(existing.id);
+            return;
+        }
+    }
+
+    // Create new section
+    const id = ++sectionIdCounter;
+    labelSections.push({ id, start: startTime, end: endTime, color, text: text.substring(0, 200) });
+
+    renderAllHighlights();
+    updateSelectCount();
+    saveLabels();
+}
+
+function findSectionAt(time) {
+    return labelSections.find(s => time >= s.start && time <= s.end);
+}
+
+function removeSection(id) {
+    labelSections = labelSections.filter(s => s.id !== id);
+    renderAllHighlights();
+    updateSelectCount();
+    saveLabels();
+}
+
+function renderAllHighlights() {
+    // Clear label highlights (preserve tw-active for playback)
+    allWords.forEach(w => {
+        w.classList.remove('tw-labeled');
+        w.removeAttribute('data-label-color');
+        delete w.dataset.sectionId;
+    });
+
+    // Apply each section's color to its word range
+    labelSections.forEach(sec => {
+        allWords.forEach(w => {
+            const ws = parseFloat(w.dataset.s);
+            const we = parseFloat(w.dataset.e);
+            // Word overlaps with section
+            if (we > sec.start && ws < sec.end) {
+                w.classList.add('tw-labeled');
+                w.setAttribute('data-label-color', sec.color);
+                w.dataset.sectionId = sec.id;
+            }
+        });
+    });
+
+    // Clean up old inline tags
+    document.querySelectorAll('.label-range-tag').forEach(el => el.remove());
+}
+
+function updateSelectCount() {
+    const el = document.getElementById('selectCount');
+    if (el) el.textContent = labelSections.length;
+}
+
+function clearAllLabels() {
+    if (!confirm('Remove all color labels?')) return;
+    labelSections = [];
+    renderAllHighlights();
+    updateSelectCount();
+    saveLabels();
+    showToast('Labels cleared');
+}
+
+let saveLabelTimeout = null;
+function saveLabels() {
+    clearTimeout(saveLabelTimeout);
+    saveLabelTimeout = setTimeout(async () => {
+        const sections = labelSections.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        try {
+            await fetch(`/project/${PROJECT_ID}/labels`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
+            });
+        } catch (err) {
+            console.error('Failed to save labels:', err);
+        }
+    }, 500);
+}
+
+// ── Chat ──
+let chatHistory = [];
+
+function sendSuggestion(btn) {
+    document.getElementById('chatInput').value = btn.textContent;
+    sendChat();
+}
+
+async function sendChat() {
+    const input = document.getElementById('chatInput');
+    const message = input.value.trim();
+    if (!message) return;
+
+    input.value = '';
+
+    // Remove welcome if present
+    const welcome = document.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+
+    // Add user message
+    appendChatMessage('user', message);
+    chatHistory.push({ role: 'user', content: message });
+
+    // Show typing indicator
+    const typing = appendChatMessage('assistant', '<span class="chat-typing"><span></span><span></span><span></span></span>', true);
+
+    // Disable input
+    const btn = document.getElementById('chatSendBtn');
+    input.disabled = true;
+    btn.disabled = true;
+
+    try {
+        const res = await fetch(`/project/${COMBINED_ID}/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, history: chatHistory }),
+        });
+        const data = await res.json();
+        typing.remove();
+
+        if (data.reply) {
+            const rendered = renderChatReply(data.reply);
+            appendChatMessage('assistant', rendered, true);
+            chatHistory.push({ role: 'assistant', content: data.reply });
+        } else {
+            appendChatMessage('assistant', 'Error: ' + (data.error || 'No response'));
+        }
+    } catch (err) {
+        typing.remove();
+        appendChatMessage('assistant', 'Error: ' + err.message);
+    }
+
+    input.disabled = false;
+    btn.disabled = false;
+    input.focus();
+}
+
+function appendChatMessage(role, content, isHtml = false) {
+    const container = document.getElementById('chatMessages');
+    const msg = document.createElement('div');
+    msg.className = `chat-msg chat-msg-${role}`;
+
+    if (isHtml) {
+        msg.innerHTML = content;
+    } else {
+        msg.textContent = content;
+    }
+
+    container.appendChild(msg);
+    container.scrollTop = container.scrollHeight;
+    return msg;
+}
+
+function renderChatReply(text) {
+    // Parse [CLIP: start=X end=Y title="..."] into actionable buttons
+    let html = escapeHtml(text);
+
+    // Helper: parse timecode or seconds to float seconds
+    function tcToSec(tc) {
+        tc = tc.trim();
+        if (tc.includes(':')) {
+            const parts = tc.split(':').map(Number);
+            if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+            if (parts.length === 2) return parts[0] * 60 + parts[1];
+        }
+        return parseFloat(tc) || 0;
+    }
+
+    // Convert clip markers to buttons — handle both seconds and timecode formats
+    // Match: [CLIP: start=... end=... title="..."] with either literal or escaped quotes
+    html = html.replace(
+        /\[CLIP:\s*start=([^\s]+)\s+end=([^\s]+)\s+title=(?:&quot;|")(.*?)(?:&quot;|")\]/gi,
+        (match, startRaw, endRaw, title) => {
+            const start = tcToSec(startRaw);
+            const end = tcToSec(endRaw);
+            const safeTitle = title.replace(/['"]/g, '').replace(/[^\w\s.,!?()-]/g, '').trim();
+            const clipUid = `cc_${start}_${end}`.replace(/\./g, '_');
+            return `<div class="chat-clip" id="${clipUid}" data-start="${start}" data-end="${end}">
+                <div class="chat-clip-header">
+                    <span class="chat-clip-title">${title}</span>
+                    <span class="chat-clip-tc">${fmtTime(start)} - ${fmtTime(end)}</span>
+                </div>
+                <div class="chat-clip-actions">
+                    <button class="btn btn-sm chat-clip-play" onclick="playChatClip('${clipUid}', ${start}, ${end})">
+                        <span class="ccp-play">Play</span>
+                        <span class="ccp-pause" style="display:none">Pause</span>
+                    </button>
+                    <button class="btn btn-sm btn-green" onclick="addClipFromChat(${start}, ${end}, '${safeTitle}')">Add to Clips</button>
+                </div>
+            </div>`;
+        }
+    );
+
+    // Convert timecodes in text to clickable links (HH:MM:SS or MM:SS)
+    html = html.replace(
+        /(\d{1,2}:\d{2}:\d{2})/g,
+        (match) => {
+            const secs = tcToSec(match);
+            return `<span class="chat-tc-link" onclick="jumpTo(${secs})">${match}</span>`;
+        }
+    );
+
+    // Newlines to <br>
+    html = html.replace(/\n/g, '<br>');
+
+    return html;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// ── Chat clip playback ──
+let activeChatClip = null;
+
+function playChatClip(uid, start, end) {
+    const el = document.getElementById(uid);
+    if (!el || !audio) return;
+
+    // Toggle pause if same clip playing
+    if (activeChatClip === uid && !audio.paused) {
+        audio.pause();
+        _updateChatClipIcons();
+        return;
+    }
+
+    // Resume if same clip paused
+    if (activeChatClip === uid && audio.paused) {
+        audio.play();
+        _updateChatClipIcons();
+        return;
+    }
+
+    // New clip
+    activeChatClip = uid;
+    audio.currentTime = start;
+    audio.play();
+    _updateChatClipIcons();
+}
+
+function _updateChatClipIcons() {
+    // Reset all chat clip buttons
+    document.querySelectorAll('.chat-clip-play').forEach(btn => {
+        btn.querySelector('.ccp-play').style.display = '';
+        btn.querySelector('.ccp-pause').style.display = 'none';
+    });
+    // Set active to pause
+    if (activeChatClip && !audio.paused) {
+        const el = document.getElementById(activeChatClip);
+        if (el) {
+            const btn = el.querySelector('.chat-clip-play');
+            if (btn) {
+                btn.querySelector('.ccp-play').style.display = 'none';
+                btn.querySelector('.ccp-pause').style.display = '';
+            }
+        }
+    }
+}
+
+// Stop chat clip when it reaches end time
+if (audio) {
+    audio.addEventListener('timeupdate', () => {
+        if (!activeChatClip) return;
+        const el = document.getElementById(activeChatClip);
+        if (!el) return;
+        const end = parseFloat(el.dataset.end);
+        if (audio.currentTime >= end) {
+            audio.pause();
+            activeChatClip = null;
+            _updateChatClipIcons();
+        }
+    });
+}
+
+function addAllAnalysisClips() {
+    let count = 0;
+    document.querySelectorAll('.analysis-item').forEach(item => {
+        const start = parseTc(item.dataset.clipStart);
+        let end = parseTc(item.dataset.clipEnd);
+        if (end <= start) end = start + 15;
+        const title = item.querySelector('.analysis-item-title')?.textContent?.trim().substring(0, 60) || 'Clip';
+        // Check if already exists (same start time)
+        const exists = labelSections.some(s => Math.abs(s.start - start) < 0.5);
+        if (!exists) {
+            const id = ++sectionIdCounter;
+            labelSections.push({ id, start, end, color: 'green', text: title });
+            count++;
+        }
+    });
+    if (count > 0) {
+        renderAllHighlights();
+        updateSelectCount();
+        saveLabels();
+        renderClipsTab();
+        showToast(`Added ${count} clips`);
+    } else {
+        showToast('All clips already added');
+    }
+}
+
+function addClipFromChat(start, end, title) {
+    // Add as a green-labeled section
+    const color = 'green';
+    const id = ++sectionIdCounter;
+    const text = title;
+    labelSections.push({ id, start, end, color, text });
+    renderAllHighlights();
+    updateSelectCount();
+    saveLabels();
+    renderClipsTab();
+    showToast(`Added "${title}" to clips`);
+}
+
+// ── Clips Tab ──
+let clipPlaying = null;
+
+function renderClipsTab() {
+    const grid = document.getElementById('clipsGrid');
+    const empty = document.getElementById('clipsEmpty');
+    const total = document.getElementById('clipsTotal');
+    if (!grid) return;
+
+    // Sort by start time
+    const sorted = [...labelSections].sort((a, b) => a.start - b.start);
+
+    total.textContent = sorted.length + ' clip' + (sorted.length !== 1 ? 's' : '');
+
+    if (sorted.length === 0) {
+        grid.innerHTML = '';
+        grid.appendChild(empty);
+        empty.style.display = '';
+        return;
+    }
+
+    if (empty) empty.style.display = 'none';
+
+    grid.innerHTML = sorted.map(clip => {
+        const duration = clip.end - clip.start;
+        const colorVar = clip.color === 'blue' ? 'accent' : clip.color;
+        const labelName = colorLabels[clip.color] || clip.color;
+
+        // Get transcript text for this clip range
+        let clipText = clip.text || '';
+        if (!clipText || clipText.length < 10) {
+            // Pull from words in range
+            const words = allWords.filter(w => {
+                const ws = parseFloat(w.dataset.s);
+                return ws >= clip.start && ws < clip.end;
+            });
+            clipText = words.map(w => w.textContent).join('').trim();
+        }
+        if (clipText.length > 180) clipText = clipText.substring(0, 180) + '...';
+
+        return `<div class="clip-card" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}">
+            <div class="clip-card-top" style="border-left: 3px solid var(--${colorVar});">
+                <div class="clip-card-header">
+                    <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()" title="Select for export">
+                    <span class="clip-card-label" style="color: var(--${colorVar});">${labelName}</span>
+                    <span class="clip-card-duration">${formatDuration(duration)}</span>
+                </div>
+                <div class="clip-card-title">${escapeHtml(clip.text || 'Untitled clip')}</div>
+                <div class="clip-card-text">${escapeHtml(clipText)}</div>
+                <div class="clip-card-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</div>
+            </div>
+            <div class="clip-card-controls">
+                <button class="clip-play-btn" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})" title="Play / Pause">
+                    <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><polygon points="6,3 20,12 6,21"/></svg>
+                    <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="16" height="16" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                </button>
+                <div class="clip-card-progress" id="clipProgress-${clip.id}" onclick="scrubClip(event, ${clip.id}, ${clip.start}, ${clip.end})">
+                    <div class="clip-card-progress-fill" id="clipFill-${clip.id}"></div>
+                </div>
+                <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})" title="Remove clip">&times;</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function formatDuration(secs) {
+    if (secs < 60) return Math.round(secs) + 's';
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60);
+    return m + ':' + String(s).padStart(2, '0');
+}
+
+function updateClipIcons() {
+    // Reset all clip icons to play
+    document.querySelectorAll('.clip-card').forEach(card => {
+        card.querySelector('.clip-icon-play').style.display = '';
+        card.querySelector('.clip-icon-pause').style.display = 'none';
+    });
+    // Set active playing card to pause icon
+    if (clipPlaying && !audio.paused) {
+        const card = document.querySelector(`.clip-card[data-clip-id="${clipPlaying.id}"]`);
+        if (card) {
+            card.querySelector('.clip-icon-play').style.display = 'none';
+            card.querySelector('.clip-icon-pause').style.display = '';
+        }
+    }
+}
+
+function playClip(clipId, start, end) {
+    if (!audio) return;
+
+    // Toggle pause if same clip is playing
+    if (clipPlaying && clipPlaying.id === clipId && !audio.paused) {
+        audio.pause();
+        updateClipIcons();
+        return;
+    }
+
+    // Resume if same clip was paused
+    if (clipPlaying && clipPlaying.id === clipId && audio.paused) {
+        audio.play();
+        updateClipIcons();
+        return;
+    }
+
+    // New clip — stop previous, start this one
+    document.querySelectorAll('.clip-card').forEach(c => c.classList.remove('clip-card-playing'));
+    clipPlaying = { id: clipId, start, end };
+    audio.currentTime = start;
+    audio.play();
+
+    const card = document.querySelector(`.clip-card[data-clip-id="${clipId}"]`);
+    if (card) card.classList.add('clip-card-playing');
+    updateClipIcons();
+}
+
+function scrubClip(e, clipId, start, end) {
+    if (!audio) return;
+    const bar = e.currentTarget;
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const seekTo = start + pct * (end - start);
+
+    // If different clip, switch to it
+    if (!clipPlaying || clipPlaying.id !== clipId) {
+        document.querySelectorAll('.clip-card').forEach(c => c.classList.remove('clip-card-playing'));
+        clipPlaying = { id: clipId, start, end };
+        const card = document.querySelector(`.clip-card[data-clip-id="${clipId}"]`);
+        if (card) card.classList.add('clip-card-playing');
+    }
+
+    audio.currentTime = seekTo;
+    audio.play();
+    updateClipIcons();
+}
+
+// Track clip playback progress
+if (audio) {
+    audio.addEventListener('timeupdate', () => {
+        if (!clipPlaying) return;
+        const { id, start, end } = clipPlaying;
+        const fill = document.getElementById('clipFill-' + id);
+        if (!fill) return;
+
+        if (audio.currentTime >= end) {
+            audio.pause();
+            fill.style.width = '100%';
+            setTimeout(() => {
+                fill.style.width = '0%';
+                document.querySelectorAll('.clip-card').forEach(c => c.classList.remove('clip-card-playing'));
+                clipPlaying = null;
+                updateClipIcons();
+            }, 500);
+        } else if (audio.currentTime >= start) {
+            const pct = ((audio.currentTime - start) / (end - start)) * 100;
+            fill.style.width = pct + '%';
+        }
+    });
+}
+
+function removeClipFromLibrary(id) {
+    removeSection(id);
+    renderClipsTab();
+}
+
+function updateClipSelection() {
+    const checks = document.querySelectorAll('.clip-check');
+    const checked = document.querySelectorAll('.clip-check:checked');
+    const countEl = document.getElementById('clipsSelectedCount');
+    const exportBtn = document.getElementById('exportSelectedBtn');
+    const selectAll = document.getElementById('clipSelectAll');
+
+    if (checked.length > 0) {
+        countEl.textContent = checked.length + ' selected';
+        countEl.style.display = '';
+        exportBtn.style.display = '';
+    } else {
+        countEl.style.display = 'none';
+        exportBtn.style.display = 'none';
+    }
+
+    // Update "All" checkbox state
+    if (selectAll) {
+        selectAll.checked = checks.length > 0 && checked.length === checks.length;
+        selectAll.indeterminate = checked.length > 0 && checked.length < checks.length;
+    }
+}
+
+function toggleAllClipChecks(checked) {
+    document.querySelectorAll('.clip-check').forEach(cb => cb.checked = checked);
+    updateClipSelection();
+}
+
+async function exportSelectedClips() {
+    const checkedIds = new Set();
+    document.querySelectorAll('.clip-check:checked').forEach(cb => {
+        checkedIds.add(parseInt(cb.dataset.clipId));
+    });
+
+    if (checkedIds.size === 0) {
+        showToast('No clips selected');
+        return;
+    }
+
+    // Save only the selected clips as labeled_sections, then export
+    const selected = labelSections.filter(s => checkedIds.has(s.id));
+    const sections = selected.map(s => ({
+        start: s.start, end: s.end, color: s.color, text: s.text
+    }));
+
+    await fetch(`/project/${PROJECT_ID}/labels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
+    });
+
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    const mode = document.getElementById('exportMode')?.value || 'cuts';
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'labels', framerate, mode }),
+        });
+
+        if (res.ok) {
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = res.headers.get('Content-Disposition')?.split('filename=')[1] || 'clips.fcpxml';
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast(`Exported ${checkedIds.size} clips!`);
+        } else {
+            showToast('Export failed');
+        }
+    } catch (err) {
+        showToast('Export error: ' + err.message);
+    }
+
+    // Restore full labels after export
+    const allSections = labelSections.map(s => ({
+        start: s.start, end: s.end, color: s.color, text: s.text
+    }));
+    await fetch(`/project/${PROJECT_ID}/labels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ color_labels: colorLabels, labeled_sections: allSections }),
+    });
+}
+
+// Initial render
+renderClipsTab();
+
+// Also re-render clips when labels change
+const _origSaveLabels = saveLabels;
+saveLabels = function() {
+    _origSaveLabels();
+    renderClipsTab();
+};
+
+// ── Transcription ──
+async function startTranscription() {
+    const btn = document.getElementById('transcribeBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Transcribing...';
+    
+    if (document.getElementById('preTranscribe')) {
+        document.getElementById('preTranscribe').style.display = 'none';
+    }
+    if (document.getElementById('transcribeProgress')) {
+        document.getElementById('transcribeProgress').style.display = 'block';
+    }
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/transcribe`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'transcribed') {
+            showToast('Transcription complete!');
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            showToast('Error: ' + (data.error || 'Unknown error'));
+            btn.disabled = false;
+            btn.textContent = 'Retry Transcription';
+        }
+    } catch (err) {
+        showToast('Error: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = 'Retry Transcription';
+    }
+}
+
+// ── AI Analysis ──
+async function runAnalysis() {
+    const btn = document.getElementById('analyzeBtn');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> Analyzing...';
+    }
+    
+    if (document.getElementById('preAnalysis')) {
+        document.getElementById('preAnalysis').style.display = 'none';
+    }
+    if (document.getElementById('analysisProgress')) {
+        document.getElementById('analysisProgress').style.display = 'block';
+    }
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'all' }),
+        });
+        const data = await res.json();
+        if (data.status === 'analyzed') {
+            showToast('Analysis complete!');
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            showToast('Error: ' + (data.error || 'Unknown error'));
+        }
+    } catch (err) {
+        showToast('Error: ' + err.message);
+    }
+}
+
+// ── Export FCPXML ──
+async function exportFCPXML(type) {
+    // If exporting clips, save labels first
+    if (type === 'labels' || type === 'all') {
+        if (labelSections.length === 0 && type === 'labels') {
+            showToast('No clips to export. Highlight some in the transcript first.');
+            return;
+        }
+        // Ensure labels are saved before export
+        const sections = labelSections.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
+        });
+    }
+
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type, framerate, mode: document.getElementById('exportMode')?.value || 'cuts' }),
+        });
+
+        if (res.ok) {
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = res.headers.get('Content-Disposition')?.split('filename=')[1] || 'markers.fcpxml';
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast('FCPXML exported!');
+        } else {
+            showToast('Export failed');
+        }
+    } catch (err) {
+        showToast('Export error: ' + err.message);
+    }
+}
+
+// ── Download Formats ──
+function downloadJSON() {
+    if (!PROJECT.transcript) return;
+    const blob = new Blob([JSON.stringify(PROJECT.transcript, null, 2)], { type: 'application/json' });
+    downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '_transcript.json');
+}
+
+function downloadSRT() {
+    if (!PROJECT.transcript) return;
+    let srt = '';
+    PROJECT.transcript.segments.forEach((seg, i) => {
+        srt += `${i + 1}\n`;
+        srt += `${formatSRT(seg.start)} --> ${formatSRT(seg.end)}\n`;
+        srt += `${seg.speaker}: ${seg.text}\n\n`;
+    });
+    const blob = new Blob([srt], { type: 'text/srt' });
+    downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '.srt');
+}
+
+function downloadTXT() {
+    if (!PROJECT.transcript) return;
+    let txt = PROJECT.name + '\n' + '='.repeat(40) + '\n\n';
+    PROJECT.transcript.segments.forEach(seg => {
+        txt += `[${seg.start_formatted.substring(0, 8)}] ${seg.speaker}: ${seg.text}\n\n`;
+    });
+    const blob = new Blob([txt], { type: 'text/plain' });
+    downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '.txt');
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function formatSRT(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    const ms = Math.floor((seconds % 1) * 1000);
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')},${String(ms).padStart(3,'0')}`;
+}
+
+// ── Share Link ──
+async function copyShareLink() {
+    const shareBtn = document.querySelector('[onclick="copyShareLink()"]');
+    if (shareBtn) { shareBtn.disabled = true; shareBtn.textContent = 'Starting tunnel...'; }
+
+    try {
+        // Check if tunnel is already running
+        let res = await fetch('/tunnel/status');
+        let data = await res.json();
+
+        if (data.status !== 'running') {
+            res = await fetch('/tunnel/start', { method: 'POST' });
+            data = await res.json();
+        }
+
+        if (data.url) {
+            const shareUrl = data.url + '/share/' + PROJECT_ID;
+            showShareResult(shareUrl);
+        } else {
+            showToast('Error: ' + (data.error || 'Could not start tunnel'));
+        }
+    } catch (err) {
+        const url = window.location.origin + '/share/' + PROJECT_ID;
+        showShareResult(url);
+    }
+
+    if (shareBtn) { shareBtn.disabled = false; shareBtn.textContent = 'Share'; }
+}
+
+function showShareResult(url) {
+    // Show a mini modal with the URL + a copy button (user click = valid gesture for clipboard)
+    let overlay = document.getElementById('shareOverlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'shareOverlay';
+        overlay.className = 'modal-overlay active';
+        overlay.innerHTML = `
+            <div class="modal" style="max-width: 520px;">
+                <h2 style="margin-bottom: 0.5rem;">Share Link</h2>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Send this link to your client. They'll see the full project with transcript, audio player, and highlighting tools.</p>
+                <div style="display: flex; gap: 0.5rem;">
+                    <input type="text" class="form-input" id="shareUrlInput" readonly style="font-family: var(--mono); font-size: 0.8rem;">
+                    <button class="btn btn-primary" onclick="doShareCopy()" style="white-space: nowrap;">Copy Link</button>
+                </div>
+                <div style="margin-top: 0.75rem; text-align: right;">
+                    <button class="btn btn-sm" onclick="document.getElementById('shareOverlay').classList.remove('active')">Close</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+    }
+    document.getElementById('shareUrlInput').value = url;
+    overlay.classList.add('active');
+}
+
+function doShareCopy() {
+    const input = document.getElementById('shareUrlInput');
+    input.select();
+    input.setSelectionRange(0, 99999);
+    document.execCommand('copy');
+    showToast('Link copied!');
+    document.getElementById('shareOverlay').classList.remove('active');
+}
+
+// ── Reveal in Finder ──
+// ── Click speaker name to cycle through speakers ──
+function cycleSpeaker(el) {
+    // Get all known speakers
+    const inputs = document.querySelectorAll('.speaker-input');
+    const speakers = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
+    if (speakers.length < 2) return; // Need at least 2 speakers to cycle
+
+    const current = el.textContent.trim();
+    const idx = speakers.indexOf(current);
+    const next = speakers[(idx + 1) % speakers.length];
+
+    // Update this paragraph's speaker
+    el.textContent = next;
+
+    // Update speaker color class
+    const speakerIdx = speakers.indexOf(next);
+    el.className = 'para-speaker';
+    if (speakerIdx === 0) el.classList.add('speaker-1');
+    else el.classList.add('speaker-2');
+
+    // Get the para-block's start time to identify segments
+    const block = el.closest('.para-block');
+    if (!block) return;
+    const blockStart = parseFloat(block.dataset.start);
+
+    // Find all segments in this paragraph and update them on the backend
+    const paraWords = block.querySelectorAll('.tw[data-s]');
+    if (paraWords.length === 0) return;
+    const paraEnd = parseFloat(paraWords[paraWords.length - 1].dataset.e);
+
+    // Build mapping for this paragraph's segments
+    const mapping = {};
+    mapping[current] = next;
+
+    // Save: update all segments in this time range
+    fetch(`/project/${PROJECT_ID}/update-speaker-range`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start: blockStart, end: paraEnd, speaker: next }),
+    });
+}
+
+async function renameSpeaker(oldName, newName) {
+    newName = newName.trim();
+    if (!newName || newName === oldName) return;
+
+    // Build mapping
+    const mapping = {};
+    mapping[oldName] = newName;
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/update-speakers`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mapping }),
+        });
+        if (res.ok) {
+            // Update all speaker labels in the transcript
+            document.querySelectorAll('.para-speaker').forEach(el => {
+                if (el.textContent.trim() === oldName) {
+                    el.textContent = newName;
+                }
+            });
+            // Update the input's data-original for future renames
+            const row = document.querySelector(`.speaker-row[data-original="${oldName}"]`);
+            if (row) row.dataset.original = newName;
+            showToast(`Renamed "${oldName}" to "${newName}"`);
+        }
+    } catch (err) {
+        showToast('Error: ' + err.message);
+    }
+}
+
+async function revealInFinder() {
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/reveal`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+            showToast(data.error || 'Could not reveal file');
+        }
+    } catch (err) {
+        showToast('Error: ' + err.message);
+    }
+}
+
+// ── Clear Transcript ──
+async function clearTranscript() {
+    if (!confirm('Clear the transcript and analysis? The source file will NOT be deleted.')) return;
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/clear`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            showToast('Transcript cleared');
+            setTimeout(() => location.reload(), 500);
+        } else {
+            showToast('Error: ' + (data.error || 'Unknown error'));
+        }
+    } catch (err) {
+        showToast('Error: ' + err.message);
+    }
+}
+
+// ── Delete ──
+async function deleteProject() {
+    if (!confirm('Delete this project and all its files?')) return;
+    await fetch(`/project/${PROJECT_ID}/delete`, { method: 'POST' });
+    window.location.href = '/';
+}
+
+// ── Toast ──
+function showToast(msg) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 3000);
+}
+</script>
+
+</body>
+</html>

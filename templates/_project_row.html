@@ -1,0 +1,26 @@
+<a href="/project/{{ p.id }}" class="project-item" data-project-id="{{ p.id }}" draggable="true" ondragstart="dragProject(event, '{{ p.id }}')">
+    <div class="project-meta">
+        <div class="project-name">{{ p.name }}</div>
+        <div class="project-details">
+            {% if p.client_name %}{{ p.client_name }} &bull; {% endif %}
+            {{ p.filename }}
+            {% if p.file_size_formatted %} &bull; {{ p.file_size_formatted }}{% endif %}
+            &bull; {{ p.created_at[:10] }}
+        </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 0.5rem;">
+        <span class="status-badge status-{{ p.status }}">
+            {% if p.status == 'uploaded' %}Ready to transcribe
+            {% elif p.status == 'transcribing' %}Transcribing...
+            {% elif p.status == 'transcribed' %}Transcribed
+            {% elif p.status == 'error' %}Error
+            {% endif %}
+        </span>
+        <button class="btn btn-sm project-action-btn" onclick="event.preventDefault(); renameProject('{{ p.id }}', this);" title="Rename project">Rename</button>
+        {% if p.transcript %}
+        <button class="btn btn-sm project-action-btn" onclick="event.preventDefault(); clearProject('{{ p.id }}', this);" title="Clear transcript, keep file">Clear</button>
+        {% endif %}
+        <button class="btn btn-sm project-action-btn" onclick="event.preventDefault(); moveToFolder('{{ p.id }}', this);" title="Move to folder">Move</button>
+        <button class="btn btn-sm project-action-btn" onclick="event.preventDefault(); deleteProject('{{ p.id }}', this);" title="Delete project" style="color: var(--red);">Delete</button>
+    </div>
+</a>

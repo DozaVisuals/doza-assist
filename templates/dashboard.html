@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Doza Assist</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="app-header">
+    <a href="/" class="app-logo">
+        <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="28" height="28" rx="6" fill="#4a9eff"/>
+            <path d="M7 8h4v12H7V8zm5 0h3.5c3 0 5.5 2.5 5.5 6s-2.5 6-5.5 6H12V8z" fill="#000" fill-opacity="0.9"/>
+        </svg>
+        <span>Doza Assist <span class="logo-sub">by Doza Visuals</span></span>
+    </a>
+    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+        <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+    </button>
+</header>
+
+<script>
+function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('doza-theme', next);
+}
+(function() {
+    const saved = localStorage.getItem('doza-theme');
+    if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+</script>
+
+<div class="container">
+    <div class="page-title-area">
+        <div>
+            <h1 class="page-title">Projects</h1>
+            <p class="page-subtitle">Reference local interview files, transcribe, and export to FCPX</p>
+        </div>
+        <button class="btn btn-sm" id="newFolderBtn" onclick="createFolder()">New Folder</button>
+    </div>
+
+    <!-- Drop Zone + File Path Input -->
+    <div class="card" id="dropCard" style="margin-bottom: 2rem; position: relative; transition: border-color 0.2s, box-shadow 0.2s;">
+        <div style="display: flex; gap: 0.75rem; align-items: flex-end;">
+            <div style="flex: 1;">
+                <label class="form-label">Source File Path</label>
+                <input type="text" class="form-input" id="filePathInput"
+                       placeholder="/Volumes/MyDrive/Interviews/interview.mov"
+                       style="font-family: var(--mono); font-size: 0.85rem;">
+            </div>
+            <button class="btn btn-primary" onclick="openBrowseModal()" style="white-space: nowrap;">
+                Browse
+            </button>
+            <button class="btn btn-primary" id="selectPathBtn" onclick="selectFilePath()" style="white-space: nowrap; display: none;">
+                Select File
+            </button>
+        </div>
+        <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
+            Drag a file here, paste a path, or click Browse. Your file stays in place -- nothing gets copied.
+            <br>Supported: WAV, MP3, MP4, MOV, AAC, M4A, FLAC, AIF, AIFF, MXF
+        </p>
+
+        <!-- Drag overlay -->
+        <div id="dragOverlay" style="display: none; position: absolute; inset: 0; background: rgba(74, 158, 255, 0.08); border: 2px dashed var(--accent); border-radius: var(--radius); z-index: 5; pointer-events: none; align-items: center; justify-content: center;">
+            <p style="font-size: 1rem; color: var(--accent); font-weight: 600; margin: 0;">Drop to find file path</p>
+        </div>
+
+        <!-- Search spinner (shown while finding file) -->
+        <div id="findingFile" style="display: none; margin-top: 0.75rem; padding: 0.75rem; background: var(--bg-input); border-radius: var(--radius);">
+            <p style="margin: 0; font-size: 0.85rem; color: var(--text-secondary);">
+                <span class="spinner" style="display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.5rem;"></span>
+                Searching your drives for <strong id="findingFileName"></strong>...
+            </p>
+        </div>
+        <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+
+        <!-- Multiple matches selector -->
+        <div id="multipleMatches" style="display: none; margin-top: 0.75rem; padding: 0.75rem; background: var(--bg-input); border-radius: var(--radius);">
+            <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: var(--text-secondary);">
+                Found multiple matches. Pick the right one:
+            </p>
+            <div id="matchesList"></div>
+        </div>
+    </div>
+
+    <!-- Browse Modal -->
+    <div class="modal-overlay" id="browseModal">
+        <div class="modal" style="max-width: 650px; max-height: 85vh; display: flex; flex-direction: column;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+                <h2 style="margin: 0;">Browse Files</h2>
+                <button class="btn btn-sm" onclick="closeBrowseModal()">Close</button>
+            </div>
+
+            <!-- Current path bar -->
+            <div id="browsePath" style="font-family: var(--mono); font-size: 0.8rem; color: var(--text-secondary); padding: 0.5rem 0.75rem; background: var(--bg-input); border-radius: var(--radius); margin-bottom: 0.75rem; word-break: break-all;">
+                Select a location to start
+            </div>
+
+            <!-- Quick locations -->
+            <div id="quickLocations" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem;">
+            </div>
+
+            <!-- File listing -->
+            <div id="browseList" style="flex: 1; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); min-height: 300px;">
+                <div style="padding: 2rem; text-align: center; color: var(--text-muted);">
+                    Choose a starting location above
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Project Details Modal (shown after file selection) -->
+    <div class="modal-overlay" id="uploadModal">
+        <div class="modal">
+            <h2>New Project</h2>
+            <form id="uploadForm" onsubmit="return false;">
+                <div class="form-group">
+                    <label class="form-label">Project Name</label>
+                    <input type="text" class="form-input" id="projectName" placeholder="e.g. Pedro Reyes Artist Profile">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Client</label>
+                    <input type="text" class="form-input" id="clientName" placeholder="e.g. Fidelity Art Collection">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Interviewer Name</label>
+                        <input type="text" class="form-input" id="interviewerName" value="Chris" placeholder="Interviewer">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Subject Name</label>
+                        <input type="text" class="form-input" id="subjectName" placeholder="e.g. Pedro Reyes">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Number of Speakers</label>
+                    <select class="form-input" id="numSpeakers">
+                        <option value="2" selected>2 (Interview)</option>
+                        <option value="1">1 (Solo)</option>
+                        <option value="3">3</option>
+                        <option value="4">4</option>
+                    </select>
+                </div>
+                <div id="selectedFile" style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;"></div>
+                <div class="btn-group" style="justify-content: flex-end;">
+                    <button class="btn" onclick="closeUploadModal()">Cancel</button>
+                    <button class="btn btn-primary" id="createBtn" onclick="createProject()">Create Project</button>
+                </div>
+                <div class="progress-bar" id="uploadProgress" style="display:none;">
+                    <div class="progress-fill" id="uploadProgressFill" style="width: 0%"></div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Folders + Projects -->
+    {% for folder_name, folder_projects in folders %}
+    <div class="folder-group" data-folder="{{ folder_name }}">
+        <div class="folder-header" onclick="toggleFolder(this)">
+            <div style="display: flex; align-items: center; gap: 0.6rem;">
+                <svg class="folder-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M4 2l4 4-4 4"/></svg>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+                <span class="folder-name">{{ folder_name }}</span>
+                <span class="folder-count">{{ folder_projects | length }}</span>
+            </div>
+            <div class="folder-actions">
+                <button class="btn btn-sm project-action-btn" onclick="event.stopPropagation(); renameFolder('{{ folder_name }}', this);" title="Rename folder">Rename</button>
+            </div>
+        </div>
+        <div class="folder-contents">
+            <div class="project-list">
+                {% for p in folder_projects %}
+                {% include '_project_row.html' %}
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+
+    {% if unfiled %}
+    {% if folders %}
+    <div style="margin-top: 0.5rem; margin-bottom: 0.5rem; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; padding-left: 0.25rem;">Unfiled</div>
+    {% endif %}
+    <div class="project-list">
+        {% for p in unfiled %}
+        {% include '_project_row.html' %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if not projects %}
+    <div class="empty-state">
+        <h3>No projects yet</h3>
+        <p>Enter a file path or browse to an interview recording to get started</p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+// ── State ──
+let selectedFilePath = null;
+let creationMode = 'path';  // Always path-based now
+
+const filePathInput = document.getElementById('filePathInput');
+const selectPathBtn = document.getElementById('selectPathBtn');
+const dropCard = document.getElementById('dropCard');
+const dragOverlay = document.getElementById('dragOverlay');
+
+// Show the "Select File" button when a path is typed
+filePathInput.addEventListener('input', () => {
+    const hasValue = filePathInput.value.trim().length > 0;
+    selectPathBtn.style.display = hasValue ? 'inline-flex' : 'none';
+});
+
+// Allow Enter key to select
+filePathInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && filePathInput.value.trim()) {
+        selectFilePath();
+    }
+});
+
+// ── File Path Selection ──
+function selectFilePath() {
+    const path = filePathInput.value.trim();
+    if (!path) return;
+
+    selectedFilePath = path;
+    creationMode = 'path';
+
+    const filename = path.split('/').pop();
+    document.getElementById('selectedFile').textContent = path;
+    document.getElementById('projectName').value = filename.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ');
+    document.getElementById('createBtn').textContent = 'Create Project';
+    document.getElementById('uploadModal').classList.add('active');
+}
+
+// ── Drag and Drop (finds file path, never uploads) ──
+let dragCounter = 0;
+
+dropCard.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dragCounter++;
+    dragOverlay.style.display = 'flex';
+});
+
+dropCard.addEventListener('dragover', (e) => {
+    e.preventDefault();
+});
+
+dropCard.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) {
+        dragCounter = 0;
+        dragOverlay.style.display = 'none';
+    }
+});
+
+dropCard.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    dragOverlay.style.display = 'none';
+
+    if (!e.dataTransfer.files.length) return;
+    const file = e.dataTransfer.files[0];
+
+    // Show searching state
+    const findingDiv = document.getElementById('findingFile');
+    const matchesDiv = document.getElementById('multipleMatches');
+    matchesDiv.style.display = 'none';
+    document.getElementById('findingFileName').textContent = file.name;
+    findingDiv.style.display = 'block';
+
+    try {
+        const res = await fetch('/find-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename: file.name, size: file.size }),
+        });
+        const data = await res.json();
+        findingDiv.style.display = 'none';
+
+        if (data.status === 'found') {
+            // Single match, auto-fill and open modal
+            filePathInput.value = data.path;
+            selectPathBtn.style.display = 'inline-flex';
+            selectFilePath();
+
+        } else if (data.status === 'multiple') {
+            // Multiple matches, let user pick
+            matchesDiv.style.display = 'block';
+            const list = document.getElementById('matchesList');
+            list.innerHTML = '';
+            data.matches.forEach(match => {
+                const btn = document.createElement('button');
+                btn.className = 'btn btn-sm';
+                btn.style.cssText = 'display: block; width: 100%; text-align: left; margin-bottom: 0.35rem; font-family: var(--mono); font-size: 0.8rem; padding: 0.5rem 0.75rem;';
+                btn.textContent = match.path + ' (' + match.size_formatted + ')';
+                btn.onclick = () => {
+                    matchesDiv.style.display = 'none';
+                    filePathInput.value = match.path;
+                    selectPathBtn.style.display = 'inline-flex';
+                    selectFilePath();
+                };
+                list.appendChild(btn);
+            });
+
+        } else {
+            // Not found
+            alert('Could not find "' + file.name + '" on your drives.\n\nTry pasting the full path manually, or click Browse to navigate to it.');
+        }
+    } catch (err) {
+        findingDiv.style.display = 'none';
+        alert('Error searching for file: ' + err.message);
+    }
+});
+
+// Also allow dropping anywhere on the page
+document.body.addEventListener('dragover', (e) => e.preventDefault());
+document.body.addEventListener('drop', (e) => {
+    e.preventDefault();
+    // If dropped outside the card, forward to card handler
+    if (!dropCard.contains(e.target) && e.dataTransfer.files.length) {
+        dropCard.dispatchEvent(new DragEvent('drop', { dataTransfer: e.dataTransfer }));
+    }
+});
+
+function closeUploadModal() {
+    document.getElementById('uploadModal').classList.remove('active');
+    selectedFilePath = null;
+    document.getElementById('uploadProgress').style.display = 'none';
+}
+
+// ── Project Creation ──
+async function createProject() {
+    await createFromPath();
+}
+
+async function createFromPath() {
+    if (!selectedFilePath) return;
+
+    const btn = document.getElementById('createBtn');
+    btn.disabled = true;
+    btn.textContent = 'Creating...';
+
+    try {
+        const res = await fetch('/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                source_path: selectedFilePath,
+                project_name: document.getElementById('projectName').value,
+                client_name: document.getElementById('clientName').value,
+                interviewer_name: document.getElementById('interviewerName').value || 'Interviewer',
+                subject_name: document.getElementById('subjectName').value || 'Subject',
+                num_speakers: parseInt(document.getElementById('numSpeakers').value) || 2,
+            }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            window.location.href = '/project/' + data.project_id;
+        } else {
+            alert('Error: ' + (data.error || 'Unknown error'));
+            btn.disabled = false;
+            btn.textContent = 'Create Project';
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = 'Create Project';
+    }
+}
+
+// ── File Browser Modal ──
+function openBrowseModal() {
+    document.getElementById('browseModal').classList.add('active');
+    loadBrowseRoot();
+}
+
+function closeBrowseModal() {
+    document.getElementById('browseModal').classList.remove('active');
+}
+
+async function loadBrowseRoot() {
+    try {
+        const res = await fetch('/browse');
+        const data = await res.json();
+
+        const quickLocations = document.getElementById('quickLocations');
+        quickLocations.innerHTML = '';
+        (data.locations || []).forEach(loc => {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-sm';
+            btn.textContent = loc.name;
+            btn.onclick = () => browseTo(loc.path);
+            quickLocations.appendChild(btn);
+        });
+
+        document.getElementById('browsePath').textContent = 'Select a location to start';
+        document.getElementById('browseList').innerHTML =
+            '<div style="padding: 2rem; text-align: center; color: var(--text-muted);">Choose a starting location above</div>';
+    } catch (err) {
+        console.error('Browse error:', err);
+    }
+}
+
+async function browseTo(path) {
+    try {
+        const res = await fetch('/browse?path=' + encodeURIComponent(path));
+        const data = await res.json();
+
+        if (data.error) {
+            alert(data.error);
+            return;
+        }
+
+        document.getElementById('browsePath').textContent = data.current_path;
+        const list = document.getElementById('browseList');
+        list.innerHTML = '';
+
+        // Parent directory link
+        if (data.parent) {
+            const parentEl = document.createElement('div');
+            parentEl.style.cssText = 'padding: 0.6rem 0.75rem; cursor: pointer; display: flex; align-items: center; gap: 0.5rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 0.85rem;';
+            parentEl.innerHTML = '<span style="font-size: 1.1rem;">&#8593;</span> Parent Directory';
+            parentEl.onmouseover = () => parentEl.style.background = 'var(--bg-hover)';
+            parentEl.onmouseout = () => parentEl.style.background = '';
+            parentEl.onclick = () => browseTo(data.parent);
+            list.appendChild(parentEl);
+        }
+
+        if (data.items.length === 0) {
+            list.innerHTML += '<div style="padding: 2rem; text-align: center; color: var(--text-muted);">No supported files in this directory</div>';
+            return;
+        }
+
+        data.items.forEach(item => {
+            const el = document.createElement('div');
+            el.style.cssText = 'padding: 0.6rem 0.75rem; cursor: pointer; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); font-size: 0.85rem;';
+            el.onmouseover = () => el.style.background = 'var(--bg-hover)';
+            el.onmouseout = () => el.style.background = '';
+
+            if (item.type === 'directory') {
+                el.innerHTML = `
+                    <span style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="color: var(--accent);">&#128193;</span>
+                        ${item.name}
+                    </span>
+                    <span style="color: var(--text-muted);">&#8594;</span>
+                `;
+                el.onclick = () => browseTo(item.path);
+            } else {
+                el.innerHTML = `
+                    <span style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="color: var(--green);">&#9654;</span>
+                        ${item.name}
+                    </span>
+                    <span style="color: var(--text-muted); font-family: var(--mono); font-size: 0.75rem;">${item.size_formatted}</span>
+                `;
+                el.onclick = () => selectBrowsedFile(item.path, item.name);
+            }
+
+            list.appendChild(el);
+        });
+    } catch (err) {
+        console.error('Browse error:', err);
+    }
+}
+
+// ── Folders ──
+function createFolder() {
+    // Insert an inline input right before the project list
+    const existing = document.getElementById('newFolderInput');
+    if (existing) { existing.querySelector('input').focus(); return; }
+
+    const container = document.createElement('div');
+    container.id = 'newFolderInput';
+    container.className = 'folder-group';
+    container.innerHTML = `
+        <div class="folder-header" style="background: var(--bg-hover);">
+            <div style="display: flex; align-items: center; gap: 0.6rem;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+                <input type="text" class="form-input" placeholder="Folder name..." style="font-size: 0.9rem; font-weight: 600; padding: 0.25rem 0.5rem; width: 220px;">
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+                <button class="btn btn-sm btn-primary" onclick="confirmNewFolder()">Create</button>
+                <button class="btn btn-sm" onclick="document.getElementById('newFolderInput').remove()">Cancel</button>
+            </div>
+        </div>`;
+
+    // Insert before first folder or project list
+    const firstFolder = document.querySelector('.folder-group');
+    const projectList = document.querySelector('.project-list');
+    const insertBefore = firstFolder || projectList || document.querySelector('.empty-state');
+    if (insertBefore) insertBefore.parentNode.insertBefore(container, insertBefore);
+    else document.querySelector('.container').appendChild(container);
+
+    const input = container.querySelector('input');
+    input.focus();
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') confirmNewFolder();
+        if (e.key === 'Escape') container.remove();
+    });
+}
+
+function confirmNewFolder() {
+    const container = document.getElementById('newFolderInput');
+    const name = container.querySelector('input').value.trim();
+    if (!name) return;
+    // Create folder — it'll appear once a project is moved in, but we fake it for now
+    container.remove();
+    // Create a visible empty folder group
+    const group = document.createElement('div');
+    group.className = 'folder-group';
+    group.dataset.folder = name;
+    group.innerHTML = `
+        <div class="folder-header" onclick="toggleFolder(this)">
+            <div style="display: flex; align-items: center; gap: 0.6rem;">
+                <svg class="folder-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M4 2l4 4-4 4"/></svg>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+                <span class="folder-name">${name}</span>
+                <span class="folder-count">0</span>
+            </div>
+        </div>
+        <div class="folder-contents">
+            <div class="project-list" style="padding: 0.5rem; color: var(--text-muted); font-size: 0.8rem;">Drag projects here</div>
+        </div>`;
+
+    const firstFolder = document.querySelector('.folder-group');
+    const insertBefore = firstFolder || document.querySelector('.project-list') || document.querySelector('.empty-state');
+    insertBefore.parentNode.insertBefore(group, insertBefore);
+
+    // Enable drop on the new folder
+    const header = group.querySelector('.folder-header');
+    header.addEventListener('dragover', (e) => { e.preventDefault(); header.style.background = 'var(--accent-dim)'; });
+    header.addEventListener('dragleave', () => { header.style.background = ''; });
+    header.addEventListener('drop', (e) => {
+        e.preventDefault();
+        header.style.background = '';
+        const projectId = e.dataTransfer.getData('text/plain');
+        if (projectId && !e.dataTransfer.files.length) {
+            fetch(`/project/${projectId}/move`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folder: name }),
+            }).then(() => location.reload());
+        }
+    });
+}
+
+function toggleFolder(header) {
+    const group = header.closest('.folder-group');
+    group.classList.toggle('collapsed');
+}
+
+function renameFolder(oldName, btn) {
+    const headerEl = btn.closest('.folder-header').querySelector('.folder-name');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = oldName;
+    input.className = 'form-input';
+    input.style.cssText = 'font-size: 0.9rem; font-weight: 600; padding: 0.2rem 0.5rem; width: 200px;';
+    headerEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    async function save() {
+        const newName = input.value.trim();
+        if (newName && newName !== oldName) {
+            // Update all projects in this folder
+            const group = btn.closest('.folder-group');
+            const items = group.querySelectorAll('.project-item');
+            for (const item of items) {
+                const pid = item.dataset.projectId;
+                await fetch(`/project/${pid}/move`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ folder: newName }),
+                });
+            }
+            location.reload();
+        } else {
+            const restored = document.createElement('span');
+            restored.className = 'folder-name';
+            restored.textContent = oldName;
+            input.replaceWith(restored);
+        }
+    }
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); save(); }
+        if (e.key === 'Escape') { input.value = oldName; save(); }
+    });
+    input.addEventListener('blur', save);
+}
+
+function moveToFolder(projectId, btn) {
+    // Show a small inline dropdown next to the button
+    const existing = document.querySelector('.move-dropdown');
+    if (existing) existing.remove();
+
+    const folders = Array.from(document.querySelectorAll('.folder-group')).map(g => g.dataset.folder).filter(Boolean);
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'move-dropdown';
+    dropdown.innerHTML = `
+        ${folders.map(f => `<button class="move-option" onclick="doMove('${projectId}', '${f.replace(/'/g, "\\'")}')">${f}</button>`).join('')}
+        <button class="move-option" style="color: var(--text-muted);" onclick="doMove('${projectId}', '')">Unfile</button>
+    `;
+
+    btn.parentElement.style.position = 'relative';
+    btn.parentElement.appendChild(dropdown);
+
+    // Close on outside click
+    setTimeout(() => {
+        document.addEventListener('click', function handler(e) {
+            if (!dropdown.contains(e.target)) { dropdown.remove(); document.removeEventListener('click', handler); }
+        });
+    }, 10);
+}
+
+function doMove(projectId, folder) {
+    const dd = document.querySelector('.move-dropdown');
+    if (dd) dd.remove();
+    fetch(`/project/${projectId}/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder }),
+    }).then(() => location.reload());
+}
+
+// Drag project to folder
+function dragProject(e, projectId) {
+    e.dataTransfer.setData('text/plain', projectId);
+    e.dataTransfer.effectAllowed = 'move';
+}
+
+// Allow folders to accept drops
+document.querySelectorAll('.folder-group').forEach(group => {
+    const header = group.querySelector('.folder-header');
+    header.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        header.style.background = 'var(--accent-dim)';
+    });
+    header.addEventListener('dragleave', () => {
+        header.style.background = '';
+    });
+    header.addEventListener('drop', (e) => {
+        e.preventDefault();
+        header.style.background = '';
+        const projectId = e.dataTransfer.getData('text/plain');
+        if (projectId && !e.dataTransfer.files.length) {
+            fetch(`/project/${projectId}/move`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folder: group.dataset.folder }),
+            }).then(() => location.reload());
+        }
+    });
+});
+
+// ── Project Actions (from list) ──
+function renameProject(id, btn) {
+    const item = btn.closest('.project-item');
+    const nameEl = item.querySelector('.project-name');
+    const current = nameEl.textContent.trim();
+
+    // Replace name with an input
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = current;
+    input.className = 'form-input';
+    input.style.cssText = 'font-size: 1rem; font-weight: 500; padding: 0.25rem 0.5rem; width: 250px;';
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    // Prevent the link from navigating while editing
+    item.onclick = (e) => e.preventDefault();
+
+    async function save() {
+        const newName = input.value.trim();
+        if (newName && newName !== current) {
+            await fetch(`/project/${id}/rename`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newName }),
+            });
+        }
+        // Restore the name element
+        const restored = document.createElement('div');
+        restored.className = 'project-name';
+        restored.textContent = newName || current;
+        input.replaceWith(restored);
+        item.onclick = null;
+    }
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); save(); }
+        if (e.key === 'Escape') { input.value = current; save(); }
+    });
+    input.addEventListener('blur', save);
+}
+
+async function clearProject(id, btn) {
+    if (!confirm('Clear transcript and analysis for this project? The source file will NOT be deleted.')) return;
+    btn.disabled = true;
+    btn.textContent = 'Clearing...';
+    try {
+        const res = await fetch(`/project/${id}/clear`, { method: 'POST' });
+        if (res.ok) location.reload();
+        else { btn.disabled = false; btn.textContent = 'Clear'; alert('Error clearing project'); }
+    } catch (err) { btn.disabled = false; btn.textContent = 'Clear'; alert('Error: ' + err.message); }
+}
+
+async function deleteProject(id, btn) {
+    if (!confirm('Delete this project and all its data?')) return;
+    btn.disabled = true;
+    btn.textContent = 'Deleting...';
+    try {
+        const res = await fetch(`/project/${id}/delete`, { method: 'POST' });
+        if (res.ok) location.reload();
+        else { btn.disabled = false; btn.textContent = 'Delete'; alert('Error deleting project'); }
+    } catch (err) { btn.disabled = false; btn.textContent = 'Delete'; alert('Error: ' + err.message); }
+}
+
+function selectBrowsedFile(path, name) {
+    filePathInput.value = path;
+    selectPathBtn.style.display = 'inline-flex';
+    closeBrowseModal();
+
+    // Auto-open the project details modal
+    selectedFilePath = path;
+    creationMode = 'path';
+    document.getElementById('selectedFile').textContent = path;
+    document.getElementById('projectName').value = name.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ');
+    document.getElementById('createBtn').textContent = 'Create Project';
+    document.getElementById('uploadModal').classList.add('active');
+}
+</script>
+
+</body>
+</html>

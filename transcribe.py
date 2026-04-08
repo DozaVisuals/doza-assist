@@ -193,13 +193,25 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
             if not sent.text.strip():
                 continue
 
+            # Merge subword tokens into full words
+            # Parakeet uses BPE: tokens starting with space begin a new word
             words = []
             for tok in sent.tokens:
-                words.append({
-                    'start': round(tok.start + time_offset, 3),
-                    'end': round(tok.end + time_offset, 3),
-                    'word': tok.text,
-                })
+                tok_text = tok.text
+                tok_start = round(tok.start + time_offset, 3)
+                tok_end = round(tok.end + time_offset, 3)
+
+                if tok_text.startswith(' ') or not words:
+                    # New word
+                    words.append({
+                        'start': tok_start,
+                        'end': tok_end,
+                        'word': tok_text,
+                    })
+                else:
+                    # Continuation of previous word — merge
+                    words[-1]['word'] += tok_text
+                    words[-1]['end'] = tok_end
 
             seg_start = (sent.tokens[0].start if sent.tokens else 0) + time_offset
             seg_end = (sent.tokens[-1].end if sent.tokens else 0) + time_offset

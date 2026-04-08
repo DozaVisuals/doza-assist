@@ -1019,12 +1019,6 @@ body {
     background: var(--accent);
     border-radius: 2px;
     transition: width 0.3s ease;
-    animation: pulse-progress 2s ease-in-out infinite;
-}
-
-@keyframes pulse-progress {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
 }
 
 /* ── Spinner ── */

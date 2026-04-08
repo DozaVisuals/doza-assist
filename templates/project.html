@@ -101,11 +101,11 @@
             <p style="margin-top: 0.5rem; font-size: 0.8rem;">Usually takes under a minute</p>
         </div>
         <div id="transcribeProgress" style="display:none; padding: 2rem; text-align:center;">
-            <div class="spinner" style="margin: 0 auto 1rem;"></div>
-            <p>Transcribing...</p>
-            <div class="progress-bar">
-                <div class="progress-fill" style="width: 60%"></div>
+            <p style="font-weight: 500;" id="transcribeStatusText">Transcribing...</p>
+            <div class="progress-bar" style="margin-top: 1rem;">
+                <div class="progress-fill" id="transcribeProgressFill" style="width: 0%; transition: width 1s linear;"></div>
             </div>
+            <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;" id="transcribeTimeText"></p>
         </div>
     </div>
     {% endif %}
@@ -1584,7 +1584,7 @@ async function startTranscription() {
     const btn = document.getElementById('transcribeBtn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Transcribing...';
-    
+
     if (document.getElementById('preTranscribe')) {
         document.getElementById('preTranscribe').style.display = 'none';
     }
@@ -1592,10 +1592,39 @@ async function startTranscription() {
         document.getElementById('transcribeProgress').style.display = 'block';
     }
 
+    // Estimate transcription time from file size
+    // Parakeet MLX: ~5 min audio per second of processing
+    // Rough estimate: 1GB file ≈ 60min audio ≈ 12s transcription + 5s overhead
+    const fileSizeGB = (PROJECT.file_size || 0) / (1024 * 1024 * 1024);
+    const estimatedSeconds = Math.max(10, Math.round(fileSizeGB * 12 + 8));
+
+    const fill = document.getElementById('transcribeProgressFill');
+    const timeText = document.getElementById('transcribeTimeText');
+    const statusText = document.getElementById('transcribeStatusText');
+    let elapsed = 0;
+
+    const progressInterval = setInterval(() => {
+        elapsed++;
+        // Ease toward 90% over estimated time, never hit 100% until done
+        const progress = Math.min(90, (elapsed / estimatedSeconds) * 90);
+        fill.style.width = progress + '%';
+
+        const remaining = Math.max(0, estimatedSeconds - elapsed);
+        if (remaining > 0) {
+            timeText.textContent = `About ${remaining}s remaining`;
+        } else {
+            timeText.textContent = 'Almost done...';
+        }
+    }, 1000);
+
     try {
         const res = await fetch(`/project/${PROJECT_ID}/transcribe`, { method: 'POST' });
+        clearInterval(progressInterval);
         const data = await res.json();
         if (data.status === 'transcribed') {
+            fill.style.width = '100%';
+            statusText.textContent = 'Done!';
+            timeText.textContent = `Completed in ${elapsed}s`;
             showToast('Transcription complete!');
             setTimeout(() => location.reload(), 1000);
         } else {
@@ -1604,6 +1633,7 @@ async function startTranscription() {
             btn.textContent = 'Retry Transcription';
         }
     } catch (err) {
+        clearInterval(progressInterval);
         showToast('Error: ' + err.message);
         btn.disabled = false;
         btn.textContent = 'Retry Transcription';

@@ -834,7 +834,7 @@ def export_fcpxml(project_id):
     else:
         suffix = export_type
 
-    export_filename = f"{name} - {suffix}.fcpxml".replace('/', '-')
+    export_filename = f"{name.strip().rstrip('_')} - {suffix.strip().rstrip('_')}.fcpxml".replace('/', '-').replace('_', ' ')
     export_path = os.path.join(app.config['EXPORTS_DIR'], export_filename)
     with open(export_path, 'w') as f:
         f.write(fcpxml_content)

@@ -1203,6 +1203,16 @@ function renderChatReply(text) {
     return html;
 }
 
+function getFilenameFromResponse(res) {
+    const cd = res.headers.get('Content-Disposition') || '';
+    // Try filename*=UTF-8''name first, then filename="name" or filename=name
+    let match = cd.match(/filename\*=UTF-8''(.+)/i);
+    if (match) return decodeURIComponent(match[1]).replace(/['"]/g, '');
+    match = cd.match(/filename=["']?([^"';\n]+)["']?/i);
+    if (match) return match[1].trim();
+    return null;
+}
+
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -1546,7 +1556,7 @@ async function exportSelectedClips() {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = res.headers.get('Content-Disposition')?.split('filename=')[1] || 'clips.fcpxml';
+            a.download = getFilenameFromResponse(res) || 'clips.fcpxml';
             a.click();
             URL.revokeObjectURL(url);
             showToast(`Exported ${checkedIds.size} clips!`);
@@ -1698,7 +1708,7 @@ async function exportFCPXML(type) {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = res.headers.get('Content-Disposition')?.split('filename=')[1] || 'markers.fcpxml';
+            a.download = getFilenameFromResponse(res) || 'export.fcpxml';
             a.click();
             URL.revokeObjectURL(url);
             showToast('FCPXML exported!');

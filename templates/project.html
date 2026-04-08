@@ -250,8 +250,7 @@
                         <label class="clip-select-all" title="Select all / none">
                             <input type="checkbox" id="clipSelectAll" onchange="toggleAllClipChecks(this.checked)"> All
                         </label>
-                        <button class="btn btn-sm btn-primary" id="exportSelectedBtn" onclick="exportSelectedClips()" style="display: none;">Export Selected to FCPX</button>
-                        <button class="btn btn-sm" onclick="exportFCPXML('labels')">Export All to FCPX</button>
+                        <button class="btn btn-sm" onclick="exportClips()">Export</button>
                     </div>
                 </div>
                 <div class="clips-grid" id="clipsGrid">
@@ -1476,23 +1475,28 @@ function removeClipFromLibrary(id) {
     renderClipsTab();
 }
 
+function exportClips() {
+    const checked = document.querySelectorAll('.clip-check:checked');
+    if (checked.length > 0) {
+        exportSelectedClips();
+    } else {
+        exportFCPXML('labels');
+    }
+}
+
 function updateClipSelection() {
     const checks = document.querySelectorAll('.clip-check');
     const checked = document.querySelectorAll('.clip-check:checked');
     const countEl = document.getElementById('clipsSelectedCount');
-    const exportBtn = document.getElementById('exportSelectedBtn');
     const selectAll = document.getElementById('clipSelectAll');
 
     if (checked.length > 0) {
         countEl.textContent = checked.length + ' selected';
         countEl.style.display = '';
-        exportBtn.style.display = '';
     } else {
         countEl.style.display = 'none';
-        exportBtn.style.display = 'none';
     }
 
-    // Update "All" checkbox state
     if (selectAll) {
         selectAll.checked = checks.length > 0 && checked.length === checks.length;
         selectAll.indeterminate = checked.length > 0 && checked.length < checks.length;

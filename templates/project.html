@@ -1561,10 +1561,10 @@ async function exportSelectedClips() {
             URL.revokeObjectURL(url);
             showToast(`Exported ${checkedIds.size} clips!`);
         } else {
-            showToast('Export failed');
+            showToast('Export failed', true);
         }
     } catch (err) {
-        showToast('Export error: ' + err.message);
+        showToast('Export error: ' + err.message, true);
     }
 
     // Restore full labels after export
@@ -1632,13 +1632,13 @@ async function startTranscription() {
         } else {
             statusText.textContent = 'Error';
             timeText.textContent = data.error || 'Unknown error';
-            showToast('Error: ' + (data.error || 'Unknown error'));
+            showToast('Error: ' + (data.error || 'Unknown error'), true);
         }
     } catch (err) {
         clearInterval(progressInterval);
         statusText.textContent = 'Error';
         timeText.textContent = err.message;
-        showToast('Error: ' + err.message);
+        showToast('Error: ' + err.message, true);
     }
 }
 
@@ -1668,10 +1668,26 @@ async function runAnalysis() {
             showToast('Analysis complete!');
             setTimeout(() => location.reload(), 1000);
         } else {
-            showToast('Error: ' + (data.error || 'Unknown error'));
+            showToast('Error: ' + (data.error || 'Unknown error'), true);
+            resetAnalyzeBtn();
         }
     } catch (err) {
-        showToast('Error: ' + err.message);
+        showToast('Error: ' + err.message, true);
+        resetAnalyzeBtn();
+    }
+}
+
+function resetAnalyzeBtn() {
+    const btn = document.getElementById('analyzeBtn');
+    if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = 'AI Analysis';
+    }
+    if (document.getElementById('preAnalysis')) {
+        document.getElementById('preAnalysis').style.display = 'block';
+    }
+    if (document.getElementById('analysisProgress')) {
+        document.getElementById('analysisProgress').style.display = 'none';
     }
 }
 
@@ -1713,10 +1729,10 @@ async function exportFCPXML(type) {
             URL.revokeObjectURL(url);
             showToast('FCPXML exported!');
         } else {
-            showToast('Export failed');
+            showToast('Export failed', true);
         }
     } catch (err) {
-        showToast('Export error: ' + err.message);
+        showToast('Export error: ' + err.message, true);
     }
 }
 
@@ -1785,7 +1801,7 @@ async function copyShareLink() {
             const shareUrl = data.url + '/share/' + PROJECT_ID;
             showShareResult(shareUrl);
         } else {
-            showToast('Error: ' + (data.error || 'Could not start tunnel'));
+            showToast('Error: ' + (data.error || 'Could not start tunnel'), true);
         }
     } catch (err) {
         const url = window.location.origin + '/share/' + PROJECT_ID;
@@ -1899,7 +1915,7 @@ async function renameSpeaker(oldName, newName) {
             showToast(`Renamed "${oldName}" to "${newName}"`);
         }
     } catch (err) {
-        showToast('Error: ' + err.message);
+        showToast('Error: ' + err.message, true);
     }
 }
 
@@ -1908,10 +1924,10 @@ async function revealInFinder() {
         const res = await fetch(`/project/${PROJECT_ID}/reveal`, { method: 'POST' });
         const data = await res.json();
         if (!res.ok) {
-            showToast(data.error || 'Could not reveal file');
+            showToast(data.error || 'Could not reveal file', true);
         }
     } catch (err) {
-        showToast('Error: ' + err.message);
+        showToast('Error: ' + err.message, true);
     }
 }
 
@@ -1925,10 +1941,10 @@ async function clearTranscript() {
             showToast('Transcript cleared');
             setTimeout(() => location.reload(), 500);
         } else {
-            showToast('Error: ' + (data.error || 'Unknown error'));
+            showToast('Error: ' + (data.error || 'Unknown error'), true);
         }
     } catch (err) {
-        showToast('Error: ' + err.message);
+        showToast('Error: ' + err.message, true);
     }
 }
 
@@ -1940,11 +1956,12 @@ async function deleteProject() {
 }
 
 // ── Toast ──
-function showToast(msg) {
+function showToast(msg, isError = false) {
     const toast = document.getElementById('toast');
     toast.textContent = msg;
+    toast.classList.toggle('error', isError);
     toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 3000);
+    setTimeout(() => toast.classList.remove('show'), 5000);
 }
 </script>
 

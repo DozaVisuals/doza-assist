@@ -1376,20 +1376,15 @@ select.form-input {
 
 /* Drag preview — shows active brush color */
 .tw-drag-preview {
-    background: var(--accent-dim) !important;
     border-radius: 3px;
-    padding: 0.15rem 0.05rem;
-    margin: 0 -0.1rem;
-    box-shadow: -3px 0 0 0 var(--accent-dim),
-                 3px 0 0 0 var(--accent-dim);
+    padding: 0.1rem 0;
 }
 
-/* Color-specific drag preview when brush is active */
-body[data-brush="blue"] .tw-drag-preview  { --_preview: var(--accent-dim); background: var(--_preview) !important; box-shadow: -3px 0 0 0 var(--_preview), 3px 0 0 0 var(--_preview); }
-body[data-brush="green"] .tw-drag-preview { --_preview: var(--green-dim); background: var(--_preview) !important; box-shadow: -3px 0 0 0 var(--_preview), 3px 0 0 0 var(--_preview); }
-body[data-brush="purple"] .tw-drag-preview { --_preview: var(--purple-dim); background: var(--_preview) !important; box-shadow: -3px 0 0 0 var(--_preview), 3px 0 0 0 var(--_preview); }
-body[data-brush="orange"] .tw-drag-preview { --_preview: var(--orange-dim); background: var(--_preview) !important; box-shadow: -3px 0 0 0 var(--_preview), 3px 0 0 0 var(--_preview); }
-body[data-brush="red"] .tw-drag-preview { --_preview: var(--red-dim); background: var(--_preview) !important; box-shadow: -3px 0 0 0 var(--_preview), 3px 0 0 0 var(--_preview); }
+body[data-brush="blue"] .tw-drag-preview  { background: var(--accent-dim) !important; box-shadow: 3px 0 0 var(--accent-dim), -3px 0 0 var(--accent-dim); }
+body[data-brush="green"] .tw-drag-preview { background: var(--green-dim) !important; box-shadow: 3px 0 0 var(--green-dim), -3px 0 0 var(--green-dim); }
+body[data-brush="purple"] .tw-drag-preview { background: var(--purple-dim) !important; box-shadow: 3px 0 0 var(--purple-dim), -3px 0 0 var(--purple-dim); }
+body[data-brush="orange"] .tw-drag-preview { background: var(--orange-dim) !important; box-shadow: 3px 0 0 var(--orange-dim), -3px 0 0 var(--orange-dim); }
+body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important; box-shadow: 3px 0 0 var(--red-dim), -3px 0 0 var(--red-dim); }
 
 /* Prevent text selection while painting */
 .painting-mode .transcript-container {
@@ -1397,24 +1392,20 @@ body[data-brush="red"] .tw-drag-preview { --_preview: var(--red-dim); background
     user-select: none;
 }
 
-/* Labeled words — colored underline + tinted background */
+/* Labeled words — clean tinted background, no underline */
 .tw-labeled {
     border-radius: 3px;
-    padding: 0.15rem 0.05rem;
-    margin: 0 -0.1rem;
-    border-bottom: 2px solid transparent;
+    padding: 0.1rem 0;
+    margin: 0;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
-    /* Extend background to cover inline whitespace gaps */
-    box-shadow: -3px 0 0 0 var(--_label-bg, transparent),
-                 3px 0 0 0 var(--_label-bg, transparent);
 }
 
-.tw-labeled[data-label-color="blue"]   { --_label-bg: var(--accent-dim); background: var(--accent-dim); border-bottom-color: var(--accent); }
-.tw-labeled[data-label-color="green"]  { --_label-bg: var(--green-dim); background: var(--green-dim); border-bottom-color: var(--green); }
-.tw-labeled[data-label-color="purple"] { --_label-bg: var(--purple-dim); background: var(--purple-dim); border-bottom-color: var(--purple); }
-.tw-labeled[data-label-color="orange"] { --_label-bg: var(--orange-dim); background: var(--orange-dim); border-bottom-color: var(--orange); }
-.tw-labeled[data-label-color="red"]    { --_label-bg: var(--red-dim); background: var(--red-dim); border-bottom-color: var(--red); }
+.tw-labeled[data-label-color="blue"]   { background: var(--accent-dim); box-shadow: 3px 0 0 var(--accent-dim), -3px 0 0 var(--accent-dim); }
+.tw-labeled[data-label-color="green"]  { background: var(--green-dim); box-shadow: 3px 0 0 var(--green-dim), -3px 0 0 var(--green-dim); }
+.tw-labeled[data-label-color="purple"] { background: var(--purple-dim); box-shadow: 3px 0 0 var(--purple-dim), -3px 0 0 var(--purple-dim); }
+.tw-labeled[data-label-color="orange"] { background: var(--orange-dim); box-shadow: 3px 0 0 var(--orange-dim), -3px 0 0 var(--orange-dim); }
+.tw-labeled[data-label-color="red"]    { background: var(--red-dim); box-shadow: 3px 0 0 var(--red-dim), -3px 0 0 var(--red-dim); }
 
 /* Section start tag (inline badge before first word) */
 .label-range-tag {

@@ -4,12 +4,11 @@ werkzeug
 requests
 certifi
 
-# Transcription
+# Transcription (Parakeet MLX — fastest on Apple Silicon)
+parakeet-mlx
+
+# Fallback transcription
 openai-whisper
 
 # AI Chat & Analysis (uses Ollama locally — no package needed)
 # Install Ollama separately: https://ollama.com
-
-# Speaker identification (optional — for diarization)
-resemblyzer
-scikit-learn

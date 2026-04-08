@@ -95,36 +95,37 @@ def format_timestamp(seconds):
 
 def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speakers=2):
     """
-    Transcribe an audio/video file with speaker diarization.
+    Transcribe an audio/video file.
 
-    Args:
-        filepath: Path to the source audio/video file.
-        project_dir: Project directory where extracted audio should be stored.
-        speaker_labels: Dict mapping speaker IDs to names.
+    Tries engines in order: Parakeet MLX (fastest) → WhisperX → Whisper.
 
     Returns:
-        dict with 'segments' list, each segment containing:
-            - start: float (seconds)
-            - end: float (seconds)
-            - text: str
-            - speaker: str
-            - start_formatted: str (HH:MM:SS.mmm)
-            - end_formatted: str (HH:MM:SS.mmm)
-            - words: list of word-level timestamps
+        dict with 'segments' list, each containing:
+            - start, end (float seconds)
+            - text (str)
+            - speaker (str)
+            - start_formatted, end_formatted (str HH:MM:SS.mmm)
+            - words (list of {start, end, word})
     """
+    # Parakeet MLX can read video directly via ffmpeg — no extraction needed
+    # For Whisper fallbacks, extract audio first
+
+    # Try Parakeet MLX first (fastest on Apple Silicon)
+    try:
+        return _transcribe_parakeet(filepath, speaker_labels)
+    except ImportError:
+        print("Parakeet MLX not available, trying Whisper...")
+    except Exception as e:
+        print(f"Parakeet failed: {e}, trying Whisper...")
+
+    # Extract audio for Whisper engines
     audio_path = extract_audio(filepath, project_dir=project_dir)
 
-    # Try WhisperX first (best quality + diarization)
+    # Try WhisperX
     try:
         return _transcribe_whisperx(audio_path, speaker_labels)
     except ImportError:
-        print("WhisperX not available, trying lightning-whisper-mlx...")
-
-    # Try Lightning Whisper MLX (fastest on Apple Silicon)
-    try:
-        return _transcribe_lightning(audio_path, speaker_labels)
-    except ImportError:
-        print("Lightning Whisper MLX not available, trying standard Whisper...")
+        print("WhisperX not available, trying standard Whisper...")
 
     # Fall back to standard Whisper
     try:
@@ -132,10 +133,58 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     except ImportError:
         raise RuntimeError(
             "No transcription engine found. Install one of:\n"
-            "  pip install whisperx\n"
-            "  pip install lightning-whisper-mlx\n"
+            "  pip install parakeet-mlx\n"
             "  pip install openai-whisper"
         )
+
+
+def _transcribe_parakeet(filepath, speaker_labels=None):
+    """Transcribe using Parakeet MLX — fastest on Apple Silicon."""
+    from parakeet_mlx import from_pretrained
+
+    print("Loading Parakeet TDT model...")
+    model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
+
+    print("Transcribing with Parakeet MLX...")
+    result = model.transcribe(filepath)
+
+    # Default speaker
+    default_speaker = 'Speaker'
+    if speaker_labels:
+        default_speaker = speaker_labels.get('SPEAKER_00', 'Speaker')
+
+    segments = []
+    for sent in result.sentences:
+        if not sent.text.strip():
+            continue
+
+        words = []
+        for tok in sent.tokens:
+            words.append({
+                'start': round(tok.start, 3),
+                'end': round(tok.end, 3),
+                'word': tok.text,
+            })
+
+        seg_start = sent.tokens[0].start if sent.tokens else 0
+        seg_end = sent.tokens[-1].end if sent.tokens else 0
+
+        segments.append({
+            'start': round(seg_start, 3),
+            'end': round(seg_end, 3),
+            'text': sent.text.strip(),
+            'speaker': default_speaker,
+            'start_formatted': format_timestamp(seg_start),
+            'end_formatted': format_timestamp(seg_end),
+            'words': words,
+        })
+
+    return {
+        'segments': segments,
+        'language': 'en',
+        'duration': segments[-1]['end'] if segments else 0,
+        'engine': 'parakeet-mlx',
+    }
 
 
 def _transcribe_whisperx(audio_path, speaker_labels=None):

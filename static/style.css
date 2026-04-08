@@ -1633,8 +1633,8 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.75rem;
-    margin: 0.5rem 0;
+    padding: 0.6rem 0.75rem;
+    margin: 0.35rem 0;
     transition: border-color 0.15s;
 }
 
@@ -1647,26 +1647,25 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     align-items: baseline;
     justify-content: space-between;
     gap: 0.5rem;
-    margin-bottom: 0.35rem;
 }
 
 .chat-clip-title {
-    font-weight: 600;
-    font-size: 0.85rem;
+    font-weight: 500;
+    font-size: 0.8rem;
 }
 
 .chat-clip-tc {
     font-family: var(--mono);
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     color: var(--text-muted);
     white-space: nowrap;
 }
 
 .chat-clip-excerpt {
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     color: var(--text-secondary);
-    line-height: 1.5;
-    margin-bottom: 0.5rem;
+    line-height: 1.4;
+    margin: 0.25rem 0 0.35rem;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
@@ -1674,17 +1673,17 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 }
 
 .chat-clip-scrub {
-    height: 3px;
+    height: 2px;
     background: var(--border);
     border-radius: 2px;
     cursor: pointer;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.35rem;
     transition: height 0.15s;
     overflow: hidden;
 }
 
 .chat-clip-scrub:hover {
-    height: 6px;
+    height: 5px;
 }
 
 .chat-clip-scrub-fill {
@@ -1698,7 +1697,12 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 
 .chat-clip-actions {
     display: flex;
-    gap: 0.5rem;
+    gap: 0.35rem;
+}
+
+.chat-clip-actions .btn-sm {
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
 }
 
 .chat-tc-link {

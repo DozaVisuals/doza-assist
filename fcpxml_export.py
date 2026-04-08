@@ -148,7 +148,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
     for i, m in enumerate(markers):
         clip_start = m['start']
-        clip_end = m['end']
+        clip_end = m['end'] + 1.0  # Add 1s buffer — word timestamps end slightly early
         clip_dur = clip_end - clip_start
         if clip_dur <= 0:
             continue

@@ -1627,9 +1627,17 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 }
 
 /* Clip suggestions in chat */
-/* Chat clips use .clip-card styles — just add spacing between them */
-.chat-clip + .chat-clip { margin-top: 10px; }
+/* Chat clips — tighter than clips tab */
+.chat-clip { padding: 8px 10px !important; }
+.chat-clip + .chat-clip { margin-top: 6px; }
 .chat-clip.cc-playing { border-color: var(--accent) !important; }
+.chat-clip .clip-card-head { margin-bottom: 2px; }
+.chat-clip .clip-card-meta { margin-bottom: 4px; }
+.chat-clip .clip-card-player { gap: 6px; }
+.chat-clip .clip-play-btn { width: 24px; height: 24px; }
+.chat-clip .clip-card-expand { margin-top: 4px; }
+.chat-clip .clip-card-excerpt { font-size: 12px; }
+.chat-clip > div:last-child { margin-top: 4px !important; }
 
 .chat-tc-link {
     font-family: var(--mono);

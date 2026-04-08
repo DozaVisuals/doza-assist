@@ -25,6 +25,8 @@ Icon?
 
 # Build artifacts
 icon_build/
+*.app/
+*.dmg
 
 # Claude
 .claude/

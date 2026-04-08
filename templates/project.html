@@ -308,7 +308,7 @@
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ beat.start }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ beat.start }}'), parseTc('{{ beat.end }}'), '{{ beat.label | replace("'", "") }}')">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ beat.start }}'), parseTc('{{ beat.end }}'), '{{ beat.label | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -339,7 +339,7 @@
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ clip.start }} – {{ clip.end }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ clip.start }}'), parseTc('{{ clip.end }}'), '{{ clip.title | replace("'", "") }}')">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ clip.start }}'), parseTc('{{ clip.end }}'), '{{ clip.title | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -369,7 +369,7 @@
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ sb.start }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}')">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -1195,7 +1195,7 @@ function renderChatReply(text) {
 <div class="cc-row1"><b>${title}</b><span class="cc-dur">${duration}s</span></div>
 <div class="cc-row2"><span class="cc-dot"></span><span class="cc-tc">${fmtTime(start)} – ${fmtTime(end)}</span></div>
 <div class="cc-row3"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div></div>
-<div class="cc-row4"><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Text <svg viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}')">+ Clips</button></div>
+<div class="cc-row4"><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Text <svg viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clips</button></div>
 <div class="cc-excerpt">${escapeHtml(excerpt)}</div>
 </div>`;
 
@@ -1344,7 +1344,7 @@ function addAllAnalysisClips() {
     }
 }
 
-function addClipFromChat(start, end, title) {
+function addClipFromChat(start, end, title, btn) {
     // Add as a green-labeled section
     const color = 'green';
     const id = ++sectionIdCounter;
@@ -1355,6 +1355,12 @@ function addClipFromChat(start, end, title) {
     saveLabels();
     renderClipsTab();
     showToast(`Added "${title}" to clips`);
+    // Show green checkmark on the button
+    if (btn) {
+        btn.innerHTML = '✓ Added';
+        btn.disabled = true;
+        btn.classList.add('clip-added');
+    }
 }
 
 // ── Clips Tab ──

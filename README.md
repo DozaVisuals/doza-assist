@@ -72,7 +72,23 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 
 ---
 
-## Quick Start
+## Download
+
+**[Download Doza Assist](https://github.com/DozaVisuals/doza-assist/releases/latest)** (macOS)
+
+1. Download the `.dmg` file from the link above
+2. Open it and drag **Doza Assist** to your Applications folder
+3. Double-click to launch
+
+On first launch, the app will automatically install everything it needs. You may be asked for your Mac password once during setup. The AI model download (~3-5 GB) takes a few minutes — the app shows progress the whole time.
+
+That's it. No Terminal required.
+
+---
+
+## Quick Start (Developer Install)
+
+If you prefer to run from source:
 
 ### Prerequisites
 - macOS (tested on Mac Studio M2)
@@ -156,15 +172,19 @@ The app automatically tries Ollama first and falls back to Claude if configured.
 
 ```
 doza-assist/
-├── app.py              # Flask server + all routes
-├── transcribe.py       # Whisper transcription engine
-├── ai_analysis.py      # AI analysis + chat (Ollama/Claude)
-├── fcpxml_export.py    # FCPXML generation with pre-cut timelines
-├── start.sh            # Launch script
-├── install.sh          # First-time setup
-├── requirements.txt    # Python dependencies
+├── app.py               # Flask server + all routes
+├── transcribe.py        # Whisper transcription engine
+├── ai_analysis.py       # AI analysis + chat (Ollama/Claude)
+├── fcpxml_export.py     # FCPXML generation with pre-cut timelines
+├── start.sh             # Launch script (developer mode)
+├── install.sh           # Manual setup (developer mode)
+├── setup_runner.sh      # Auto-setup phase 1 (Xcode CLT, Homebrew, Python)
+├── setup_assistant.py   # Auto-setup phase 2 (browser UI for remaining deps)
+├── dep_check.sh         # Quick dependency checker for app launches
+├── build_launcher.sh    # Builds .app bundle + .dmg
+├── requirements.txt     # Python dependencies
 ├── static/
-│   └── style.css       # All styles (dark + light themes)
+│   └── style.css        # All styles (dark + light themes)
 ├── templates/
 │   ├── dashboard.html   # Projects page with folders
 │   ├── project.html     # Main project view (all tabs)

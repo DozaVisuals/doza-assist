@@ -1548,7 +1548,7 @@ async function exportSelectedClips() {
         const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'labels', framerate, mode }),
+            body: JSON.stringify({ type: 'labels', framerate, mode, total_clips: labelSections.length }),
         });
 
         if (res.ok) {
@@ -1700,7 +1700,7 @@ async function exportFCPXML(type) {
         const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type, framerate, mode: document.getElementById('exportMode')?.value || 'cuts' }),
+            body: JSON.stringify({ type, framerate, mode: document.getElementById('exportMode')?.value || 'cuts', total_clips: labelSections.length }),
         });
 
         if (res.ok) {

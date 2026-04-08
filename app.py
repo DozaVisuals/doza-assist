@@ -857,7 +857,8 @@ def export_fcpxml(project_id):
             clip_title = markers[0].get('text', 'Clip')[:40].strip()
             suffix = clip_title
         else:
-            suffix = 'All Clips' if count == len(project.get('labeled_sections', [])) else f'{count} Clips'
+            total = request.json.get('total_clips', count)
+            suffix = 'All Clips' if count >= total else f'{count} Clips'
     elif export_type == 'social':
         suffix = 'Social Clips'
     elif export_type == 'story':

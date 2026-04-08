@@ -80,11 +80,7 @@
             {% endif %}
         </div>
         <div class="btn-group">
-            {% if project.status == 'uploaded' %}
-            <button class="btn btn-primary" id="transcribeBtn" onclick="startTranscription()">
-                Transcribe
-            </button>
-            {% elif project.status == 'transcribed' %}
+            {% if project.status == 'transcribed' %}
             <button class="btn btn-purple" id="analyzeBtn" onclick="runAnalysis()">
                 AI Analysis
             </button>
@@ -93,14 +89,9 @@
     </div>
 
     {% if project.status == 'uploaded' %}
-    <!-- Pre-transcription state -->
+    <!-- Auto-transcription state -->
     <div class="card">
-        <div class="empty-state" id="preTranscribe">
-            <h3>Ready to transcribe</h3>
-            <p>Click "Transcribe" to process this file locally.</p>
-            <p style="margin-top: 0.5rem; font-size: 0.8rem;">Usually takes under a minute</p>
-        </div>
-        <div id="transcribeProgress" style="display:none; padding: 2rem; text-align:center;">
+        <div id="transcribeProgress" style="padding: 2rem; text-align:center;">
             <p style="font-weight: 500;" id="transcribeStatusText">Transcribing...</p>
             <div class="progress-bar" style="margin-top: 1rem;">
                 <div class="progress-fill" id="transcribeProgressFill" style="width: 0%; transition: width 1s linear;"></div>
@@ -108,6 +99,10 @@
             <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;" id="transcribeTimeText"></p>
         </div>
     </div>
+    <script>
+        // Auto-start transcription when page loads
+        window.addEventListener('DOMContentLoaded', () => startTranscription());
+    </script>
     {% endif %}
 
     {% if project.transcript %}
@@ -1581,13 +1576,6 @@ saveLabels = function() {
 
 // ── Transcription ──
 async function startTranscription() {
-    const btn = document.getElementById('transcribeBtn');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Transcribing...';
-
-    if (document.getElementById('preTranscribe')) {
-        document.getElementById('preTranscribe').style.display = 'none';
-    }
     if (document.getElementById('transcribeProgress')) {
         document.getElementById('transcribeProgress').style.display = 'block';
     }
@@ -1628,15 +1616,15 @@ async function startTranscription() {
             showToast('Transcription complete!');
             setTimeout(() => location.reload(), 1000);
         } else {
+            statusText.textContent = 'Error';
+            timeText.textContent = data.error || 'Unknown error';
             showToast('Error: ' + (data.error || 'Unknown error'));
-            btn.disabled = false;
-            btn.textContent = 'Retry Transcription';
         }
     } catch (err) {
         clearInterval(progressInterval);
+        statusText.textContent = 'Error';
+        timeText.textContent = err.message;
         showToast('Error: ' + err.message);
-        btn.disabled = false;
-        btn.textContent = 'Retry Transcription';
     }
 }
 

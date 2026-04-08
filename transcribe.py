@@ -107,19 +107,19 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
             - start_formatted, end_formatted (str HH:MM:SS.mmm)
             - words (list of {start, end, word})
     """
-    # Parakeet MLX can read video directly via ffmpeg — no extraction needed
-    # For Whisper fallbacks, extract audio first
+    # Extract audio first — needed for all engines (video files are too large for direct processing)
+    audio_path = extract_audio(filepath, project_dir=project_dir)
 
     # Try Parakeet MLX first (fastest on Apple Silicon)
     try:
-        return _transcribe_parakeet(filepath, speaker_labels)
+        return _transcribe_parakeet(audio_path, speaker_labels)
     except ImportError:
-        print("Parakeet MLX not available, trying Whisper...")
+        print("Parakeet MLX not available, trying Whisper...", flush=True)
     except Exception as e:
-        print(f"Parakeet failed: {e}, trying Whisper...")
-
-    # Extract audio for Whisper engines
-    audio_path = extract_audio(filepath, project_dir=project_dir)
+        import traceback
+        print(f"Parakeet failed: {e}", flush=True)
+        traceback.print_exc()
+        print("Falling back to Whisper...", flush=True)
 
     # Try WhisperX
     try:
@@ -139,50 +139,102 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
 
 
 def _transcribe_parakeet(filepath, speaker_labels=None):
-    """Transcribe using Parakeet MLX — fastest on Apple Silicon."""
-    from parakeet_mlx import from_pretrained
+    """Transcribe using Parakeet MLX — fastest on Apple Silicon.
 
-    print("Loading Parakeet TDT model...")
+    Chunks long audio into 5-minute segments to avoid Metal GPU memory limits.
+    """
+    import numpy as np
+    from parakeet_mlx import from_pretrained
+    from parakeet_mlx.audio import load_audio
+
+    print("Loading Parakeet TDT model...", flush=True)
     model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
 
-    print("Transcribing with Parakeet MLX...")
-    result = model.transcribe(filepath)
+    import numpy as np
 
-    # Default speaker
+    print("Loading audio...", flush=True)
+    audio_data = load_audio(filepath, model.preprocessor_config.sample_rate)
+
+    sr = model.preprocessor_config.sample_rate
+    total_samples = len(audio_data)
+    total_duration = total_samples / sr
+
+    # Chunk into ~5 minute segments with 1s overlap to avoid cutting words
+    chunk_sec = 300  # 5 minutes
+    overlap_sec = 1
+    chunk_samples = int(chunk_sec * sr)
+    overlap_samples = int(overlap_sec * sr)
+
     default_speaker = 'Speaker'
     if speaker_labels:
         default_speaker = speaker_labels.get('SPEAKER_00', 'Speaker')
 
-    segments = []
-    for sent in result.sentences:
-        if not sent.text.strip():
-            continue
+    all_segments = []
+    chunk_start = 0
+    chunk_idx = 0
 
-        words = []
-        for tok in sent.tokens:
-            words.append({
-                'start': round(tok.start, 3),
-                'end': round(tok.end, 3),
-                'word': tok.text,
+    while chunk_start < total_samples:
+        chunk_end = min(chunk_start + chunk_samples, total_samples)
+        chunk = audio_data[chunk_start:chunk_end]
+        time_offset = chunk_start / sr
+
+        chunk_idx += 1
+        print(f"Transcribing chunk {chunk_idx} ({time_offset:.0f}s - {chunk_end/sr:.0f}s)...", flush=True)
+
+        # Save chunk as temp WAV (parakeet.transcribe expects a file path)
+        import soundfile as sf
+        tmp_path = os.path.join(tempfile.gettempdir(), f'parakeet_chunk_{chunk_idx}.wav')
+        sf.write(tmp_path, np.array(chunk), sr)
+
+        result = model.transcribe(tmp_path)
+        os.remove(tmp_path)
+
+        for sent in result.sentences:
+            if not sent.text.strip():
+                continue
+
+            words = []
+            for tok in sent.tokens:
+                words.append({
+                    'start': round(tok.start + time_offset, 3),
+                    'end': round(tok.end + time_offset, 3),
+                    'word': tok.text,
+                })
+
+            seg_start = (sent.tokens[0].start if sent.tokens else 0) + time_offset
+            seg_end = (sent.tokens[-1].end if sent.tokens else 0) + time_offset
+
+            all_segments.append({
+                'start': round(seg_start, 3),
+                'end': round(seg_end, 3),
+                'text': sent.text.strip(),
+                'speaker': default_speaker,
+                'start_formatted': format_timestamp(seg_start),
+                'end_formatted': format_timestamp(seg_end),
+                'words': words,
             })
 
-        seg_start = sent.tokens[0].start if sent.tokens else 0
-        seg_end = sent.tokens[-1].end if sent.tokens else 0
+        # Advance past this chunk, minus overlap
+        chunk_start = chunk_end - overlap_samples
+        if chunk_end >= total_samples:
+            break
 
-        segments.append({
-            'start': round(seg_start, 3),
-            'end': round(seg_end, 3),
-            'text': sent.text.strip(),
-            'speaker': default_speaker,
-            'start_formatted': format_timestamp(seg_start),
-            'end_formatted': format_timestamp(seg_end),
-            'words': words,
-        })
+    # Remove duplicate segments from overlap regions
+    if len(all_segments) > 1:
+        deduped = [all_segments[0]]
+        for seg in all_segments[1:]:
+            # Skip if this segment starts before the previous one ends (overlap duplicate)
+            if seg['start'] < deduped[-1]['end'] - 0.5:
+                continue
+            deduped.append(seg)
+        all_segments = deduped
+
+    print(f"Parakeet done: {len(all_segments)} segments in {total_duration:.0f}s of audio", flush=True)
 
     return {
-        'segments': segments,
+        'segments': all_segments,
         'language': 'en',
-        'duration': segments[-1]['end'] if segments else 0,
+        'duration': all_segments[-1]['end'] if all_segments else 0,
         'engine': 'parakeet-mlx',
     }
 

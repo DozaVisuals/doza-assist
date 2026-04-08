@@ -403,7 +403,7 @@
                         </div>
                     </div>
                     <div class="chat-input-area">
-                        <input type="text" class="chat-input" id="chatInput" placeholder="Ask about the transcript..."
+                        <input type="text" class="chat-input" id="chatInput" placeholder="Ask about the transcript...  press Enter to send"
                                onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }">
                         <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -1172,17 +1172,31 @@ function renderChatReply(text) {
             const end = tcToSec(endRaw);
             const safeTitle = title.replace(/['"]/g, '').replace(/[^\w\s.,!?()-]/g, '').trim();
             const clipUid = `cc_${start}_${end}`.replace(/\./g, '_');
+            const duration = Math.round(end - start);
+            // Pull transcript text from the word spans in the time range
+            const clipWords = allWords.filter(w => {
+                const ws = parseFloat(w.dataset.s);
+                return ws >= start && ws < end;
+            });
+            let excerpt = clipWords.map(w => w.textContent).join('').trim();
+            if (excerpt.length > 140) excerpt = excerpt.substring(0, 140) + '...';
+            const excerptHtml = excerpt ? `<div class="chat-clip-excerpt">${escapeHtml(excerpt)}</div>` : '';
+
             return `<div class="chat-clip" id="${clipUid}" data-start="${start}" data-end="${end}">
                 <div class="chat-clip-header">
                     <span class="chat-clip-title">${title}</span>
-                    <span class="chat-clip-tc">${fmtTime(start)} - ${fmtTime(end)}</span>
+                    <span class="chat-clip-tc">${fmtTime(start)} – ${fmtTime(end)} (${duration}s)</span>
+                </div>
+                ${excerptHtml}
+                <div class="chat-clip-scrub" onclick="scrubChatClip(event, '${clipUid}', ${start}, ${end})">
+                    <div class="chat-clip-scrub-fill" id="ccfill_${clipUid}"></div>
                 </div>
                 <div class="chat-clip-actions">
-                    <button class="btn btn-sm chat-clip-play" onclick="playChatClip('${clipUid}', ${start}, ${end})">
+                    <button class="btn btn-sm btn-primary chat-clip-play" onclick="playChatClip('${clipUid}', ${start}, ${end})">
                         <span class="ccp-play">Play</span>
                         <span class="ccp-pause" style="display:none">Pause</span>
                     </button>
-                    <button class="btn btn-sm btn-green" onclick="addClipFromChat(${start}, ${end}, '${safeTitle}')">Add to Clips</button>
+                    <button class="btn btn-sm" onclick="addClipFromChat(${start}, ${end}, '${safeTitle}')">+ Clips</button>
                 </div>
             </div>`;
         }
@@ -1226,34 +1240,48 @@ function playChatClip(uid, start, end) {
     const el = document.getElementById(uid);
     if (!el || !audio) return;
 
-    // Toggle pause if same clip playing
     if (activeChatClip === uid && !audio.paused) {
         audio.pause();
         _updateChatClipIcons();
         return;
     }
 
-    // Resume if same clip paused
     if (activeChatClip === uid && audio.paused) {
         audio.play();
         _updateChatClipIcons();
         return;
     }
 
-    // New clip
+    // Reset previous
+    document.querySelectorAll('.chat-clip.cc-playing').forEach(c => c.classList.remove('cc-playing'));
     activeChatClip = uid;
+    el.classList.add('cc-playing');
     audio.currentTime = start;
     audio.play();
     _updateChatClipIcons();
 }
 
+function scrubChatClip(e, uid, start, end) {
+    if (!audio) return;
+    const bar = e.currentTarget;
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const seekTo = start + pct * (end - start);
+
+    document.querySelectorAll('.chat-clip.cc-playing').forEach(c => c.classList.remove('cc-playing'));
+    activeChatClip = uid;
+    const el = document.getElementById(uid);
+    if (el) el.classList.add('cc-playing');
+    audio.currentTime = seekTo;
+    audio.play();
+    _updateChatClipIcons();
+}
+
 function _updateChatClipIcons() {
-    // Reset all chat clip buttons
     document.querySelectorAll('.chat-clip-play').forEach(btn => {
         btn.querySelector('.ccp-play').style.display = '';
         btn.querySelector('.ccp-pause').style.display = 'none';
     });
-    // Set active to pause
     if (activeChatClip && !audio.paused) {
         const el = document.getElementById(activeChatClip);
         if (el) {
@@ -1266,17 +1294,26 @@ function _updateChatClipIcons() {
     }
 }
 
-// Stop chat clip when it reaches end time
+// Update chat clip scrub bars + auto-stop
 if (audio) {
     audio.addEventListener('timeupdate', () => {
         if (!activeChatClip) return;
         const el = document.getElementById(activeChatClip);
         if (!el) return;
+        const start = parseFloat(el.dataset.start);
         const end = parseFloat(el.dataset.end);
+        const fill = document.getElementById('ccfill_' + activeChatClip);
+
         if (audio.currentTime >= end) {
             audio.pause();
+            if (fill) fill.style.width = '100%';
+            el.classList.remove('cc-playing');
             activeChatClip = null;
             _updateChatClipIcons();
+            setTimeout(() => { if (fill) fill.style.width = '0%'; }, 400);
+        } else if (audio.currentTime >= start && fill) {
+            const pct = ((audio.currentTime - start) / (end - start)) * 100;
+            fill.style.width = pct + '%';
         }
     });
 }

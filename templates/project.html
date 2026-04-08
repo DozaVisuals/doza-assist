@@ -1596,7 +1596,7 @@ async function startTranscription() {
     // Parakeet MLX: ~5 min audio per second of processing
     // Rough estimate: 1GB file ≈ 60min audio ≈ 12s transcription + 5s overhead
     const fileSizeGB = (PROJECT.file_size || 0) / (1024 * 1024 * 1024);
-    const estimatedSeconds = Math.max(10, Math.round(fileSizeGB * 12 + 8));
+    const estimatedSeconds = Math.max(5, Math.round(fileSizeGB * 3 + 2));
 
     const fill = document.getElementById('transcribeProgressFill');
     const timeText = document.getElementById('transcribeTimeText');

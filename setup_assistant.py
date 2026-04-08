@@ -66,11 +66,23 @@ def homebrew_prefix():
 
 
 def ensure_path():
+    """Ensure Homebrew and essential dirs are on PATH.
+    macOS .app bundles launch with a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+    so we must explicitly add Homebrew."""
     prefix = homebrew_prefix()
+    current = os.environ.get("PATH", "")
+    additions = []
     if prefix:
-        bin_dir = os.path.join(prefix, "bin")
-        if bin_dir not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = bin_dir + ":" + os.environ.get("PATH", "")
+        for d in [os.path.join(prefix, "bin"), os.path.join(prefix, "sbin")]:
+            if d not in current:
+                additions.append(d)
+    # Also ensure standard paths
+    for d in ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]:
+        if d not in current and d not in additions:
+            additions.append(d)
+    if additions:
+        os.environ["PATH"] = ":".join(additions) + ":" + current
+    log(f"PATH: {os.environ['PATH']}")
 
 
 def update_step(index, status, detail=""):
@@ -105,11 +117,27 @@ def install_ffmpeg():
     if shutil.which("ffmpeg"):
         log("ffmpeg already installed.")
         return True
-    log("Installing ffmpeg via Homebrew...")
-    update_step(0, "running", "Installing ffmpeg via Homebrew...")
-    rc, out, err = run_cmd("brew install ffmpeg")
+
+    # Verify brew is available
+    brew_path = shutil.which("brew")
+    if not brew_path:
+        log("ERROR: brew not found on PATH. Homebrew may not be installed.")
+        update_step(0, "error", "Homebrew not found. Please relaunch to retry setup.")
+        return False
+
+    log(f"Installing ffmpeg via Homebrew (brew at {brew_path})...")
+    update_step(0, "running", "Installing ffmpeg via Homebrew (this may take a few minutes)...")
+    rc, out, err = run_cmd(f'"{brew_path}" install ffmpeg')
     if rc != 0:
-        log(f"ffmpeg install failed: {err}")
+        log(f"ffmpeg install failed (rc={rc}).")
+        log(f"stdout: {out[-500:] if out else 'none'}")
+        log(f"stderr: {err[-500:] if err else 'none'}")
+        update_step(0, "error", f"brew install ffmpeg failed: {(err or out or 'unknown error')[-200:]}")
+        return False
+    # Verify it actually installed
+    ensure_path()
+    if not shutil.which("ffmpeg"):
+        log("WARNING: brew install succeeded but ffmpeg not found on PATH.")
         return False
     log("ffmpeg installed.")
     return True
@@ -120,12 +148,23 @@ def install_ollama():
     if shutil.which("ollama"):
         log("Ollama already installed.")
         return True
-    log("Installing Ollama via Homebrew...")
-    update_step(1, "running", "Installing Ollama via Homebrew...")
-    rc, out, err = run_cmd("brew install ollama")
-    if rc != 0:
-        log(f"Ollama install failed: {err}")
+
+    brew_path = shutil.which("brew")
+    if not brew_path:
+        log("ERROR: brew not found on PATH.")
+        update_step(1, "error", "Homebrew not found. Please relaunch to retry setup.")
         return False
+
+    log(f"Installing Ollama via Homebrew...")
+    update_step(1, "running", "Installing Ollama via Homebrew...")
+    rc, out, err = run_cmd(f'"{brew_path}" install ollama')
+    if rc != 0:
+        log(f"Ollama install failed (rc={rc}).")
+        log(f"stdout: {out[-500:] if out else 'none'}")
+        log(f"stderr: {err[-500:] if err else 'none'}")
+        update_step(1, "error", f"brew install ollama failed: {(err or out or 'unknown error')[-200:]}")
+        return False
+    ensure_path()
     log("Ollama installed.")
     return True
 
@@ -137,9 +176,14 @@ def create_venv():
     log("Creating virtual environment...")
     update_step(2, "running", "Creating Python virtual environment...")
     python_path = sys.executable
+    log(f"Using Python: {python_path}")
     rc, out, err = run_cmd(f'"{python_path}" -m venv "{VENV_DIR}"')
     if rc != 0:
-        log(f"venv creation failed: {err}")
+        log(f"venv creation failed (rc={rc}): {err}")
+        update_step(2, "error", f"Failed to create venv: {(err or 'unknown error')[-200:]}")
+        return False
+    if not os.path.isfile(os.path.join(VENV_DIR, "bin", "python3")):
+        log("ERROR: venv created but python3 not found inside it.")
         return False
     log("Virtual environment created.")
     return True
@@ -259,7 +303,7 @@ def pull_ollama_model():
         log(f"ERROR: ollama pull exception: {e}")
         return False
 
-    log("gemma3 model pulled successfully.")
+    log("gemma4 model pulled successfully.")
     return True
 
 
@@ -516,8 +560,13 @@ function retry() {
   fetch('/api/retry', { method: 'POST' })
     .then(() => {
       document.getElementById('message').innerHTML = '';
-      setTimeout(poll, 500);
+      poll();
     });
+}
+
+// Also restart polling on error state so retry works
+function pollAfterError() {
+  setTimeout(poll, 1000);
 }
 
 poll();
@@ -591,9 +640,15 @@ def setup_loop():
 def main():
     os.makedirs(SUPPORT_DIR, exist_ok=True)
 
+    # Set up PATH immediately so all steps can find brew, etc.
+    ensure_path()
+
     log("=== Doza Assist Phase 2 Setup Assistant ===")
     log(f"App directory: {APP_DIR}")
     log(f"Support directory: {SUPPORT_DIR}")
+    log(f"PATH: {os.environ.get('PATH', '')}")
+    log(f"Python: {sys.executable}")
+    log(f"brew: {shutil.which('brew') or 'NOT FOUND'}")
 
     # Start HTTP server in background
     server_thread = threading.Thread(target=run_server, daemon=True)

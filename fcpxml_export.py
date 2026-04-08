@@ -84,7 +84,8 @@ MARKER_COLORS = {
 
 
 def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
-                    source_path=None, media_duration=None, mode="cuts"):
+                    source_path=None, media_duration=None, mode="cuts",
+                    width=1920, height=1080):
     """
     Generate an FCPXML file.
 
@@ -104,14 +105,14 @@ def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
         mode = "markers"
 
     if mode == "markers":
-        return _generate_markers_only(markers, project_name, framerate)
+        return _generate_markers_only(markers, project_name, framerate, width, height)
 
     return _generate_cuts_timeline(markers, project_name, framerate,
-                                   source_path, media_duration, mode)
+                                   source_path, media_duration, mode, width, height)
 
 
 def _generate_cuts_timeline(markers, project_name, framerate, source_path,
-                            media_duration, mode):
+                            media_duration, mode, width=1920, height=1080):
     """Generate FCPXML with actual cuts on the timeline referencing source media."""
     frame_dur = get_frame_duration(framerate)
     safe_name = _escape_xml(project_name)
@@ -203,7 +204,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
 <fcpxml version="1.11">
     <resources>
-        <format id="r1" name="FFVideoFormat1080p{_framerate_label(framerate)}" frameDuration="{frame_dur}" width="1920" height="1080"/>
+        <format id="r1" name="FFVideoFormat{_resolution_label(height)}{_framerate_label(framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}"/>
         <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="0/1s" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
@@ -227,7 +228,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     return fcpxml
 
 
-def _generate_markers_only(markers, project_name, framerate):
+def _generate_markers_only(markers, project_name, framerate, width=1920, height=1080):
     """Legacy marker-only export (no source media reference)."""
     frame_dur = get_frame_duration(framerate)
 
@@ -264,7 +265,7 @@ def _generate_markers_only(markers, project_name, framerate):
 
 <fcpxml version="1.11">
     <resources>
-        <format id="r1" name="FFVideoFormat1080p{_framerate_label(framerate)}" frameDuration="{frame_dur}" width="1920" height="1080"/>
+        <format id="r1" name="FFVideoFormat{_resolution_label(height)}{_framerate_label(framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}"/>
     </resources>
     <library>
         <event name="{_escape_xml(project_name)} Markers">
@@ -282,6 +283,18 @@ def _generate_markers_only(markers, project_name, framerate):
 </fcpxml>"""
 
     return fcpxml
+
+
+def _resolution_label(height):
+    """Get FCPX format resolution label."""
+    if height >= 2160:
+        return "2160p"
+    elif height >= 1080:
+        return "1080p"
+    elif height >= 720:
+        return "720p"
+    else:
+        return f"{height}p"
 
 
 def _framerate_label(framerate):

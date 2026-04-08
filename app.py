@@ -798,6 +798,34 @@ def export_fcpxml(project_id):
                 'category': label_name,
             })
 
+    def _get_video_resolution(path):
+        """Detect video width and height using ffprobe."""
+        if not path or not os.path.exists(path):
+            return 1920, 1080
+        ffprobe = shutil.which('ffprobe')
+        if not ffprobe:
+            for candidate in ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe']:
+                if os.path.isfile(candidate):
+                    ffprobe = candidate
+                    break
+        if not ffprobe:
+            return 1920, 1080
+        try:
+            result = subprocess.run([
+                ffprobe, '-v', 'quiet',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height',
+                '-of', 'csv=p=0',
+                path
+            ], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split(',')
+                if len(parts) >= 2:
+                    return int(parts[0]), int(parts[1])
+        except Exception:
+            pass
+        return 1920, 1080
+
     framerate = request.json.get('framerate', 23.976)
     export_mode = request.json.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
 
@@ -807,6 +835,9 @@ def export_fcpxml(project_id):
     if project.get('transcript') and project['transcript'].get('duration'):
         media_duration = project['transcript']['duration']
 
+    # Detect video resolution from source file
+    width, height = _get_video_resolution(source_path)
+
     fcpxml_content = generate_fcpxml(
         markers=markers,
         project_name=project['name'],
@@ -814,6 +845,8 @@ def export_fcpxml(project_id):
         source_path=source_path,
         media_duration=media_duration,
         mode=export_mode,
+        width=width,
+        height=height,
     )
 
     # Build clean filename

@@ -435,8 +435,12 @@ def reveal_in_finder(project_id):
 
 def group_into_paragraphs(segments):
     """
-    Group transcript segments into paragraphs by speaker.
-    Each continuous run by the same speaker becomes one paragraph.
+    Group transcript segments into readable paragraphs.
+
+    Breaks on:
+      - Speaker change (always)
+      - Every ~4-6 sentences (keeps paragraphs short and readable)
+      - Long pauses > 2 seconds (natural topic breaks)
     """
     if not segments:
         return []
@@ -448,12 +452,29 @@ def group_into_paragraphs(segments):
         'start_formatted': segments[0].get('start_formatted', '00:00:00')[:8],
         'segments': [segments[0]],
     }
+    sentence_count = 1
 
     for i in range(1, len(segments)):
         seg = segments[i]
+        prev = segments[i - 1]
         speaker = seg.get('speaker', 'Speaker')
+        gap = seg['start'] - prev['end']
+        prev_text = prev.get('text', '').rstrip()
+        ends_sentence = prev_text.endswith(('.', '!', '?'))
 
+        new_para = False
+
+        # Speaker change — always break
         if speaker != current['speaker']:
+            new_para = True
+        # Long pause — natural break
+        elif gap >= 2.0:
+            new_para = True
+        # After ~5 sentences — keep paragraphs short
+        elif sentence_count >= 5 and ends_sentence:
+            new_para = True
+
+        if new_para:
             paragraphs.append(current)
             current = {
                 'speaker': speaker,
@@ -461,8 +482,11 @@ def group_into_paragraphs(segments):
                 'start_formatted': seg.get('start_formatted', '00:00:00')[:8],
                 'segments': [seg],
             }
+            sentence_count = 1
         else:
             current['segments'].append(seg)
+            if ends_sentence:
+                sentence_count += 1
 
     paragraphs.append(current)
     return paragraphs

@@ -97,15 +97,12 @@
     <div class="card">
         <div class="empty-state" id="preTranscribe">
             <h3>Ready to transcribe</h3>
-            <p>Click "Transcribe" to process this file with speaker diarization.</p>
-            <p style="margin-top: 0.5rem; font-size: 0.8rem;">Estimated time: ~1 min per 10 min of audio</p>
+            <p>Click "Transcribe" to process this file locally.</p>
+            <p style="margin-top: 0.5rem; font-size: 0.8rem;">Usually takes under a minute</p>
         </div>
         <div id="transcribeProgress" style="display:none; padding: 2rem; text-align:center;">
             <div class="spinner" style="margin: 0 auto 1rem;"></div>
-            <p>Transcribing... this may take a few minutes.</p>
-            <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;">
-                Running WhisperX with speaker diarization
-            </p>
+            <p>Transcribing...</p>
             <div class="progress-bar">
                 <div class="progress-fill" style="width: 60%"></div>
             </div>

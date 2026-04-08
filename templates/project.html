@@ -1208,14 +1208,14 @@ function renderChatReply(text) {
                         <div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div>
                     </div>
                 </div>
-                <div class="clip-card-expand" onclick="this.parentElement.classList.toggle('expanded')">
-                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg>
-                    Show text
-                </div>
-                <div class="clip-card-excerpt">${escapeHtml(excerpt)}</div>
-                <div style="margin-top: 8px;">
+                <div class="chat-clip-footer">
+                    <span class="clip-card-expand" onclick="this.closest('.clip-card').classList.toggle('expanded')">
+                        <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="8" height="8"><path d="M3 4l3 3 3-3"/></svg>
+                        Text
+                    </span>
                     <button class="btn btn-sm btn-outline" onclick="addClipFromChat(${start}, ${end}, '${safeTitle}')">+ Clips</button>
                 </div>
+                <div class="clip-card-excerpt">${escapeHtml(excerpt)}</div>
             </div>`;
         }
     );

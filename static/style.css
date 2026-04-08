@@ -1071,6 +1071,12 @@ body {
     transform: translateX(-50%) translateY(0);
 }
 
+.toast.error {
+    background: #3d1a1a;
+    border-color: #7a3030;
+    color: #f5c0c0;
+}
+
 /* ── Modal ── */
 
 .modal-overlay {

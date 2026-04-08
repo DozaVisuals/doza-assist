@@ -35,6 +35,8 @@ setup_state = {
     "status": "running",  # running, complete, error
     "current_step": 0,
     "steps": [
+        {"id": "xcode",     "name": "Xcode Command Line Tools",           "status": "pending", "detail": ""},
+        {"id": "homebrew",  "name": "Install Homebrew (package manager)",  "status": "pending", "detail": ""},
         {"id": "ffmpeg",    "name": "Install ffmpeg (audio processing)",   "status": "pending", "detail": ""},
         {"id": "ollama",    "name": "Install Ollama (AI engine)",          "status": "pending", "detail": ""},
         {"id": "venv",      "name": "Create Python environment",          "status": "pending", "detail": ""},
@@ -110,7 +112,90 @@ def run_cmd(cmd, capture=True, env=None):
         return 1, "", str(e)
 
 
+# ── Step indices ──
+STEP_XCODE    = 0
+STEP_HOMEBREW = 1
+STEP_FFMPEG   = 2
+STEP_OLLAMA   = 3
+STEP_VENV     = 4
+STEP_PIP      = 5
+STEP_MODEL    = 6
+
+
 # ── Installation Steps ──
+
+def install_xcode_clt():
+    """Install Xcode Command Line Tools if missing."""
+    # Check if already installed
+    rc, out, _ = run_cmd("xcode-select -p")
+    if rc == 0:
+        log("Xcode CLT already installed.")
+        return True
+
+    log("Installing Xcode Command Line Tools...")
+    update_step(STEP_XCODE, "running", "Installing Xcode Command Line Tools...")
+
+    # Trigger the install
+    run_cmd("xcode-select --install")
+
+    # Wait for installation (up to 20 minutes)
+    update_step(STEP_XCODE, "running", "Waiting for Xcode tools to install (check for a system dialog)...")
+    for i in range(120):  # 120 * 10s = 20 minutes
+        time.sleep(10)
+        rc, _, _ = run_cmd("xcode-select -p")
+        if rc == 0:
+            log("Xcode CLT installed.")
+            return True
+        if i % 6 == 0:  # Update detail every minute
+            mins = (i * 10) // 60
+            update_step(STEP_XCODE, "running", f"Installing Xcode tools... ({mins}m elapsed, check for system dialog)")
+
+    log("ERROR: Xcode CLT installation timed out.")
+    update_step(STEP_XCODE, "error", "Timed out. Look for an Apple system dialog asking to install developer tools.")
+    return False
+
+
+def install_homebrew():
+    """Install Homebrew if missing."""
+    ensure_path()
+    if shutil.which("brew"):
+        log("Homebrew already installed.")
+        return True
+
+    log("Installing Homebrew...")
+    update_step(STEP_HOMEBREW, "running", "Installing Homebrew (you may be asked for your Mac password in a Terminal window)...")
+
+    # Run the Homebrew installer
+    # NONINTERACTIVE=1 avoids prompts; it still needs sudo for /opt/homebrew ownership
+    rc, out, err = run_cmd(
+        'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+    )
+
+    if rc != 0:
+        log(f"Homebrew install failed (rc={rc}).")
+        log(f"stderr: {err[-500:] if err else 'none'}")
+        # Common failure: needs password. Give a helpful message.
+        if "sudo" in (err or "").lower() or "password" in (err or "").lower():
+            update_step(STEP_HOMEBREW, "error",
+                "Homebrew needs your Mac password to install. "
+                "Please open Terminal and run:\n"
+                '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+            )
+        else:
+            update_step(STEP_HOMEBREW, "error", f"Homebrew install failed: {(err or out or 'unknown error')[-200:]}")
+        return False
+
+    # Refresh PATH
+    ensure_path()
+
+    if not shutil.which("brew"):
+        log("ERROR: Homebrew install seemed to succeed but brew not found on PATH.")
+        update_step(STEP_HOMEBREW, "error", "Homebrew installed but not found. Please restart your Mac and relaunch Doza Assist.")
+        return False
+
+    log("Homebrew installed.")
+    return True
+
 
 def install_ffmpeg():
     ensure_path()
@@ -118,23 +203,21 @@ def install_ffmpeg():
         log("ffmpeg already installed.")
         return True
 
-    # Verify brew is available
     brew_path = shutil.which("brew")
     if not brew_path:
         log("ERROR: brew not found on PATH. Homebrew may not be installed.")
-        update_step(0, "error", "Homebrew not found. Please relaunch to retry setup.")
+        update_step(STEP_FFMPEG, "error", "Homebrew not found. Please relaunch to retry setup.")
         return False
 
     log(f"Installing ffmpeg via Homebrew (brew at {brew_path})...")
-    update_step(0, "running", "Installing ffmpeg via Homebrew (this may take a few minutes)...")
+    update_step(STEP_FFMPEG, "running", "Installing ffmpeg via Homebrew (this may take a few minutes)...")
     rc, out, err = run_cmd(f'"{brew_path}" install ffmpeg')
     if rc != 0:
         log(f"ffmpeg install failed (rc={rc}).")
         log(f"stdout: {out[-500:] if out else 'none'}")
         log(f"stderr: {err[-500:] if err else 'none'}")
-        update_step(0, "error", f"brew install ffmpeg failed: {(err or out or 'unknown error')[-200:]}")
+        update_step(STEP_FFMPEG, "error", f"brew install ffmpeg failed: {(err or out or 'unknown error')[-200:]}")
         return False
-    # Verify it actually installed
     ensure_path()
     if not shutil.which("ffmpeg"):
         log("WARNING: brew install succeeded but ffmpeg not found on PATH.")
@@ -152,17 +235,17 @@ def install_ollama():
     brew_path = shutil.which("brew")
     if not brew_path:
         log("ERROR: brew not found on PATH.")
-        update_step(1, "error", "Homebrew not found. Please relaunch to retry setup.")
+        update_step(STEP_OLLAMA, "error", "Homebrew not found. Please relaunch to retry setup.")
         return False
 
     log(f"Installing Ollama via Homebrew...")
-    update_step(1, "running", "Installing Ollama via Homebrew...")
+    update_step(STEP_OLLAMA, "running", "Installing Ollama via Homebrew...")
     rc, out, err = run_cmd(f'"{brew_path}" install ollama')
     if rc != 0:
         log(f"Ollama install failed (rc={rc}).")
         log(f"stdout: {out[-500:] if out else 'none'}")
         log(f"stderr: {err[-500:] if err else 'none'}")
-        update_step(1, "error", f"brew install ollama failed: {(err or out or 'unknown error')[-200:]}")
+        update_step(STEP_OLLAMA, "error", f"brew install ollama failed: {(err or out or 'unknown error')[-200:]}")
         return False
     ensure_path()
     log("Ollama installed.")
@@ -174,13 +257,13 @@ def create_venv():
         log("Virtual environment already exists.")
         return True
     log("Creating virtual environment...")
-    update_step(2, "running", "Creating Python virtual environment...")
+    update_step(STEP_VENV, "running", "Creating Python virtual environment...")
     python_path = sys.executable
     log(f"Using Python: {python_path}")
     rc, out, err = run_cmd(f'"{python_path}" -m venv "{VENV_DIR}"')
     if rc != 0:
         log(f"venv creation failed (rc={rc}): {err}")
-        update_step(2, "error", f"Failed to create venv: {(err or 'unknown error')[-200:]}")
+        update_step(STEP_VENV, "error", f"Failed to create venv: {(err or 'unknown error')[-200:]}")
         return False
     if not os.path.isfile(os.path.join(VENV_DIR, "bin", "python3")):
         log("ERROR: venv created but python3 not found inside it.")
@@ -196,29 +279,29 @@ def install_pip_packages():
         return False
 
     log("Installing pip packages...")
-    update_step(3, "running", "Upgrading pip...")
+    update_step(STEP_PIP, "running", "Upgrading pip...")
     run_cmd(f'"{pip_path}" install --upgrade pip')
 
     if not os.path.isfile(REQUIREMENTS_FILE):
         log(f"WARNING: requirements.txt not found at {REQUIREMENTS_FILE}")
         # Install minimum packages
-        update_step(3, "running", "Installing core packages...")
+        update_step(STEP_PIP, "running", "Installing core packages...")
         rc, out, err = run_cmd(f'"{pip_path}" install flask werkzeug requests certifi')
         return rc == 0
 
-    update_step(3, "running", "Installing packages from requirements.txt...")
+    update_step(STEP_PIP, "running", "Installing packages from requirements.txt...")
     rc, out, err = run_cmd(f'"{pip_path}" install -r "{REQUIREMENTS_FILE}"')
     if rc != 0:
         log(f"pip install failed: {err}")
         # Try installing packages one at a time to identify the failure
-        update_step(3, "running", "Retrying packages individually...")
+        update_step(STEP_PIP, "running", "Retrying packages individually...")
         with open(REQUIREMENTS_FILE) as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#"):
                     pkg = line.split("#")[0].strip()
                     if pkg:
-                        update_step(3, "running", f"Installing {pkg}...")
+                        update_step(STEP_PIP, "running", f"Installing {pkg}...")
                         rc2, _, err2 = run_cmd(f'"{pip_path}" install {pkg}')
                         if rc2 != 0:
                             log(f"WARNING: Failed to install {pkg}: {err2}")
@@ -248,7 +331,7 @@ def pull_ollama_model():
     rc, _, _ = run_cmd("curl -sf http://127.0.0.1:11434/api/version")
     if rc != 0:
         log("Starting Ollama service...")
-        update_step(4, "running", "Starting Ollama service...")
+        update_step(STEP_MODEL, "running", "Starting Ollama service...")
         subprocess.Popen(
             [ollama_path, "serve"],
             stdout=subprocess.DEVNULL,
@@ -267,7 +350,7 @@ def pull_ollama_model():
 
     # Pull the model with progress tracking
     log("Pulling gemma3 model...")
-    update_step(4, "running", "Downloading AI model (this may take several minutes)...")
+    update_step(STEP_MODEL, "running", "Downloading AI model (this may take several minutes)...")
 
     try:
         proc = subprocess.Popen(
@@ -290,9 +373,9 @@ def pull_ollama_model():
                         detail = f"Downloading AI model... {pct}% ({size_match.group(1)} / {size_match.group(2)})"
                     else:
                         detail = f"Downloading AI model... {pct}%"
-                    update_step(4, "running", detail)
+                    update_step(STEP_MODEL, "running", detail)
                 elif "success" in line.lower():
-                    update_step(4, "running", "Model downloaded successfully!")
+                    update_step(STEP_MODEL, "running", "Model downloaded successfully!")
                 log(f"ollama pull: {line}")
 
         proc.wait()
@@ -329,11 +412,13 @@ def save_setup_state():
 def run_setup():
     """Execute all setup steps sequentially."""
     steps = [
-        (0, "ffmpeg",  install_ffmpeg),
-        (1, "ollama",  install_ollama),
-        (2, "venv",    create_venv),
-        (3, "pip",     install_pip_packages),
-        (4, "model",   pull_ollama_model),
+        (STEP_XCODE,    "xcode",     install_xcode_clt),
+        (STEP_HOMEBREW,  "homebrew",  install_homebrew),
+        (STEP_FFMPEG,    "ffmpeg",    install_ffmpeg),
+        (STEP_OLLAMA,    "ollama",    install_ollama),
+        (STEP_VENV,      "venv",      create_venv),
+        (STEP_PIP,       "pip",       install_pip_packages),
+        (STEP_MODEL,     "model",     pull_ollama_model),
     ]
 
     for idx, name, func in steps:

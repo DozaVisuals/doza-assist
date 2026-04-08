@@ -1627,25 +1627,27 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 }
 
 /* Clip suggestions in chat */
-/* Chat clips — force compact with !important */
-.clip-card.chat-clip {
-    padding: 6px 8px !important;
-    margin: 4px 0 !important;
-}
-.clip-card.chat-clip .clip-card-head { margin-bottom: 0 !important; gap: 4px !important; }
-.clip-card.chat-clip .clip-card-title { font-size: 13px !important; -webkit-line-clamp: 1 !important; }
-.clip-card.chat-clip .clip-card-duration { font-size: 11px !important; }
-.clip-card.chat-clip .clip-card-meta { margin-bottom: 2px !important; gap: 4px !important; }
-.clip-card.chat-clip .clip-card-tc { font-size: 11px !important; }
-.clip-card.chat-clip .clip-card-dot { width: 5px !important; height: 5px !important; }
-.clip-card.chat-clip .clip-card-player { gap: 5px !important; }
-.clip-card.chat-clip .clip-play-btn { width: 20px !important; height: 20px !important; }
-.clip-card.chat-clip .clip-play-btn svg { width: 9px !important; height: 9px !important; }
-.clip-card.chat-clip .clip-card-progress { height: 2px !important; }
-.clip-card.chat-clip .clip-card-expand { display: inline !important; margin-top: 0 !important; font-size: 10px !important; }
-.clip-card.chat-clip .clip-card-excerpt { font-size: 11px !important; line-height: 1.3 !important; }
-.clip-card.chat-clip .chat-clip-footer { display: flex !important; align-items: center !important; gap: 6px !important; margin-top: 3px !important; }
-.clip-card.chat-clip .chat-clip-footer .btn-sm { padding: 1px 6px !important; font-size: 10px !important; }
+/* Chat clip cards — standalone compact */
+.cc-card { background: var(--bg-card); border: 1px solid var(--border); border-left: 3px solid var(--green); border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.cc-card.cc-playing { border-color: var(--accent); border-left-color: var(--accent); }
+.cc-row1 { display: flex; align-items: baseline; gap: 4px; }
+.cc-row1 b { font-size: 13px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-dur { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+.cc-row2 { display: flex; align-items: center; gap: 4px; margin: 1px 0; }
+.cc-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+.cc-tc { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+.cc-row3 { display: flex; align-items: center; gap: 6px; margin: 3px 0 2px; }
+.cc-play { display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; border: none; background: var(--accent); color: #000; cursor: pointer; }
+[data-theme="light"] .cc-play { color: #fff; }
+.cc-play:hover { opacity: 0.85; }
+.cc-row3 .clip-card-progress { flex: 1; height: 2px; }
+.cc-row4 { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.cc-text-toggle { font-size: 10px; color: var(--text-muted); cursor: pointer; }
+.cc-text-toggle:hover { color: var(--text-secondary); }
+.cc-add { font-size: 10px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text-secondary); cursor: pointer; font-family: var(--font); }
+.cc-add:hover { border-color: var(--border-light); color: var(--text-primary); }
+.cc-excerpt { font-size: 11px; color: var(--text-secondary); line-height: 1.3; max-height: 0; overflow: hidden; transition: max-height 0.2s ease; }
+.cc-card.cc-open .cc-excerpt { max-height: 100px; margin-top: 3px; }
 
 .chat-tc-link {
     font-family: var(--mono);

@@ -1190,33 +1190,14 @@ function renderChatReply(text) {
             if (excerpt.length > 140) excerpt = excerpt.substring(0, 140) + '...';
             const excerptHtml = excerpt ? `<div class="chat-clip-excerpt">${escapeHtml(excerpt)}</div>` : '';
 
-            return `<div class="clip-card chat-clip" id="${clipUid}" data-start="${start}" data-end="${end}" style="border-left: 3px solid var(--green);">
-                <div class="clip-card-head">
-                    <span class="clip-card-title" title="${safeTitle}">${title}</span>
-                    <span class="clip-card-duration">${duration}s</span>
-                </div>
-                <div class="clip-card-meta">
-                    <span class="clip-card-dot" style="background: var(--green);"></span>
-                    <span class="clip-card-tc">${fmtTime(start)} – ${fmtTime(end)}</span>
-                </div>
-                <div class="clip-card-player">
-                    <button class="clip-play-btn chat-clip-play" onclick="playChatClip('${clipUid}', ${start}, ${end})">
-                        <svg class="ccp-play clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
-                        <svg class="ccp-pause clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
-                    </button>
-                    <div class="clip-card-progress" onclick="scrubChatClip(event, '${clipUid}', ${start}, ${end})">
-                        <div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div>
-                    </div>
-                </div>
-                <div class="chat-clip-footer">
-                    <span class="clip-card-expand" onclick="this.closest('.clip-card').classList.toggle('expanded')">
-                        <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="8" height="8"><path d="M3 4l3 3 3-3"/></svg>
-                        Text
-                    </span>
-                    <button class="btn btn-sm btn-outline" onclick="addClipFromChat(${start}, ${end}, '${safeTitle}')">+ Clips</button>
-                </div>
-                <div class="clip-card-excerpt">${escapeHtml(excerpt)}</div>
-            </div>`;
+            return `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}">
+<div class="cc-row1"><b>${title}</b><span class="cc-dur">${duration}s</span></div>
+<div class="cc-row2"><span class="cc-dot"></span><span class="cc-tc">${fmtTime(start)} – ${fmtTime(end)}</span></div>
+<div class="cc-row3"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="9" height="9"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="9" height="9" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div></div>
+<div class="cc-row4"><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">text</span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}')">+ Clips</button></div>
+<div class="cc-excerpt">${escapeHtml(excerpt)}</div>
+</div>`;
+
         }
     );
 
@@ -1271,7 +1252,7 @@ function playChatClip(uid, start, end) {
     }
 
     // Reset previous
-    document.querySelectorAll('.chat-clip.cc-playing').forEach(c => c.classList.remove('cc-playing'));
+    document.querySelectorAll('.cc-card.cc-playing').forEach(c => c.classList.remove('cc-playing'));
     activeChatClip = uid;
     el.classList.add('cc-playing');
     audio.currentTime = start;
@@ -1286,7 +1267,7 @@ function scrubChatClip(e, uid, start, end) {
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const seekTo = start + pct * (end - start);
 
-    document.querySelectorAll('.chat-clip.cc-playing').forEach(c => c.classList.remove('cc-playing'));
+    document.querySelectorAll('.cc-card.cc-playing').forEach(c => c.classList.remove('cc-playing'));
     activeChatClip = uid;
     const el = document.getElementById(uid);
     if (el) el.classList.add('cc-playing');

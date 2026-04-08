@@ -1627,23 +1627,25 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 }
 
 /* Clip suggestions in chat */
-/* Chat clips — compact inline cards, high specificity to override .clip-card */
-.chat-msg .clip-card.chat-clip { padding: 8px 10px; margin: 4px 0; }
-.chat-msg .chat-clip.cc-playing { border-color: var(--accent); }
-.chat-msg .chat-clip .clip-card-head { margin-bottom: 0; gap: 4px; }
-.chat-msg .chat-clip .clip-card-title { font-size: 13px; -webkit-line-clamp: 1; }
-.chat-msg .chat-clip .clip-card-duration { font-size: 11px; }
-.chat-msg .chat-clip .clip-card-meta { margin-bottom: 2px; gap: 4px; }
-.chat-msg .chat-clip .clip-card-tc { font-size: 11px; }
-.chat-msg .chat-clip .clip-card-dot { width: 5px; height: 5px; }
-.chat-msg .chat-clip .clip-card-player { gap: 6px; }
-.chat-msg .chat-clip .clip-play-btn { width: 22px; height: 22px; }
-.chat-msg .chat-clip .clip-play-btn svg { width: 10px; height: 10px; }
-.chat-msg .chat-clip .clip-card-progress { height: 2px; }
-.chat-msg .chat-clip .clip-card-expand { display: inline; margin-top: 0; font-size: 10px; }
-.chat-msg .chat-clip .clip-card-excerpt { font-size: 11px; line-height: 1.3; }
-.chat-msg .chat-clip .chat-clip-footer { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-.chat-msg .chat-clip .chat-clip-footer .btn-sm { padding: 2px 8px; font-size: 11px; }
+/* Chat clips — force compact with !important */
+.clip-card.chat-clip {
+    padding: 6px 8px !important;
+    margin: 4px 0 !important;
+}
+.clip-card.chat-clip .clip-card-head { margin-bottom: 0 !important; gap: 4px !important; }
+.clip-card.chat-clip .clip-card-title { font-size: 13px !important; -webkit-line-clamp: 1 !important; }
+.clip-card.chat-clip .clip-card-duration { font-size: 11px !important; }
+.clip-card.chat-clip .clip-card-meta { margin-bottom: 2px !important; gap: 4px !important; }
+.clip-card.chat-clip .clip-card-tc { font-size: 11px !important; }
+.clip-card.chat-clip .clip-card-dot { width: 5px !important; height: 5px !important; }
+.clip-card.chat-clip .clip-card-player { gap: 5px !important; }
+.clip-card.chat-clip .clip-play-btn { width: 20px !important; height: 20px !important; }
+.clip-card.chat-clip .clip-play-btn svg { width: 9px !important; height: 9px !important; }
+.clip-card.chat-clip .clip-card-progress { height: 2px !important; }
+.clip-card.chat-clip .clip-card-expand { display: inline !important; margin-top: 0 !important; font-size: 10px !important; }
+.clip-card.chat-clip .clip-card-excerpt { font-size: 11px !important; line-height: 1.3 !important; }
+.clip-card.chat-clip .chat-clip-footer { display: flex !important; align-items: center !important; gap: 6px !important; margin-top: 3px !important; }
+.clip-card.chat-clip .chat-clip-footer .btn-sm { padding: 1px 6px !important; font-size: 10px !important; }
 
 .chat-tc-link {
     font-family: var(--mono);

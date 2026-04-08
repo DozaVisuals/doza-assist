@@ -300,14 +300,14 @@ Return a JSON object with:
       "order": 1,
       "label": "Opening Hook",
       "description": "Why this moment works",
-      "start": 45.2,
-      "end": 62.8
+      "start": "00:00:45",
+      "end": "00:01:02"
     }}
   ],
   "strongest_soundbites": [
     {{
       "text": "The actual quote",
-      "start": 120.5,
+      "start": "00:02:00",
       "why": "Why this is powerful"
     }}
   ]
@@ -315,7 +315,7 @@ Return a JSON object with:
 
 Find 4-6 story beats following a documentary arc: hook, context, rising action, emotional peak, resolution, closing.
 Find 3-5 strongest soundbites.
-Use EXACT timestamps from the transcript.
+CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end. Use string format like "00:02:45".
 Return ONLY valid JSON."""
 
     response = _call_ai(prompt, system_prompt)
@@ -342,9 +342,9 @@ Return a JSON object with this exact structure:
     {{
       "rank": 1,
       "title": "Short punchy title for the clip",
-      "start": 45.2,
-      "end": 72.8,
-      "duration_seconds": 27.6,
+      "start": "00:00:45",
+      "end": "00:01:12",
+      "duration_seconds": 27,
       "text": "The key quote or moment in this clip",
       "platform": "instagram_reels",
       "why": "Why this would perform well",
@@ -354,16 +354,15 @@ Return a JSON object with this exact structure:
   ]
 }}
 
-Rules for finding great clips:
+Rules:
 - Each clip should be 15-60 seconds and work as a standalone moment
 - Look for: emotional peaks, surprising statements, humor, strong opinions, quotable moments
-- The first 3 seconds must hook a viewer (start mid-thought if needed)
-- Platform suggestions: instagram_reels (15-30s emotional/visual), tiktok (15-60s personality/humor), 
-  linkedin (30-60s insight/expertise), youtube_shorts (30-60s story moments)
+- Platform suggestions: instagram_reels, tiktok, linkedin, youtube_shorts
 - Find at least 5 clips if the transcript is long enough
 - Rank by predicted engagement (1 = highest)
 
-Use the EXACT timestamps from the transcript.
+CRITICAL: The "start" and "end" values MUST be copied exactly from the [HH:MM:SS] timecodes in the transcript.
+Use the HH:MM:SS format as a string, like "00:02:45". Do NOT convert to decimal numbers.
 Return ONLY valid JSON, no markdown formatting."""
 
     response = _call_ai(prompt, system_prompt)

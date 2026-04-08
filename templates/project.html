@@ -22,6 +22,7 @@
             <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
         </button>
         {% if not is_shared %}
+        <a href="/" class="btn btn-sm">Projects</a>
         <button class="btn btn-sm" onclick="copyShareLink()" title="Copy shareable link">Share</button>
         <button class="btn btn-sm" onclick="deleteProject()" style="color: var(--red);">Delete</button>
         {% endif %}

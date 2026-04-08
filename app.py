@@ -816,7 +816,25 @@ def export_fcpxml(project_id):
         mode=export_mode,
     )
 
-    export_filename = f"{project['name'].replace(' ', '_')}_{export_type}.fcpxml"
+    # Build clean filename
+    name = project['name']
+    if export_type == 'labels':
+        count = len(markers)
+        if count == 1:
+            clip_title = markers[0].get('text', 'Clip')[:40].strip()
+            suffix = clip_title
+        else:
+            suffix = 'All Clips' if count == len(project.get('labeled_sections', [])) else f'{count} Clips'
+    elif export_type == 'social':
+        suffix = 'Social Clips'
+    elif export_type == 'story':
+        suffix = 'Story Beats'
+    elif export_type == 'all':
+        suffix = 'Full Export'
+    else:
+        suffix = export_type
+
+    export_filename = f"{name} - {suffix}.fcpxml".replace('/', '-')
     export_path = os.path.join(app.config['EXPORTS_DIR'], export_filename)
     with open(export_path, 'w') as f:
         f.write(fcpxml_content)

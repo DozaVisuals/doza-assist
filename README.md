@@ -80,6 +80,8 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 2. Open it and drag **Doza Assist** to your Applications folder
 3. Double-click to launch
 
+First launch: macOS may block the app. Go to **System Settings > Privacy & Security**, scroll down, and click **"Open Anyway"** next to the Doza Assist message. This only happens once.
+
 On first launch, the app will automatically install everything it needs. You may be asked for your Mac password once during setup. The AI model download (~3-5 GB) takes a few minutes — the app shows progress the whole time.
 
 That's it. No Terminal required.

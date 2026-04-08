@@ -1190,21 +1190,31 @@ function renderChatReply(text) {
             if (excerpt.length > 140) excerpt = excerpt.substring(0, 140) + '...';
             const excerptHtml = excerpt ? `<div class="chat-clip-excerpt">${escapeHtml(excerpt)}</div>` : '';
 
-            return `<div class="chat-clip" id="${clipUid}" data-start="${start}" data-end="${end}">
-                <div class="chat-clip-header">
-                    <span class="chat-clip-title">${title}</span>
-                    <span class="chat-clip-tc">${fmtTime(start)} – ${fmtTime(end)} (${duration}s)</span>
+            return `<div class="clip-card chat-clip" id="${clipUid}" data-start="${start}" data-end="${end}" style="border-left: 3px solid var(--green);">
+                <div class="clip-card-head">
+                    <span class="clip-card-title" title="${safeTitle}">${title}</span>
+                    <span class="clip-card-duration">${duration}s</span>
                 </div>
-                ${excerptHtml}
-                <div class="chat-clip-scrub" onclick="scrubChatClip(event, '${clipUid}', ${start}, ${end})">
-                    <div class="chat-clip-scrub-fill" id="ccfill_${clipUid}"></div>
+                <div class="clip-card-meta">
+                    <span class="clip-card-dot" style="background: var(--green);"></span>
+                    <span class="clip-card-tc">${fmtTime(start)} – ${fmtTime(end)}</span>
                 </div>
-                <div class="chat-clip-actions">
-                    <button class="btn btn-sm btn-primary chat-clip-play" onclick="playChatClip('${clipUid}', ${start}, ${end})">
-                        <span class="ccp-play">Play</span>
-                        <span class="ccp-pause" style="display:none">Pause</span>
+                <div class="clip-card-player">
+                    <button class="clip-play-btn chat-clip-play" onclick="playChatClip('${clipUid}', ${start}, ${end})">
+                        <svg class="ccp-play clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                        <svg class="ccp-pause clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
                     </button>
-                    <button class="btn btn-sm" onclick="addClipFromChat(${start}, ${end}, '${safeTitle}')">+ Clips</button>
+                    <div class="clip-card-progress" onclick="scrubChatClip(event, '${clipUid}', ${start}, ${end})">
+                        <div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div>
+                    </div>
+                </div>
+                <div class="clip-card-expand" onclick="this.parentElement.classList.toggle('expanded')">
+                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg>
+                    Show text
+                </div>
+                <div class="clip-card-excerpt">${escapeHtml(excerpt)}</div>
+                <div style="margin-top: 8px;">
+                    <button class="btn btn-sm btn-outline" onclick="addClipFromChat(${start}, ${end}, '${safeTitle}')">+ Clips</button>
                 </div>
             </div>`;
         }

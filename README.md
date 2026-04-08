@@ -1,10 +1,10 @@
 # Doza Assist
 
-A local-first AI-powered interview transcription and editing tool for documentary filmmakers.
+Local-first AI-powered transcription and clip discovery for interview-driven workflows.
 
-Built for any workflow where you need to find the best moments in recorded interviews, conversations, or presentations. Documentary films, corporate video, podcasts, news, legal depositions, customer testimonials, training content. If someone is talking on camera and you need to find what matters, this tool does the heavy lifting.
+Documentary films, corporate video, podcasts, news, legal depositions, customer testimonials, training content. If someone is talking on camera and you need to find the best moments, this tool does the heavy lifting.
 
-Transcribe interviews, discover clips with AI, highlight and organize selects, and export pre-cut timelines directly to Final Cut Pro — all running locally on your machine.
+Drop in footage, transcribe it, run AI analysis to surface story beats and soundbites, highlight and organize selects with color labels, and export pre-cut timelines directly to Final Cut Pro. Everything runs on your machine. Nothing uploads. Nothing leaves.
 
 <!-- Add your demo video here:
 https://github.com/user-attachments/assets/YOUR_VIDEO_ID

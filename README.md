@@ -2,7 +2,9 @@
 
 A local-first AI-powered interview transcription and editing tool for documentary filmmakers.
 
-Built for video production workflows — transcribe interviews, discover clips with AI, highlight and organize selects, and export pre-cut timelines directly to Final Cut Pro.
+Built for any workflow where you need to find the best moments in recorded interviews, conversations, or presentations. Documentary films, corporate video, podcasts, news, legal depositions, customer testimonials, training content. If someone is talking on camera and you need to find what matters, this tool does the heavy lifting.
+
+Transcribe interviews, discover clips with AI, highlight and organize selects, and export pre-cut timelines directly to Final Cut Pro — all running locally on your machine.
 
 <!-- Add your demo video here:
 https://github.com/user-attachments/assets/YOUR_VIDEO_ID

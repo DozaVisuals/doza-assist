@@ -1627,17 +1627,23 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 }
 
 /* Clip suggestions in chat */
-/* Chat clips — tighter than clips tab */
-.chat-clip { padding: 8px 10px !important; }
-.chat-clip + .chat-clip { margin-top: 6px; }
+/* Chat clips — compact inline cards */
+.chat-clip { padding: 6px 8px !important; margin: 4px 0 !important; }
 .chat-clip.cc-playing { border-color: var(--accent) !important; }
-.chat-clip .clip-card-head { margin-bottom: 2px; }
-.chat-clip .clip-card-meta { margin-bottom: 4px; }
-.chat-clip .clip-card-player { gap: 6px; }
-.chat-clip .clip-play-btn { width: 24px; height: 24px; }
-.chat-clip .clip-card-expand { margin-top: 4px; }
-.chat-clip .clip-card-excerpt { font-size: 12px; }
-.chat-clip > div:last-child { margin-top: 4px !important; }
+.chat-clip .clip-card-head { margin-bottom: 1px; gap: 4px; }
+.chat-clip .clip-card-title { font-size: 13px; -webkit-line-clamp: 1; }
+.chat-clip .clip-card-duration { font-size: 11px; }
+.chat-clip .clip-card-meta { margin-bottom: 3px; gap: 4px; }
+.chat-clip .clip-card-tc { font-size: 11px; }
+.chat-clip .clip-card-dot { width: 5px; height: 5px; }
+.chat-clip .clip-card-player { gap: 6px; margin: 0; }
+.chat-clip .clip-play-btn { width: 22px; height: 22px; }
+.chat-clip .clip-play-btn svg { width: 10px; height: 10px; }
+.chat-clip .clip-card-progress { height: 2px; }
+.chat-clip .clip-card-expand { margin-top: 3px; font-size: 10px; }
+.chat-clip .clip-card-excerpt { font-size: 11px; line-height: 1.35; }
+.chat-clip > div:last-child { margin-top: 3px !important; }
+.chat-clip > div:last-child .btn-sm { padding: 2px 8px; font-size: 11px; }
 
 .chat-tc-link {
     font-family: var(--mono);

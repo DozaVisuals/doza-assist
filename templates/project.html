@@ -171,8 +171,8 @@
         <div class="left-section">
             <div style="display: flex; flex-direction: column; gap: 0.4rem;">
                 <button class="btn btn-sm btn-primary" onclick="exportFCPXML('labels')">Export Clips to FCPX</button>
-                <button class="btn btn-sm" onclick="downloadSRT()">Download SRT</button>
-                <button class="btn btn-sm" onclick="downloadTXT()">Download Text</button>
+                <button class="btn btn-sm btn-outline" onclick="downloadSRT()">Download SRT</button>
+                <button class="btn btn-sm btn-outline" onclick="downloadTXT()">Download Text</button>
             </div>
         </div>
     </div>
@@ -247,6 +247,14 @@
                         <span id="clipsSelectedCount" style="font-size: 0.8rem; color: var(--accent); display: none;"></span>
                     </div>
                     <div class="btn-group">
+                        <div class="view-toggle">
+                            <button class="view-toggle-btn" data-view="grid" onclick="setClipsView('grid')" title="Grid view">
+                                <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+                            </button>
+                            <button class="view-toggle-btn" data-view="list" onclick="setClipsView('list')" title="List view">
+                                <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><rect x="1" y="2" width="14" height="2" rx="1"/><rect x="1" y="7" width="14" height="2" rx="1"/><rect x="1" y="12" width="14" height="2" rx="1"/></svg>
+                            </button>
+                        </div>
                         <label class="clip-select-all" title="Select all / none">
                             <input type="checkbox" id="clipSelectAll" onchange="toggleAllClipChecks(this.checked)"> All
                         </label>
@@ -1380,47 +1388,79 @@ function renderClipsTab() {
 
     if (empty) empty.style.display = 'none';
 
+    const viewMode = localStorage.getItem('clips-view') || 'grid';
+    grid.className = viewMode === 'list' ? 'clips-list' : 'clips-grid';
+
     grid.innerHTML = sorted.map(clip => {
         const duration = clip.end - clip.start;
         const colorVar = clip.color === 'blue' ? 'accent' : clip.color;
-        const labelName = colorLabels[clip.color] || clip.color;
+        const safeTitle = escapeHtml(clip.text || 'Untitled clip');
 
-        // Get transcript text for this clip range
-        let clipText = clip.text || '';
-        if (!clipText || clipText.length < 10) {
-            // Pull from words in range
-            const words = allWords.filter(w => {
-                const ws = parseFloat(w.dataset.s);
-                return ws >= clip.start && ws < clip.end;
-            });
-            clipText = words.map(w => w.textContent).join('').trim();
+        // Get transcript excerpt
+        let clipText = '';
+        const words = allWords.filter(w => parseFloat(w.dataset.s) >= clip.start && parseFloat(w.dataset.s) < clip.end);
+        clipText = words.map(w => w.textContent).join('').trim();
+        if (clipText.length > 200) clipText = clipText.substring(0, 200) + '...';
+
+        if (viewMode === 'list') {
+            return `<div class="clip-row" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}">
+                <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
+                <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
+                <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
+                <span class="clip-row-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</span>
+                <span class="clip-row-dur">${formatDuration(duration)}</span>
+                <button class="clip-row-play" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})">
+                    <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg>
+                    <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                </button>
+                <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
+            </div>`;
         }
-        if (clipText.length > 180) clipText = clipText.substring(0, 180) + '...';
 
-        return `<div class="clip-card" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}">
-            <div class="clip-card-top" style="border-left: 3px solid var(--${colorVar});">
-                <div class="clip-card-header">
-                    <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()" title="Select for export">
-                    <span class="clip-card-label" style="color: var(--${colorVar});">${labelName}</span>
-                    <span class="clip-card-duration">${formatDuration(duration)}</span>
-                </div>
-                <div class="clip-card-title">${escapeHtml(clip.text || 'Untitled clip')}</div>
-                <div class="clip-card-text">${escapeHtml(clipText)}</div>
-                <div class="clip-card-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</div>
+        return `<div class="clip-card" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}" style="border-left: 3px solid var(--${colorVar});">
+            <div class="clip-card-head">
+                <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
+                <span class="clip-card-title" title="${safeTitle}">${safeTitle}</span>
+                <span class="clip-card-duration">${formatDuration(duration)}</span>
             </div>
-            <div class="clip-card-controls">
-                <button class="clip-play-btn" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})" title="Play / Pause">
-                    <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><polygon points="6,3 20,12 6,21"/></svg>
-                    <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="16" height="16" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+            <div class="clip-card-meta">
+                <span class="clip-card-dot" style="background: var(--${colorVar});"></span>
+                <span class="clip-card-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</span>
+                <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
+            </div>
+            <div class="clip-card-player">
+                <button class="clip-play-btn" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})">
+                    <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                    <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
                 </button>
                 <div class="clip-card-progress" id="clipProgress-${clip.id}" onclick="scrubClip(event, ${clip.id}, ${clip.start}, ${clip.end})">
                     <div class="clip-card-progress-fill" id="clipFill-${clip.id}"></div>
                 </div>
-                <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})" title="Remove clip">&times;</button>
             </div>
+            <div class="clip-card-expand" onclick="this.parentElement.classList.toggle('expanded')">
+                <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg>
+                Show text
+            </div>
+            <div class="clip-card-excerpt">${escapeHtml(clipText)}</div>
         </div>`;
     }).join('');
 }
+
+function setClipsView(mode) {
+    localStorage.setItem('clips-view', mode);
+    document.querySelectorAll('.view-toggle-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.view === mode);
+    });
+    renderClipsTab();
+}
+
+// Init view toggle state
+(function() {
+    const v = localStorage.getItem('clips-view') || 'grid';
+    document.querySelectorAll('.view-toggle-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.view === v);
+    });
+})();
 
 function formatDuration(secs) {
     if (secs < 60) return Math.round(secs) + 's';

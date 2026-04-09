@@ -20,7 +20,8 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 
 **Transcription**
 - Drag and drop video/audio files (MP4, MOV, WAV, MP3, MXF, etc.)
-- Transcribes locally with OpenAI Whisper — no cloud uploads
+- Transcribes locally — no cloud uploads
+- Uses NVIDIA Parakeet TDT (via MLX) on Apple Silicon for fast transcription, falls back to OpenAI Whisper
 - Word-level timestamps for precise sync
 - Click speaker names to assign who said what
 
@@ -48,6 +49,15 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 - Ask for clips, themes, story angles, soundbites
 - AI suggests clips with timecodes — play them instantly or add to your library
 - Follow-up questions maintain context
+
+**Story Builder**
+- Describe the story you want to tell and the AI assembles it from your footage
+- The story agent reads the full transcript, selects the strongest soundbites, and arranges them into a narrative arc — hook, rising action, emotional peak, resolution
+- Returns an ordered sequence of clips with editorial notes explaining why each clip is in that position
+- Drag to reorder clips, remove what doesn't work, rebuild with a different prompt
+- Play All button plays the entire sequence back-to-back so you can hear the story before you cut it
+- One-click export to FCPX — the clips land on your timeline in story order, ready to refine
+- Save multiple story builds per project to compare different angles or versions
 
 **FCPX Export**
 - Pre-cut timeline — each clip becomes an actual edit referencing your source media
@@ -161,7 +171,7 @@ The app automatically tries Ollama first and falls back to Claude if configured.
 
 - **Backend:** Python / Flask
 - **Frontend:** Vanilla JS, CSS custom properties
-- **Transcription:** OpenAI Whisper (local, runs on CPU)
+- **Transcription:** Parakeet TDT via MLX (fast, Apple Silicon native) with OpenAI Whisper fallback
 - **AI:** Ollama with Gemma 4 (local, free) or Claude API (optional)
 - **Audio:** ffmpeg for extraction
 - **Sharing:** Cloudflare Tunnel (free, no account needed)

@@ -132,14 +132,10 @@
 
     <!-- Left Column: Player (persists across all tabs) -->
     <div class="player-col" id="playerCol">
-        {% if is_video %}
-        <div class="video-player-box">
-            <video id="videoPreview" preload="metadata" src="/project/{{ project.id }}/media" class="video-preview-main"></video>
+        <div class="video-player-box" id="videoPlayerBox" style="{% if not is_video %}display:none{% endif %}">
+            <video id="videoPreview" preload="metadata" {% if is_video %}src="/project/{{ project.id }}/media"{% endif %} class="video-preview-main"></video>
         </div>
-        {% endif %}
-        {% if not is_video %}
-        <audio id="audioPlayer" preload="metadata" src="/project/{{ project.id }}/media"></audio>
-        {% endif %}
+        <audio id="audioPlayer" preload="metadata" {% if not is_video %}src="/project/{{ project.id }}/media"{% endif %} style="display:none"></audio>
 
         <div class="player-controls-box">
             <div class="player-inner">
@@ -154,6 +150,11 @@
                 <span class="player-time" id="playerDuration">00:00</span>
                 <button class="player-speed-btn" id="speedBtn" onclick="cycleSpeed()" title="Playback speed">1x</button>
             </div>
+            {% if is_multi %}
+            <div style="text-align: center; padding: 0.25rem 0; font-size: 0.75rem; color: var(--text-muted);">
+                Now playing: <span id="playerProjectName" style="color: var(--accent); font-weight: 500;">{{ project.name }}</span>
+            </div>
+            {% endif %}
         </div>
 
         <div class="left-section">
@@ -238,10 +239,10 @@
                             {% for seg in para.segments %}
                                 {% if seg.words %}
                                     {% for w in seg.words %}
-                                        <span class="tw" data-s="{{ w.start }}" data-e="{{ w.end }}" onclick="jumpTo({{ w.start }})">{{ w.word }}</span>
+                                        <span class="tw" data-s="{{ w.start }}" data-e="{{ w.end }}" onclick="jumpTo({{ w.start }}, '{{ para.project_id or project.id }}')">{{ w.word }}</span>
                                     {% endfor %}
                                 {% else %}
-                                    <span class="tw" data-s="{{ seg.start }}" data-e="{{ seg.end }}" onclick="jumpTo({{ seg.start }})"> {{ seg.text }}</span>
+                                    <span class="tw" data-s="{{ seg.start }}" data-e="{{ seg.end }}" onclick="jumpTo({{ seg.start }}, '{{ para.project_id or project.id }}')"> {{ seg.text }}</span>
                                 {% endif %}
                             {% endfor %}
                         </p>
@@ -646,8 +647,11 @@ function switchTab(tab) {
 }
 
 // ── Audio Player ──
-// Use the video element as the primary player if present, otherwise the audio element
-const audio = document.getElementById('videoPreview') || document.getElementById('audioPlayer');
+// Both elements exist; we switch between them depending on media type
+const videoEl = document.getElementById('videoPreview');
+const audioEl = document.getElementById('audioPlayer');
+const videoPlayerBox = document.getElementById('videoPlayerBox');
+let audio = {{ 'videoEl' if is_video else 'audioEl' }};
 const playBtn = document.getElementById('playBtn');
 const playIcon = document.getElementById('playIcon');
 const pauseIcon = document.getElementById('pauseIcon');
@@ -657,27 +661,72 @@ const playerDuration = document.getElementById('playerDuration');
 const transcriptContainer = document.getElementById('transcriptContainer');
 const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
 let speedIndex = 2; // default 1x
+let currentPlayerIsVideo = {{ 'true' if is_video else 'false' }};
+
+function switchPlayerElement(useVideo) {
+    if (useVideo === currentPlayerIsVideo) return;
+    const oldPlayer = audio;
+    const wasPlaying = oldPlayer && !oldPlayer.paused;
+    if (oldPlayer) oldPlayer.pause();
+
+    if (useVideo) {
+        videoPlayerBox.style.display = '';
+        audio = videoEl;
+    } else {
+        videoPlayerBox.style.display = 'none';
+        audio = audioEl;
+    }
+    currentPlayerIsVideo = useVideo;
+    bindPlayerEvents();
+}
 let lastActiveSegment = null;
 let userScrolled = false;
 let scrollTimeout = null;
 
-if (audio) {
-    audio.addEventListener('loadedmetadata', () => {
-        playerDuration.textContent = fmtTime(audio.duration);
-    });
-
-    audio.addEventListener('timeupdate', () => {
-        if (!audio.duration) return;
-        const pct = (audio.currentTime / audio.duration) * 100;
-        playerProgress.style.width = pct + '%';
-        playerCurrentTime.textContent = fmtTime(audio.currentTime);
-        highlightActiveSegment(audio.currentTime);
-    });
-
-    audio.addEventListener('play', () => { playIcon.style.display='none'; pauseIcon.style.display=''; });
-    audio.addEventListener('pause', () => { playIcon.style.display=''; pauseIcon.style.display='none'; });
-    audio.addEventListener('ended', () => { playIcon.style.display=''; pauseIcon.style.display='none'; });
+function _onLoadedMetadata() { playerDuration.textContent = fmtTime(audio.duration); }
+function _onTimeUpdate() {
+    if (!audio.duration) return;
+    const pct = (audio.currentTime / audio.duration) * 100;
+    playerProgress.style.width = pct + '%';
+    playerCurrentTime.textContent = fmtTime(audio.currentTime);
+    highlightActiveSegment(audio.currentTime);
 }
+function _onPlay() { playIcon.style.display='none'; pauseIcon.style.display=''; }
+function _onPause() { playIcon.style.display=''; pauseIcon.style.display='none'; }
+function _onEnded() { playIcon.style.display=''; pauseIcon.style.display='none'; }
+
+// All timeupdate handlers registered later are added here as well
+const _extraTimeUpdateHandlers = [];
+function bindPlayerEvents() {
+    // Remove from both elements to avoid duplicates
+    [videoEl, audioEl].forEach(el => {
+        if (!el) return;
+        el.removeEventListener('loadedmetadata', _onLoadedMetadata);
+        el.removeEventListener('timeupdate', _onTimeUpdate);
+        el.removeEventListener('timeupdate', _onAnalysisScrubUpdate);
+        el.removeEventListener('play', _onPlay);
+        el.removeEventListener('pause', _onPause);
+        el.removeEventListener('ended', _onEnded);
+        _extraTimeUpdateHandlers.forEach(fn => el.removeEventListener('timeupdate', fn));
+    });
+    if (audio) {
+        audio.addEventListener('loadedmetadata', _onLoadedMetadata);
+        audio.addEventListener('timeupdate', _onTimeUpdate);
+        audio.addEventListener('timeupdate', _onAnalysisScrubUpdate);
+        audio.addEventListener('play', _onPlay);
+        audio.addEventListener('pause', _onPause);
+        audio.addEventListener('ended', _onEnded);
+        _extraTimeUpdateHandlers.forEach(fn => audio.addEventListener('timeupdate', fn));
+    }
+}
+
+// Register extra timeupdate handlers (called from later code sections)
+function registerTimeUpdateHandler(fn) {
+    _extraTimeUpdateHandlers.push(fn);
+    if (audio) audio.addEventListener('timeupdate', fn);
+}
+
+bindPlayerEvents();
 
 // Detect manual scrolling to pause auto-scroll
 if (transcriptContainer) {
@@ -720,15 +769,20 @@ function jumpTo(seconds, projectId) {
     seconds = parseTc(seconds);
     if (!audio) return;
 
-    // Switch audio source if needed (multi-project)
+    // Switch media source if needed (multi-project)
     if (projectId && projectId !== currentAudioProject) {
         audio.pause();
+
+        // Check if this project is video or audio and switch player if needed
+        const meta = PROJECTS_META.find(p => p.id === projectId);
+        const needsVideo = meta ? meta.is_video : false;
+        switchPlayerElement(needsVideo);
+
         audio.src = `/project/${projectId}/media`;
         currentAudioProject = projectId;
         // Update the now-playing indicator
         const indicator = document.getElementById('playerProjectName');
         if (indicator) {
-            const meta = PROJECTS_META.find(p => p.id === projectId);
             indicator.textContent = meta ? meta.name : '';
             indicator.style.display = IS_MULTI ? '' : 'none';
         }
@@ -795,29 +849,26 @@ function scrubAnalysisItem(e, scrubEl) {
     audio.play();
 }
 
-// Update scrub bars on timeupdate
-if (audio) {
-    audio.addEventListener('timeupdate', () => {
-        if (!activeAnalysisItem) return;
-        const start = parseTc(activeAnalysisItem.dataset.clipStart);
-        let end = parseTc(activeAnalysisItem.dataset.clipEnd);
-        if (end <= start) end = start + 15;
+// Update scrub bars on timeupdate — handled via bindPlayerEvents
+function _onAnalysisScrubUpdate() {
+    if (!activeAnalysisItem) return;
+    const start = parseTc(activeAnalysisItem.dataset.clipStart);
+    let end = parseTc(activeAnalysisItem.dataset.clipEnd);
+    if (end <= start) end = start + 15;
 
-        const fill = activeAnalysisItem.querySelector('.analysis-scrub-fill');
-        if (!fill) return;
+    const fill = activeAnalysisItem.querySelector('.analysis-scrub-fill');
+    if (!fill) return;
 
-        if (audio.currentTime >= end) {
-            // Clip finished
-            fill.style.width = '100%';
-            activeAnalysisItem.classList.remove('analysis-playing');
-            activeAnalysisItem = null;
-            audio.pause();
-            setTimeout(() => { fill.style.width = '0%'; }, 400);
-        } else if (audio.currentTime >= start) {
-            const pct = ((audio.currentTime - start) / (end - start)) * 100;
-            fill.style.width = pct + '%';
-        }
-    });
+    if (audio.currentTime >= end) {
+        fill.style.width = '100%';
+        activeAnalysisItem.classList.remove('analysis-playing');
+        activeAnalysisItem = null;
+        audio.pause();
+        setTimeout(() => { fill.style.width = '0%'; }, 400);
+    } else if (audio.currentTime >= start) {
+        const pct = ((audio.currentTime - start) / (end - start)) * 100;
+        fill.style.width = pct + '%';
+    }
 }
 
 function cycleSpeed() {
@@ -839,29 +890,41 @@ function fmtTime(s) {
 // ── Word-level highlighting ──
 // Build a sorted index of all timed words for fast binary-search lookup
 const allWords = Array.from(document.querySelectorAll('.tw[data-s]'));
+
+// Build per-project word lists for accurate highlighting in multi-project mode
+const wordsByProject = {};
+allWords.forEach(w => {
+    const para = w.closest('.para-block');
+    const pid = para ? para.dataset.project : PROJECT_ID;
+    if (!wordsByProject[pid]) wordsByProject[pid] = [];
+    wordsByProject[pid].push(w);
+});
 let lastActiveWord = null;
 
 function highlightActiveSegment(currentTime) {
     // Remove previous highlight
     if (lastActiveWord) lastActiveWord.classList.remove('tw-active');
 
+    // Use project-specific word list to avoid cross-project timestamp collisions
+    const projectWords = wordsByProject[currentAudioProject] || allWords;
+
     // Binary search for the current word
-    let lo = 0, hi = allWords.length - 1, active = null;
+    let lo = 0, hi = projectWords.length - 1, active = null;
     while (lo <= hi) {
         const mid = (lo + hi) >> 1;
-        const s = parseFloat(allWords[mid].dataset.s);
-        const e = parseFloat(allWords[mid].dataset.e);
-        if (currentTime >= s && currentTime < e) { active = allWords[mid]; break; }
+        const s = parseFloat(projectWords[mid].dataset.s);
+        const e = parseFloat(projectWords[mid].dataset.e);
+        if (currentTime >= s && currentTime < e) { active = projectWords[mid]; break; }
         else if (currentTime < s) hi = mid - 1;
         else lo = mid + 1;
     }
 
     // Fallback linear scan if binary search missed (overlapping timestamps)
     if (!active) {
-        for (let i = 0; i < allWords.length; i++) {
-            const s = parseFloat(allWords[i].dataset.s);
-            const e = parseFloat(allWords[i].dataset.e);
-            if (currentTime >= s && currentTime < e) { active = allWords[i]; break; }
+        for (let i = 0; i < projectWords.length; i++) {
+            const s = parseFloat(projectWords[i].dataset.s);
+            const e = parseFloat(projectWords[i].dataset.e);
+            if (currentTime >= s && currentTime < e) { active = projectWords[i]; break; }
             if (s > currentTime) break;
         }
     }
@@ -882,10 +945,14 @@ function highlightActiveSegment(currentTime) {
         }
     }
 
-    // Highlight the active paragraph block
+    // Highlight the active paragraph block (only for current project)
     document.querySelectorAll('.para-block').forEach(pb => {
+        const pbProject = pb.dataset.project || PROJECT_ID;
+        if (pbProject !== currentAudioProject) {
+            pb.classList.remove('para-active');
+            return;
+        }
         const s = parseFloat(pb.dataset.start);
-        // Find the last word in this block to get its end time
         const words = pb.querySelectorAll('.tw[data-e]');
         const e = words.length ? parseFloat(words[words.length - 1].dataset.e) : s;
         if (currentTime >= s && currentTime < e) {
@@ -1390,29 +1457,28 @@ function _updateChatClipIcons() {
     }
 }
 
-// Update chat clip scrub bars + auto-stop
-if (audio) {
-    audio.addEventListener('timeupdate', () => {
-        if (!activeChatClip) return;
-        const el = document.getElementById(activeChatClip);
-        if (!el) return;
-        const start = parseFloat(el.dataset.start);
-        const end = parseFloat(el.dataset.end);
-        const fill = document.getElementById('ccfill_' + activeChatClip);
+// Update chat clip scrub bars + auto-stop — registered via registerTimeUpdateHandler
+function _onChatClipTimeUpdate() {
+    if (!activeChatClip) return;
+    const el = document.getElementById(activeChatClip);
+    if (!el) return;
+    const start = parseFloat(el.dataset.start);
+    const end = parseFloat(el.dataset.end);
+    const fill = document.getElementById('ccfill_' + activeChatClip);
 
-        if (audio.currentTime >= end) {
-            audio.pause();
-            if (fill) fill.style.width = '100%';
-            el.classList.remove('cc-playing');
-            activeChatClip = null;
-            _updateChatClipIcons();
-            setTimeout(() => { if (fill) fill.style.width = '0%'; }, 400);
-        } else if (audio.currentTime >= start && fill) {
-            const pct = ((audio.currentTime - start) / (end - start)) * 100;
-            fill.style.width = pct + '%';
-        }
-    });
+    if (audio.currentTime >= end) {
+        audio.pause();
+        if (fill) fill.style.width = '100%';
+        el.classList.remove('cc-playing');
+        activeChatClip = null;
+        _updateChatClipIcons();
+        setTimeout(() => { if (fill) fill.style.width = '0%'; }, 400);
+    } else if (audio.currentTime >= start && fill) {
+        const pct = ((audio.currentTime - start) / (end - start)) * 100;
+        fill.style.width = pct + '%';
+    }
 }
+registerTimeUpdateHandler(_onChatClipTimeUpdate);
 
 function addAllAnalysisClips() {
     let count = 0;
@@ -1630,28 +1696,27 @@ function scrubClip(e, clipId, start, end) {
 }
 
 // Track clip playback progress
-if (audio) {
-    audio.addEventListener('timeupdate', () => {
-        if (!clipPlaying) return;
-        const { id, start, end } = clipPlaying;
-        const fill = document.getElementById('clipFill-' + id);
-        if (!fill) return;
+function _onClipTimeUpdate() {
+    if (!clipPlaying) return;
+    const { id, start, end } = clipPlaying;
+    const fill = document.getElementById('clipFill-' + id);
+    if (!fill) return;
 
-        if (audio.currentTime >= end) {
-            audio.pause();
-            fill.style.width = '100%';
-            setTimeout(() => {
-                fill.style.width = '0%';
-                document.querySelectorAll('.clip-card').forEach(c => c.classList.remove('clip-card-playing'));
-                clipPlaying = null;
-                updateClipIcons();
-            }, 500);
-        } else if (audio.currentTime >= start) {
-            const pct = ((audio.currentTime - start) / (end - start)) * 100;
-            fill.style.width = pct + '%';
-        }
-    });
+    if (audio.currentTime >= end) {
+        audio.pause();
+        fill.style.width = '100%';
+        setTimeout(() => {
+            fill.style.width = '0%';
+            document.querySelectorAll('.clip-card').forEach(c => c.classList.remove('clip-card-playing'));
+            clipPlaying = null;
+            updateClipIcons();
+        }, 500);
+    } else if (audio.currentTime >= start) {
+        const pct = ((audio.currentTime - start) / (end - start)) * 100;
+        fill.style.width = pct + '%';
+    }
 }
+registerTimeUpdateHandler(_onClipTimeUpdate);
 
 function removeClipFromLibrary(id) {
     removeSection(id);
@@ -2565,50 +2630,46 @@ function _updateStoryClipIcons() {
 let storyPlayAllActive = false;
 let storyPlayAllIndex = -1;
 
-if (audio) {
-    audio.addEventListener('timeupdate', () => {
-        if (!activeStoryClip) return;
-        const fill = document.getElementById('sfill_' + activeStoryClip);
-        if (!fill) return;
-        const card = fill.closest('.story-card');
-        if (!card) return;
-        const start = parseFloat(card.dataset.start);
-        const end = parseFloat(card.dataset.end);
+function _onStoryClipTimeUpdate() {
+    if (!activeStoryClip) return;
+    const fill = document.getElementById('sfill_' + activeStoryClip);
+    if (!fill) return;
+    const card = fill.closest('.story-card');
+    if (!card) return;
+    const start = parseFloat(card.dataset.start);
+    const end = parseFloat(card.dataset.end);
 
-        if (audio.currentTime >= end) {
-            fill.style.width = '100%';
+    if (audio.currentTime >= end) {
+        fill.style.width = '100%';
 
-            if (storyPlayAllActive) {
-                // Advance to next clip
-                setTimeout(() => { fill.style.width = '0%'; }, 200);
-                storyPlayAllIndex++;
-                const cards = document.querySelectorAll('.story-card');
-                if (storyPlayAllIndex < cards.length) {
-                    const next = cards[storyPlayAllIndex];
-                    const nextStart = parseFloat(next.dataset.start);
-                    const nextEnd = parseFloat(next.dataset.end);
-                    const nextIdx = parseInt(next.dataset.idx);
-                    activeStoryClip = 'story_' + nextIdx;
-                    _updateStoryClipIcons();
-                    _highlightPlayingCard(storyPlayAllIndex);
-                    audio.currentTime = nextStart;
-                    // Don't pause — keep playing
-                } else {
-                    // Finished all clips
-                    stopPlayAllStory();
-                }
-            } else {
-                audio.pause();
-                activeStoryClip = null;
+        if (storyPlayAllActive) {
+            setTimeout(() => { fill.style.width = '0%'; }, 200);
+            storyPlayAllIndex++;
+            const cards = document.querySelectorAll('.story-card');
+            if (storyPlayAllIndex < cards.length) {
+                const next = cards[storyPlayAllIndex];
+                const nextStart = parseFloat(next.dataset.start);
+                const nextEnd = parseFloat(next.dataset.end);
+                const nextIdx = parseInt(next.dataset.idx);
+                activeStoryClip = 'story_' + nextIdx;
                 _updateStoryClipIcons();
-                setTimeout(() => { fill.style.width = '0%'; }, 400);
+                _highlightPlayingCard(storyPlayAllIndex);
+                audio.currentTime = nextStart;
+            } else {
+                stopPlayAllStory();
             }
-        } else if (audio.currentTime >= start) {
-            const pct = ((audio.currentTime - start) / (end - start)) * 100;
-            fill.style.width = pct + '%';
+        } else {
+            audio.pause();
+            activeStoryClip = null;
+            _updateStoryClipIcons();
+            setTimeout(() => { fill.style.width = '0%'; }, 400);
         }
-    });
+    } else if (audio.currentTime >= start) {
+        const pct = ((audio.currentTime - start) / (end - start)) * 100;
+        fill.style.width = pct + '%';
+    }
 }
+registerTimeUpdateHandler(_onStoryClipTimeUpdate);
 
 function togglePlayAllStory() {
     if (storyPlayAllActive) {

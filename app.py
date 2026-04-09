@@ -517,12 +517,15 @@ def project_view(project_id):
 
     # Assign a color index to each active project for visual distinction
     project_colors = ['accent', 'green', 'purple', 'orange', 'red']
+    video_extensions = ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
     projects_meta = []
     for i, p in enumerate(projects):
+        src_ext = os.path.splitext(p.get('source_path', '') or '')[1].lower()
         projects_meta.append({
             'id': p['id'],
             'name': p.get('name', 'Untitled'),
             'color': project_colors[i % len(project_colors)],
+            'is_video': src_ext in video_extensions,
         })
 
     # Build combined paragraphs across all projects
@@ -539,9 +542,8 @@ def project_view(project_id):
 
     is_multi = len(projects) > 1
 
-    # Determine if source is video for the player
-    source_ext = os.path.splitext(project.get('source_path', '') or '')[1].lower()
-    is_video = source_ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
+    # Determine if any project has video (need video element if so)
+    is_video = any(pm['is_video'] for pm in projects_meta)
 
     return render_template('project.html',
                            project=project,

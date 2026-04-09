@@ -94,6 +94,37 @@ def update_step(index, status, detail=""):
             setup_state["current_step"] = index
 
 
+def is_apple_silicon():
+    """Check if the hardware is Apple Silicon (even if running under Rosetta)."""
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.optional.arm64"],
+            capture_output=True, text=True
+        )
+        return result.stdout.strip() == "1"
+    except Exception:
+        return os.path.isdir("/opt/homebrew")
+
+
+def brew_cmd(args):
+    """Build a brew command string, using arch -arm64 on Apple Silicon
+    to avoid Rosetta/x86 issues when Python itself is an Intel binary."""
+    ensure_path()
+    brew_path = shutil.which("brew")
+    if not brew_path:
+        # Fallback: check common locations directly
+        for p in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]:
+            if os.path.isfile(p):
+                brew_path = p
+                break
+    if not brew_path:
+        return None
+
+    if is_apple_silicon() and "/opt/homebrew" in brew_path:
+        return f'arch -arm64 "{brew_path}" {args}'
+    return f'"{brew_path}" {args}'
+
+
 def run_cmd(cmd, capture=True, env=None):
     """Run a shell command and return (returncode, stdout, stderr)."""
     merged_env = os.environ.copy()
@@ -251,15 +282,15 @@ def install_ffmpeg():
         log("ffmpeg already installed.")
         return True
 
-    brew_path = shutil.which("brew")
-    if not brew_path:
-        log("ERROR: brew not found on PATH. Homebrew may not be installed.")
+    cmd = brew_cmd("install ffmpeg")
+    if not cmd:
+        log("ERROR: brew not found. Homebrew may not be installed.")
         update_step(STEP_FFMPEG, "error", "Homebrew not found. Please relaunch to retry setup.")
         return False
 
-    log(f"Installing ffmpeg via Homebrew (brew at {brew_path})...")
+    log(f"Installing ffmpeg: {cmd}")
     update_step(STEP_FFMPEG, "running", "Installing ffmpeg via Homebrew (this may take a few minutes)...")
-    rc, out, err = run_cmd(f'"{brew_path}" install ffmpeg')
+    rc, out, err = run_cmd(cmd)
     if rc != 0:
         log(f"ffmpeg install failed (rc={rc}).")
         log(f"stdout: {out[-500:] if out else 'none'}")
@@ -280,15 +311,15 @@ def install_ollama():
         log("Ollama already installed.")
         return True
 
-    brew_path = shutil.which("brew")
-    if not brew_path:
+    cmd = brew_cmd("install ollama")
+    if not cmd:
         log("ERROR: brew not found on PATH.")
         update_step(STEP_OLLAMA, "error", "Homebrew not found. Please relaunch to retry setup.")
         return False
 
-    log(f"Installing Ollama via Homebrew...")
+    log(f"Installing Ollama: {cmd}")
     update_step(STEP_OLLAMA, "running", "Installing Ollama via Homebrew...")
-    rc, out, err = run_cmd(f'"{brew_path}" install ollama')
+    rc, out, err = run_cmd(cmd)
     if rc != 0:
         log(f"Ollama install failed (rc={rc}).")
         log(f"stdout: {out[-500:] if out else 'none'}")
@@ -362,17 +393,30 @@ def install_pip_packages():
     return True
 
 
+def native_cmd(args_list):
+    """Wrap a command list with arch -arm64 on Apple Silicon to avoid Rosetta issues."""
+    if is_apple_silicon():
+        return ["arch", "-arm64"] + args_list
+    return args_list
+
+
 def pull_ollama_model():
     ensure_path()
     ollama_path = shutil.which("ollama")
+    if not ollama_path:
+        # Check common locations directly
+        for p in ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"]:
+            if os.path.isfile(p):
+                ollama_path = p
+                break
     if not ollama_path:
         log("ERROR: ollama not found on PATH.")
         return False
 
     # Check if model already exists
-    rc, out, _ = run_cmd(f'"{ollama_path}" list')
+    rc, out, _ = run_cmd(f'arch -arm64 "{ollama_path}" list' if is_apple_silicon() else f'"{ollama_path}" list')
     if rc == 0 and "gemma4" in out:
-        log("gemma3 model already available.")
+        log("gemma4 model already available.")
         return True
 
     # Start Ollama if not running
@@ -381,7 +425,7 @@ def pull_ollama_model():
         log("Starting Ollama service...")
         update_step(STEP_MODEL, "running", "Starting Ollama service...")
         subprocess.Popen(
-            [ollama_path, "serve"],
+            native_cmd([ollama_path, "serve"]),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -397,12 +441,12 @@ def pull_ollama_model():
             return False
 
     # Pull the model with progress tracking
-    log("Pulling gemma3 model...")
+    log("Pulling gemma4 model...")
     update_step(STEP_MODEL, "running", "Downloading AI model (this may take several minutes)...")
 
     try:
         proc = subprocess.Popen(
-            [ollama_path, "pull", "gemma4"],
+            native_cmd([ollama_path, "pull", "gemma4"]),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

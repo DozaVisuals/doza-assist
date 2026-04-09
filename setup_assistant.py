@@ -51,7 +51,6 @@ state_lock = threading.Lock()
 def log(msg):
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
-    print(line, flush=True)
     try:
         with open(LOG_FILE, "a") as f:
             f.write(line + "\n")
@@ -156,41 +155,90 @@ def install_xcode_clt():
 
 
 def install_homebrew():
-    """Install Homebrew if missing."""
+    """Install Homebrew if missing. Opens Terminal for password entry."""
     ensure_path()
     if shutil.which("brew"):
         log("Homebrew already installed.")
         return True
 
-    log("Installing Homebrew...")
-    update_step(STEP_HOMEBREW, "running", "Installing Homebrew (you may be asked for your Mac password in a Terminal window)...")
+    log("Installing Homebrew (requires Terminal for password)...")
+    update_step(STEP_HOMEBREW, "running", "Opening Terminal to install Homebrew — enter your Mac password when asked...")
 
-    # Run the Homebrew installer
-    # NONINTERACTIVE=1 avoids prompts; it still needs sudo for /opt/homebrew ownership
-    rc, out, err = run_cmd(
-        'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-    )
+    # Homebrew installer needs sudo, which needs a TTY for the password prompt.
+    # We write a small script, open it in Terminal, and wait for it to finish.
+    marker_file = os.path.join(SUPPORT_DIR, "brew_install_done")
+    try:
+        os.remove(marker_file)
+    except FileNotFoundError:
+        pass
 
-    if rc != 0:
-        log(f"Homebrew install failed (rc={rc}).")
-        log(f"stderr: {err[-500:] if err else 'none'}")
-        # Common failure: needs password. Give a helpful message.
-        if "sudo" in (err or "").lower() or "password" in (err or "").lower():
-            update_step(STEP_HOMEBREW, "error",
-                "Homebrew needs your Mac password to install. "
-                "Please open Terminal and run:\n"
-                '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-            )
-        else:
-            update_step(STEP_HOMEBREW, "error", f"Homebrew install failed: {(err or out or 'unknown error')[-200:]}")
+    brew_script = os.path.join(SUPPORT_DIR, "install_brew.sh")
+    with open(brew_script, "w") as f:
+        f.write(f"""#!/bin/bash
+echo ""
+echo "  ╔═══════════════════════════════════════════════╗"
+echo "  ║  Doza Assist — Installing Homebrew            ║"
+echo "  ║  Enter your Mac password when prompted below  ║"
+echo "  ╚═══════════════════════════════════════════════╝"
+echo ""
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+RESULT=$?
+if [ $RESULT -eq 0 ]; then
+    echo "SUCCESS" > "{marker_file}"
+    echo ""
+    echo "  ✅ Homebrew installed! You can close this window."
+    echo ""
+else
+    echo "FAILED" > "{marker_file}"
+    echo ""
+    echo "  ❌ Homebrew installation failed."
+    echo "  Press any key to close..."
+    read -n 1
+fi
+""")
+    os.chmod(brew_script, 0o755)
+
+    # Open the script in Terminal
+    subprocess.Popen(["open", "-a", "Terminal", brew_script])
+
+    # Wait for the marker file (up to 15 minutes)
+    for i in range(180):  # 180 * 5s = 15 minutes
+        time.sleep(5)
+        if os.path.isfile(marker_file):
+            break
+        if i % 12 == 0 and i > 0:
+            mins = (i * 5) // 60
+            update_step(STEP_HOMEBREW, "running",
+                f"Waiting for Homebrew install in Terminal... ({mins}m elapsed)")
+    else:
+        log("ERROR: Homebrew install timed out.")
+        update_step(STEP_HOMEBREW, "error", "Homebrew install timed out. Please try again.")
+        return False
+
+    # Check result
+    try:
+        result = open(marker_file).read().strip()
+    except Exception:
+        result = "FAILED"
+
+    # Clean up
+    try:
+        os.remove(brew_script)
+        os.remove(marker_file)
+    except Exception:
+        pass
+
+    if result != "SUCCESS":
+        log("ERROR: Homebrew installation failed in Terminal.")
+        update_step(STEP_HOMEBREW, "error", "Homebrew installation failed. Please try again.")
         return False
 
     # Refresh PATH
     ensure_path()
 
     if not shutil.which("brew"):
-        log("ERROR: Homebrew install seemed to succeed but brew not found on PATH.")
-        update_step(STEP_HOMEBREW, "error", "Homebrew installed but not found. Please restart your Mac and relaunch Doza Assist.")
+        log("ERROR: Homebrew installed but not found on PATH.")
+        update_step(STEP_HOMEBREW, "error", "Homebrew installed but not found on PATH. Please restart your Mac and relaunch.")
         return False
 
     log("Homebrew installed.")
@@ -702,12 +750,41 @@ class SetupHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
 
 
+def kill_stale_setup_server():
+    """Kill any previous setup assistant still holding port 5051."""
+    try:
+        result = subprocess.run(
+            f"lsof -ti tcp:{SETUP_PORT}", shell=True,
+            capture_output=True, text=True
+        )
+        if result.stdout.strip():
+            for pid in result.stdout.strip().split("\n"):
+                pid = pid.strip()
+                if pid and pid != str(os.getpid()):
+                    log(f"Killing stale setup process on port {SETUP_PORT}: PID {pid}")
+                    os.kill(int(pid), signal.SIGTERM)
+            time.sleep(1)
+    except Exception as e:
+        log(f"Warning: could not check for stale processes: {e}")
+
+
 def run_server():
     """Start the HTTP server."""
+    kill_stale_setup_server()
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", SETUP_PORT), SetupHandler) as httpd:
-        log(f"Setup server running at http://127.0.0.1:{SETUP_PORT}")
-        httpd.serve_forever()
+    try:
+        with socketserver.TCPServer(("127.0.0.1", SETUP_PORT), SetupHandler) as httpd:
+            log(f"Setup server running at http://127.0.0.1:{SETUP_PORT}")
+            httpd.serve_forever()
+    except OSError as e:
+        log(f"ERROR: Could not start setup server: {e}")
+        # Try once more after a brief wait
+        time.sleep(2)
+        kill_stale_setup_server()
+        time.sleep(1)
+        with socketserver.TCPServer(("127.0.0.1", SETUP_PORT), SetupHandler) as httpd:
+            log(f"Setup server running at http://127.0.0.1:{SETUP_PORT} (retry)")
+            httpd.serve_forever()
 
 
 def setup_loop():

@@ -228,6 +228,99 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     return fcpxml
 
 
+def generate_story_fcpxml(markers, project_name="Interview", story_title="Story",
+                          framerate=23.976, source_path=None, media_duration=None,
+                          width=1920, height=1080):
+    """
+    Generate FCPXML for a Story Builder sequence.
+    Creates a single timeline with clips in narrative order as actual edits.
+    """
+    if not source_path or not os.path.exists(source_path):
+        return _generate_markers_only(markers, f"{project_name} - {story_title}", framerate, width, height)
+
+    frame_dur = get_frame_duration(framerate)
+    safe_name = _escape_xml(project_name)
+    safe_title = _escape_xml(story_title)
+    uid = f"doza-story-{uuid.uuid4().hex[:8]}"
+
+    markers = sorted(markers, key=lambda m: m.get('_order', markers.index(m)))
+
+    if not media_duration and markers:
+        media_duration = max(m['end'] for m in markers) + 10.0
+    elif not media_duration:
+        media_duration = 60.0
+
+    media_dur_str = seconds_to_fcpxml_time(media_duration, framerate)
+
+    total_timeline = sum(m['end'] - m['start'] for m in markers if m['end'] > m['start'])
+    if total_timeline <= 0:
+        total_timeline = media_duration
+    timeline_dur_str = seconds_to_fcpxml_time(total_timeline, framerate)
+
+    file_url = 'file://' + source_path.replace(' ', '%20')
+    ext = os.path.splitext(source_path)[1].lower()
+    is_video = ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
+
+    spine_clips = []
+    timeline_offset = 0.0
+
+    for i, m in enumerate(markers):
+        clip_start = m['start']
+        clip_end = m['end'] + 1.0
+        clip_dur = clip_end - clip_start
+        if clip_dur <= 0:
+            continue
+
+        offset_str = seconds_to_fcpxml_time(timeline_offset, framerate)
+        src_start_str = seconds_to_fcpxml_time(clip_start, framerate)
+        dur_str = seconds_to_fcpxml_time(clip_dur, framerate)
+
+        clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
+        note = _escape_xml(m.get('note', ''))
+
+        marker_xml = (
+            f'\n                            <chapter-marker start="{src_start_str}" '
+            f'duration="{frame_dur}" value="{clip_name}" '
+            f'note="{note}"/>'
+        )
+
+        spine_clips.append(
+            f'                        <asset-clip name="{clip_name}" ref="r2" '
+            f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
+            f'format="r1" tcFormat="NDF">{marker_xml}'
+            f'\n                        </asset-clip>'
+        )
+
+        timeline_offset += clip_dur
+
+    spine_block = '\n'.join(spine_clips)
+
+    fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+
+<fcpxml version="1.11">
+    <resources>
+        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}"/>
+        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="0/1s" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
+            <media-rep kind="original-media" src="{file_url}"/>
+        </asset>
+    </resources>
+    <library>
+        <event name="{safe_name}">
+            <project name="{safe_title}" uid="{uid}">
+                <sequence format="r1" duration="{timeline_dur_str}" tcStart="0/1s" tcFormat="NDF">
+                    <spine>
+{spine_block}
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </library>
+</fcpxml>"""
+
+    return fcpxml
+
+
 def _generate_markers_only(markers, project_name, framerate, width=1920, height=1080):
     """Legacy marker-only export (no source media reference)."""
     frame_dur = get_frame_duration(framerate)

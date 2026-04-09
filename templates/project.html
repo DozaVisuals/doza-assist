@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -109,11 +109,22 @@
     {% if project.transcript %}
     <!-- Tabs -->
     <div class="tabs">
-        <button class="tab active" onclick="switchTab('transcript')">Transcript</button>
-        <button class="tab" onclick="switchTab('clips')">Clips</button>
-        <button class="tab" onclick="switchTab('analysis')">AI Analysis</button>
-        <button class="tab" onclick="switchTab('chat')">Chat</button>
-        <button class="tab" onclick="switchTab('export')">Export</button>
+        {% if is_shared %}
+            {% set tabs = shared_tabs or {'transcript': true, 'clips': true, 'analysis': true, 'chat': true, 'export': true} %}
+            {% if tabs.get('transcript', true) %}<button class="tab active" onclick="switchTab('transcript')"><span id="transcriptTabLabel">Transcript</span></button>{% endif %}
+            {% if tabs.get('clips', true) %}<button class="tab" onclick="switchTab('clips')">Clips</button>{% endif %}
+            {% if tabs.get('analysis', true) %}<button class="tab" onclick="switchTab('analysis')">AI Analysis</button>{% endif %}
+            {% if tabs.get('chat', true) %}<button class="tab" onclick="switchTab('chat')">Chat</button>{% endif %}
+            {% if tabs.get('story', true) %}<button class="tab" onclick="switchTab('story')">Story Builder</button>{% endif %}
+            {% if tabs.get('export', true) %}<button class="tab" onclick="switchTab('export')">Export</button>{% endif %}
+        {% else %}
+            <button class="tab active" onclick="switchTab('transcript')"><span id="transcriptTabLabel">Transcript</span></button>
+            <button class="tab" onclick="switchTab('clips')">Clips</button>
+            <button class="tab" onclick="switchTab('analysis')">AI Analysis</button>
+            <button class="tab" onclick="switchTab('chat')">Chat</button>
+            <button class="tab" onclick="switchTab('story')">Story Builder</button>
+            <button class="tab" onclick="switchTab('export')">Export</button>
+        {% endif %}
     </div>
 
     <!-- Persistent 2-column: Player left + Tab content right -->
@@ -421,6 +432,64 @@
                 </div>
     </div>
 
+    <!-- Story Builder Tab -->
+    {% if not is_shared %}
+    <div class="tab-content" id="tab-story">
+        <div id="storyBuilderContent">
+            <!-- Build selector + stats bar (hidden until first build) -->
+            <div class="story-topbar" id="storyTopbar" style="display:none;">
+                <div class="story-stats">
+                    <span id="storyClipCount">0 clips</span>
+                    <span class="story-stats-sep">|</span>
+                    <span id="storyTotalDuration">0:00</span>
+                    <span class="story-stats-sep">|</span>
+                    <span id="storyPromptDisplay" class="story-prompt-text"></span>
+                </div>
+                <div class="story-topbar-right">
+                    <button class="btn btn-sm btn-primary story-playall-btn" id="storyPlayAllBtn" onclick="togglePlayAllStory()" title="Play all clips in sequence">
+                        <svg id="storyPlayAllIcon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                        <svg id="storyPauseAllIcon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                        <span id="storyPlayAllLabel">Play All</span>
+                    </button>
+                    <select class="form-input story-build-select" id="storyBuildSelect" onchange="loadStoryBuild(this.value)">
+                    </select>
+                    <button class="btn btn-sm" onclick="deleteCurrentStoryBuild()" title="Delete this build" style="color: var(--red);">&times;</button>
+                </div>
+            </div>
+
+            <!-- Empty state -->
+            <div class="story-empty" id="storyEmpty">
+                <div class="story-empty-text">Describe a story and the AI will build your first cut</div>
+            </div>
+
+            <!-- Loading state -->
+            <div class="story-loading" id="storyLoading" style="display:none;">
+                <div class="spinner" style="margin: 0 auto 1rem;"></div>
+                <p>Building your story...</p>
+            </div>
+
+            <!-- Sequence container (vertical timeline) -->
+            <div class="story-sequence" id="storySequence" style="display:none;">
+            </div>
+
+            <!-- Action buttons -->
+            <div class="story-actions" id="storyActions" style="display:none;">
+                <button class="btn btn-primary" onclick="exportStoryFCPXML()">Export to FCPX</button>
+                <button class="btn btn-green" onclick="addAllStoryClips()">Add All to Clips</button>
+                <button class="btn" onclick="rebuildStory()">Rebuild</button>
+            </div>
+        </div>
+
+        <!-- Input bar (always visible) -->
+        <div class="story-input-area">
+            <input type="text" class="story-input" id="storyInput"
+                   placeholder="Build me a 3-minute story about her journey from athlete to coach..."
+                   onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); buildStory(); }">
+            <button class="btn btn-primary story-build-btn" id="storyBuildBtn" onclick="buildStory()">Build</button>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- Export Tab -->
     <div class="tab-content" id="tab-export">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
@@ -490,15 +559,15 @@
 <script>
 // ── Theme Toggle ──
 function toggleTheme() {
-    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    const current = document.documentElement.getAttribute('data-theme') || 'light';
     const next = current === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('doza-theme', next);
 }
-// Restore saved theme
+// Restore saved theme (default: light)
 (function() {
     const saved = localStorage.getItem('doza-theme');
-    if (saved) document.documentElement.setAttribute('data-theme', saved);
+    document.documentElement.setAttribute('data-theme', saved || 'light');
 })();
 
 const PROJECT_ID = '{{ project.id }}';
@@ -507,9 +576,33 @@ const PROJECT_IDS = {{ active_ids | tojson }};
 const PROJECTS_META = {{ projects_meta | tojson }};
 const IS_MULTI = {{ 'true' if is_multi else 'false' }};
 const IS_SHARED = {{ 'true' if is_shared else 'false' }};
+const SHARED_TABS = {{ (shared_tabs or {})|tojson if is_shared else '{}' }};
 
 // For multi-project, chat/labels use combined ID string
 const COMBINED_ID = PROJECT_IDS.join(',');
+
+// Hide tab content for tabs not shared, activate first visible tab
+if (IS_SHARED && Object.keys(SHARED_TABS).length > 0) {
+    const allTabNames = ['transcript', 'clips', 'analysis', 'chat', 'story', 'export'];
+    let firstVisible = null;
+    allTabNames.forEach(name => {
+        if (SHARED_TABS[name] === false) {
+            const content = document.getElementById('tab-' + name);
+            if (content) content.remove();
+        } else if (!firstVisible) {
+            firstVisible = name;
+        }
+    });
+    // Make sure first visible tab is active
+    if (firstVisible) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        const firstBtn = document.querySelector(`.tab[onclick*="'${firstVisible}'"]`);
+        const firstContent = document.getElementById('tab-' + firstVisible);
+        if (firstBtn) firstBtn.classList.add('active');
+        if (firstContent) firstContent.classList.add('active');
+    }
+}
 
 // Project selector
 function toggleProjectDropdown() {
@@ -547,6 +640,9 @@ function switchTab(tab) {
     if (toolbar) {
         toolbar.style.display = (tab === 'transcript' || tab === 'clips') ? '' : 'none';
     }
+
+    // Load story builds when switching to story tab
+    if (tab === 'story') loadStoryBuilds();
 }
 
 // ── Audio Player ──
@@ -1412,6 +1508,7 @@ function renderClipsTab() {
                     <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
                 </button>
                 <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
+                <button class="cc-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}')" title="Add to Story Builder" style="font-size:11px;padding:2px 6px;">+ Story</button>
             </div>`;
         }
 
@@ -1424,6 +1521,7 @@ function renderClipsTab() {
             <div class="clip-card-meta">
                 <span class="clip-card-dot" style="background: var(--${colorVar});"></span>
                 <span class="clip-card-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</span>
+                <button class="cc-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}')" title="Add to Story Builder" style="font-size:11px;padding:2px 8px;">+ Story</button>
                 <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
             </div>
             <div class="clip-card-player">
@@ -1858,12 +1956,87 @@ function formatSRT(seconds) {
 }
 
 // ── Share Link ──
-async function copyShareLink() {
-    const shareBtn = document.querySelector('[onclick="copyShareLink()"]');
-    if (shareBtn) { shareBtn.disabled = true; shareBtn.textContent = 'Starting tunnel...'; }
+function copyShareLink() {
+    showShareSettings();
+}
 
+function showShareSettings() {
+    let overlay = document.getElementById('shareOverlay');
+    if (overlay) overlay.remove();
+
+    overlay = document.createElement('div');
+    overlay.id = 'shareOverlay';
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 480px;">
+            <h2 style="margin-bottom: 0.25rem;">Share Project</h2>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Choose which tabs your client can see.</p>
+            <div id="shareTabToggles" style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.25rem;">
+                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_transcript" checked><span>Transcript</span></label>
+                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_clips" checked><span>Clips</span></label>
+                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_analysis" checked><span>AI Analysis</span></label>
+                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_chat" checked><span>Chat</span></label>
+                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_story" checked><span>Story Builder</span></label>
+                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_export" checked><span>Export</span></label>
+            </div>
+            <p style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1rem; padding: 0.5rem 0.65rem; background: var(--bg-secondary); border-radius: var(--radius); line-height: 1.4;">Keep Doza Assist open while sharing — the link only works while the app is running on your machine.</p>
+            <div id="shareLinkArea" style="display: none; margin-bottom: 0.75rem;">
+                <div style="display: flex; gap: 0.5rem;">
+                    <input type="text" class="form-input" id="shareUrlInput" readonly style="font-family: var(--mono); font-size: 0.8rem;">
+                    <button class="btn btn-primary" onclick="doShareCopy()" style="white-space: nowrap;">Copy Link</button>
+                </div>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+                <button class="btn btn-sm" onclick="document.getElementById('shareOverlay').classList.remove('active')">Cancel</button>
+                <button class="btn btn-primary" id="shareGenerateBtn" onclick="generateShareLink()">Generate Link</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    // Load existing settings
+    fetch(`/project/${PROJECT_ID}/share-settings`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.shared_tabs) {
+                for (const [tab, on] of Object.entries(data.shared_tabs)) {
+                    const cb = document.getElementById('shareToggle_' + tab);
+                    if (cb) cb.checked = on;
+                }
+            }
+        })
+        .catch(() => {});
+}
+
+async function generateShareLink() {
+    const btn = document.getElementById('shareGenerateBtn');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+
+    // Gather toggle states
+    const shared_tabs = {};
+    for (const tab of ['transcript', 'clips', 'analysis', 'chat', 'story', 'export']) {
+        const cb = document.getElementById('shareToggle_' + tab);
+        shared_tabs[tab] = cb ? cb.checked : true;
+    }
+
+    // Save settings
     try {
-        // Check if tunnel is already running
+        await fetch(`/project/${PROJECT_ID}/share-settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ shared_tabs }),
+        });
+    } catch (err) {
+        showToast('Failed to save share settings', true);
+        btn.disabled = false;
+        btn.textContent = 'Generate Link';
+        return;
+    }
+
+    btn.textContent = 'Starting tunnel...';
+
+    // Start tunnel
+    try {
         let res = await fetch('/tunnel/status');
         let data = await res.json();
 
@@ -1874,41 +2047,25 @@ async function copyShareLink() {
 
         if (data.url) {
             const shareUrl = data.url + '/share/' + PROJECT_ID;
-            showShareResult(shareUrl);
+            showShareUrl(shareUrl);
         } else {
             showToast('Error: ' + (data.error || 'Could not start tunnel'), true);
         }
     } catch (err) {
         const url = window.location.origin + '/share/' + PROJECT_ID;
-        showShareResult(url);
+        showShareUrl(url);
     }
 
-    if (shareBtn) { shareBtn.disabled = false; shareBtn.textContent = 'Share'; }
+    btn.disabled = false;
+    btn.textContent = 'Generate Link';
 }
 
-function showShareResult(url) {
-    // Show a mini modal with the URL + a copy button (user click = valid gesture for clipboard)
-    let overlay = document.getElementById('shareOverlay');
-    if (!overlay) {
-        overlay = document.createElement('div');
-        overlay.id = 'shareOverlay';
-        overlay.className = 'modal-overlay active';
-        overlay.innerHTML = `
-            <div class="modal" style="max-width: 520px;">
-                <h2 style="margin-bottom: 0.5rem;">Share Link</h2>
-                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Send this link to your client. They'll see the full project with transcript, audio player, and highlighting tools.</p>
-                <div style="display: flex; gap: 0.5rem;">
-                    <input type="text" class="form-input" id="shareUrlInput" readonly style="font-family: var(--mono); font-size: 0.8rem;">
-                    <button class="btn btn-primary" onclick="doShareCopy()" style="white-space: nowrap;">Copy Link</button>
-                </div>
-                <div style="margin-top: 0.75rem; text-align: right;">
-                    <button class="btn btn-sm" onclick="document.getElementById('shareOverlay').classList.remove('active')">Close</button>
-                </div>
-            </div>`;
-        document.body.appendChild(overlay);
+function showShareUrl(url) {
+    const area = document.getElementById('shareLinkArea');
+    if (area) {
+        area.style.display = 'block';
+        document.getElementById('shareUrlInput').value = url;
     }
-    document.getElementById('shareUrlInput').value = url;
-    overlay.classList.add('active');
 }
 
 function doShareCopy() {
@@ -2037,6 +2194,800 @@ function showToast(msg, isError = false) {
     toast.classList.toggle('error', isError);
     toast.classList.add('show');
     setTimeout(() => toast.classList.remove('show'), 5000);
+}
+
+// ── Story Builder ──
+let storyBuilds = [];
+let currentBuildId = null;
+let storyDragItem = null;
+
+async function loadStoryBuilds() {
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/story/builds`);
+        const data = await res.json();
+        storyBuilds = data.builds || [];
+        updateStoryBuildSelect();
+        if (storyBuilds.length > 0 && !currentBuildId) {
+            loadStoryBuild(storyBuilds[storyBuilds.length - 1].id);
+        }
+    } catch (err) { console.error('Failed to load story builds:', err); }
+}
+
+function updateStoryBuildSelect() {
+    const sel = document.getElementById('storyBuildSelect');
+    if (!sel) return;
+    sel.innerHTML = storyBuilds.map(b =>
+        `<option value="${b.id}" ${b.id === currentBuildId ? 'selected' : ''}>${escapeHtml(b.story_title)} (${new Date(b.created_at).toLocaleDateString()})</option>`
+    ).join('');
+}
+
+function loadStoryBuild(buildId) {
+    const build = storyBuilds.find(b => b.id === buildId);
+    if (!build) return;
+    currentBuildId = buildId;
+    updateStoryBuildSelect();
+    renderStorySequence(build);
+}
+
+async function buildStory() {
+    const input = document.getElementById('storyInput');
+    const message = input.value.trim();
+    if (!message) return;
+
+    const btn = document.getElementById('storyBuildBtn');
+    input.disabled = true;
+    btn.disabled = true;
+
+    document.getElementById('storyEmpty').style.display = 'none';
+    document.getElementById('storySequence').style.display = 'none';
+    document.getElementById('storyActions').style.display = 'none';
+    document.getElementById('storyLoading').style.display = 'block';
+
+    try {
+        const storyAbort = new AbortController();
+        const storyTimeout = setTimeout(() => storyAbort.abort(), 600000); // 10 min timeout
+        const res = await fetch(`/project/${PROJECT_ID}/story/build`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message }),
+            signal: storyAbort.signal,
+        });
+        clearTimeout(storyTimeout);
+        const data = await res.json();
+        document.getElementById('storyLoading').style.display = 'none';
+
+        if (data.build) {
+            storyBuilds.push(data.build);
+            currentBuildId = data.build.id;
+            updateStoryBuildSelect();
+            renderStorySequence(data.build);
+            showToast('Story built!');
+        } else {
+            showToast('Error: ' + (data.error || 'Failed to build story'), true);
+            if (storyBuilds.length === 0) document.getElementById('storyEmpty').style.display = '';
+        }
+    } catch (err) {
+        document.getElementById('storyLoading').style.display = 'none';
+        const msg = err.name === 'AbortError'
+            ? 'Request timed out. The AI may be processing a long transcript — try again.'
+            : err.message;
+        showToast('Error: ' + msg, true);
+        if (storyBuilds.length === 0) document.getElementById('storyEmpty').style.display = '';
+    }
+
+    input.disabled = false;
+    btn.disabled = false;
+    input.focus();
+}
+
+function renderStorySequence(build) {
+    const container = document.getElementById('storySequence');
+    const topbar = document.getElementById('storyTopbar');
+    const actions = document.getElementById('storyActions');
+    const empty = document.getElementById('storyEmpty');
+
+    if (!build || !build.clips || build.clips.length === 0) {
+        container.style.display = 'none';
+        actions.style.display = 'none';
+        topbar.style.display = 'none';
+        empty.style.display = '';
+        return;
+    }
+
+    empty.style.display = 'none';
+    container.style.display = '';
+    actions.style.display = '';
+    topbar.style.display = '';
+
+    // Stats
+    let totalDuration = 0;
+    build.clips.forEach(clip => {
+        const s = parseTc(clip.start_time);
+        const e = parseTc(clip.end_time);
+        if (e > s) totalDuration += (e - s);
+    });
+
+    document.getElementById('storyClipCount').textContent = build.clips.length + ' clip' + (build.clips.length !== 1 ? 's' : '');
+    document.getElementById('storyTotalDuration').textContent = fmtTime(totalDuration);
+    document.getElementById('storyPromptDisplay').textContent = build.prompt || '';
+
+    container.innerHTML = build.clips.map((clip, idx) => {
+        const start = parseTc(clip.start_time);
+        const end = parseTc(clip.end_time);
+        const duration = Math.max(0, end - start);
+        const safeTitle = escapeHtml(clip.title || 'Untitled');
+        const safeNote = escapeHtml(clip.editorial_note || '');
+        const safeTranscript = escapeHtml(clip.transcript || '');
+        const clipUid = `story_${idx}`;
+
+        return `<div class="story-card" draggable="true" data-idx="${idx}" data-start="${start}" data-end="${end}"
+                     ondragstart="storyDragStart(event)" ondragover="storyDragOver(event)" ondragenter="storyDragEnter(event)" ondragleave="storyDragLeave(event)" ondrop="storyDrop(event)" ondragend="storyDragEnd(event)">
+            <div class="story-card-grip" title="Drag to reorder">
+                <svg viewBox="0 0 10 16" fill="currentColor" width="10" height="16"><circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="3" cy="6" r="1.2"/><circle cx="7" cy="6" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="14" r="1.2"/><circle cx="7" cy="14" r="1.2"/></svg>
+            </div>
+            <div class="story-card-number">${idx + 1}</div>
+            <div class="story-card-body">
+                <div class="story-card-header">
+                    <span class="story-card-title">${safeTitle}</span>
+                    <span class="story-card-duration">${formatDuration(duration)}</span>
+                    <button class="story-card-remove" onclick="removeStoryClip(${idx})" title="Remove">&times;</button>
+                </div>
+                <div class="story-card-meta">
+                    <span class="story-card-tc">${fmtTime(start)} - ${fmtTime(end)}</span>
+                </div>
+                <div class="story-card-note">${safeNote}</div>
+                <div class="story-card-player">
+                    <button class="clip-play-btn story-play-btn" onclick="playStoryClip('${clipUid}', ${start}, ${end}, this)">
+                        <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                        <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                    </button>
+                    <div class="clip-card-progress" onclick="scrubStoryClip(event, '${clipUid}', ${start}, ${end})">
+                        <div class="clip-card-progress-fill" id="sfill_${clipUid}"></div>
+                    </div>
+                </div>
+                <div class="story-card-expand" onclick="this.closest('.story-card').classList.toggle('story-expanded')">
+                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg>
+                    Transcript
+                </div>
+                <div class="story-card-transcript">${safeTranscript}</div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// Drag and drop for story cards
+function storyDragStart(e) {
+    storyDragItem = e.currentTarget;
+    e.currentTarget.classList.add('story-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', e.currentTarget.dataset.idx);
+}
+
+function storyDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+}
+
+function storyDragEnter(e) {
+    e.preventDefault();
+    const card = e.target.closest('.story-card');
+    if (card && card !== storyDragItem) card.classList.add('story-drag-over');
+}
+
+function storyDragLeave(e) {
+    const card = e.target.closest('.story-card');
+    if (card) card.classList.remove('story-drag-over');
+}
+
+function storyDrop(e) {
+    e.preventDefault();
+    const card = e.target.closest('.story-card');
+    if (!card || !storyDragItem || card === storyDragItem) return;
+    card.classList.remove('story-drag-over');
+
+    const fromIdx = parseInt(storyDragItem.dataset.idx);
+    const toIdx = parseInt(card.dataset.idx);
+
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build) return;
+
+    // Reorder clips
+    const [moved] = build.clips.splice(fromIdx, 1);
+    build.clips.splice(toIdx, 0, moved);
+
+    // Re-number
+    build.clips.forEach((c, i) => c.order = i + 1);
+
+    renderStorySequence(build);
+    saveStoryBuild(build);
+}
+
+function storyDragEnd(e) {
+    e.currentTarget.classList.remove('story-dragging');
+    document.querySelectorAll('.story-drag-over').forEach(el => el.classList.remove('story-drag-over'));
+    storyDragItem = null;
+}
+
+function removeStoryClip(idx) {
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build) return;
+    build.clips.splice(idx, 1);
+    build.clips.forEach((c, i) => c.order = i + 1);
+    renderStorySequence(build);
+    saveStoryBuild(build);
+}
+
+async function saveStoryBuild(build) {
+    try {
+        await fetch(`/project/${PROJECT_ID}/story/builds/${build.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clips: build.clips, story_title: build.story_title }),
+        });
+    } catch (err) { console.error('Failed to save story build:', err); }
+}
+
+async function deleteCurrentStoryBuild() {
+    if (!currentBuildId) return;
+    if (!confirm('Delete this story build?')) return;
+    try {
+        await fetch(`/project/${PROJECT_ID}/story/builds/${currentBuildId}`, { method: 'DELETE' });
+        storyBuilds = storyBuilds.filter(b => b.id !== currentBuildId);
+        currentBuildId = null;
+        if (storyBuilds.length > 0) {
+            loadStoryBuild(storyBuilds[storyBuilds.length - 1].id);
+        } else {
+            document.getElementById('storySequence').style.display = 'none';
+            document.getElementById('storyActions').style.display = 'none';
+            document.getElementById('storyTopbar').style.display = 'none';
+            document.getElementById('storyEmpty').style.display = '';
+        }
+        updateStoryBuildSelect();
+        showToast('Build deleted');
+    } catch (err) { showToast('Error: ' + err.message, true); }
+}
+
+function rebuildStory() {
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (build) {
+        document.getElementById('storyInput').value = build.prompt || '';
+    }
+    buildStory();
+}
+
+function addAllStoryClips() {
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build || !build.clips) return;
+    let count = 0;
+    build.clips.forEach(clip => {
+        const start = parseTc(clip.start_time);
+        const end = parseTc(clip.end_time);
+        const title = clip.title || 'Story Clip';
+        const exists = labelSections.some(s => Math.abs(s.start - start) < 0.5);
+        if (!exists) {
+            const id = ++sectionIdCounter;
+            labelSections.push({ id, start, end, color: 'purple', text: title });
+            count++;
+        }
+    });
+    if (count > 0) {
+        renderAllHighlights();
+        updateSelectCount();
+        saveLabels();
+        renderClipsTab();
+        showToast(`Added ${count} clips to library`);
+    } else {
+        showToast('All clips already in library');
+    }
+}
+
+async function exportStoryFCPXML() {
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build || !build.clips || build.clips.length === 0) {
+        showToast('No clips to export');
+        return;
+    }
+
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/story/export`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clips: build.clips, story_title: build.story_title, framerate }),
+        });
+
+        if (res.ok) {
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = getFilenameFromResponse(res) || 'story.fcpxml';
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast('Story exported to FCPX!');
+        } else {
+            showToast('Export failed', true);
+        }
+    } catch (err) { showToast('Export error: ' + err.message, true); }
+}
+
+// Story clip playback
+let activeStoryClip = null;
+
+function playStoryClip(uid, start, end, btn) {
+    if (!audio) return;
+    if (activeStoryClip === uid && !audio.paused) {
+        audio.pause();
+        _updateStoryClipIcons();
+        return;
+    }
+    if (activeStoryClip === uid && audio.paused) {
+        audio.play();
+        _updateStoryClipIcons();
+        return;
+    }
+    activeStoryClip = uid;
+    audio.currentTime = start;
+    audio.play();
+    _updateStoryClipIcons();
+}
+
+function scrubStoryClip(e, uid, start, end) {
+    if (!audio) return;
+    const bar = e.currentTarget;
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    audio.currentTime = start + pct * (end - start);
+    activeStoryClip = uid;
+    audio.play();
+    _updateStoryClipIcons();
+}
+
+function _updateStoryClipIcons() {
+    document.querySelectorAll('.story-play-btn').forEach(btn => {
+        btn.querySelector('.clip-icon-play').style.display = '';
+        btn.querySelector('.clip-icon-pause').style.display = 'none';
+    });
+    if (activeStoryClip && !audio.paused) {
+        const fill = document.getElementById('sfill_' + activeStoryClip);
+        if (fill) {
+            const btn = fill.closest('.story-card-player')?.querySelector('.story-play-btn');
+            if (btn) {
+                btn.querySelector('.clip-icon-play').style.display = 'none';
+                btn.querySelector('.clip-icon-pause').style.display = '';
+            }
+        }
+    }
+}
+
+// Story clip progress tracking + Play All
+let storyPlayAllActive = false;
+let storyPlayAllIndex = -1;
+
+if (audio) {
+    audio.addEventListener('timeupdate', () => {
+        if (!activeStoryClip) return;
+        const fill = document.getElementById('sfill_' + activeStoryClip);
+        if (!fill) return;
+        const card = fill.closest('.story-card');
+        if (!card) return;
+        const start = parseFloat(card.dataset.start);
+        const end = parseFloat(card.dataset.end);
+
+        if (audio.currentTime >= end) {
+            fill.style.width = '100%';
+
+            if (storyPlayAllActive) {
+                // Advance to next clip
+                setTimeout(() => { fill.style.width = '0%'; }, 200);
+                storyPlayAllIndex++;
+                const cards = document.querySelectorAll('.story-card');
+                if (storyPlayAllIndex < cards.length) {
+                    const next = cards[storyPlayAllIndex];
+                    const nextStart = parseFloat(next.dataset.start);
+                    const nextEnd = parseFloat(next.dataset.end);
+                    const nextIdx = parseInt(next.dataset.idx);
+                    activeStoryClip = 'story_' + nextIdx;
+                    _updateStoryClipIcons();
+                    _highlightPlayingCard(storyPlayAllIndex);
+                    audio.currentTime = nextStart;
+                    // Don't pause — keep playing
+                } else {
+                    // Finished all clips
+                    stopPlayAllStory();
+                }
+            } else {
+                audio.pause();
+                activeStoryClip = null;
+                _updateStoryClipIcons();
+                setTimeout(() => { fill.style.width = '0%'; }, 400);
+            }
+        } else if (audio.currentTime >= start) {
+            const pct = ((audio.currentTime - start) / (end - start)) * 100;
+            fill.style.width = pct + '%';
+        }
+    });
+}
+
+function togglePlayAllStory() {
+    if (storyPlayAllActive) {
+        if (audio.paused) {
+            audio.play();
+            _updatePlayAllBtn(true);
+        } else {
+            audio.pause();
+            _updatePlayAllBtn(false);
+        }
+        return;
+    }
+    startPlayAllStory();
+}
+
+function startPlayAllStory() {
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build || !build.clips || build.clips.length === 0) return;
+
+    storyPlayAllActive = true;
+    storyPlayAllIndex = 0;
+
+    const cards = document.querySelectorAll('.story-card');
+    if (cards.length === 0) return;
+
+    const firstCard = cards[0];
+    const start = parseFloat(firstCard.dataset.start);
+    const idx = parseInt(firstCard.dataset.idx);
+
+    activeStoryClip = 'story_' + idx;
+    _updateStoryClipIcons();
+    _highlightPlayingCard(0);
+    _updatePlayAllBtn(true);
+
+    audio.currentTime = start;
+    audio.play();
+}
+
+function stopPlayAllStory() {
+    storyPlayAllActive = false;
+    storyPlayAllIndex = -1;
+    activeStoryClip = null;
+    audio.pause();
+    _updateStoryClipIcons();
+    _updatePlayAllBtn(false);
+    document.querySelectorAll('.story-card.story-card-active').forEach(c => c.classList.remove('story-card-active'));
+    // Reset all fills
+    document.querySelectorAll('[id^="sfill_story_"]').forEach(f => { f.style.width = '0%'; });
+}
+
+function _highlightPlayingCard(idx) {
+    document.querySelectorAll('.story-card.story-card-active').forEach(c => c.classList.remove('story-card-active'));
+    const cards = document.querySelectorAll('.story-card');
+    if (cards[idx]) {
+        cards[idx].classList.add('story-card-active');
+        cards[idx].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+}
+
+function _updatePlayAllBtn(playing) {
+    const playIcon = document.getElementById('storyPlayAllIcon');
+    const pauseIcon = document.getElementById('storyPauseAllIcon');
+    const label = document.getElementById('storyPlayAllLabel');
+    if (playIcon) playIcon.style.display = playing ? 'none' : '';
+    if (pauseIcon) pauseIcon.style.display = playing ? '' : 'none';
+    if (label) label.textContent = storyPlayAllActive ? (playing ? 'Pause' : 'Resume') : 'Play All';
+}
+
+// Stop play-all when user manually plays a single clip
+const _origPlayStoryClip = playStoryClip;
+playStoryClip = function(uid, start, end, btn) {
+    if (storyPlayAllActive) stopPlayAllStory();
+    _origPlayStoryClip(uid, start, end, btn);
+};
+
+// ── Client Comments ──
+let clientComments = [];
+let clientName = localStorage.getItem('doza-client-name') || '';
+let commentPopover = null;
+let commentsLastSeen = parseInt(localStorage.getItem('doza-comments-seen-' + PROJECT_ID) || '0');
+
+async function loadComments() {
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/comments`);
+        const data = await res.json();
+        clientComments = data.comments || [];
+        renderCommentMarkers();
+        updateCommentBadge();
+        if (!IS_SHARED) renderClientNotesPanel();
+    } catch (err) { console.error('Failed to load comments:', err); }
+}
+
+function updateCommentBadge() {
+    const label = document.getElementById('transcriptTabLabel');
+    if (!label) return;
+    const newCount = clientComments.filter(c => {
+        return new Date(c.created_at).getTime() > commentsLastSeen && !c.addressed;
+    }).length;
+    if (newCount > 0) {
+        label.textContent = `Transcript (${newCount})`;
+    } else {
+        label.textContent = 'Transcript';
+    }
+}
+
+function renderCommentMarkers() {
+    // Remove old markers
+    document.querySelectorAll('.comment-marker').forEach(el => el.remove());
+    document.querySelectorAll('.tw-commented').forEach(el => el.classList.remove('tw-commented'));
+
+    clientComments.forEach(comment => {
+        if (comment.addressed && IS_SHARED) return;
+
+        const startTime = parseTc(comment.start_time);
+        const endTime = parseTc(comment.end_time);
+
+        // Highlight commented words
+        allWords.forEach(w => {
+            const ws = parseFloat(w.dataset.s);
+            const we = parseFloat(w.dataset.e);
+            if (we > startTime && ws < endTime) {
+                w.classList.add('tw-commented');
+                if (!w.dataset.commentId) w.dataset.commentId = comment.id;
+            }
+        });
+
+        // Add marker dot to the paragraph
+        const paraBlocks = document.querySelectorAll('.para-block');
+        for (const block of paraBlocks) {
+            const blockStart = parseFloat(block.dataset.start);
+            const words = block.querySelectorAll('.tw[data-s]');
+            if (words.length === 0) continue;
+            const blockEnd = parseFloat(words[words.length - 1].dataset.e);
+            if (startTime >= blockStart && startTime < blockEnd) {
+                const marker = document.createElement('div');
+                marker.className = 'comment-marker' + (comment.addressed ? ' comment-addressed' : '');
+                marker.dataset.commentId = comment.id;
+                marker.title = `${comment.client_name}: ${comment.comment_text}`;
+                marker.onclick = (e) => { e.stopPropagation(); showCommentPopover(comment, marker); };
+                block.querySelector('.para-header').appendChild(marker);
+                break;
+            }
+        }
+    });
+}
+
+function showCommentPopover(comment, anchor) {
+    closeCommentPopover();
+    const pop = document.createElement('div');
+    pop.className = 'comment-popover';
+    const isAddressed = comment.addressed ? ' comment-pop-addressed' : '';
+    pop.innerHTML = `<div class="comment-pop-inner${isAddressed}">
+        <div class="comment-pop-name">${escapeHtml(comment.client_name)}</div>
+        <div class="comment-pop-time">${new Date(comment.created_at).toLocaleString()}</div>
+        <div class="comment-pop-text">${escapeHtml(comment.comment_text)}</div>
+        <div class="comment-pop-quote">"${escapeHtml(comment.selected_text)}"</div>
+        <div class="comment-pop-actions">
+            <button class="btn btn-sm" onclick="jumpTo(${parseTc(comment.start_time)})">Play</button>
+            ${!IS_SHARED ? `<button class="btn btn-sm" onclick="toggleAddressComment('${comment.id}')">${comment.addressed ? 'Unaddress' : 'Address'}</button>
+            <button class="btn btn-sm" onclick="deleteComment('${comment.id}')" style="color:var(--red);">Delete</button>` : ''}
+            <button class="btn btn-sm" onclick="closeCommentPopover()">Close</button>
+        </div>
+    </div>`;
+
+    document.body.appendChild(pop);
+    commentPopover = pop;
+
+    // Position near anchor
+    const rect = anchor.getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.top = (rect.bottom + 8) + 'px';
+    pop.style.left = Math.min(rect.left, window.innerWidth - 320) + 'px';
+    pop.style.zIndex = '500';
+}
+
+function closeCommentPopover() {
+    if (commentPopover) {
+        commentPopover.remove();
+        commentPopover = null;
+    }
+}
+
+document.addEventListener('click', (e) => {
+    if (commentPopover && !commentPopover.contains(e.target) && !e.target.closest('.comment-marker')) {
+        closeCommentPopover();
+    }
+});
+
+// Shared view: comment on text selection
+if (IS_SHARED && transcriptContainer) {
+    transcriptContainer.addEventListener('mouseup', (e) => {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
+
+        // Get time range from selected words
+        const range = sel.getRangeAt(0);
+        const container = range.commonAncestorContainer.nodeType === 1
+            ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
+        const selectedWords = [];
+        allWords.forEach(w => {
+            if (sel.containsNode(w, true)) selectedWords.push(w);
+        });
+
+        if (selectedWords.length === 0) return;
+
+        const startTime = parseFloat(selectedWords[0].dataset.s);
+        const endTime = parseFloat(selectedWords[selectedWords.length - 1].dataset.e);
+        const selectedText = selectedWords.map(w => w.textContent).join('').trim();
+
+        showAddCommentPopover(e.clientX, e.clientY, selectedText, startTime, endTime);
+    });
+}
+
+function showAddCommentPopover(x, y, selectedText, startTime, endTime) {
+    closeCommentPopover();
+    const pop = document.createElement('div');
+    pop.className = 'comment-popover comment-add-popover';
+    pop.innerHTML = `<div class="comment-pop-inner">
+        <div class="comment-pop-quote" style="margin-bottom:0.5rem;">"${escapeHtml(selectedText.substring(0, 100))}"</div>
+        ${!clientName ? '<input type="text" class="form-input comment-name-input" id="commentNameInput" placeholder="Your name" style="margin-bottom:0.5rem;">' : ''}
+        <textarea class="form-input comment-text-input" id="commentTextInput" placeholder="Leave a note..." rows="2"></textarea>
+        <div class="comment-pop-actions" style="margin-top:0.5rem;">
+            <button class="btn btn-sm btn-primary" onclick="submitComment('${startTime}','${endTime}',\`${selectedText.replace(/`/g, "'").replace(/\\/g, '\\\\')}\`)">Save</button>
+            <button class="btn btn-sm" onclick="closeCommentPopover()">Cancel</button>
+        </div>
+    </div>`;
+
+    document.body.appendChild(pop);
+    commentPopover = pop;
+
+    pop.style.position = 'fixed';
+    pop.style.top = Math.min(y + 10, window.innerHeight - 250) + 'px';
+    pop.style.left = Math.min(x, window.innerWidth - 320) + 'px';
+    pop.style.zIndex = '500';
+
+    const textInput = document.getElementById('commentTextInput');
+    if (textInput) setTimeout(() => textInput.focus(), 50);
+}
+
+async function submitComment(startTime, endTime, selectedText) {
+    const nameInput = document.getElementById('commentNameInput');
+    const textInput = document.getElementById('commentTextInput');
+
+    if (nameInput) {
+        clientName = nameInput.value.trim();
+        if (!clientName) { showToast('Please enter your name'); return; }
+        localStorage.setItem('doza-client-name', clientName);
+    }
+
+    const commentText = textInput ? textInput.value.trim() : '';
+    if (!commentText) { showToast('Please enter a comment'); return; }
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/comments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                client_name: clientName,
+                comment_text: commentText,
+                selected_text: selectedText,
+                start_time: startTime,
+                end_time: endTime,
+            }),
+        });
+        const data = await res.json();
+        if (data.comment) {
+            clientComments.push(data.comment);
+            renderCommentMarkers();
+            closeCommentPopover();
+            window.getSelection().removeAllRanges();
+            showToast('Comment saved');
+        } else {
+            showToast('Error: ' + (data.error || 'Failed to save'), true);
+        }
+    } catch (err) { showToast('Error: ' + err.message, true); }
+}
+
+async function toggleAddressComment(commentId) {
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/comments/${commentId}/address`, { method: 'PUT' });
+        const data = await res.json();
+        const comment = clientComments.find(c => c.id === commentId);
+        if (comment) comment.addressed = data.addressed;
+        renderCommentMarkers();
+        updateCommentBadge();
+        if (!IS_SHARED) renderClientNotesPanel();
+        closeCommentPopover();
+        showToast(data.addressed ? 'Comment addressed' : 'Comment unaddressed');
+    } catch (err) { showToast('Error: ' + err.message, true); }
+}
+
+async function deleteComment(commentId) {
+    if (!confirm('Delete this comment?')) return;
+    try {
+        await fetch(`/project/${PROJECT_ID}/comments/${commentId}`, { method: 'DELETE' });
+        clientComments = clientComments.filter(c => c.id !== commentId);
+        renderCommentMarkers();
+        updateCommentBadge();
+        if (!IS_SHARED) renderClientNotesPanel();
+        closeCommentPopover();
+        showToast('Comment deleted');
+    } catch (err) { showToast('Error: ' + err.message, true); }
+}
+
+// Client Notes panel (editor view)
+function renderClientNotesPanel() {
+    let panel = document.getElementById('clientNotesPanel');
+    if (clientComments.length === 0) {
+        if (panel) panel.style.display = 'none';
+        return;
+    }
+
+    if (!panel) {
+        // Create the panel in the transcript tab
+        const transcriptTab = document.getElementById('tab-transcript');
+        if (!transcriptTab) return;
+        panel = document.createElement('div');
+        panel.id = 'clientNotesPanel';
+        panel.className = 'client-notes-panel';
+        transcriptTab.appendChild(panel);
+    }
+
+    panel.style.display = '';
+    const sorted = [...clientComments].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    panel.innerHTML = `<div class="client-notes-header">
+        <span class="card-title">Client Notes</span>
+        <span class="client-notes-count">${sorted.length}</span>
+        <button class="btn btn-sm" onclick="document.getElementById('clientNotesPanel').classList.toggle('collapsed')" style="margin-left:auto;">Toggle</button>
+    </div>
+    <div class="client-notes-list">
+        ${sorted.map(c => {
+            const isAddressed = c.addressed ? ' client-note-addressed' : '';
+            return `<div class="client-note${isAddressed}">
+                <div class="client-note-header">
+                    <span class="client-note-name">${escapeHtml(c.client_name)}</span>
+                    <span class="client-note-time">${new Date(c.created_at).toLocaleString()}</span>
+                    ${c.addressed ? '<span class="client-note-check">&#10003;</span>' : ''}
+                </div>
+                <div class="client-note-quote">"${escapeHtml(c.selected_text)}"</div>
+                <div class="client-note-text">${escapeHtml(c.comment_text)}</div>
+                <div class="client-note-actions">
+                    <button class="btn btn-sm" onclick="jumpTo(${parseTc(c.start_time)})">Play</button>
+                    <button class="btn btn-sm" onclick="toggleAddressComment('${c.id}')">${c.addressed ? 'Unaddress' : 'Address'}</button>
+                    <button class="btn btn-sm" onclick="deleteComment('${c.id}')" style="color:var(--red);">Delete</button>
+                </div>
+            </div>`;
+        }).join('')}
+    </div>`;
+
+    // Mark comments as seen
+    commentsLastSeen = Date.now();
+    localStorage.setItem('doza-comments-seen-' + PROJECT_ID, commentsLastSeen.toString());
+    updateCommentBadge();
+}
+
+// Load comments on page load
+loadComments();
+
+// "Add to Story Builder" function for clips in other tabs
+function addToStoryBuilder(start, end, title) {
+    if (!currentBuildId) {
+        showToast('Build a story first, then add clips to it');
+        return;
+    }
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build) return;
+
+    build.clips.push({
+        order: build.clips.length + 1,
+        title: title,
+        start_time: fmtTime(start),
+        end_time: fmtTime(end),
+        transcript: '',
+        editorial_note: 'Manually added from clip library',
+    });
+
+    saveStoryBuild(build);
+    showToast(`Added "${title}" to story`);
 }
 </script>
 

@@ -292,6 +292,55 @@ def _get_ollama_model():
     return 'gemma4:latest'
 
 
+def build_story(transcript, message, project_name="Interview"):
+    """
+    Build a narrative sequence from the transcript based on the user's description.
+    Returns a dict with story_title, target_duration, and clips array.
+    """
+    formatted = _format_transcript_for_ai(transcript, max_chars=12000)
+
+    system_prompt = """You are a story editor building a narrative sequence from interview transcript footage. The user will describe what kind of story or edit they want. Your job is to select and order clips from the transcript that form a coherent narrative.
+
+Rules:
+- Select clips that build a clear narrative arc: hook, rising action, emotional peak, resolution
+- Order them for maximum story impact, not chronological order unless that serves the story
+- Each clip should be 5-30 seconds long unless the moment requires more breathing room
+- Include 5-15 clips depending on the requested duration (roughly 3-4 clips per minute of final edit)
+- For each clip, provide: a short title, start timecode, end timecode, the transcript excerpt, and a one-sentence editorial note explaining why this clip is in this position
+- Be selective and opinionated. Don't include filler. Every clip should earn its place
+- If the user asks for a specific duration, respect it. Calculate total clip time and stay within range
+- CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end times. Use string format like "00:02:45"
+- Respond ONLY in valid JSON with this structure:
+{
+  "story_title": "suggested title for this sequence",
+  "target_duration": "estimated total duration",
+  "clips": [
+    {
+      "order": 1,
+      "title": "clip title",
+      "start_time": "00:00:00",
+      "end_time": "00:00:00",
+      "transcript": "the exact words from the transcript",
+      "editorial_note": "why this clip is here and what it does for the story"
+    }
+  ]
+}"""
+
+    prompt = f"""Build a narrative sequence from this interview transcript.
+
+PROJECT: {project_name}
+
+USER REQUEST: {message}
+
+TRANSCRIPT:
+{formatted}
+
+Return ONLY valid JSON. No markdown, no extra text."""
+
+    response = _call_ai(prompt, system_prompt)
+    return _parse_json_response(response)
+
+
 def _analyze_story(transcript_text, project_name):
     """Analyze transcript for documentary story structure."""
     system_prompt = """You are an expert documentary film editor.

@@ -882,6 +882,23 @@ def client_review(project_id):
     return redirect(f'/share/{project_id}')
 
 
+@app.route('/project/<project_id>/share-settings', methods=['GET', 'POST'])
+def save_share_settings(project_id):
+    """Get or save which tabs are visible in the shared view."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    if request.method == 'GET':
+        default_tabs = {'transcript': True, 'clips': True, 'analysis': True, 'chat': True, 'story': True, 'export': True}
+        return jsonify({'shared_tabs': project.get('shared_tabs', default_tabs)})
+
+    data = request.json or {}
+    project['shared_tabs'] = data.get('shared_tabs', {})
+    save_project(project_id, project)
+    return jsonify({'status': 'saved'})
+
+
 @app.route('/share/<project_id>')
 def shared_view(project_id):
     """Shared project view — full project experience, read-only."""
@@ -907,6 +924,10 @@ def shared_view(project_id):
     source_ext = os.path.splitext(project.get('source_path', '') or '')[1].lower()
     is_video = source_ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
 
+    # Tab visibility — default all on
+    default_tabs = {'transcript': True, 'clips': True, 'analysis': True, 'chat': True, 'story': True, 'export': True}
+    shared_tabs = project.get('shared_tabs', default_tabs)
+
     return render_template('project.html',
                            project=project,
                            projects=[project],
@@ -916,7 +937,8 @@ def shared_view(project_id):
                            paragraphs=paragraphs,
                            is_multi=False,
                            is_shared=True,
-                           is_video=is_video)
+                           is_video=is_video,
+                           shared_tabs=shared_tabs)
 
 
 @app.route('/project/<project_id>/clear', methods=['POST'])
@@ -1017,6 +1039,278 @@ def update_speaker_range(project_id):
     project['transcript']['segments'] = segments
     save_project(project_id, project)
     return jsonify({'status': 'updated'})
+
+
+# ── Story Builder ──────────────────────────────────────────────────
+
+@app.route('/project/<project_id>/story/build', methods=['POST'])
+def story_build(project_id):
+    """Build a narrative sequence from the transcript using AI."""
+    project = get_project(project_id)
+    if not project or not project.get('transcript'):
+        return jsonify({'error': 'No transcript available'}), 400
+
+    data = request.json or {}
+    message = data.get('message', '').strip()
+    if not message:
+        return jsonify({'error': 'No story description provided'}), 400
+
+    try:
+        from ai_analysis import build_story
+        result = build_story(
+            project['transcript'],
+            message=message,
+            project_name=project.get('name', 'Interview'),
+        )
+
+        # Save the build to story_builds.json
+        project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+        builds_path = os.path.join(project_dir, 'story_builds.json')
+
+        builds = []
+        if os.path.exists(builds_path):
+            with open(builds_path, 'r') as f:
+                builds = json.load(f)
+
+        build_entry = {
+            'id': str(uuid.uuid4())[:8],
+            'prompt': message,
+            'created_at': datetime.now().isoformat(),
+            'story_title': result.get('story_title', 'Untitled'),
+            'target_duration': result.get('target_duration', ''),
+            'clips': result.get('clips', []),
+        }
+        builds.append(build_entry)
+
+        with open(builds_path, 'w') as f:
+            json.dump(builds, f, indent=2)
+
+        return jsonify({'status': 'built', 'build': build_entry})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/project/<project_id>/story/builds')
+def story_list(project_id):
+    """List all story builds for a project."""
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    builds_path = os.path.join(project_dir, 'story_builds.json')
+
+    if not os.path.exists(builds_path):
+        return jsonify({'builds': []})
+
+    with open(builds_path, 'r') as f:
+        builds = json.load(f)
+
+    return jsonify({'builds': builds})
+
+
+@app.route('/project/<project_id>/story/builds/<build_id>', methods=['PUT'])
+def story_update(project_id, build_id):
+    """Update a story build (reorder clips, remove clips, etc.)."""
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    builds_path = os.path.join(project_dir, 'story_builds.json')
+
+    if not os.path.exists(builds_path):
+        return jsonify({'error': 'No builds found'}), 404
+
+    with open(builds_path, 'r') as f:
+        builds = json.load(f)
+
+    data = request.json or {}
+    for i, b in enumerate(builds):
+        if b['id'] == build_id:
+            if 'clips' in data:
+                builds[i]['clips'] = data['clips']
+            if 'story_title' in data:
+                builds[i]['story_title'] = data['story_title']
+            with open(builds_path, 'w') as f:
+                json.dump(builds, f, indent=2)
+            return jsonify({'status': 'updated', 'build': builds[i]})
+
+    return jsonify({'error': 'Build not found'}), 404
+
+
+@app.route('/project/<project_id>/story/builds/<build_id>', methods=['DELETE'])
+def story_delete(project_id, build_id):
+    """Delete a story build."""
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    builds_path = os.path.join(project_dir, 'story_builds.json')
+
+    if not os.path.exists(builds_path):
+        return jsonify({'error': 'No builds found'}), 404
+
+    with open(builds_path, 'r') as f:
+        builds = json.load(f)
+
+    builds = [b for b in builds if b['id'] != build_id]
+
+    with open(builds_path, 'w') as f:
+        json.dump(builds, f, indent=2)
+
+    return jsonify({'status': 'deleted'})
+
+
+@app.route('/project/<project_id>/story/export', methods=['POST'])
+def story_export(project_id):
+    """Export a story build as FCPXML timeline."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    from fcpxml_export import generate_story_fcpxml
+
+    data = request.json or {}
+    clips = data.get('clips', [])
+    story_title = data.get('story_title', 'Story')
+    framerate = data.get('framerate', 23.976)
+
+    if not clips:
+        return jsonify({'error': 'No clips in sequence'}), 400
+
+    def _to_seconds(val):
+        if isinstance(val, (int, float)):
+            return float(val)
+        val = str(val).strip()
+        if ':' in val:
+            parts = val.split(':')
+            if len(parts) == 3:
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+            elif len(parts) == 2:
+                return float(parts[0]) * 60 + float(parts[1])
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
+
+    # Convert clips to markers format
+    markers = []
+    for clip in clips:
+        markers.append({
+            'start': _to_seconds(clip.get('start_time', 0)),
+            'end': _to_seconds(clip.get('end_time', 0)),
+            'text': clip.get('title', 'Clip'),
+            'note': clip.get('editorial_note', ''),
+        })
+
+    source_path = project.get('source_path', project.get('filepath', ''))
+    media_duration = None
+    if project.get('transcript') and project['transcript'].get('duration'):
+        media_duration = project['transcript']['duration']
+
+    # Detect resolution
+    source_ext = os.path.splitext(source_path or '')[1].lower()
+    is_video = source_ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
+    width, height = 1920, 1080
+    if is_video and source_path and os.path.exists(source_path):
+        ffprobe = shutil.which('ffprobe')
+        if not ffprobe:
+            for candidate in ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe']:
+                if os.path.isfile(candidate):
+                    ffprobe = candidate
+                    break
+        if ffprobe:
+            try:
+                result = subprocess.run([
+                    ffprobe, '-v', 'quiet', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=width,height', '-of', 'csv=p=0', source_path
+                ], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and result.stdout.strip():
+                    parts = result.stdout.strip().split(',')
+                    if len(parts) >= 2:
+                        width, height = int(parts[0]), int(parts[1])
+            except Exception:
+                pass
+
+    fcpxml_content = generate_story_fcpxml(
+        markers=markers,
+        project_name=project['name'],
+        story_title=story_title,
+        framerate=framerate,
+        source_path=source_path,
+        media_duration=media_duration,
+        width=width,
+        height=height,
+    )
+
+    export_filename = f"{project['name'].strip()} - {story_title.strip()}.fcpxml".replace('/', '-')
+    export_path = os.path.join(app.config['EXPORTS_DIR'], export_filename)
+    with open(export_path, 'w') as f:
+        f.write(fcpxml_content)
+
+    return send_file(export_path, as_attachment=True, download_name=export_filename)
+
+
+# ── Client Comments ────────────────────────────────────────────────
+
+def _get_comments_path(project_id):
+    return os.path.join(app.config['PROJECTS_DIR'], project_id, 'client_comments.json')
+
+
+def _load_comments(project_id):
+    path = _get_comments_path(project_id)
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            return json.load(f)
+    return {'comments': []}
+
+
+def _save_comments(project_id, data):
+    path = _get_comments_path(project_id)
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+@app.route('/project/<project_id>/comments', methods=['GET'])
+def get_comments(project_id):
+    """Get all comments for a project."""
+    return jsonify(_load_comments(project_id))
+
+
+@app.route('/project/<project_id>/comments', methods=['POST'])
+def add_comment(project_id):
+    """Add a new comment (from shared or editor view)."""
+    data = request.json or {}
+    comment = {
+        'id': str(uuid.uuid4())[:8],
+        'client_name': data.get('client_name', 'Anonymous').strip(),
+        'comment_text': data.get('comment_text', '').strip(),
+        'selected_text': data.get('selected_text', '').strip(),
+        'start_time': data.get('start_time', ''),
+        'end_time': data.get('end_time', ''),
+        'created_at': datetime.now().isoformat(),
+        'addressed': False,
+    }
+
+    if not comment['comment_text']:
+        return jsonify({'error': 'Comment text required'}), 400
+
+    comments_data = _load_comments(project_id)
+    comments_data['comments'].append(comment)
+    _save_comments(project_id, comments_data)
+
+    return jsonify({'status': 'saved', 'comment': comment})
+
+
+@app.route('/project/<project_id>/comments/<comment_id>/address', methods=['PUT'])
+def address_comment(project_id, comment_id):
+    """Mark a comment as addressed (editor only)."""
+    comments_data = _load_comments(project_id)
+    for c in comments_data['comments']:
+        if c['id'] == comment_id:
+            c['addressed'] = not c.get('addressed', False)
+            _save_comments(project_id, comments_data)
+            return jsonify({'status': 'updated', 'addressed': c['addressed']})
+    return jsonify({'error': 'Comment not found'}), 404
+
+
+@app.route('/project/<project_id>/comments/<comment_id>', methods=['DELETE'])
+def delete_comment(project_id, comment_id):
+    """Delete a comment (editor only)."""
+    comments_data = _load_comments(project_id)
+    comments_data['comments'] = [c for c in comments_data['comments'] if c['id'] != comment_id]
+    _save_comments(project_id, comments_data)
+    return jsonify({'status': 'deleted'})
 
 
 # ── Cloudflare Tunnel for sharing ────────────────────────────────────

@@ -259,7 +259,8 @@ echo "  ╔═══════════════════════
 echo "  ║    Doza Assist — First Launch     ║"
 echo "  ╚═══════════════════════════════════╝"
 echo ""
-PYTHON_PATH=\$(bash "${APP_SRC}/setup_runner.sh" 2>&1 | tee /dev/stderr | tail -1)
+# setup_runner.sh: log messages go to stderr (visible in Terminal), python path goes to stdout
+PYTHON_PATH=\$(bash "${APP_SRC}/setup_runner.sh")
 echo "\$PYTHON_PATH" > "${PHASE1_RESULT}"
 if [ -n "\$PYTHON_PATH" ] && [ -x "\$PYTHON_PATH" ]; then
     echo ""
@@ -276,8 +277,16 @@ fi
 WRAPPER_EOF
     chmod +x "$PHASE1_WRAPPER"
 
-    # Open in Terminal and wait
-    /usr/bin/open -a Terminal -W "$PHASE1_WRAPPER"
+    # Open in Terminal and poll for completion (don't use -W, it waits for Terminal.app to quit)
+    /usr/bin/open -a Terminal "$PHASE1_WRAPPER"
+
+    # Wait for the result file to appear (up to 20 minutes)
+    for i in $(seq 1 240); do
+        if [ -f "$PHASE1_RESULT" ]; then
+            break
+        fi
+        sleep 5
+    done
 
     # Read the result
     if [ -f "$PHASE1_RESULT" ]; then

@@ -16,7 +16,7 @@ mkdir -p "$SUPPORT_DIR"
 # ── Logging ──
 log() {
     echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"
-    echo "$1"
+    echo "$1" >&2
 }
 
 # ── Detect Homebrew path ──

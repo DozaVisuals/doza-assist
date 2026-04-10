@@ -4,7 +4,7 @@
 # Usage:  bash install.sh          — normal install
 #         bash install.sh --clean  — wipe everything and start fresh
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 # ── Colors ──
 RED='\033[0;31m'
@@ -94,7 +94,7 @@ if ! xcode-select -p &>/dev/null; then
 
     xcode-select --install 2>/dev/null || true
 
-    read -p "Press Enter once the Command Line Tools install is complete... " _
+    read -rp "Press Enter once the Command Line Tools install is complete... " _
 
     if ! xcode-select -p &>/dev/null; then
         fail \
@@ -201,9 +201,11 @@ if ! command -v ffmpeg &>/dev/null; then
     log_raw "${YELLOW}ffmpeg not found.${RESET} Trying to install via Homebrew..."
 
     if command -v brew &>/dev/null; then
-        brew install ffmpeg >> "$LOG_FILE" 2>&1 && \
-            log_raw "${GREEN}✓ ffmpeg installed${RESET}" || \
+        if brew install ffmpeg >> "$LOG_FILE" 2>&1; then
+            log_raw "${GREEN}✓ ffmpeg installed${RESET}"
+        else
             log_raw "${YELLOW}⚠  ffmpeg install failed. You can install it later with: brew install ffmpeg${RESET}"
+        fi
     else
         log_raw "${YELLOW}⚠  Homebrew not found. Install ffmpeg manually: brew install ffmpeg${RESET}"
         log_raw "   ffmpeg is required for video file audio extraction."
@@ -222,23 +224,27 @@ echo "  3) Lightning Whisper MLX (fastest, no speaker labels)"
 echo "  4) Standard Whisper      (basic, most compatible)"
 echo "  5) Skip                  (install later)"
 echo ""
-read -p "Enter choice [1]: " engine_choice
+read -rp "Enter choice [1]: " engine_choice
 engine_choice=${engine_choice:-1}
 
 case $engine_choice in
     1)
         log_raw "${BOLD}Installing Parakeet TDT (MLX)...${RESET}"
-        pip install mlx-audio >> "$LOG_FILE" 2>&1 && \
-            log_raw "${GREEN}✓ Parakeet / MLX installed${RESET}" || \
+        if pip install mlx-audio >> "$LOG_FILE" 2>&1; then
+            log_raw "${GREEN}✓ Parakeet / MLX installed${RESET}"
+        else
             log_raw "${YELLOW}⚠  Parakeet install failed. You can install it later: pip install mlx-audio${RESET}"
+        fi
         ;;
     2)
         log_raw "${BOLD}Installing WhisperX...${RESET}"
-        pip install whisperx >> "$LOG_FILE" 2>&1 && \
-            log_raw "${GREEN}✓ WhisperX installed${RESET}" || \
+        if pip install whisperx >> "$LOG_FILE" 2>&1; then
+            log_raw "${GREEN}✓ WhisperX installed${RESET}"
+        else
             fail \
                 "WhisperX installation failed." \
                 "Check the log at $LOG_FILE. You can try 'pip install whisperx' manually after running 'source venv/bin/activate'."
+        fi
         log_raw ""
         log_raw "${YELLOW}Speaker diarization needs a free HuggingFace token:${RESET}"
         log_raw "  1. Create an account at huggingface.co"
@@ -248,15 +254,19 @@ case $engine_choice in
         ;;
     3)
         log_raw "${BOLD}Installing Lightning Whisper MLX...${RESET}"
-        pip install lightning-whisper-mlx >> "$LOG_FILE" 2>&1 && \
-            log_raw "${GREEN}✓ Lightning Whisper MLX installed${RESET}" || \
+        if pip install lightning-whisper-mlx >> "$LOG_FILE" 2>&1; then
+            log_raw "${GREEN}✓ Lightning Whisper MLX installed${RESET}"
+        else
             log_raw "${YELLOW}⚠  Install failed. Try manually: pip install lightning-whisper-mlx${RESET}"
+        fi
         ;;
     4)
         log_raw "${BOLD}Installing OpenAI Whisper...${RESET}"
-        pip install openai-whisper >> "$LOG_FILE" 2>&1 && \
-            log_raw "${GREEN}✓ OpenAI Whisper installed${RESET}" || \
+        if pip install openai-whisper >> "$LOG_FILE" 2>&1; then
+            log_raw "${GREEN}✓ OpenAI Whisper installed${RESET}"
+        else
             log_raw "${YELLOW}⚠  Install failed. Try manually: pip install openai-whisper${RESET}"
+        fi
         ;;
     5)
         log_raw "${YELLOW}Skipping transcription engine.${RESET}"

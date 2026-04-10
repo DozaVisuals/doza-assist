@@ -1,7 +1,7 @@
 #!/bin/bash
 # ── Start Doza Assist ──
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 # Ensure Homebrew binaries (ffmpeg, etc.) are on PATH
 if [ -d "/opt/homebrew/bin" ]; then
@@ -10,6 +10,7 @@ elif [ -d "/usr/local/bin" ]; then
     export PATH="/usr/local/bin:$PATH"
 fi
 
+# shellcheck source=/dev/null
 source venv/bin/activate
 
 echo ""

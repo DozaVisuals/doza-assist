@@ -57,8 +57,9 @@ if [ -z "$MISSING" ]; then
     log "All dependencies present. Starting Flask server."
 
     export DOZA_APP_DIR="${APP_SRC}"
+    # shellcheck source=/dev/null
     source "${VENV_DIR}/bin/activate"
-    cd "${APP_SRC}"
+    cd "${APP_SRC}" || exit 1
 
     python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
     SERVER_PID=$!
@@ -66,7 +67,7 @@ if [ -z "$MISSING" ]; then
     echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
 
     # Wait for server to be ready (up to 30 seconds)
-    for i in $(seq 1 60); do
+    for _ in {1..60}; do
         if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
             log "Server ready."
             /usr/bin/open "${FLASK_URL}"
@@ -84,8 +85,6 @@ fi
 log "Setup needed. Missing: $(echo "$MISSING" | tr '\n' ',')"
 
 # ── Phase 1: Pre-Python bootstrap (Xcode CLT, Homebrew, Python) ──
-NEED_PHASE1=false
-
 find_python() {
     for candidate in python3.13 python3.12 python3.11 python3; do
         local py
@@ -110,7 +109,6 @@ find_python() {
 PYTHON_PATH=$(find_python 2>/dev/null || true)
 
 if [ -z "$PYTHON_PATH" ]; then
-    NEED_PHASE1=true
     log "No suitable Python found. Running Phase 1 bootstrap."
 
     osascript -e 'display dialog "Doza Assist needs to install some tools for first-time setup.\n\nA Terminal window will open to install:\n• Developer tools\n• Homebrew package manager\n• Python\n\nYou may be asked for your Mac password." with title "Doza Assist — First Launch" buttons {"Continue"} default button "Continue" with icon note' 2>/dev/null
@@ -147,7 +145,7 @@ WRAPPER_EOF
     /usr/bin/open -a Terminal "$PHASE1_WRAPPER"
 
     # Wait for the result file to appear (up to 20 minutes)
-    for i in $(seq 1 240); do
+    for _ in {1..240}; do
         if [ -f "$PHASE1_RESULT" ]; then
             break
         fi
@@ -177,7 +175,7 @@ export DOZA_APP_DIR="${APP_SRC}"
 SETUP_PID=$!
 
 # Wait for setup server to be ready
-for i in $(seq 1 20); do
+for _ in {1..20}; do
     if /usr/bin/curl -sf "http://127.0.0.1:${SETUP_PORT}" > /dev/null 2>&1; then
         break
     fi
@@ -195,14 +193,15 @@ fi
 
 # ── Launch Flask server ──
 log "Starting Flask server..."
+# shellcheck source=/dev/null
 source "${VENV_DIR}/bin/activate"
-cd "${APP_SRC}"
+cd "${APP_SRC}" || exit 1
 
 python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
 
-for i in $(seq 1 60); do
+for _ in {1..60}; do
     if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
         log "Server ready after setup. PID: $SERVER_PID"
         /usr/bin/open "${FLASK_URL}"

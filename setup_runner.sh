@@ -8,7 +8,6 @@
 set -e
 
 SUPPORT_DIR="$HOME/Library/Application Support/DozaAssist"
-SETUP_JSON="$SUPPORT_DIR/setup.json"
 LOG_FILE="$SUPPORT_DIR/setup.log"
 
 mkdir -p "$SUPPORT_DIR"

@@ -4,16 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Doza Assist</title>
+    <link rel="icon" type="image/jpeg" href="/static/logo.jpg">
+    <link rel="apple-touch-icon" href="/static/logo.jpg">
     <link rel="stylesheet" href="/static/style.css?v={{ range(10000,99999) | random }}">
 </head>
 <body>
 
 <header class="app-header">
     <a href="/" class="app-logo">
-        <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect width="28" height="28" rx="6" fill="#4a9eff"/>
-            <path d="M7 8h4v12H7V8zm5 0h3.5c3 0 5.5 2.5 5.5 6s-2.5 6-5.5 6H12V8z" fill="#000" fill-opacity="0.9"/>
-        </svg>
+        <img class="logo-img" src="/static/logo.jpg" alt="Doza Assist">
         <span>Doza Assist <span class="logo-sub">by Doza Visuals</span></span>
     </a>
     <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">

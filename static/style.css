@@ -94,9 +94,14 @@ body {
     color: var(--text-primary);
 }
 
-.app-logo svg {
-    width: 28px;
-    height: 28px;
+.app-logo svg,
+.app-logo img.logo-img,
+.review-logo img.logo-img {
+    width: 32px;
+    height: 32px;
+    border-radius: 7px;
+    display: block;
+    object-fit: cover;
 }
 
 .app-logo span {

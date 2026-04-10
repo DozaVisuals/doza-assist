@@ -1002,6 +1002,49 @@ let dragCurrentWord = null;
 let colorLabels = {{ (project.color_labels or {})|tojson }};
 let labelSections = [];
 let sectionIdCounter = 0;
+let segmentVectors = {{ (segment_vectors or [])|tojson }};
+
+// Convert HH:MM:SS / MM:SS string to seconds (for segment vector lookup)
+function _segTcToSec(tc) {
+    if (typeof tc === 'number') return tc;
+    if (!tc) return 0;
+    const parts = String(tc).split(':');
+    if (parts.length === 3) return (+parts[0]) * 3600 + (+parts[1]) * 60 + parseFloat(parts[2]);
+    if (parts.length === 2) return (+parts[0]) * 60 + parseFloat(parts[1]);
+    return parseFloat(tc) || 0;
+}
+
+// Find the segment vector that overlaps the given time range the most.
+function findSegmentVectorForRange(start, end) {
+    if (!segmentVectors || !segmentVectors.length) return null;
+    let best = null;
+    let bestOverlap = 0;
+    for (const sv of segmentVectors) {
+        const ss = _segTcToSec(sv.timecode_in);
+        const se = _segTcToSec(sv.timecode_out);
+        const overlap = Math.max(0, Math.min(end, se) - Math.max(start, ss));
+        if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            best = sv;
+        }
+    }
+    return best;
+}
+
+function renderClipBadges(start, end) {
+    const sv = findSegmentVectorForRange(start, end);
+    if (!sv) return '';
+    let html = '';
+    if (sv.narrative_score === 'high') {
+        html += '<span class="seg-badge seg-badge-gold" title="High narrative score">HIGH</span>';
+    } else if (sv.narrative_score === 'medium') {
+        html += '<span class="seg-badge seg-badge-silver" title="Medium narrative score">MED</span>';
+    }
+    if (sv.memory_type) {
+        html += `<span class="seg-memory seg-memory-${sv.memory_type}">${sv.memory_type}</span>`;
+    }
+    return html;
+}
 
 // Auto-activate first swatch + painting mode on load
 document.body.classList.add('painting-mode');
@@ -1562,11 +1605,14 @@ function renderClipsTab() {
         clipText = words.map(w => w.textContent).join('').trim();
         if (clipText.length > 200) clipText = clipText.substring(0, 200) + '...';
 
+        const badges = renderClipBadges(clip.start, clip.end);
+
         if (viewMode === 'list') {
             return `<div class="clip-row" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}">
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
                 <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
+                ${badges}
                 <span class="clip-row-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</span>
                 <span class="clip-row-dur">${formatDuration(duration)}</span>
                 <button class="clip-row-play" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})">
@@ -1582,6 +1628,7 @@ function renderClipsTab() {
             <div class="clip-card-head">
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-card-title" title="${safeTitle}">${safeTitle}</span>
+                ${badges}
                 <span class="clip-card-duration">${formatDuration(duration)}</span>
             </div>
             <div class="clip-card-meta">

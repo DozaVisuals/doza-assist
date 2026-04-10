@@ -44,6 +44,19 @@ def get_project(project_id):
         return json.load(f)
 
 
+def load_segment_vectors(project_id):
+    """Load structured segment vectors for a project, or [] if not yet generated."""
+    path = os.path.join(app.config['PROJECTS_DIR'], project_id, 'segment_vectors.json')
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
 def save_project(project_id, data):
     """Save a project's metadata."""
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
@@ -545,6 +558,12 @@ def project_view(project_id):
     # Determine if any project has video (need video element if so)
     is_video = any(pm['is_video'] for pm in projects_meta)
 
+    # Combine segment vectors across all active projects (used for clip badges
+    # and as the menu Story Builder draws from).
+    segment_vectors = []
+    for p in projects:
+        segment_vectors.extend(load_segment_vectors(p['id']))
+
     return render_template('project.html',
                            project=project,
                            projects=projects,
@@ -554,7 +573,8 @@ def project_view(project_id):
                            paragraphs=paragraphs,
                            is_multi=is_multi,
                            is_shared=False,
-                           is_video=is_video)
+                           is_video=is_video,
+                           segment_vectors=segment_vectors)
 
 
 @app.route('/project/<project_id>/media')
@@ -630,15 +650,39 @@ def analyze(project_id):
     analysis_type = request.json.get('type', 'all')  # 'story', 'social', 'all'
 
     try:
-        from ai_analysis import analyze_transcript
+        from ai_analysis import analyze_transcript, generate_segment_vectors
         result = analyze_transcript(
             project['transcript'],
             project_name=project['name'],
             analysis_type=analysis_type
         )
         project['analysis'] = result
+
+        # Also generate structured segment vectors and persist them alongside meta.
+        # This is the source of truth Story Builder + Clips badges read from.
+        segment_vectors = []
+        try:
+            segment_vectors = generate_segment_vectors(
+                project['transcript'],
+                project_name=project['name'],
+            )
+        except Exception as ve:
+            # Don't fail the whole analysis if vector generation hiccups —
+            # the human-readable analysis is still useful on its own.
+            print(f"Segment vector generation failed: {ve}")
+
+        if segment_vectors:
+            project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+            vectors_path = os.path.join(project_dir, 'segment_vectors.json')
+            with open(vectors_path, 'w') as f:
+                json.dump(segment_vectors, f, indent=2)
+
         save_project(project_id, project)
-        return jsonify({'status': 'analyzed', 'analysis': result})
+        return jsonify({
+            'status': 'analyzed',
+            'analysis': result,
+            'segment_vectors': segment_vectors,
+        })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -940,7 +984,8 @@ def shared_view(project_id):
                            is_multi=False,
                            is_shared=True,
                            is_video=is_video,
-                           shared_tabs=shared_tabs)
+                           shared_tabs=shared_tabs,
+                           segment_vectors=load_segment_vectors(project_id))
 
 
 @app.route('/project/<project_id>/clear', methods=['POST'])
@@ -1059,10 +1104,13 @@ def story_build(project_id):
 
     try:
         from ai_analysis import build_story
+        # Prefer pre-generated segment vectors — much more consistent across runs.
+        segment_vectors = load_segment_vectors(project_id)
         result = build_story(
             project['transcript'],
             message=message,
             project_name=project.get('name', 'Interview'),
+            segment_vectors=segment_vectors or None,
         )
 
         # Save the build to story_builds.json

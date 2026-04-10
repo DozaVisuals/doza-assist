@@ -292,11 +292,18 @@ def _get_ollama_model():
     return 'gemma4:latest'
 
 
-def build_story(transcript, message, project_name="Interview"):
+def build_story(transcript, message, project_name="Interview", segment_vectors=None):
     """
     Build a narrative sequence from the transcript based on the user's description.
     Returns a dict with story_title, target_duration, and clips array.
+
+    If segment_vectors is provided, the model is given the pre-classified segments
+    instead of having to re-analyze the raw transcript. This makes builds faster and
+    much more consistent across runs.
     """
+    if segment_vectors:
+        return _build_story_from_vectors(segment_vectors, message, project_name)
+
     formatted = _format_transcript_for_ai(transcript, max_chars=12000)
 
     system_prompt = """You are a story editor building a narrative sequence from interview transcript footage. The user will describe what kind of story or edit they want. Your job is to select and order clips from the transcript that form a coherent narrative.
@@ -339,6 +346,297 @@ Return ONLY valid JSON. No markdown, no extra text."""
 
     response = _call_ai(prompt, system_prompt)
     return _parse_json_response(response)
+
+
+def generate_segment_vectors(transcript, project_name="Interview"):
+    """
+    Generate structured segment vectors from a transcript.
+
+    Returns a list of dicts each shaped like:
+      {
+        "seg_id": "SEG001",
+        "timecode_in": "00:12:34",
+        "timecode_out": "00:13:02",
+        "thread_title": "The day I quit",
+        "memory_type": "episodic" | "semantic",
+        "narrative_score": "high" | "medium" | "low",
+        "beat_type": "hook" | "context" | "pressure" | "turn" | "resolution",
+        "theme_tags": ["loss", "decision"],
+        "transcript_excerpt": "First 50 words ...",
+        "frozen": true
+      }
+    """
+    formatted = _format_transcript_for_ai(transcript, max_chars=12000)
+
+    system_prompt = """You are a documentary story analyst. You break interview transcripts into discrete narrative segments and classify them with strict, structured metadata. You always respond in valid JSON only — no prose, no markdown, no code fences."""
+
+    prompt = f"""Analyze this interview transcript and produce a structured set of segment vectors.
+
+PROJECT: {project_name}
+
+TRANSCRIPT:
+{formatted}
+
+STEP 1 — Identify the distinct threads or topics the speaker discusses. Use the speaker's own words and phrasing for each thread title. Do not invent abstract corporate language. "The day I quit" — yes. "Professional Transition Event" — no.
+
+STEP 2 — Segment the transcript into discrete moments. A segment is one continuous thought, story beat, or topic. Each segment must have an exact start and end timecode copied from the [HH:MM:SS] markers in the transcript.
+
+STEP 3 — Classify each segment with these fields:
+
+  thread_title (string): The thread this segment belongs to, in the speaker's own words.
+
+  memory_type (string): One of:
+    - "episodic" — a specific event, sensory detail, "I remember when...", a story with concrete time/place.
+    - "semantic" — general knowledge, abstract statement, opinion, "Generally speaking...", reflection without a specific scene.
+
+  narrative_score (string): One of "high", "medium", "low".
+    DISTRIBUTION CONSTRAINT — across all segments you produce:
+      - roughly 15% should be "high" (top tier — strong emotion, cinematic specificity, the moments an editor would build a film around)
+      - roughly 50% should be "medium" (solid, usable for montage or connective tissue)
+      - roughly 35% should be "low" (exposition, filler, repetition, throat-clearing)
+    Be ruthless. Most segments are NOT "high". If you find yourself marking more than 1 in 6 as "high", downgrade the weakest ones.
+
+  beat_type (string): One of "hook", "context", "pressure", "turn", "resolution".
+
+  theme_tags (array of 2-4 strings): Short keyword tags describing the emotional or thematic content (e.g. ["loss", "decision"]).
+
+Return ONLY valid JSON in this exact shape:
+{{
+  "segments": [
+    {{
+      "seg_id": "SEG001",
+      "timecode_in": "00:00:00",
+      "timecode_out": "00:00:00",
+      "thread_title": "...",
+      "memory_type": "episodic",
+      "narrative_score": "medium",
+      "beat_type": "context",
+      "theme_tags": ["tag1", "tag2"]
+    }}
+  ]
+}}
+
+Do NOT include the transcript_excerpt field — the application will fill that in.
+Use string HH:MM:SS format for timecodes, copied exactly from the transcript markers.
+Aim for 12-30 segments depending on transcript length."""
+
+    response = _call_ai(prompt, system_prompt)
+    parsed = _parse_json_response(response)
+
+    raw_segments = []
+    if isinstance(parsed, dict):
+        raw_segments = parsed.get('segments', []) or []
+    elif isinstance(parsed, list):
+        raw_segments = parsed
+
+    return _normalize_segment_vectors(raw_segments, transcript)
+
+
+def _normalize_segment_vectors(raw_segments, transcript):
+    """Validate, repair, and enrich segment vectors with transcript_excerpt."""
+    valid_memory = {'episodic', 'semantic'}
+    valid_score = {'high', 'medium', 'low'}
+    valid_beat = {'hook', 'context', 'pressure', 'turn', 'resolution'}
+
+    out = []
+    for i, seg in enumerate(raw_segments):
+        if not isinstance(seg, dict):
+            continue
+        tc_in = str(seg.get('timecode_in', seg.get('start', '')) or '').strip()
+        tc_out = str(seg.get('timecode_out', seg.get('end', '')) or '').strip()
+        if not tc_in or not tc_out:
+            continue
+
+        memory_type = str(seg.get('memory_type', 'semantic')).strip().lower()
+        if memory_type not in valid_memory:
+            memory_type = 'semantic'
+
+        narrative_score = str(seg.get('narrative_score', 'medium')).strip().lower()
+        if narrative_score not in valid_score:
+            narrative_score = 'medium'
+
+        beat_type = str(seg.get('beat_type', 'context')).strip().lower()
+        if beat_type not in valid_beat:
+            beat_type = 'context'
+
+        tags = seg.get('theme_tags', []) or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(',') if t.strip()]
+        tags = [str(t).strip() for t in tags if str(t).strip()][:4]
+
+        excerpt = _extract_excerpt_for_range(transcript, tc_in, tc_out, max_words=50)
+
+        out.append({
+            'seg_id': seg.get('seg_id') or f'SEG{i + 1:03d}',
+            'timecode_in': tc_in,
+            'timecode_out': tc_out,
+            'thread_title': str(seg.get('thread_title', '') or '').strip()[:120],
+            'memory_type': memory_type,
+            'narrative_score': narrative_score,
+            'beat_type': beat_type,
+            'theme_tags': tags,
+            'transcript_excerpt': excerpt,
+            'frozen': True,
+        })
+
+    # Soft-enforce the distribution: if more than ~22% are "high", demote extras to medium.
+    if out:
+        highs = [s for s in out if s['narrative_score'] == 'high']
+        cap = max(1, round(len(out) * 0.22))
+        if len(highs) > cap:
+            # Keep the first `cap` highs (in order); demote the rest.
+            for s in highs[cap:]:
+                s['narrative_score'] = 'medium'
+
+    return out
+
+
+def _tc_to_seconds(tc):
+    """Convert HH:MM:SS or MM:SS string to float seconds."""
+    if isinstance(tc, (int, float)):
+        return float(tc)
+    s = str(tc).strip()
+    if not s:
+        return 0.0
+    if ':' in s:
+        parts = s.split(':')
+        try:
+            if len(parts) == 3:
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+            if len(parts) == 2:
+                return float(parts[0]) * 60 + float(parts[1])
+        except ValueError:
+            return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _extract_excerpt_for_range(transcript, tc_in, tc_out, max_words=50):
+    """Pull the first ~max_words of actual transcript text inside a time range."""
+    start = _tc_to_seconds(tc_in)
+    end = _tc_to_seconds(tc_out)
+    if end <= start:
+        end = start + 30
+
+    segments = (transcript or {}).get('segments', []) or []
+    collected = []
+    for seg in segments:
+        seg_start = float(seg.get('start', 0) or 0)
+        seg_end = float(seg.get('end', seg_start) or seg_start)
+        if seg_end < start or seg_start > end:
+            continue
+        text = (seg.get('text') or '').strip()
+        if text:
+            collected.append(text)
+            joined = ' '.join(collected)
+            if len(joined.split()) >= max_words:
+                break
+
+    words = ' '.join(collected).split()
+    if len(words) > max_words:
+        return ' '.join(words[:max_words]) + '...'
+    return ' '.join(words)
+
+
+def _build_story_from_vectors(segment_vectors, message, project_name):
+    """Build a narrative using pre-classified segment vectors as the menu of clips.
+
+    Prioritizes "high" narrative scores; uses "episodic" segments for key moments
+    and "semantic" segments for context/transitions. The model only chooses and
+    orders — it does not invent timecodes — which is why this path is more reliable.
+    """
+    # Compact menu of available segments for the prompt
+    menu_lines = []
+    for s in segment_vectors:
+        menu_lines.append(
+            f"- {s.get('seg_id', '?')} [{s.get('timecode_in', '')}-{s.get('timecode_out', '')}] "
+            f"score={s.get('narrative_score', 'medium')} memory={s.get('memory_type', 'semantic')} "
+            f"beat={s.get('beat_type', 'context')} thread=\"{s.get('thread_title', '')}\" "
+            f"tags={','.join(s.get('theme_tags', []))} "
+            f":: {(s.get('transcript_excerpt') or '')[:140]}"
+        )
+    menu = '\n'.join(menu_lines)
+
+    system_prompt = """You are a documentary story editor. You are given a menu of pre-classified interview segments and a user's brief. You select and order segments from the menu to form a coherent narrative arc.
+
+Rules:
+- ONLY select segments that appear in the menu. Do not invent new ones. Use their seg_id.
+- Prioritize segments with narrative_score "high" — those are the spine.
+- Use "episodic" segments (specific events, sensory) for key emotional moments.
+- Use "semantic" segments (general reflection) for context and transitions between episodic beats.
+- Build a clear arc: hook, context, pressure, turn, resolution.
+- 5-15 clips total, ordered for story impact (not necessarily chronological).
+- Always respond in valid JSON only. No markdown, no prose."""
+
+    prompt = f"""PROJECT: {project_name}
+
+USER REQUEST: {message}
+
+AVAILABLE SEGMENTS (pre-classified):
+{menu}
+
+Return ONLY valid JSON in this shape:
+{{
+  "story_title": "suggested title",
+  "target_duration": "estimated total duration",
+  "clips": [
+    {{
+      "order": 1,
+      "seg_id": "SEG001",
+      "title": "short clip title",
+      "start_time": "00:00:00",
+      "end_time": "00:00:00",
+      "editorial_note": "why this clip is in this position"
+    }}
+  ]
+}}"""
+
+    response = _call_ai(prompt, system_prompt)
+    parsed = _parse_json_response(response)
+    if not isinstance(parsed, dict):
+        parsed = {'clips': []}
+
+    # Hydrate each clip from the segment vector by seg_id so timecodes/excerpts
+    # are guaranteed to be correct, regardless of what the model echoed back.
+    by_id = {s['seg_id']: s for s in segment_vectors}
+    hydrated = []
+    for i, clip in enumerate(parsed.get('clips', []) or []):
+        if not isinstance(clip, dict):
+            continue
+        sid = clip.get('seg_id')
+        seg = by_id.get(sid)
+        if not seg:
+            # Fall back to whatever the model returned, if it's plausible
+            if clip.get('start_time') and clip.get('end_time'):
+                hydrated.append({
+                    'order': clip.get('order', i + 1),
+                    'title': clip.get('title', 'Untitled'),
+                    'start_time': clip.get('start_time'),
+                    'end_time': clip.get('end_time'),
+                    'transcript': clip.get('transcript', ''),
+                    'editorial_note': clip.get('editorial_note', ''),
+                })
+            continue
+        hydrated.append({
+            'order': clip.get('order', i + 1),
+            'seg_id': seg['seg_id'],
+            'title': clip.get('title') or seg.get('thread_title') or 'Untitled',
+            'start_time': seg['timecode_in'],
+            'end_time': seg['timecode_out'],
+            'transcript': seg.get('transcript_excerpt', ''),
+            'editorial_note': clip.get('editorial_note', ''),
+            'narrative_score': seg.get('narrative_score'),
+            'memory_type': seg.get('memory_type'),
+            'beat_type': seg.get('beat_type'),
+        })
+
+    return {
+        'story_title': parsed.get('story_title', 'Untitled'),
+        'target_duration': parsed.get('target_duration', ''),
+        'clips': hydrated,
+    }
 
 
 def _analyze_story(transcript_text, project_name):

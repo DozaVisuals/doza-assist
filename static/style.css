@@ -1731,6 +1731,45 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     overflow: hidden;
 }
 
+/* Segment vector badges (narrative_score + memory_type) */
+.seg-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 5px;
+    border-radius: 3px;
+    margin-left: 4px;
+    line-height: 1;
+    vertical-align: middle;
+}
+.seg-badge-gold {
+    background: linear-gradient(180deg, #f5d76e, #d4a017);
+    color: #3a2a00;
+    border: 1px solid #b8860b;
+}
+.seg-badge-silver {
+    background: linear-gradient(180deg, #e8e8e8, #b8b8b8);
+    color: #2a2a2a;
+    border: 1px solid #888;
+}
+.seg-memory {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 500;
+    padding: 2px 5px;
+    border-radius: 3px;
+    margin-left: 4px;
+    line-height: 1;
+    vertical-align: middle;
+    text-transform: lowercase;
+    border: 1px solid var(--border, #444);
+    color: var(--text-secondary, #aaa);
+    background: transparent;
+}
+.seg-memory-episodic { color: #7ec8e3; border-color: #2e5c6e; }
+.seg-memory-semantic { color: #c9a3e0; border-color: #5a3c6b; }
+
 .clip-card-duration {
     font-family: var(--mono);
     font-size: 12px;

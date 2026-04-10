@@ -1,0 +1,215 @@
+name: Build & Release
+
+# Triggers:
+#   - Push a version tag to build and publish a release:  git tag v1.2.3 && git push origin v1.2.3
+#   - Open a PR or push to main to validate without releasing
+#   - Run manually from the Actions tab (Actions → Build & Release → Run workflow)
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp (e.g. 1.2.3). Defaults to 0.0.0-dev when run manually without a tag.'
+        required: false
+
+permissions:
+  contents: write  # required to create GitHub Releases
+
+# ─────────────────────────────────────────────
+# Job 1: Validate — runs on every push and PR
+# ─────────────────────────────────────────────
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check Python syntax
+        run: |
+          echo "Checking Python syntax..."
+          python -m py_compile app.py transcribe.py ai_analysis.py fcpxml_export.py setup_assistant.py make_icon.py
+          echo "All Python files OK."
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint shell scripts
+        run: |
+          echo "Linting shell scripts..."
+          shellcheck build_launcher.sh launcher.sh setup_runner.sh dep_check.sh install.sh start.sh
+          echo "All shell scripts OK."
+
+  # ─────────────────────────────────────────────
+  # Job 2: Build — runs on tags and manual trigger
+  # ─────────────────────────────────────────────
+  build:
+    name: Build DMG
+    needs: validate
+    runs-on: macos-15
+    timeout-minutes: 20
+    # Skip on PRs — validate is enough there
+    if: github.event_name != 'pull_request'
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      dmg_name: ${{ steps.dmg.outputs.filename }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="0.0.0-dev+$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Build app bundle and DMG
+        env:
+          OUTPUT_DIR: ${{ github.workspace }}/dist
+        run: |
+          mkdir -p dist
+          bash build_launcher.sh
+
+      - name: Stamp version into app bundle
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PLIST="dist/Doza Assist.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+          echo "Stamped version $VERSION into Info.plist"
+
+      # ── Optional: code sign the app bundle ──────────────────────────────────
+      # To enable, add these repository secrets (Settings → Secrets → Actions):
+      #   MACOS_CERTIFICATE          — base64-encoded Developer ID .p12 certificate
+      #   MACOS_CERTIFICATE_PASSWORD — password for the .p12
+      #   MACOS_SIGNING_IDENTITY     — e.g. "Developer ID Application: Doza Visuals (TEAMID)"
+      # Without these secrets this step is skipped and the app ships unsigned.
+      # Unsigned apps trigger a Gatekeeper warning on macOS 13+; users can bypass
+      # it via System Settings → Privacy & Security → Open Anyway.
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Sign app bundle
+        if: env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/cert.p12
+
+          security create-keychain -p "ci-build" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "ci-build" build.keychain
+          security import /tmp/cert.p12 -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -T /usr/bin/codesign build.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "ci-build" build.keychain
+          rm /tmp/cert.p12
+
+          codesign --force --deep --options runtime \
+            --sign "$MACOS_SIGNING_IDENTITY" \
+            "dist/Doza Assist.app"
+
+          codesign --verify --deep --strict "dist/Doza Assist.app"
+          echo "Code signing successful."
+
+      - name: Repackage DMG with versioned filename
+        id: dmg
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APP_DIR="${{ github.workspace }}/dist/Doza Assist.app"
+          STAGING="/tmp/doza_dmg_staging"
+          FILENAME="Doza-Assist-${VERSION}.dmg"
+          DMG_PATH="${{ github.workspace }}/dist/${FILENAME}"
+
+          rm -f "${{ github.workspace }}/dist/Doza Assist.dmg"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          cp -R "$APP_DIR" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
+          hdiutil create \
+            -volname "Doza Assist" \
+            -srcfolder "$STAGING" \
+            -ov \
+            -format UDZO \
+            "$DMG_PATH"
+
+          rm -rf "$STAGING"
+          echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+
+      - name: Verify DMG is mountable
+        run: |
+          DMG_PATH="${{ steps.dmg.outputs.path }}"
+          hdiutil verify "$DMG_PATH"
+          echo "DMG verified OK."
+
+      - name: Generate SHA256 checksum
+        id: checksum
+        run: |
+          DMG_PATH="${{ steps.dmg.outputs.path }}"
+          CHECKSUM_FILE="${DMG_PATH}.sha256"
+          shasum -a 256 "$DMG_PATH" | awk '{print $1}' > "$CHECKSUM_FILE"
+          echo "SHA256: $(cat "$CHECKSUM_FILE")"
+          echo "path=$CHECKSUM_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.dmg.outputs.filename }}
+          path: |
+            ${{ steps.dmg.outputs.path }}
+            ${{ steps.checksum.outputs.path }}
+          retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # Job 3: Release — runs only on version tags
+  # ─────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.dmg_name }}
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Doza Assist ${{ needs.build.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
+          # Tags with a hyphen (e.g. v1.0.0-beta.1) are marked as pre-releases
+          prerelease: ${{ contains(github.ref_name, '-') }}

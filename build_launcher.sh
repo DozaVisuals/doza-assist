@@ -11,12 +11,15 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Doza Assist"
-APP_DIR="$HOME/Desktop/${APP_NAME}.app"
+APP_DIR="${OUTPUT_DIR:-$HOME/Desktop}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 APP_SRC_DIR="${RESOURCES_DIR}/app"
 ICONSET_DIR="/tmp/DozaAssist.iconset"
+
+# Clean up temp files on exit (success or failure)
+trap 'rm -rf "${ICONSET_DIR}" "/tmp/DozaAssist.icns" "/tmp/DozaAssist_dmg"' EXIT
 
 echo "Building ${APP_NAME}..."
 echo "Source: ${SCRIPT_DIR}"
@@ -122,237 +125,7 @@ PLIST
 echo ""
 echo "5. Creating launcher..."
 
-cat > "${MACOS_DIR}/launch" << 'LAUNCHER_EOF'
-#!/bin/bash
-#
-# Doza Assist Launcher
-# Handles first-launch setup, dependency checking, and starting the Flask server.
-#
-
-# ── Resolve paths ──
-BUNDLE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-APP_SRC="${BUNDLE_DIR}/Contents/Resources/app"
-SUPPORT_DIR="$HOME/Library/Application Support/DozaAssist"
-VENV_DIR="$SUPPORT_DIR/venv"
-SETUP_JSON="$SUPPORT_DIR/setup.json"
-LOG_FILE="$SUPPORT_DIR/launch.log"
-
-FLASK_PORT=5050
-SETUP_PORT=5051
-FLASK_URL="http://127.0.0.1:${FLASK_PORT}"
-
-mkdir -p "$SUPPORT_DIR"
-mkdir -p "$SUPPORT_DIR/projects"
-mkdir -p "$SUPPORT_DIR/exports"
-
-# ── Symlink data directories so project data persists outside the .app bundle ──
-if [ ! -e "${APP_SRC}/projects" ]; then
-    ln -s "$SUPPORT_DIR/projects" "${APP_SRC}/projects"
-fi
-if [ ! -e "${APP_SRC}/exports" ]; then
-    ln -s "$SUPPORT_DIR/exports" "${APP_SRC}/exports"
-fi
-
-# ── Logging ──
-log() {
-    echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"
-}
-
-# ── Ensure Homebrew on PATH ──
-if [ -d "/opt/homebrew/bin" ]; then
-    export PATH="/opt/homebrew/bin:$PATH"
-elif [ -d "/usr/local/bin" ]; then
-    export PATH="/usr/local/bin:$PATH"
-fi
-
-# ── If Flask server already running, just open browser ──
-if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
-    log "Server already running, opening browser."
-    /usr/bin/open "${FLASK_URL}"
-    exit 0
-fi
-
-# ── Quick dependency check ──
-log "Running dependency check..."
-MISSING=$( bash "${APP_SRC}/dep_check.sh" 2>/dev/null ) || true
-
-if [ -z "$MISSING" ]; then
-    # ── All dependencies present — launch directly ──
-    log "All dependencies present. Starting Flask server."
-
-    # Activate venv and start the server in the background
-    export DOZA_APP_DIR="${APP_SRC}"
-    source "${VENV_DIR}/bin/activate"
-    cd "${APP_SRC}"
-
-    # Start Flask server
-    python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
-    SERVER_PID=$!
-    log "Flask server PID: $SERVER_PID"
-
-    # Save PID for later cleanup
-    echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
-
-    # Wait for server to be ready (up to 30 seconds)
-    for i in $(seq 1 60); do
-        if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
-            log "Server ready."
-            /usr/bin/open "${FLASK_URL}"
-            exit 0
-        fi
-        sleep 0.5
-    done
-
-    log "ERROR: Server failed to start within 30 seconds."
-    osascript -e 'display dialog "Doza Assist failed to start.\n\nCheck the log at:\n'"$SUPPORT_DIR/server.log"'" with title "Doza Assist" buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
-    exit 1
-fi
-
-# ── Setup needed ──
-log "Setup needed. Missing: $(echo $MISSING | tr '\n' ', ')"
-
-# ── Phase 1: Pre-Python bootstrap (Xcode CLT, Homebrew, Python) ──
-# Check if we need Phase 1 (Python-related deps missing)
-NEED_PHASE1=false
-
-# Find a usable Python 3.11+
-find_python() {
-    for candidate in python3.13 python3.12 python3.11 python3; do
-        local py
-        py=$(command -v "$candidate" 2>/dev/null || true)
-        if [ -n "$py" ]; then
-            local ver
-            ver=$("$py" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || true)
-            if [ -n "$ver" ]; then
-                local major minor
-                major=$(echo "$ver" | cut -d. -f1)
-                minor=$(echo "$ver" | cut -d. -f2)
-                if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
-                    echo "$py"
-                    return 0
-                fi
-            fi
-        fi
-    done
-    return 1
-}
-
-PYTHON_PATH=$(find_python 2>/dev/null || true)
-
-if [ -z "$PYTHON_PATH" ]; then
-    NEED_PHASE1=true
-    log "No suitable Python found. Running Phase 1 bootstrap."
-
-    # Phase 1 runs in Terminal so the user can see progress and enter passwords
-    osascript -e 'display dialog "Doza Assist needs to install some tools for first-time setup.\n\nA Terminal window will open to install:\n• Developer tools\n• Homebrew package manager\n• Python\n\nYou may be asked for your Mac password." with title "Doza Assist — First Launch" buttons {"Continue"} default button "Continue" with icon note' 2>/dev/null
-
-    # Run Phase 1 in Terminal and capture the Python path
-    PHASE1_RESULT="$SUPPORT_DIR/phase1_result.txt"
-    rm -f "$PHASE1_RESULT"
-
-    # Create a wrapper script that runs Phase 1 and saves the result
-    PHASE1_WRAPPER="$SUPPORT_DIR/phase1_wrapper.sh"
-    cat > "$PHASE1_WRAPPER" << WRAPPER_EOF
-#!/bin/bash
-echo ""
-echo "  ╔═══════════════════════════════════╗"
-echo "  ║    Doza Assist — First Launch     ║"
-echo "  ╚═══════════════════════════════════╝"
-echo ""
-# setup_runner.sh: log messages go to stderr (visible in Terminal), python path goes to stdout
-PYTHON_PATH=\$(bash "${APP_SRC}/setup_runner.sh")
-echo "\$PYTHON_PATH" > "${PHASE1_RESULT}"
-if [ -n "\$PYTHON_PATH" ] && [ -x "\$PYTHON_PATH" ]; then
-    echo ""
-    echo "  ✅ Basic tools installed. Continuing setup in your browser..."
-    sleep 2
-else
-    echo ""
-    echo "  ❌ Setup encountered an error. Check the log at:"
-    echo "     $SUPPORT_DIR/setup.log"
-    echo ""
-    echo "  Press any key to close..."
-    read -n 1
-fi
-WRAPPER_EOF
-    chmod +x "$PHASE1_WRAPPER"
-
-    # Open in Terminal and poll for completion (don't use -W, it waits for Terminal.app to quit)
-    /usr/bin/open -a Terminal "$PHASE1_WRAPPER"
-
-    # Wait for the result file to appear (up to 20 minutes)
-    for i in $(seq 1 240); do
-        if [ -f "$PHASE1_RESULT" ]; then
-            break
-        fi
-        sleep 5
-    done
-
-    # Read the result
-    if [ -f "$PHASE1_RESULT" ]; then
-        PYTHON_PATH=$(cat "$PHASE1_RESULT" | tr -d '[:space:]')
-    fi
-
-    rm -f "$PHASE1_WRAPPER" "$PHASE1_RESULT"
-
-    if [ -z "$PYTHON_PATH" ] || [ ! -x "$PYTHON_PATH" ]; then
-        log "ERROR: Phase 1 failed to install Python."
-        osascript -e 'display dialog "Setup failed to install Python.\n\nPlease check the log at:\n'"$SUPPORT_DIR/setup.log"'" with title "Doza Assist" buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
-        exit 1
-    fi
-fi
-
-log "Using Python: $PYTHON_PATH"
-
-# ── Phase 2: Python-based setup assistant ──
-log "Starting Phase 2 setup assistant..."
-
-export DOZA_APP_DIR="${APP_SRC}"
-"$PYTHON_PATH" "${APP_SRC}/setup_assistant.py" >> "$SUPPORT_DIR/setup.log" 2>&1 &
-SETUP_PID=$!
-
-# Wait for setup server to be ready
-for i in $(seq 1 20); do
-    if /usr/bin/curl -sf "http://127.0.0.1:${SETUP_PORT}" > /dev/null 2>&1; then
-        break
-    fi
-    sleep 0.5
-done
-
-# Wait for setup to complete (setup_assistant.py exits when done)
-wait $SETUP_PID 2>/dev/null || true
-log "Setup assistant finished."
-
-# Verify setup completed
-if [ ! -f "$SETUP_JSON" ]; then
-    log "ERROR: Setup did not complete successfully."
-    osascript -e 'display dialog "Setup did not complete.\n\nPlease relaunch Doza Assist to try again." with title "Doza Assist" buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
-    exit 1
-fi
-
-# ── Launch Flask server ──
-log "Starting Flask server..."
-source "${VENV_DIR}/bin/activate"
-cd "${APP_SRC}"
-
-python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
-SERVER_PID=$!
-echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
-
-# Wait for server to be ready
-for i in $(seq 1 60); do
-    if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
-        log "Server ready after setup. PID: $SERVER_PID"
-        /usr/bin/open "${FLASK_URL}"
-        exit 0
-    fi
-    sleep 0.5
-done
-
-log "ERROR: Server failed to start after setup."
-osascript -e 'display dialog "Doza Assist server failed to start after setup.\n\nCheck the log at:\n'"$SUPPORT_DIR/server.log"'" with title "Doza Assist" buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
-exit 1
-LAUNCHER_EOF
+cp "${SCRIPT_DIR}/launcher.sh" "${MACOS_DIR}/launch"
 
 chmod +x "${MACOS_DIR}/launch"
 
@@ -369,7 +142,7 @@ echo "7. Creating .dmg for distribution..."
 
 DMG_NAME="${APP_NAME}"
 DMG_DIR="/tmp/DozaAssist_dmg"
-DMG_PATH="$HOME/Desktop/${DMG_NAME}.dmg"
+DMG_PATH="${OUTPUT_DIR:-$HOME/Desktop}/${DMG_NAME}.dmg"
 
 # Clean up any previous DMG build
 rm -rf "${DMG_DIR}"
@@ -385,8 +158,7 @@ ln -s /Applications "${DMG_DIR}/Applications"
 hdiutil create -volname "${DMG_NAME}" \
     -srcfolder "${DMG_DIR}" \
     -ov -format UDZO \
-    "${DMG_PATH}" \
-    > /dev/null 2>&1
+    "${DMG_PATH}"
 
 rm -rf "${DMG_DIR}"
 
@@ -395,8 +167,8 @@ echo "================================================"
 echo "  Build complete!"
 echo "================================================"
 echo ""
-echo "  App:  ~/Desktop/Doza Assist.app"
-echo "  DMG:  ~/Desktop/Doza Assist.dmg"
+echo "  App:  ${APP_DIR}"
+echo "  DMG:  ${DMG_PATH}"
 echo ""
 echo "  The .app is self-contained — drag it to"
 echo "  Applications or double-click to launch."

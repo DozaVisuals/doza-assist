@@ -207,6 +207,29 @@ doza-assist/
 
 ---
 
+## Troubleshooting
+
+**Install failing?**
+Run `bash install.sh --clean` to wipe the setup and start completely fresh.
+
+**Want to completely remove Doza Assist?**
+Run `bash uninstall.sh` — it will walk you through what gets removed and ask before doing anything.
+
+**Getting a Python error or "command not found"?**
+Make sure Xcode Command Line Tools are installed:
+```bash
+xcode-select --install
+```
+Wait for the installer to finish, then run `bash install.sh --clean`.
+
+**macOS blocking the app?**
+Go to **System Settings > Privacy & Security**, scroll down, and click **Open Anyway** next to the Doza Assist message. This only happens once.
+
+**Want to report a bug?**
+The installer saves a full log to `install_log.txt` in the project folder. Attach it when reporting issues — it shows exactly where things went wrong.
+
+---
+
 ## Privacy
 
 - All transcription runs locally on your machine

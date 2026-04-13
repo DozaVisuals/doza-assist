@@ -403,21 +403,26 @@ def install_transcription_engine():
         log("ERROR: pip not found in venv.")
         return False
 
+    # On Apple Silicon, MLX requires running under arm64 (not Rosetta/x86_64).
+    # The .app bundle may launch Python under Rosetta, so we force arch -arm64.
+    arm_prefix = "arch -arm64 " if is_apple_silicon() else ""
+
     # Install Parakeet MLX (fast, Apple Silicon native, no cmake needed)
     update_step(STEP_TRANSCRIBE, "running", "Installing Parakeet MLX (Apple Silicon transcription)...")
-    rc, out, err = run_cmd(f'"{pip_path}" install parakeet-mlx')
+    # Use --force-reinstall to resolve conflicts from previous failed installs
+    rc, out, err = run_cmd(f'{arm_prefix}"{pip_path}" install --force-reinstall parakeet-mlx')
     if rc != 0:
         log(f"WARNING: parakeet-mlx install failed: {err}")
         update_step(STEP_TRANSCRIBE, "running", "Parakeet failed, trying OpenAI Whisper...")
     else:
         log("Parakeet MLX installed successfully.")
-        # Verify it imports
-        rc2, _, _ = run_cmd(f'"{python_path}" -c "import parakeet_mlx"')
+        # Verify it imports (must use arm64 for MLX)
+        rc2, _, err2 = run_cmd(f'{arm_prefix}"{python_path}" -c "import parakeet_mlx"')
         if rc2 == 0:
             log("Parakeet MLX verified.")
             update_step(STEP_TRANSCRIBE, "running", "Parakeet MLX installed! Installing Whisper as fallback...")
         else:
-            log("WARNING: parakeet-mlx installed but import failed.")
+            log(f"WARNING: parakeet-mlx installed but import failed: {err2}")
 
     # Try OpenAI Whisper as fallback — needs cmake
     update_step(STEP_TRANSCRIBE, "running", "Installing cmake (needed for Whisper)...")
@@ -426,17 +431,17 @@ def install_transcription_engine():
     if cmake_cmd:
         run_cmd(cmake_cmd)
     # Also try cmake via pip as backup
-    run_cmd(f'"{pip_path}" install cmake')
+    run_cmd(f'{arm_prefix}"{pip_path}" install cmake')
 
     update_step(STEP_TRANSCRIBE, "running", "Installing OpenAI Whisper (fallback engine)...")
-    rc, out, err = run_cmd(f'"{pip_path}" install openai-whisper')
+    rc, out, err = run_cmd(f'{arm_prefix}"{pip_path}" install openai-whisper')
     if rc != 0:
         log(f"WARNING: openai-whisper install failed: {err}")
         # Not fatal — parakeet is the primary engine
 
-    # Verify at least one engine works
-    rc_p, _, _ = run_cmd(f'"{python_path}" -c "import parakeet_mlx"')
-    rc_w, _, _ = run_cmd(f'"{python_path}" -c "import whisper"')
+    # Verify at least one engine works (use arm64 for MLX compatibility)
+    rc_p, _, _ = run_cmd(f'{arm_prefix}"{python_path}" -c "import parakeet_mlx"')
+    rc_w, _, _ = run_cmd(f'{arm_prefix}"{python_path}" -c "import whisper"')
 
     if rc_p != 0 and rc_w != 0:
         log("ERROR: No transcription engine could be installed.")

@@ -41,6 +41,12 @@ elif [ -d "/usr/local/bin" ]; then
     export PATH="/usr/local/bin:$PATH"
 fi
 
+# ── Detect Apple Silicon and set arch prefix ──
+ARCH_PREFIX=""
+if /usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null | grep -q "1"; then
+    ARCH_PREFIX="arch -arm64"
+fi
+
 # ── If Flask server already running, just open browser ──
 if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
     log "Server already running, opening browser."
@@ -61,7 +67,7 @@ if [ -z "$MISSING" ]; then
     source "${VENV_DIR}/bin/activate"
     cd "${APP_SRC}" || exit 1
 
-    python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
+    $ARCH_PREFIX python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
     SERVER_PID=$!
     log "Flask server PID: $SERVER_PID"
     echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
@@ -171,7 +177,7 @@ log "Using Python: $PYTHON_PATH"
 log "Starting Phase 2 setup assistant..."
 
 export DOZA_APP_DIR="${APP_SRC}"
-"$PYTHON_PATH" "${APP_SRC}/setup_assistant.py" >> "$SUPPORT_DIR/setup.log" 2>&1 &
+$ARCH_PREFIX "$PYTHON_PATH" "${APP_SRC}/setup_assistant.py" >> "$SUPPORT_DIR/setup.log" 2>&1 &
 SETUP_PID=$!
 
 # Wait for setup server to be ready
@@ -197,7 +203,7 @@ log "Starting Flask server..."
 source "${VENV_DIR}/bin/activate"
 cd "${APP_SRC}" || exit 1
 
-python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
+$ARCH_PREFIX python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
 

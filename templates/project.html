@@ -111,17 +111,17 @@
         {% if is_shared %}
             {% set tabs = shared_tabs or {'transcript': true, 'clips': true, 'analysis': true, 'chat': true, 'export': true} %}
             {% if tabs.get('transcript', true) %}<button class="tab active" onclick="switchTab('transcript')"><span id="transcriptTabLabel">Transcript</span></button>{% endif %}
-            {% if tabs.get('clips', true) %}<button class="tab" onclick="switchTab('clips')">Clips</button>{% endif %}
             {% if tabs.get('analysis', true) %}<button class="tab" onclick="switchTab('analysis')">AI Analysis</button>{% endif %}
             {% if tabs.get('chat', true) %}<button class="tab" onclick="switchTab('chat')">Chat</button>{% endif %}
             {% if tabs.get('story', true) %}<button class="tab" onclick="switchTab('story')">Story Builder</button>{% endif %}
+            {% if tabs.get('clips', true) %}<button class="tab" onclick="switchTab('clips')">Clips</button>{% endif %}
             {% if tabs.get('export', true) %}<button class="tab" onclick="switchTab('export')">Export</button>{% endif %}
         {% else %}
             <button class="tab active" onclick="switchTab('transcript')"><span id="transcriptTabLabel">Transcript</span></button>
-            <button class="tab" onclick="switchTab('clips')">Clips</button>
             <button class="tab" onclick="switchTab('analysis')">AI Analysis</button>
             <button class="tab" onclick="switchTab('chat')">Chat</button>
             <button class="tab" onclick="switchTab('story')">Story Builder</button>
+            <button class="tab" onclick="switchTab('clips')">Clips</button>
             <button class="tab" onclick="switchTab('export')">Export</button>
         {% endif %}
     </div>
@@ -156,7 +156,7 @@
             {% endif %}
         </div>
 
-        <div class="left-section">
+        <div class="left-section" id="speakerSection">
             <div class="card-title" style="margin-bottom: 0.5rem;">Speakers</div>
             <div id="speakerList">
                 {% set speakers = [] %}
@@ -174,18 +174,27 @@
             </div>
         </div>
 
-        <div class="left-section">
+        <div class="left-section" style="display:none;">
             <div class="card-title" style="margin-bottom: 0.35rem;">Selections</div>
             <p style="font-size: 1.5rem; font-weight: 600; line-height: 1;"><span id="selectCount">0</span></p>
             <p style="font-size: 0.75rem; color: var(--text-muted);">labeled sections</p>
         </div>
 
-        <div class="left-section">
-            <div style="display: flex; flex-direction: column; gap: 0.4rem;">
-                <button class="btn btn-sm btn-primary" onclick="exportFCPXML('labels')">Export Clips to FCPX</button>
-                <button class="btn btn-sm btn-outline" onclick="downloadSRT()">Download SRT</button>
-                <button class="btn btn-sm btn-outline" onclick="downloadTXT()">Download Text</button>
+        <!-- Stories list (visible when Story tab active) -->
+        <div class="left-section story-only-section" id="storyListSidebar" style="display:none;">
+            <div class="card-title" style="margin-bottom: 0.5rem;">Stories</div>
+            <div class="story-sidebar-list" id="storySidebarList">
+                <div class="story-sidebar-empty" id="storySidebarEmpty">No stories yet. Describe one above to get started.</div>
             </div>
+        </div>
+
+        <!-- Clip library for Story Builder (visible when Story tab active) -->
+        <div class="left-section story-only-section" id="storyClipLibrarySidebar" style="display:none;">
+            <div class="card-title" style="margin-bottom: 0.5rem;">Your Clips</div>
+            <div class="story-clip-library-empty" id="storyClipEmpty">
+                <p>Clips from Transcript or Chat appear here.</p>
+            </div>
+            <div class="story-clip-library-list" id="storyClipList"></div>
         </div>
     </div>
 
@@ -412,18 +421,18 @@
                 <div class="card chat-card">
                     <div class="chat-messages" id="chatMessages">
                         <div class="chat-welcome">
-                            <h3>Ask about the transcript</h3>
-                            <p>Find clips, explore themes, discover soundbites, or ask anything about this interview.</p>
+                            <h3>Narrative Intelligence</h3>
+                            <p>Explore what this interview is really about. Tell it what kind of story you're making and let it find the moments that matter.</p>
                             <div class="chat-suggestions">
-                                <button class="chat-suggestion" onclick="sendSuggestion(this)">What are the most emotional moments?</button>
-                                <button class="chat-suggestion" onclick="sendSuggestion(this)">Find 3 clips for Instagram Reels</button>
-                                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the strongest opening hook?</button>
-                                <button class="chat-suggestion" onclick="sendSuggestion(this)">Find controversial or surprising statements</button>
+                                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the emotional arc of this interview?</button>
+                                <button class="chat-suggestion" onclick="sendSuggestion(this)">Where does the energy shift?</button>
+                                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the most revealing thing they said about themselves?</button>
+                                <button class="chat-suggestion" onclick="sendSuggestion(this)">I'm making a film about resilience — what supports that?</button>
                             </div>
                         </div>
                     </div>
                     <div class="chat-input-area">
-                        <input type="text" class="chat-input" id="chatInput" placeholder="Ask about the transcript...  press Enter to send"
+                        <input type="text" class="chat-input" id="chatInput" placeholder="What story are you looking for?"
                                onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }">
                         <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -436,25 +445,18 @@
     {% if not is_shared %}
     <div class="tab-content" id="tab-story">
         <div id="storyBuilderContent">
-            <!-- Build selector + stats bar (hidden until first build) -->
-            <div class="story-topbar" id="storyTopbar" style="display:none;">
-                <div class="story-stats">
-                    <span id="storyClipCount">0 clips</span>
-                    <span class="story-stats-sep">|</span>
-                    <span id="storyTotalDuration">0:00</span>
-                    <span class="story-stats-sep">|</span>
-                    <span id="storyPromptDisplay" class="story-prompt-text"></span>
-                </div>
-                <div class="story-topbar-right">
-                    <button class="btn btn-sm btn-primary story-playall-btn" id="storyPlayAllBtn" onclick="togglePlayAllStory()" title="Play all clips in sequence">
-                        <svg id="storyPlayAllIcon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
-                        <svg id="storyPauseAllIcon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
-                        <span id="storyPlayAllLabel">Play All</span>
-                    </button>
-                    <select class="form-input story-build-select" id="storyBuildSelect" onchange="loadStoryBuild(this.value)">
-                    </select>
-                    <button class="btn btn-sm" onclick="deleteCurrentStoryBuild()" title="Delete this build" style="color: var(--red);">&times;</button>
-                </div>
+            <!-- Hidden elements for JS compatibility -->
+            <span id="storyClipCount" style="display:none;"></span>
+            <span id="storyTotalDuration" style="display:none;"></span>
+            <span id="storyPromptDisplay" style="display:none;"></span>
+            <select id="storyBuildSelect" style="display:none;"></select>
+
+            <!-- Input bar (above everything) -->
+            <div class="story-input-area">
+                <input type="text" class="story-input" id="storyInput"
+                       placeholder="Build me a 3-minute story about her journey from athlete to coach..."
+                       onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); buildStory(); }">
+                <button class="btn btn-primary story-build-btn" id="storyBuildBtn" onclick="buildStory()">Build</button>
             </div>
 
             <!-- Empty state -->
@@ -468,24 +470,21 @@
                 <p>Building your story...</p>
             </div>
 
-            <!-- Sequence container (vertical timeline) -->
-            <div class="story-sequence" id="storySequence" style="display:none;">
-            </div>
-
-            <!-- Action buttons -->
+            <!-- Action buttons (above story sequence) -->
             <div class="story-actions" id="storyActions" style="display:none;">
+                <button class="btn btn-sm btn-primary story-playall-btn" id="storyPlayAllBtn" onclick="togglePlayAllStory()" title="Play all clips in sequence">
+                    <svg id="storyPlayAllIcon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                    <svg id="storyPauseAllIcon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                    <span id="storyPlayAllLabel">Play All</span>
+                </button>
                 <button class="btn btn-primary" onclick="exportStoryFCPXML()">Export to FCPX</button>
                 <button class="btn btn-green" onclick="addAllStoryClips()">Add All to Clips</button>
                 <button class="btn" onclick="rebuildStory()">Rebuild</button>
             </div>
-        </div>
 
-        <!-- Input bar (always visible) -->
-        <div class="story-input-area">
-            <input type="text" class="story-input" id="storyInput"
-                   placeholder="Build me a 3-minute story about her journey from athlete to coach..."
-                   onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); buildStory(); }">
-            <button class="btn btn-primary story-build-btn" id="storyBuildBtn" onclick="buildStory()">Build</button>
+            <!-- Sequence container (vertical timeline) -->
+            <div class="story-sequence" id="storySequence" style="display:none;">
+            </div>
         </div>
     </div>
     {% endif %}
@@ -641,8 +640,27 @@ function switchTab(tab) {
         toolbar.style.display = (tab === 'transcript' || tab === 'clips') ? '' : 'none';
     }
 
+    // Show clip library and story list in sidebar only on story tab
+    const clipSidebar = document.getElementById('storyClipLibrarySidebar');
+    if (clipSidebar) {
+        clipSidebar.style.display = (tab === 'story') ? '' : 'none';
+    }
+    const storyList = document.getElementById('storyListSidebar');
+    if (storyList) {
+        storyList.style.display = (tab === 'story') ? '' : 'none';
+    }
+
+    // Hide speakers section on story tab
+    const speakerSec = document.getElementById('speakerSection');
+    if (speakerSec) {
+        speakerSec.style.display = (tab === 'story') ? 'none' : '';
+    }
+
     // Load story builds when switching to story tab
-    if (tab === 'story') loadStoryBuilds();
+    if (tab === 'story') {
+        loadStoryBuilds();
+        renderStoryClipLibrary();
+    }
 }
 
 // ── Audio Player ──
@@ -1297,6 +1315,11 @@ function sendSuggestion(btn) {
     sendChat();
 }
 
+function isStoryRequest(msg) {
+    return /\b(build|create|make|assemble|craft|put together|construct)\b.*\b(story|narrative|sequence|edit|cut|timeline|selects)\b/i.test(msg)
+        || /\b(story|narrative|sequence|edit|cut|timeline)\b.*\b(build|create|make|about|for|from)\b/i.test(msg);
+}
+
 async function sendChat() {
     const input = document.getElementById('chatInput');
     const message = input.value.trim();
@@ -1311,6 +1334,12 @@ async function sendChat() {
     // Add user message
     appendChatMessage('user', message);
     chatHistory.push({ role: 'user', content: message });
+
+    // Detect story-building intent
+    if (isStoryRequest(message)) {
+        await buildStoryFromChat(message);
+        return;
+    }
 
     // Show typing indicator
     const typing = appendChatMessage('assistant', '<span class="chat-typing"><span></span><span></span><span></span></span>', true);
@@ -1331,8 +1360,19 @@ async function sendChat() {
 
         if (data.reply) {
             const rendered = renderChatReply(data.reply);
-            appendChatMessage('assistant', rendered, true);
+            const msg = appendChatMessage('assistant', rendered, true);
             chatHistory.push({ role: 'assistant', content: data.reply });
+
+            // If reply contains clips, append action prompts
+            const clipCards = msg.querySelectorAll('.cc-card');
+            if (clipCards.length > 0) {
+                const pullPrompt = document.createElement('div');
+                pullPrompt.className = 'chat-pull-prompt';
+                pullPrompt.innerHTML = `Want me to pull ${clipCards.length === 1 ? 'that clip' : 'those ' + clipCards.length + ' clips'} for you?`
+                    + ` <button class="btn btn-primary btn-sm chat-pull-btn" onclick="addAllChatClips(this)">Pull Clips</button>`
+                    + ` <button class="btn btn-sm chat-pull-btn" onclick="buildStoryFromChatClips(this)" style="margin-left:4px;">Build as Story</button>`;
+                msg.appendChild(pullPrompt);
+            }
         } else {
             appendChatMessage('assistant', 'Error: ' + (data.error || 'No response'));
         }
@@ -1344,6 +1384,106 @@ async function sendChat() {
     input.disabled = false;
     btn.disabled = false;
     input.focus();
+}
+
+async function buildStoryFromChat(message) {
+    const typing = appendChatMessage('assistant', '<div class="chat-story-building"><span class="chat-typing"><span></span><span></span><span></span></span> Building your story...</div>', true);
+
+    const btn = document.getElementById('chatSendBtn');
+    const input = document.getElementById('chatInput');
+    input.disabled = true;
+    btn.disabled = true;
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/story/build`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message }),
+        });
+        const data = await res.json();
+        typing.remove();
+
+        if (data.build) {
+            storyBuilds.push(data.build);
+            currentBuildId = data.build.id;
+            updateStoryBuildSelect();
+            renderStoryList();
+
+            // Show story result in chat
+            const clipCount = data.build.clips ? data.build.clips.length : 0;
+            let totalDur = 0;
+            (data.build.clips || []).forEach(c => {
+                const s = parseTc(c.start_time);
+                const e = parseTc(c.end_time);
+                if (e > s) totalDur += (e - s);
+            });
+
+            let storyHtml = `<div class="chat-story-result">`;
+            storyHtml += `<div class="chat-story-result-title">${escapeHtml(data.build.story_title || 'Untitled Story')}</div>`;
+            storyHtml += `<div class="chat-story-result-meta">${clipCount} clips &bull; ${fmtTime(totalDur)}</div>`;
+
+            // Show clip previews
+            (data.build.clips || []).forEach((clip, i) => {
+                const s = parseTc(clip.start_time);
+                const e = parseTc(clip.end_time);
+                const dur = Math.max(0, e - s);
+                storyHtml += `<div class="chat-story-clip">
+                    <span class="chat-story-clip-num">${i + 1}</span>
+                    <span class="chat-story-clip-title">${escapeHtml(clip.title || 'Untitled')}</span>
+                    <span class="chat-story-clip-tc" onclick="jumpTo(${s})">${fmtTime(s)} - ${fmtTime(e)}</span>
+                    <span class="chat-story-clip-dur">${formatDuration(dur)}</span>
+                </div>`;
+            });
+
+            storyHtml += `<div class="chat-story-result-actions">`;
+            storyHtml += `<button class="btn btn-primary btn-sm" onclick="switchTab('story')">Open in Story Builder</button>`;
+            storyHtml += `<button class="btn btn-sm" onclick="exportStoryFCPXML()">Export to FCPX</button>`;
+            storyHtml += `</div></div>`;
+
+            const msg = appendChatMessage('assistant', storyHtml, true);
+            chatHistory.push({ role: 'assistant', content: `Built story "${data.build.story_title}" with ${clipCount} clips (${fmtTime(totalDur)}).` });
+        } else {
+            appendChatMessage('assistant', 'Error building story: ' + (data.error || 'Unknown error'));
+        }
+    } catch (err) {
+        typing.remove();
+        appendChatMessage('assistant', 'Error: ' + err.message);
+    }
+
+    input.disabled = false;
+    btn.disabled = false;
+    input.focus();
+}
+
+async function buildStoryFromChatClips(btnEl) {
+    const prompt = btnEl.closest('.chat-msg');
+    const clipCards = prompt ? prompt.querySelectorAll('.cc-card') : [];
+    if (clipCards.length === 0) { showToast('No clips found', true); return; }
+
+    btnEl.disabled = true;
+    btnEl.textContent = 'Building...';
+
+    // Collect clip info for a story prompt
+    const clipDescs = [];
+    clipCards.forEach(card => {
+        const start = parseFloat(card.dataset.start);
+        const end = parseFloat(card.dataset.end);
+        const titleEl = card.querySelector('b');
+        const title = titleEl ? titleEl.textContent : '';
+        clipDescs.push(`"${title}" (${fmtTime(start)}-${fmtTime(end)})`);
+    });
+
+    // Use the last user message as context for the story
+    let lastUserMsg = '';
+    for (let i = chatHistory.length - 1; i >= 0; i--) {
+        if (chatHistory[i].role === 'user') { lastUserMsg = chatHistory[i].content; break; }
+    }
+
+    const storyPrompt = `Build a story using these clips about: ${lastUserMsg}`;
+    await buildStoryFromChat(storyPrompt);
+
+    btnEl.textContent = 'Built!';
+    btnEl.classList.add('clip-added');
 }
 
 function appendChatMessage(role, content, isHtml = false) {
@@ -1407,12 +1547,13 @@ function renderChatReply(text) {
         }
     );
 
-    // Convert timecodes in text to clickable links (HH:MM:SS or MM:SS)
+    // Convert timecodes in text to clickable links with + button (HH:MM:SS or MM:SS)
     html = html.replace(
         /(\d{1,2}:\d{2}:\d{2})/g,
         (match) => {
             const secs = tcToSec(match);
-            return `<span class="chat-tc-link" onclick="jumpTo(${secs})">${match}</span>`;
+            const end = secs + 15;
+            return `<span class="chat-tc-group"><span class="chat-tc-link" onclick="jumpTo(${secs})">${match}</span><button class="chat-tc-add" onclick="addClipFromChat(${secs},${end},'Clip at ${match}',this)" title="Add as clip">+</button></span>`;
         }
     );
 
@@ -1548,7 +1689,52 @@ function addAllAnalysisClips() {
     }
 }
 
+function addAllChatClips(btn) {
+    const msg = btn.closest('.chat-msg');
+    const cards = msg.querySelectorAll('.cc-card');
+    let count = 0;
+    cards.forEach(card => {
+        const start = parseFloat(card.dataset.start);
+        const end = parseFloat(card.dataset.end);
+        const title = card.querySelector('b')?.textContent?.trim() || 'Clip';
+        const exists = labelSections.some(s => Math.abs(s.start - start) < 0.5);
+        if (!exists) {
+            const id = ++sectionIdCounter;
+            labelSections.push({ id, start, end, color: 'green', text: title });
+            count++;
+        }
+        // Mark individual + Clips buttons as added
+        const addBtn = card.querySelector('.cc-add');
+        if (addBtn && !addBtn.disabled) {
+            addBtn.innerHTML = '✓ Added';
+            addBtn.disabled = true;
+            addBtn.classList.add('clip-added');
+        }
+    });
+    if (count > 0) {
+        renderAllHighlights();
+        updateSelectCount();
+        saveLabels();
+        renderClipsTab();
+        renderStoryClipLibrary();
+        showToast(`Pulled ${count} clips`);
+    } else {
+        showToast('All clips already added');
+    }
+    btn.innerHTML = '✓ Pulled';
+    btn.disabled = true;
+    btn.classList.add('clip-added');
+}
+
 function addClipFromChat(start, end, title, btn) {
+    // Check if already exists
+    const exists = labelSections.some(s => Math.abs(s.start - start) < 0.5);
+    if (exists) {
+        showToast('Clip already added');
+        if (btn) { btn.innerHTML = '✓'; btn.disabled = true; btn.classList.add('clip-added'); }
+        return;
+    }
+
     // Add as a green-labeled section
     const color = 'green';
     const id = ++sectionIdCounter;
@@ -1558,13 +1744,34 @@ function addClipFromChat(start, end, title, btn) {
     updateSelectCount();
     saveLabels();
     renderClipsTab();
-    showToast(`Added "${title}" to clips`);
+    renderStoryClipLibrary();
+
     // Show green checkmark on the button
     if (btn) {
-        btn.innerHTML = '✓ Added';
+        btn.innerHTML = '✓';
         btn.disabled = true;
         btn.classList.add('clip-added');
     }
+
+    // Insert inline clip card after the closest paragraph in chat
+    const chatMsg = btn?.closest('.chat-msg');
+    if (chatMsg) {
+        const card = document.createElement('div');
+        card.className = 'chat-inline-clip';
+        card.innerHTML = `<span class="chat-inline-clip-dot"></span>`
+            + `<span class="chat-inline-clip-title">${escapeHtml(title)}</span>`
+            + `<span class="chat-inline-clip-tc">${fmtTime(start)} – ${fmtTime(end)}</span>`
+            + `<button class="chat-inline-clip-play" onclick="jumpTo(${start})">&#9654;</button>`;
+        // Insert after the button's parent tc-group or after the cc-card
+        const anchor = btn.closest('.chat-tc-group') || btn.closest('.cc-card');
+        if (anchor && anchor.parentNode) {
+            anchor.parentNode.insertBefore(card, anchor.nextSibling);
+        } else {
+            chatMsg.appendChild(card);
+        }
+    }
+
+    showToast(`Added "${title}" to clips`);
 }
 
 // ── Clips Tab ──
@@ -1864,6 +2071,7 @@ async function exportSelectedClips() {
 
 // Initial render
 renderClipsTab();
+renderStoryClipLibrary();
 
 // Also re-render clips when labels change
 const _origSaveLabels = saveLabels;
@@ -2318,8 +2526,10 @@ async function loadStoryBuilds() {
         const data = await res.json();
         storyBuilds = data.builds || [];
         updateStoryBuildSelect();
-        if (storyBuilds.length > 0 && !currentBuildId) {
-            loadStoryBuild(storyBuilds[storyBuilds.length - 1].id);
+        renderStoryList();
+        if (storyBuilds.length > 0) {
+            const targetId = currentBuildId || storyBuilds[storyBuilds.length - 1].id;
+            loadStoryBuild(targetId);
         }
     } catch (err) { console.error('Failed to load story builds:', err); }
 }
@@ -2337,6 +2547,7 @@ function loadStoryBuild(buildId) {
     if (!build) return;
     currentBuildId = buildId;
     updateStoryBuildSelect();
+    renderStoryList();
     renderStorySequence(build);
 }
 
@@ -2371,6 +2582,7 @@ async function buildStory() {
             storyBuilds.push(data.build);
             currentBuildId = data.build.id;
             updateStoryBuildSelect();
+            renderStoryList();
             renderStorySequence(data.build);
             showToast('Story built!');
         } else {
@@ -2393,14 +2605,12 @@ async function buildStory() {
 
 function renderStorySequence(build) {
     const container = document.getElementById('storySequence');
-    const topbar = document.getElementById('storyTopbar');
     const actions = document.getElementById('storyActions');
     const empty = document.getElementById('storyEmpty');
 
     if (!build || !build.clips || build.clips.length === 0) {
         container.style.display = 'none';
         actions.style.display = 'none';
-        topbar.style.display = 'none';
         empty.style.display = '';
         return;
     }
@@ -2408,7 +2618,6 @@ function renderStorySequence(build) {
     empty.style.display = 'none';
     container.style.display = '';
     actions.style.display = '';
-    topbar.style.display = '';
 
     // Stats
     let totalDuration = 0;
@@ -2550,11 +2759,86 @@ async function deleteCurrentStoryBuild() {
         } else {
             document.getElementById('storySequence').style.display = 'none';
             document.getElementById('storyActions').style.display = 'none';
-            document.getElementById('storyTopbar').style.display = 'none';
             document.getElementById('storyEmpty').style.display = '';
         }
         updateStoryBuildSelect();
+        renderStoryList();
         showToast('Build deleted');
+    } catch (err) { showToast('Error: ' + err.message, true); }
+}
+
+function renderStoryList() {
+    const list = document.getElementById('storySidebarList');
+    const empty = document.getElementById('storySidebarEmpty');
+    if (!list) return;
+
+    if (storyBuilds.length === 0) {
+        list.innerHTML = '';
+        if (empty) empty.style.display = '';
+        return;
+    }
+    if (empty) empty.style.display = 'none';
+
+    list.innerHTML = storyBuilds.map(b => {
+        const isActive = b.id === currentBuildId;
+        // Calculate duration
+        let dur = 0;
+        if (b.clips) {
+            b.clips.forEach(c => {
+                const s = parseTc(c.start_time);
+                const e = parseTc(c.end_time);
+                if (e > s) dur += (e - s);
+            });
+        }
+        const clipCount = b.clips ? b.clips.length : 0;
+        const title = escapeHtml(b.story_title || 'Untitled');
+        return `<div class="story-sidebar-item${isActive ? ' active' : ''}" data-build-id="${b.id}" onclick="loadStoryBuild('${b.id}')">
+            <div class="story-sidebar-item-top">
+                <input class="story-sidebar-title" type="text" value="${title}"
+                    onclick="event.stopPropagation()"
+                    onblur="renameStory('${b.id}', this.value)"
+                    onkeydown="if(event.key==='Enter'){this.blur();}">
+                <button class="story-sidebar-trash" onclick="event.stopPropagation(); deleteStoryBuild('${b.id}')" title="Delete story">&times;</button>
+            </div>
+            <div class="story-sidebar-item-meta">${clipCount} clip${clipCount !== 1 ? 's' : ''} &bull; ${fmtTime(dur)}</div>
+        </div>`;
+    }).join('');
+}
+
+async function renameStory(buildId, newTitle) {
+    newTitle = newTitle.trim();
+    if (!newTitle) return;
+    const build = storyBuilds.find(b => b.id === buildId);
+    if (!build || build.story_title === newTitle) return;
+    build.story_title = newTitle;
+    updateStoryBuildSelect();
+    try {
+        await fetch(`/project/${PROJECT_ID}/story/builds/${buildId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ story_title: newTitle, clips: build.clips }),
+        });
+    } catch (err) { console.error('Failed to rename story:', err); }
+}
+
+async function deleteStoryBuild(buildId) {
+    if (!confirm('Are you sure you want to delete this story?')) return;
+    try {
+        await fetch(`/project/${PROJECT_ID}/story/builds/${buildId}`, { method: 'DELETE' });
+        storyBuilds = storyBuilds.filter(b => b.id !== buildId);
+        if (currentBuildId === buildId) {
+            currentBuildId = null;
+            if (storyBuilds.length > 0) {
+                loadStoryBuild(storyBuilds[storyBuilds.length - 1].id);
+            } else {
+                document.getElementById('storySequence').style.display = 'none';
+                document.getElementById('storyActions').style.display = 'none';
+                    document.getElementById('storyEmpty').style.display = '';
+            }
+        }
+        updateStoryBuildSelect();
+        renderStoryList();
+        showToast('Story deleted');
     } catch (err) { showToast('Error: ' + err.message, true); }
 }
 
@@ -3076,7 +3360,35 @@ function renderClientNotesPanel() {
 loadComments();
 
 // "Add to Story Builder" function for clips in other tabs
-function addToStoryBuilder(start, end, title) {
+function renderStoryClipLibrary() {
+    const list = document.getElementById('storyClipList');
+    const empty = document.getElementById('storyClipEmpty');
+    if (!list) return;
+
+    const sorted = [...labelSections].sort((a, b) => a.start - b.start);
+
+    if (sorted.length === 0) {
+        empty.style.display = '';
+        list.innerHTML = '';
+        return;
+    }
+    empty.style.display = 'none';
+
+    list.innerHTML = sorted.map(clip => {
+        const dur = Math.round(clip.end - clip.start);
+        const safeTitle = escapeHtml(clip.text || 'Untitled');
+        return `<div class="story-clip-item" data-start="${clip.start}" data-end="${clip.end}">
+            <button class="story-clip-play" onclick="jumpTo(${clip.start})">&#9654;</button>
+            <div class="story-clip-info">
+                <span class="story-clip-title">${safeTitle}</span>
+                <span class="story-clip-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)} &middot; ${dur}s</span>
+            </div>
+            <button class="cc-add story-clip-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}',this)">+ Story</button>
+        </div>`;
+    }).join('');
+}
+
+function addToStoryBuilder(start, end, title, btn) {
     if (!currentBuildId) {
         showToast('Build a story first, then add clips to it');
         return;
@@ -3094,7 +3406,14 @@ function addToStoryBuilder(start, end, title) {
     });
 
     saveStoryBuild(build);
+    renderStorySequence(build);
     showToast(`Added "${title}" to story`);
+
+    if (btn) {
+        btn.innerHTML = '✓ Added';
+        btn.disabled = true;
+        btn.classList.add('clip-added');
+    }
 }
 </script>
 

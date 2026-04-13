@@ -312,10 +312,9 @@ Rules:
 - Select clips that build a clear narrative arc: hook, rising action, emotional peak, resolution
 - Order them for maximum story impact, not chronological order unless that serves the story
 - Each clip should be 5-30 seconds long unless the moment requires more breathing room
-- Include 5-15 clips depending on the requested duration (roughly 3-4 clips per minute of final edit)
+- DURATION IS CRITICAL: If the user requests a specific duration (e.g. "4 minute story"), you MUST hit that target. Calculate the total duration of all clips you select by adding up (end_time - start_time) for each clip. Aim for roughly 3-4 clips per minute. For a 4-minute story, that means 12-16 clips totaling approximately 3:30-4:30 of content. If your first selection is too short, add more clips.
 - For each clip, provide: a short title, start timecode, end timecode, the transcript excerpt, and a one-sentence editorial note explaining why this clip is in this position
 - Be selective and opinionated. Don't include filler. Every clip should earn its place
-- If the user asks for a specific duration, respect it. Calculate total clip time and stay within range
 - CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end times. Use string format like "00:02:45"
 - Respond ONLY in valid JSON with this structure:
 {
@@ -548,10 +547,18 @@ def _build_story_from_vectors(segment_vectors, message, project_name):
     orders — it does not invent timecodes — which is why this path is more reliable.
     """
     # Compact menu of available segments for the prompt
+    def _tc_to_sec(tc):
+        parts = tc.split(':')
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        return 0
+
     menu_lines = []
     for s in segment_vectors:
+        dur = _tc_to_sec(s.get('timecode_out', '0:0:0')) - _tc_to_sec(s.get('timecode_in', '0:0:0'))
         menu_lines.append(
             f"- {s.get('seg_id', '?')} [{s.get('timecode_in', '')}-{s.get('timecode_out', '')}] "
+            f"dur={int(dur)}s "
             f"score={s.get('narrative_score', 'medium')} memory={s.get('memory_type', 'semantic')} "
             f"beat={s.get('beat_type', 'context')} thread=\"{s.get('thread_title', '')}\" "
             f"tags={','.join(s.get('theme_tags', []))} "
@@ -567,7 +574,8 @@ Rules:
 - Use "episodic" segments (specific events, sensory) for key emotional moments.
 - Use "semantic" segments (general reflection) for context and transitions between episodic beats.
 - Build a clear arc: hook, context, pressure, turn, resolution.
-- 5-15 clips total, ordered for story impact (not necessarily chronological).
+- DURATION IS CRITICAL: If the user requests a specific duration (e.g. "4 minute story"), you MUST hit that target. Calculate the total duration of all clips you select by adding up (end_time - start_time) for each clip. Each segment in the menu shows its timecode range — use that to calculate duration. Aim for roughly 3-4 clips per minute of requested duration. For a 4-minute story, select enough clips to total approximately 3:30-4:30 of content. If your first selection is too short, add more clips. If too long, trim or remove clips.
+- Ordered for story impact (not necessarily chronological).
 - Always respond in valid JSON only. No markdown, no prose."""
 
     prompt = f"""PROJECT: {project_name}

@@ -30,8 +30,10 @@ You have three modes depending on what the user asks:
 General rules:
 - Keep responses short and direct. 2-3 sentences for simple answers. A few short paragraphs max for complex editorial questions.
 - Never repeat the entire transcript back. Reference specific moments by timecode.
+- The transcript shows each segment as [START-END] Speaker: text. Use these exact timecodes for clips.
 - When suggesting clips, always include timecodes so the app can render them as playable cards. Use this exact format:
-  [CLIP: start=45.2 end=62.8 title="Short descriptive title"]
+  [CLIP: start=HH:MM:SS end=HH:MM:SS title="Short descriptive title"]
+- A clip should span multiple segments to capture a complete thought — typically 10-60 seconds. NEVER make a clip shorter than 5 seconds. Look at the start time of the first relevant segment and the end time of the last relevant segment.
 - Keep clip titles under 8 words.
 - Use natural conversational language. No bullet point lists unless the user specifically asks for a list.
 - No emojis. No markdown headers (#). No bullet points with asterisks. Use plain text with line breaks.
@@ -179,14 +181,16 @@ def _format_transcript_for_ai(transcript, max_chars=12000):
     if not segments:
         return ''
 
-    # Format all segments
+    # Format all segments with start AND end times so AI can set accurate clip boundaries
     all_lines = []
     for seg in segments:
-        tc = seg['start_formatted'][:8]
+        start_tc = seg['start_formatted'][:8]
+        end_s = seg.get('end', seg.get('start', 0))
+        end_tc = f"{int(end_s)//3600:02d}:{(int(end_s)%3600)//60:02d}:{int(end_s)%60:02d}"
         speaker = seg.get('speaker', 'Speaker')
         text = seg['text']
         if text.strip():
-            all_lines.append(f"[{tc}] {speaker}: {text}")
+            all_lines.append(f"[{start_tc}-{end_tc}] {speaker}: {text}")
 
     full = '\n'.join(all_lines)
     if len(full) <= max_chars:

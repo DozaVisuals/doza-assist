@@ -1389,6 +1389,10 @@ async function sendChat() {
     input.focus();
 }
 
+// Store pending chat story builds (not yet sent to Story Builder)
+let chatStoryBuilds = {};
+let chatStoryPlayState = null; // { buildId, clipIdx, playing }
+
 async function buildStoryFromChat(message) {
     const typing = appendChatMessage('assistant', '<div class="chat-story-building"><span class="chat-typing"><span></span><span></span><span></span></span> Building your story...</div>', true);
 
@@ -1407,44 +1411,12 @@ async function buildStoryFromChat(message) {
         typing.remove();
 
         if (data.build) {
-            storyBuilds.push(data.build);
-            currentBuildId = data.build.id;
-            updateStoryBuildSelect();
-            renderStoryList();
+            // Store locally — don't add to Story Builder yet
+            const bid = data.build.id;
+            chatStoryBuilds[bid] = data.build;
 
-            // Show story result in chat
-            const clipCount = data.build.clips ? data.build.clips.length : 0;
-            let totalDur = 0;
-            (data.build.clips || []).forEach(c => {
-                const s = parseTc(c.start_time);
-                const e = parseTc(c.end_time);
-                if (e > s) totalDur += (e - s);
-            });
-
-            let storyHtml = `<div class="chat-story-result">`;
-            storyHtml += `<div class="chat-story-result-title">${escapeHtml(data.build.story_title || 'Untitled Story')}</div>`;
-            storyHtml += `<div class="chat-story-result-meta">${clipCount} clips &bull; ${fmtTime(totalDur)}</div>`;
-
-            // Show clip previews
-            (data.build.clips || []).forEach((clip, i) => {
-                const s = parseTc(clip.start_time);
-                const e = parseTc(clip.end_time);
-                const dur = Math.max(0, e - s);
-                storyHtml += `<div class="chat-story-clip">
-                    <span class="chat-story-clip-num">${i + 1}</span>
-                    <span class="chat-story-clip-title">${escapeHtml(clip.title || 'Untitled')}</span>
-                    <span class="chat-story-clip-tc" onclick="jumpTo(${s})">${fmtTime(s)} - ${fmtTime(e)}</span>
-                    <span class="chat-story-clip-dur">${formatDuration(dur)}</span>
-                </div>`;
-            });
-
-            storyHtml += `<div class="chat-story-result-actions">`;
-            storyHtml += `<button class="btn btn-primary btn-sm" onclick="switchTab('story')">Open in Story Builder</button>`;
-            storyHtml += `<button class="btn btn-sm" onclick="exportStoryFCPXML()">Export to FCPX</button>`;
-            storyHtml += `</div></div>`;
-
-            const msg = appendChatMessage('assistant', storyHtml, true);
-            chatHistory.push({ role: 'assistant', content: `Built story "${data.build.story_title}" with ${clipCount} clips (${fmtTime(totalDur)}).` });
+            const msg = appendChatMessage('assistant', renderChatStoryCard(data.build), true);
+            chatHistory.push({ role: 'assistant', content: `Built story "${data.build.story_title}" with ${data.build.clips ? data.build.clips.length : 0} clips.` });
         } else {
             appendChatMessage('assistant', 'Error building story: ' + (data.error || 'Unknown error'));
         }
@@ -1456,6 +1428,188 @@ async function buildStoryFromChat(message) {
     input.disabled = false;
     btn.disabled = false;
     input.focus();
+}
+
+function renderChatStoryCard(build) {
+    const bid = build.id;
+    const clips = build.clips || [];
+    const clipCount = clips.length;
+    let totalDur = 0;
+    clips.forEach(c => {
+        const s = parseTc(c.start_time);
+        const e = parseTc(c.end_time);
+        if (e > s) totalDur += (e - s);
+    });
+
+    let html = `<div class="chat-story-result" data-build-id="${bid}">`;
+    html += `<div class="chat-story-result-header">`;
+    html += `<div>`;
+    html += `<div class="chat-story-result-title">${escapeHtml(build.story_title || 'Untitled Story')}</div>`;
+    html += `<div class="chat-story-result-meta">${clipCount} clips &bull; ${fmtTime(totalDur)}</div>`;
+    html += `</div>`;
+    html += `<button class="btn btn-sm btn-primary chat-story-playall" id="csPlayAll_${bid}" onclick="chatStoryPlayAll('${bid}', this)">`;
+    html += `<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg> Play All`;
+    html += `</button>`;
+    html += `</div>`;
+
+    // Clip list with individual play buttons
+    clips.forEach((clip, i) => {
+        const s = parseTc(clip.start_time);
+        const e = parseTc(clip.end_time);
+        const dur = Math.max(0, e - s);
+        const uid = `cs_${bid}_${i}`;
+        html += `<div class="chat-story-clip" id="${uid}" data-start="${s}" data-end="${e}">
+            <span class="chat-story-clip-num">${i + 1}</span>
+            <button class="chat-story-clip-play" onclick="chatStoryPlayClip('${bid}', ${i}, ${s}, ${e}, this)" title="Play">
+                <svg class="csp-play" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg>
+                <svg class="csp-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+            </button>
+            <span class="chat-story-clip-title">${escapeHtml(clip.title || 'Untitled')}</span>
+            <span class="chat-story-clip-tc" onclick="jumpTo(${s})">${fmtTime(s)} - ${fmtTime(e)}</span>
+            <span class="chat-story-clip-dur">${formatDuration(dur)}</span>
+        </div>`;
+    });
+
+    html += `<div class="chat-story-result-actions">`;
+    html += `<button class="btn btn-primary btn-sm" onclick="sendChatStoryToBuilder('${bid}', this)">Send to Story Builder</button>`;
+    html += `<button class="btn btn-sm" onclick="exportStoryFCPXMLFromChat('${bid}')">Export to FCPX</button>`;
+    html += `</div></div>`;
+
+    return html;
+}
+
+function chatStoryPlayClip(buildId, idx, start, end, btnEl) {
+    if (!audio) return;
+
+    const uid = `cs_${buildId}_${idx}`;
+    const isPlaying = chatStoryPlayState && chatStoryPlayState.uid === uid && !audio.paused;
+
+    // Stop any current playback
+    _stopChatStoryPlay();
+
+    if (isPlaying) return; // Was playing this clip, just stop
+
+    audio.currentTime = start;
+    audio.play();
+
+    chatStoryPlayState = { buildId, uid, clipIdx: idx, start, end, allMode: false };
+
+    // Highlight active clip
+    document.querySelectorAll('.chat-story-clip.cs-playing').forEach(el => el.classList.remove('cs-playing'));
+    const clipEl = document.getElementById(uid);
+    if (clipEl) clipEl.classList.add('cs-playing');
+
+    // Update button icons
+    if (btnEl) {
+        btnEl.querySelector('.csp-play').style.display = 'none';
+        btnEl.querySelector('.csp-pause').style.display = '';
+    }
+}
+
+function chatStoryPlayAll(buildId, btnEl) {
+    const build = chatStoryBuilds[buildId];
+    if (!build || !build.clips || build.clips.length === 0) return;
+
+    // If already playing all for this build, stop
+    if (chatStoryPlayState && chatStoryPlayState.buildId === buildId && chatStoryPlayState.allMode && !audio.paused) {
+        _stopChatStoryPlay();
+        btnEl.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg> Play All`;
+        return;
+    }
+
+    _stopChatStoryPlay();
+
+    const firstClip = build.clips[0];
+    const s = parseTc(firstClip.start_time);
+    const e = parseTc(firstClip.end_time);
+
+    audio.currentTime = s;
+    audio.play();
+
+    chatStoryPlayState = { buildId, uid: `cs_${buildId}_0`, clipIdx: 0, start: s, end: e, allMode: true };
+
+    // Highlight first clip
+    document.querySelectorAll('.chat-story-clip.cs-playing').forEach(el => el.classList.remove('cs-playing'));
+    const clipEl = document.getElementById(`cs_${buildId}_0`);
+    if (clipEl) clipEl.classList.add('cs-playing');
+
+    btnEl.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg> Pause`;
+}
+
+function _chatStoryTimeUpdate() {
+    if (!chatStoryPlayState || !audio) return;
+    const st = chatStoryPlayState;
+
+    if (audio.currentTime >= st.end) {
+        if (st.allMode) {
+            // Advance to next clip
+            const build = chatStoryBuilds[st.buildId];
+            const nextIdx = st.clipIdx + 1;
+            if (build && build.clips && nextIdx < build.clips.length) {
+                const nextClip = build.clips[nextIdx];
+                const ns = parseTc(nextClip.start_time);
+                const ne = parseTc(nextClip.end_time);
+                audio.currentTime = ns;
+
+                chatStoryPlayState = { buildId: st.buildId, uid: `cs_${st.buildId}_${nextIdx}`, clipIdx: nextIdx, start: ns, end: ne, allMode: true };
+
+                // Update highlight
+                document.querySelectorAll('.chat-story-clip.cs-playing').forEach(el => el.classList.remove('cs-playing'));
+                const clipEl = document.getElementById(`cs_${st.buildId}_${nextIdx}`);
+                if (clipEl) clipEl.classList.add('cs-playing');
+                return;
+            }
+            // End of story
+            _stopChatStoryPlay();
+            const playAllBtn = document.getElementById(`csPlayAll_${st.buildId}`);
+            if (playAllBtn) playAllBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg> Play All`;
+        } else {
+            _stopChatStoryPlay();
+        }
+    }
+}
+
+function _stopChatStoryPlay() {
+    if (chatStoryPlayState) {
+        audio.pause();
+        document.querySelectorAll('.chat-story-clip.cs-playing').forEach(el => el.classList.remove('cs-playing'));
+        // Reset all clip play buttons
+        document.querySelectorAll('.chat-story-clip-play .csp-pause').forEach(el => el.style.display = 'none');
+        document.querySelectorAll('.chat-story-clip-play .csp-play').forEach(el => el.style.display = '');
+        chatStoryPlayState = null;
+    }
+}
+
+function sendChatStoryToBuilder(buildId, btnEl) {
+    const build = chatStoryBuilds[buildId];
+    if (!build) { showToast('Story not found', true); return; }
+
+    // Add to story builds if not already there
+    if (!storyBuilds.find(b => b.id === buildId)) {
+        storyBuilds.push(build);
+    }
+    currentBuildId = buildId;
+    updateStoryBuildSelect();
+    renderStoryList();
+
+    btnEl.textContent = 'Sent!';
+    btnEl.classList.add('clip-added');
+    btnEl.disabled = true;
+
+    showToast('Story added to Story Builder');
+}
+
+function exportStoryFCPXMLFromChat(buildId) {
+    const build = chatStoryBuilds[buildId];
+    if (!build) { showToast('Story not found', true); return; }
+    // Temporarily set as current and export
+    const prevBuildId = currentBuildId;
+    if (!storyBuilds.find(b => b.id === buildId)) {
+        storyBuilds.push(build);
+    }
+    currentBuildId = buildId;
+    exportStoryFCPXML();
+    currentBuildId = prevBuildId;
 }
 
 async function buildStoryFromChatClips(btnEl) {
@@ -1487,6 +1641,11 @@ async function buildStoryFromChatClips(btnEl) {
 
     btnEl.textContent = 'Built!';
     btnEl.classList.add('clip-added');
+}
+
+// Register chat story playback monitor
+if (typeof registerTimeUpdateHandler === 'function') {
+    registerTimeUpdateHandler(_chatStoryTimeUpdate);
 }
 
 function appendChatMessage(role, content, isHtml = false) {

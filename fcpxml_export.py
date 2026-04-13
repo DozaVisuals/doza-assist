@@ -188,17 +188,6 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
     spine_block = '\n'.join(spine_clips)
 
-    # Also build keyword ranges on the source asset for browser filtering
-    keyword_ranges = []
-    for m in markers:
-        kw_start = seconds_to_fcpxml_time(m['start'], framerate)
-        kw_dur = seconds_to_fcpxml_time(m['end'] - m['start'], framerate)
-        category = _escape_xml(m.get('category', m.get('text', 'Clip')))[:40]
-        keyword_ranges.append(
-            f'                <keyword start="{kw_start}" duration="{kw_dur}" value="{category}"/>'
-        )
-    keywords_block = '\n'.join(keyword_ranges)
-
     fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 
@@ -211,9 +200,6 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     </resources>
     <library>
         <event name="{safe_name}">
-            <asset-clip name="{_escape_xml(os.path.basename(source_path))}" ref="r2" duration="{media_dur_str}" format="r1" tcFormat="NDF">
-{keywords_block}
-            </asset-clip>
             <project name="{safe_name} - Selects" uid="{uid}">
                 <sequence format="r1" duration="{timeline_dur_str}" tcStart="0/1s" tcFormat="NDF">
                     <spine>

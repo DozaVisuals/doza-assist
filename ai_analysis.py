@@ -13,7 +13,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     Chat with AI about the transcript. Supports follow-up questions.
     Returns the AI reply as a string (may contain embedded clip suggestions).
     """
-    formatted = _format_transcript_for_ai(transcript, max_chars=80000)
+    formatted = _format_transcript_for_ai(transcript)
 
     system_prompt = f"""You are an expert editorial consultant embedded in a documentary and interview editing tool called Doza Assist. You have the full transcript of the project "{project_name}" loaded in context.
 
@@ -172,11 +172,10 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
     return result
 
 
-def _format_transcript_for_ai(transcript, max_chars=80000):
+def _format_transcript_for_ai(transcript):
     """Format transcript segments into readable text with timecodes.
 
-    Limits output to max_chars to avoid overwhelming the model.
-    Samples evenly from beginning, middle, and end for full coverage.
+    Always sends the full transcript — no truncation.
     """
     segments = transcript.get('segments', [])
     if not segments:
@@ -193,27 +192,7 @@ def _format_transcript_for_ai(transcript, max_chars=80000):
         if text.strip():
             all_lines.append(f"[{start_tc}-{end_tc}] {speaker}: {text}")
 
-    full = '\n'.join(all_lines)
-    if len(full) <= max_chars:
-        return full
-
-    # If too long, take beginning + middle + end portions
-    n = len(all_lines)
-    third = n // 3
-    sampled = (
-        all_lines[:third] +
-        ['', '--- [middle of interview] ---', ''] +
-        all_lines[third:2*third] +
-        ['', '--- [final portion] ---', ''] +
-        all_lines[2*third:]
-    )
-    result = '\n'.join(sampled)
-
-    # If still too long, hard truncate
-    if len(result) > max_chars:
-        result = result[:max_chars] + '\n[... transcript truncated for length ...]'
-
-    return result
+    return '\n'.join(all_lines)
 
 
 def _call_ai(prompt, system_prompt=""):
@@ -310,7 +289,7 @@ def build_story(transcript, message, project_name="Interview", segment_vectors=N
     if segment_vectors:
         return _build_story_from_vectors(segment_vectors, message, project_name)
 
-    formatted = _format_transcript_for_ai(transcript, max_chars=80000)
+    formatted = _format_transcript_for_ai(transcript)
 
     system_prompt = """You are a story editor building a narrative sequence from interview transcript footage. The user will describe what kind of story or edit they want. Your job is to select and order clips from the transcript that form a coherent narrative.
 
@@ -371,7 +350,7 @@ def generate_segment_vectors(transcript, project_name="Interview"):
         "frozen": true
       }
     """
-    formatted = _format_transcript_for_ai(transcript, max_chars=80000)
+    formatted = _format_transcript_for_ai(transcript)
 
     system_prompt = """You are a documentary story analyst. You break interview transcripts into discrete narrative segments and classify them with strict, structured metadata. You always respond in valid JSON only — no prose, no markdown, no code fences."""
 

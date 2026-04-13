@@ -93,11 +93,12 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
-def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speakers=2):
+def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speakers=2, language='en'):
     """
     Transcribe an audio/video file.
 
     Tries engines in order: Parakeet MLX (fastest) → WhisperX → Whisper.
+    For non-English languages, skips Parakeet (English-only) and uses WhisperX/Whisper.
 
     Returns:
         dict with 'segments' list, each containing:
@@ -110,26 +111,29 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     # Extract audio first — needed for all engines (video files are too large for direct processing)
     audio_path = extract_audio(filepath, project_dir=project_dir)
 
-    # Try Parakeet MLX first (fastest on Apple Silicon)
-    try:
-        return _transcribe_parakeet(audio_path, speaker_labels)
-    except ImportError:
-        print("Parakeet MLX not available, trying Whisper...", flush=True)
-    except Exception as e:
-        import traceback
-        print(f"Parakeet failed: {e}", flush=True)
-        traceback.print_exc()
-        print("Falling back to Whisper...", flush=True)
+    # Try Parakeet MLX first (fastest on Apple Silicon) — English only
+    if language == 'en':
+        try:
+            return _transcribe_parakeet(audio_path, speaker_labels)
+        except ImportError:
+            print("Parakeet MLX not available, trying Whisper...", flush=True)
+        except Exception as e:
+            import traceback
+            print(f"Parakeet failed: {e}", flush=True)
+            traceback.print_exc()
+            print("Falling back to Whisper...", flush=True)
+    else:
+        print(f"Language '{language}' selected — skipping Parakeet (English-only), using Whisper...", flush=True)
 
     # Try WhisperX
     try:
-        return _transcribe_whisperx(audio_path, speaker_labels)
+        return _transcribe_whisperx(audio_path, speaker_labels, language=language)
     except ImportError:
         print("WhisperX not available, trying standard Whisper...")
 
     # Fall back to standard Whisper
     try:
-        return _transcribe_whisper(audio_path, speaker_labels, num_speakers=num_speakers)
+        return _transcribe_whisper(audio_path, speaker_labels, num_speakers=num_speakers, language=language)
     except ImportError:
         raise RuntimeError(
             "No transcription engine found. Install one of:\n"
@@ -251,7 +255,7 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
     }
 
 
-def _transcribe_whisperx(audio_path, speaker_labels=None):
+def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
     """Transcribe using WhisperX with word-level timestamps and diarization."""
     import whisperx
     import torch
@@ -267,9 +271,13 @@ def _transcribe_whisperx(audio_path, speaker_labels=None):
     print("Loading WhisperX model...")
     model = whisperx.load_model("large-v3", device, compute_type=compute_type)
 
-    print("Transcribing...")
+    print(f"Transcribing (language: {language})...")
     audio = whisperx.load_audio(audio_path)
-    result = model.transcribe(audio, batch_size=16)
+    # Pass language to avoid auto-detection when user has specified it
+    transcribe_kwargs = {"batch_size": 16}
+    if language != 'auto':
+        transcribe_kwargs["language"] = language
+    result = model.transcribe(audio, **transcribe_kwargs)
 
     # Align whisper output for word-level timestamps
     print("Aligning timestamps...")
@@ -348,15 +356,18 @@ def _transcribe_lightning(audio_path, speaker_labels=None):
     }
 
 
-def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2):
+def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, language='en'):
     """Transcribe using OpenAI Whisper. Speaker assignment done manually by user."""
     import whisper
 
     print("Loading Whisper model (base)...")
     model = whisper.load_model("base")
 
-    print("Transcribing...")
-    result = model.transcribe(audio_path, word_timestamps=True)
+    print(f"Transcribing (language: {language})...")
+    transcribe_kwargs = {"word_timestamps": True}
+    if language != 'auto':
+        transcribe_kwargs["language"] = language
+    result = model.transcribe(audio_path, **transcribe_kwargs)
 
     # Default speaker name
     default_speaker = 'Speaker'

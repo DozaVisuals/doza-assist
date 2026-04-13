@@ -178,6 +178,7 @@ def create_project():
     interviewer_name = data.get('interviewer_name', 'Interviewer').strip()
     subject_name = data.get('subject_name', 'Subject').strip()
     num_speakers = int(data.get('num_speakers', 2))
+    language = data.get('language', 'en').strip()
 
     if not project_name:
         project_name = Path(source_path).stem.replace('_', ' ').replace('-', ' ')
@@ -195,6 +196,7 @@ def create_project():
         'interviewer_name': interviewer_name,
         'subject_name': subject_name,
         'num_speakers': num_speakers,
+        'language': language,
         'filename': os.path.basename(source_path),
         'source_path': source_path,
         'filepath': source_path,
@@ -226,6 +228,7 @@ def upload():
     client_name = request.form.get('client_name', '').strip()
     interviewer_name = request.form.get('interviewer_name', 'Interviewer').strip()
     subject_name = request.form.get('subject_name', 'Subject').strip()
+    language = request.form.get('language', 'en').strip()
 
     if not project_name:
         project_name = file.filename.rsplit('.', 1)[0]
@@ -246,6 +249,7 @@ def upload():
         'client_name': client_name,
         'interviewer_name': interviewer_name,
         'subject_name': subject_name,
+        'language': language,
         'filename': filename,
         'source_path': filepath,
         'filepath': filepath,
@@ -619,6 +623,7 @@ def transcribe(project_id):
         # Pass both source path and project directory for audio extraction
         project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
         num_speakers = project.get('num_speakers', 2)
+        language = project.get('language', 'en')
         result = transcribe_file(
             source_path,
             project_dir=project_dir,
@@ -627,6 +632,7 @@ def transcribe(project_id):
                 'SPEAKER_01': project.get('subject_name', 'Subject'),
             },
             num_speakers=num_speakers,
+            language=language,
         )
         project['transcript'] = result
         project['status'] = 'transcribed'

@@ -129,12 +129,6 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
     media_dur_str = seconds_to_fcpxml_time(media_duration, framerate)
 
-    # Calculate total timeline duration (sum of all clips)
-    total_timeline = sum(m['end'] - m['start'] for m in markers) if markers else 0
-    if total_timeline <= 0:
-        total_timeline = media_duration
-    timeline_dur_str = seconds_to_fcpxml_time(total_timeline, framerate)
-
     # File reference — use file:// URL for the source media
     file_url = 'file://' + source_path.replace(' ', '%20')
     ext = os.path.splitext(source_path)[1].lower()
@@ -148,7 +142,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
     for i, m in enumerate(markers):
         clip_start = m['start']
-        clip_end = m['end'] + 1.0  # Add 1s buffer — word timestamps end slightly early
+        clip_end = m['end']
         clip_dur = clip_end - clip_start
         if clip_dur <= 0:
             continue
@@ -187,6 +181,9 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         timeline_offset += clip_dur
 
     spine_block = '\n'.join(spine_clips)
+
+    total_timeline = timeline_offset if timeline_offset > 0 else media_duration
+    timeline_dur_str = seconds_to_fcpxml_time(total_timeline, framerate)
 
     fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
@@ -238,11 +235,6 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 
     media_dur_str = seconds_to_fcpxml_time(media_duration, framerate)
 
-    total_timeline = sum(m['end'] - m['start'] for m in markers if m['end'] > m['start'])
-    if total_timeline <= 0:
-        total_timeline = media_duration
-    timeline_dur_str = seconds_to_fcpxml_time(total_timeline, framerate)
-
     file_url = 'file://' + source_path.replace(' ', '%20')
     ext = os.path.splitext(source_path)[1].lower()
     is_video = ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
@@ -252,7 +244,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 
     for i, m in enumerate(markers):
         clip_start = m['start']
-        clip_end = m['end'] + 1.0
+        clip_end = m['end']
         clip_dur = clip_end - clip_start
         if clip_dur <= 0:
             continue
@@ -280,6 +272,9 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
         timeline_offset += clip_dur
 
     spine_block = '\n'.join(spine_clips)
+
+    total_timeline = timeline_offset if timeline_offset > 0 else media_duration
+    timeline_dur_str = seconds_to_fcpxml_time(total_timeline, framerate)
 
     fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>

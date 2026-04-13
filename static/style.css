@@ -117,6 +117,10 @@ body {
     margin-left: 0.25rem;
 }
 
+.app-logo-group { display: flex; align-items: center; gap: 0.5rem; }
+.logo-byline { font-size: 0.65rem; color: var(--text-muted); text-decoration: none; font-weight: 400; white-space: nowrap; }
+.logo-byline:hover { color: var(--accent); }
+
 .container {
     max-width: 1200px;
     margin: 0 auto;

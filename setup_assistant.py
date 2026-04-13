@@ -41,6 +41,7 @@ setup_state = {
         {"id": "ollama",    "name": "Install Ollama (AI engine)",          "status": "pending", "detail": ""},
         {"id": "venv",      "name": "Create Python environment",          "status": "pending", "detail": ""},
         {"id": "pip",       "name": "Install Python packages",            "status": "pending", "detail": ""},
+        {"id": "transcribe","name": "Install transcription engine",       "status": "pending", "detail": ""},
         {"id": "model",     "name": "Download AI model (gemma4)",         "status": "pending", "detail": ""},
     ],
     "error": None,
@@ -143,13 +144,14 @@ def run_cmd(cmd, capture=True, env=None):
 
 
 # ── Step indices ──
-STEP_XCODE    = 0
-STEP_HOMEBREW = 1
-STEP_FFMPEG   = 2
-STEP_OLLAMA   = 3
-STEP_VENV     = 4
-STEP_PIP      = 5
-STEP_MODEL    = 6
+STEP_XCODE      = 0
+STEP_HOMEBREW   = 1
+STEP_FFMPEG     = 2
+STEP_OLLAMA     = 3
+STEP_VENV       = 4
+STEP_PIP        = 5
+STEP_TRANSCRIBE = 6
+STEP_MODEL      = 7
 
 
 # ── Installation Steps ──
@@ -393,6 +395,63 @@ def install_pip_packages():
     return True
 
 
+def install_transcription_engine():
+    """Install Parakeet MLX (primary) and optionally OpenAI Whisper (fallback)."""
+    pip_path = os.path.join(VENV_DIR, "bin", "pip")
+    python_path = os.path.join(VENV_DIR, "bin", "python3")
+    if not os.path.isfile(pip_path):
+        log("ERROR: pip not found in venv.")
+        return False
+
+    # Install Parakeet MLX (fast, Apple Silicon native, no cmake needed)
+    update_step(STEP_TRANSCRIBE, "running", "Installing Parakeet MLX (Apple Silicon transcription)...")
+    rc, out, err = run_cmd(f'"{pip_path}" install parakeet-mlx')
+    if rc != 0:
+        log(f"WARNING: parakeet-mlx install failed: {err}")
+        update_step(STEP_TRANSCRIBE, "running", "Parakeet failed, trying OpenAI Whisper...")
+    else:
+        log("Parakeet MLX installed successfully.")
+        # Verify it imports
+        rc2, _, _ = run_cmd(f'"{python_path}" -c "import parakeet_mlx"')
+        if rc2 == 0:
+            log("Parakeet MLX verified.")
+            update_step(STEP_TRANSCRIBE, "running", "Parakeet MLX installed! Installing Whisper as fallback...")
+        else:
+            log("WARNING: parakeet-mlx installed but import failed.")
+
+    # Try OpenAI Whisper as fallback — needs cmake
+    update_step(STEP_TRANSCRIBE, "running", "Installing cmake (needed for Whisper)...")
+    ensure_path()
+    cmake_cmd = brew_cmd("install cmake")
+    if cmake_cmd:
+        run_cmd(cmake_cmd)
+    # Also try cmake via pip as backup
+    run_cmd(f'"{pip_path}" install cmake')
+
+    update_step(STEP_TRANSCRIBE, "running", "Installing OpenAI Whisper (fallback engine)...")
+    rc, out, err = run_cmd(f'"{pip_path}" install openai-whisper')
+    if rc != 0:
+        log(f"WARNING: openai-whisper install failed: {err}")
+        # Not fatal — parakeet is the primary engine
+
+    # Verify at least one engine works
+    rc_p, _, _ = run_cmd(f'"{python_path}" -c "import parakeet_mlx"')
+    rc_w, _, _ = run_cmd(f'"{python_path}" -c "import whisper"')
+
+    if rc_p != 0 and rc_w != 0:
+        log("ERROR: No transcription engine could be installed.")
+        update_step(STEP_TRANSCRIBE, "error", "No transcription engine installed. Try: pip install parakeet-mlx")
+        return False
+
+    engines = []
+    if rc_p == 0:
+        engines.append("Parakeet MLX")
+    if rc_w == 0:
+        engines.append("OpenAI Whisper")
+    log(f"Transcription engines installed: {', '.join(engines)}")
+    return True
+
+
 def native_cmd(args_list):
     """Wrap a command list with arch -arm64 on Apple Silicon to avoid Rosetta issues."""
     if is_apple_silicon():
@@ -504,13 +563,14 @@ def save_setup_state():
 def run_setup():
     """Execute all setup steps sequentially."""
     steps = [
-        (STEP_XCODE,    "xcode",     install_xcode_clt),
-        (STEP_HOMEBREW,  "homebrew",  install_homebrew),
-        (STEP_FFMPEG,    "ffmpeg",    install_ffmpeg),
-        (STEP_OLLAMA,    "ollama",    install_ollama),
-        (STEP_VENV,      "venv",      create_venv),
-        (STEP_PIP,       "pip",       install_pip_packages),
-        (STEP_MODEL,     "model",     pull_ollama_model),
+        (STEP_XCODE,      "xcode",      install_xcode_clt),
+        (STEP_HOMEBREW,   "homebrew",   install_homebrew),
+        (STEP_FFMPEG,     "ffmpeg",     install_ffmpeg),
+        (STEP_OLLAMA,     "ollama",     install_ollama),
+        (STEP_VENV,       "venv",       create_venv),
+        (STEP_PIP,        "pip",        install_pip_packages),
+        (STEP_TRANSCRIBE, "transcribe", install_transcription_engine),
+        (STEP_MODEL,      "model",      pull_ollama_model),
     ]
 
     for idx, name, func in steps:

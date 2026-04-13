@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Style - Doza Assist</title>
+    <link rel="icon" type="image/jpeg" href="/static/logo.jpg">
+    <link rel="apple-touch-icon" href="/static/logo.jpg">
+    <link rel="stylesheet" href="/static/style.css?v={{ range(10000,99999) | random }}">
+</head>
+<body>
+
+<header class="app-header">
+    <div class="app-logo-group">
+        <a href="/" class="app-logo">
+            <img class="logo-img" src="/static/logo.jpg" alt="Doza Assist">
+            <span>Doza Assist</span>
+        </a>
+        <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;">
+        <a href="/" class="btn btn-sm" style="text-decoration:none;">Projects</a>
+        <a href="/my-style" class="btn btn-sm btn-accent" style="text-decoration:none;">My Style</a>
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+            <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        </button>
+    </div>
+</header>
+
+<script>
+function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') || 'light';
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('doza-theme', next);
+}
+(function() {
+    const saved = localStorage.getItem('doza-theme');
+    document.documentElement.setAttribute('data-theme', saved || 'light');
+})();
+</script>
+
+<div class="container my-style-page">
+
+{% if not profile %}
+<!-- ==================== EMPTY STATE ==================== -->
+<div class="my-style-empty">
+    <h1>Teach Doza Assist your storytelling style</h1>
+    <p class="my-style-subhead">Drop in finished projects you've edited. Doza Assist will listen to how you shape spoken stories and learn your narrative voice. Then every AI suggestion starts to sound like you.</p>
+
+    <div class="drop-zone" id="dropZone">
+        <div class="drop-zone-content">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48" style="opacity:0.5;margin-bottom:12px;"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+            <p class="drop-zone-label">Drop video files or a folder here</p>
+            <p class="drop-zone-hint">or <label for="fileInput" style="color:var(--accent);cursor:pointer;text-decoration:underline;">browse files</label></p>
+        </div>
+        <input type="file" id="fileInput" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a" style="display:none;">
+        <input type="file" id="folderInput" webkitdirectory style="display:none;">
+    </div>
+    <p class="my-style-privacy">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
+</div>
+
+{% else %}
+<!-- ==================== POPULATED STATE ==================== -->
+<div class="my-style-header">
+    <h1>My Style</h1>
+    <div class="my-style-master-toggle">
+        <label class="toggle-switch">
+            <input type="checkbox" id="masterToggle" {% if profile.active %}checked{% endif %} onchange="toggleMyStyle(this.checked)">
+            <span class="toggle-slider"></span>
+        </label>
+        <span id="toggleLabel">My Style is currently <strong>{{ 'ON' if profile.active else 'OFF' }}</strong></span>
+    </div>
+</div>
+
+<div class="my-style-body {% if not profile.active %}my-style-dimmed{% endif %}" id="styleBody">
+
+    <div class="style-summary-card">
+        <p class="style-summary-text">{{ profile.natural_language_summary }}</p>
+    </div>
+
+    <div class="stat-cards-grid">
+        <div class="stat-card">
+            <div class="stat-value">{{ "%.1f"|format(profile.speech_pacing.avg_beat_length) }}s</div>
+            <div class="stat-label">Avg Beat Length</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ "%.0f"|format(profile.speech_pacing.words_per_minute) }}</div>
+            <div class="stat-label">Words/Min</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ profile.structural_rhythm.energy_arc }}</div>
+            <div class="stat-label">Energy Arc</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ "%.0f"|format(profile.soundbite_craft.clean_cut_ratio * 100) }}%</div>
+            <div class="stat-label">Clean Cuts</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ profile.story_shape.opening_style }}</div>
+            <div class="stat-label">Opening Style</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ profile.story_shape.closing_style }}</div>
+            <div class="stat-label">Closing Style</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ profile.source_files|length }}</div>
+            <div class="stat-label">Projects Analyzed</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ profile.speech_pacing.rhythm_descriptor }}</div>
+            <div class="stat-label">Rhythm</div>
+        </div>
+    </div>
+
+    <div class="my-style-section">
+        <h3>Imported Projects</h3>
+        <div class="source-files-list">
+            {% for sf in profile.source_files %}
+            <div class="source-file-row">
+                <span class="source-file-name">{{ sf.filename }}</span>
+                <span class="source-file-dur">{{ "%.0f"|format(sf.duration_seconds) }}s</span>
+                <span class="source-file-date">{{ sf.imported_at[:10] }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="my-style-actions">
+        <label for="fileInputMore" class="btn btn-accent" style="cursor:pointer;">Import More</label>
+        <input type="file" id="fileInputMore" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a" style="display:none;">
+        <a href="/my-style/export" class="btn">Export Profile (JSON)</a>
+        <button class="btn btn-danger" onclick="deleteProfile()">Delete Profile</button>
+    </div>
+</div>
+
+<!-- Drop zone for importing more (hidden, activates on drag) -->
+<div class="drop-zone drop-zone-overlay" id="dropZoneOverlay" style="display:none;">
+    <div class="drop-zone-content">
+        <p class="drop-zone-label">Drop files to import more projects</p>
+    </div>
+</div>
+{% endif %}
+
+<!-- ==================== PROGRESS OVERLAY ==================== -->
+<div class="import-progress-overlay" id="progressOverlay" style="display:none;">
+    <div class="import-progress-card">
+        <h2>Analyzing your style...</h2>
+        <p class="import-progress-sub">This takes a few minutes per file. Hang tight.</p>
+        <div id="progressList"></div>
+        <div class="import-progress-bar-wrap">
+            <div class="import-progress-bar" id="progressBar" style="width:0%"></div>
+        </div>
+        <p id="progressStatus" class="import-progress-status"></p>
+    </div>
+</div>
+
+</div><!-- .container -->
+
+<script>
+// ===== File upload & import =====
+const dropZone = document.getElementById('dropZone');
+const dropZoneOverlay = document.getElementById('dropZoneOverlay');
+const fileInput = document.getElementById('fileInput');
+const fileInputMore = document.getElementById('fileInputMore');
+
+function setupDragDrop(zone, inputEl) {
+    if (!zone) return;
+    ['dragenter', 'dragover'].forEach(evt => {
+        zone.addEventListener(evt, e => { e.preventDefault(); zone.classList.add('drop-zone-active'); });
+    });
+    ['dragleave', 'drop'].forEach(evt => {
+        zone.addEventListener(evt, e => { e.preventDefault(); zone.classList.remove('drop-zone-active'); });
+    });
+    zone.addEventListener('drop', e => {
+        const files = e.dataTransfer.files;
+        if (files.length) startImport(files);
+    });
+    if (inputEl) {
+        inputEl.addEventListener('change', () => {
+            if (inputEl.files.length) startImport(inputEl.files);
+        });
+    }
+}
+
+setupDragDrop(dropZone, fileInput);
+setupDragDrop(dropZoneOverlay, null);
+if (fileInputMore) {
+    fileInputMore.addEventListener('change', () => {
+        if (fileInputMore.files.length) startImport(fileInputMore.files);
+    });
+}
+
+// Show overlay drop zone on body drag for populated state
+{% if profile %}
+document.body.addEventListener('dragenter', e => {
+    e.preventDefault();
+    const overlay = document.getElementById('dropZoneOverlay');
+    if (overlay) overlay.style.display = 'flex';
+});
+document.getElementById('dropZoneOverlay')?.addEventListener('dragleave', e => {
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
+        e.currentTarget.style.display = 'none';
+    }
+});
+document.getElementById('dropZoneOverlay')?.addEventListener('drop', e => {
+    e.preventDefault();
+    e.currentTarget.style.display = 'none';
+    const files = e.dataTransfer.files;
+    if (files.length) startImport(files);
+});
+{% endif %}
+
+async function startImport(fileList) {
+    const overlay = document.getElementById('progressOverlay');
+    const list = document.getElementById('progressList');
+    const bar = document.getElementById('progressBar');
+    const status = document.getElementById('progressStatus');
+    overlay.style.display = 'flex';
+    list.innerHTML = '';
+    bar.style.width = '0%';
+    status.textContent = 'Uploading files...';
+
+    // Show file list
+    for (const f of fileList) {
+        const row = document.createElement('div');
+        row.className = 'import-file-row';
+        row.id = 'import-' + f.name.replace(/[^a-zA-Z0-9]/g, '_');
+        row.innerHTML = `<span class="import-file-name">${f.name}</span><span class="import-file-status">waiting</span>`;
+        list.appendChild(row);
+    }
+
+    const formData = new FormData();
+    for (const f of fileList) {
+        formData.append('files', f);
+    }
+
+    try {
+        const response = await fetch('/my-style/import', {
+            method: 'POST',
+            body: formData,
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // keep incomplete line in buffer
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const msg = JSON.parse(line);
+                    handleProgress(msg, list, bar, status, fileList.length);
+                } catch(e) {}
+            }
+        }
+
+        // Process remaining buffer
+        if (buffer.trim()) {
+            try {
+                const msg = JSON.parse(buffer);
+                handleProgress(msg, list, bar, status, fileList.length);
+            } catch(e) {}
+        }
+
+    } catch (err) {
+        status.textContent = 'Import failed: ' + err.message;
+    }
+}
+
+function handleProgress(msg, list, bar, status, totalFiles) {
+    if (msg.file) {
+        const rowId = 'import-' + msg.file.replace(/[^a-zA-Z0-9]/g, '_');
+        const row = document.getElementById(rowId);
+        if (row) {
+            const statusEl = row.querySelector('.import-file-status');
+            if (msg.status === 'processing') {
+                statusEl.textContent = msg.step || 'processing';
+                statusEl.className = 'import-file-status processing';
+            } else if (msg.status === 'done') {
+                statusEl.textContent = 'done';
+                statusEl.className = 'import-file-status done';
+            } else if (msg.status === 'error') {
+                statusEl.textContent = 'error';
+                statusEl.className = 'import-file-status error';
+                statusEl.title = msg.reason || '';
+            } else if (msg.status === 'skipped') {
+                statusEl.textContent = 'skipped';
+                statusEl.className = 'import-file-status skipped';
+            }
+        }
+        if (msg.progress && msg.total) {
+            bar.style.width = Math.round((msg.progress / msg.total) * 80) + '%';
+        }
+    }
+
+    if (msg.status === 'classifying') {
+        status.textContent = 'Running style classifiers...';
+        bar.style.width = '85%';
+    }
+    if (msg.status === 'generating summary') {
+        status.textContent = 'Generating your style summary...';
+        bar.style.width = '95%';
+    }
+    if (msg.status === 'complete') {
+        bar.style.width = '100%';
+        if (msg.error) {
+            status.textContent = msg.error;
+        } else {
+            status.textContent = 'Done! Reloading...';
+            setTimeout(() => window.location.reload(), 1000);
+        }
+    }
+}
+
+// ===== Toggle =====
+function toggleMyStyle(active) {
+    fetch('/my-style/toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({active}),
+    }).then(() => {
+        document.getElementById('toggleLabel').innerHTML =
+            'My Style is currently <strong>' + (active ? 'ON' : 'OFF') + '</strong>';
+        const body = document.getElementById('styleBody');
+        if (body) {
+            if (active) body.classList.remove('my-style-dimmed');
+            else body.classList.add('my-style-dimmed');
+        }
+    });
+}
+
+// ===== Delete =====
+function deleteProfile() {
+    if (!confirm('Delete your style profile? This cannot be undone.')) return;
+    fetch('/my-style/delete', {method: 'POST'}).then(() => window.location.reload());
+}
+</script>
+
+</body>
+</html>

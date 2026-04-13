@@ -2702,3 +2702,359 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     gap: 0.35rem;
     margin-top: 0.5rem;
 }
+
+/* ===== My Style (Editorial DNA) ===== */
+
+.my-style-page {
+    max-width: 900px;
+    padding-top: 2rem;
+}
+
+.my-style-empty {
+    text-align: center;
+    padding: 3rem 1rem;
+}
+
+.my-style-empty h1 {
+    font-size: 1.6rem;
+    margin-bottom: 0.75rem;
+}
+
+.my-style-subhead {
+    color: var(--text-secondary);
+    max-width: 540px;
+    margin: 0 auto 2rem;
+    line-height: 1.6;
+}
+
+.my-style-privacy {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    margin-top: 1.5rem;
+    opacity: 0.7;
+}
+
+/* Drop zone */
+.drop-zone {
+    border: 2px dashed var(--border-color);
+    border-radius: 12px;
+    padding: 3rem 2rem;
+    transition: border-color 0.2s, background 0.2s;
+    cursor: pointer;
+    max-width: 500px;
+    margin: 0 auto;
+}
+
+.drop-zone-active,
+.drop-zone:hover {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.drop-zone-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.drop-zone-label {
+    font-size: 1.05rem;
+    font-weight: 500;
+    margin-bottom: 0.4rem;
+}
+
+.drop-zone-hint {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.drop-zone-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 1000;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Populated state */
+.my-style-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.5rem;
+}
+
+.my-style-header h1 {
+    font-size: 1.5rem;
+    margin: 0;
+}
+
+.my-style-master-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.9rem;
+}
+
+.my-style-body.my-style-dimmed {
+    opacity: 0.45;
+    pointer-events: none;
+    transition: opacity 0.3s;
+}
+
+/* Toggle switch */
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+}
+
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+
+.toggle-slider {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg-tertiary);
+    border-radius: 24px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 18px; height: 18px;
+    left: 3px; bottom: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: transform 0.2s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+    background: var(--accent);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(20px);
+}
+
+/* Summary card */
+.style-summary-card {
+    background: var(--bg-secondary);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.style-summary-text {
+    font-size: 1.05rem;
+    line-height: 1.7;
+    color: var(--text-primary);
+    margin: 0;
+    font-style: italic;
+}
+
+/* Stat cards grid */
+.stat-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 2rem;
+}
+
+.stat-card {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 1rem;
+    text-align: center;
+}
+
+.stat-value {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.25rem;
+    word-break: break-word;
+}
+
+.stat-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* Source files list */
+.my-style-section {
+    margin-bottom: 2rem;
+}
+
+.my-style-section h3 {
+    font-size: 0.95rem;
+    margin-bottom: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.source-files-list {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.source-file-row {
+    display: flex;
+    align-items: center;
+    padding: 0.6rem 1rem;
+    gap: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.85rem;
+}
+
+.source-file-row:last-child { border-bottom: none; }
+
+.source-file-name {
+    flex: 1;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.source-file-dur {
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.source-file-date {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+/* Action buttons */
+.my-style-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 1.5rem;
+    padding-bottom: 3rem;
+}
+
+/* Import progress overlay */
+.import-progress-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 2000;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.import-progress-card {
+    background: var(--bg-primary);
+    border-radius: 12px;
+    padding: 2rem 2.5rem;
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+}
+
+.import-progress-card h2 {
+    margin: 0 0 0.25rem;
+    font-size: 1.2rem;
+}
+
+.import-progress-sub {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin-bottom: 1.25rem;
+}
+
+.import-file-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0;
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.import-file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    margin-right: 1rem;
+}
+
+.import-file-status {
+    font-size: 0.78rem;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.import-file-status.processing { color: var(--accent); }
+.import-file-status.done { color: var(--green); }
+.import-file-status.error { color: var(--red); }
+.import-file-status.skipped { color: var(--text-secondary); }
+
+.import-progress-bar-wrap {
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    height: 6px;
+    margin: 1rem 0 0.75rem;
+    overflow: hidden;
+}
+
+.import-progress-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 4px;
+    transition: width 0.4s ease;
+}
+
+.import-progress-status {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin: 0;
+}
+
+/* My Style toggle pill (for chat & story builder) */
+.my-style-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: 1.5px solid var(--border-color);
+    background: transparent;
+    color: var(--text-secondary);
+    user-select: none;
+}
+
+.my-style-pill.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+}
+
+.my-style-pill-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+}
+
+.my-style-pill.active .my-style-pill-dot {
+    background: var(--accent);
+}

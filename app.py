@@ -1451,5 +1451,245 @@ def tunnel_status():
     return jsonify({'url': None, 'status': 'stopped'})
 
 
+# ---------------------------------------------------------------------------
+# My Style (Editorial DNA) routes
+# ---------------------------------------------------------------------------
+
+from editorial_dna.storage import (
+    load_profile as _edna_load,
+    save_profile as _edna_save,
+    delete_profile as _edna_delete,
+    export_profile as _edna_export,
+    set_active as _edna_set_active,
+    is_active as _edna_is_active,
+)
+
+
+@app.route('/my-style')
+def my_style_page():
+    profile = _edna_load()
+    return render_template('my_style.html', profile=profile)
+
+
+@app.route('/my-style/profile')
+def my_style_profile():
+    profile = _edna_load()
+    if profile is None:
+        return jsonify({'error': 'No profile exists'}), 404
+    return jsonify(profile)
+
+
+@app.route('/my-style/status')
+def my_style_status():
+    profile = _edna_load()
+    return jsonify({
+        'active': _edna_is_active(),
+        'profile_exists': profile is not None,
+    })
+
+
+@app.route('/my-style/toggle', methods=['POST'])
+def my_style_toggle():
+    data = request.get_json(force=True)
+    active = data.get('active', True)
+    ok = _edna_set_active(active)
+    if not ok:
+        return jsonify({'error': 'No profile to toggle'}), 404
+    return jsonify({'active': active})
+
+
+@app.route('/my-style/delete', methods=['POST'])
+def my_style_delete_route():
+    _edna_delete()
+    return jsonify({'status': 'deleted'})
+
+
+@app.route('/my-style/export')
+def my_style_export_route():
+    profile = _edna_export()
+    if profile is None:
+        return jsonify({'error': 'No profile'}), 404
+    import io
+    buf = io.BytesIO(json.dumps(profile, indent=2).encode('utf-8'))
+    buf.seek(0)
+    return send_file(buf, mimetype='application/json', as_attachment=True,
+                     download_name='my_style_profile.json')
+
+
+@app.route('/my-style/import', methods=['POST'])
+def my_style_import():
+    """
+    Accept uploaded video/audio files, run the full pipeline per file
+    (extract audio → transcribe → analyze), merge into existing profile,
+    re-run classifiers and summarizer, save.
+
+    Returns a streaming response with per-file progress.
+    """
+    import tempfile
+    from transcribe import extract_audio, transcribe_file
+    from editorial_dna.transcript_analyzer import analyze_transcript as edna_analyze, merge_metrics
+    from editorial_dna.classifier import (
+        classify_opening, classify_closing, classify_rhythm,
+        classify_energy_arc, detect_callbacks, estimate_topic_count,
+    )
+    from editorial_dna.summarizer import generate_summary
+
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': 'No files uploaded'}), 400
+
+    # Supported extensions for My Style import
+    style_extensions = {'mp4', 'mov', 'm4v', 'mkv', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'aif', 'aiff'}
+
+    def generate():
+        """Stream progress as newline-delimited JSON."""
+        existing_profile = _edna_load()
+        source_files = (existing_profile or {}).get('source_files', [])
+        merged = existing_profile  # None on first import
+
+        processed_count = 0
+        total_files = len(files)
+
+        for i, f in enumerate(files):
+            fname = f.filename or f'file_{i}'
+            ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
+
+            if ext not in style_extensions:
+                yield json.dumps({'file': fname, 'status': 'skipped', 'reason': 'unsupported format', 'progress': i + 1, 'total': total_files}) + '\n'
+                continue
+
+            yield json.dumps({'file': fname, 'status': 'processing', 'step': 'saving', 'progress': i + 1, 'total': total_files}) + '\n'
+
+            try:
+                # Save uploaded file to temp location
+                tmp_dir = tempfile.mkdtemp(prefix='doza_style_')
+                tmp_path = os.path.join(tmp_dir, fname)
+                f.save(tmp_path)
+
+                # Extract audio
+                yield json.dumps({'file': fname, 'status': 'processing', 'step': 'extracting audio'}) + '\n'
+                audio_path = extract_audio(tmp_path, project_dir=tmp_dir)
+
+                # Transcribe
+                yield json.dumps({'file': fname, 'status': 'processing', 'step': 'transcribing'}) + '\n'
+                transcript = transcribe_file(audio_path, project_dir=tmp_dir)
+
+                # Analyze
+                yield json.dumps({'file': fname, 'status': 'processing', 'step': 'analyzing'}) + '\n'
+                metrics = edna_analyze(transcript)
+                file_duration = transcript.get('duration', 0)
+
+                # Merge with existing
+                if merged and 'speech_pacing' in merged:
+                    merged_metrics = merge_metrics(merged, metrics, file_duration)
+                else:
+                    merged_metrics = {k: v for k, v in metrics.items() if not k.startswith('_')}
+
+                # Keep _raw from latest for classifier (will re-classify on merged)
+                merged_metrics['_raw'] = metrics.get('_raw', {})
+                merged = merged_metrics
+
+                source_files.append({
+                    'filename': fname,
+                    'imported_at': datetime.now().isoformat(),
+                    'duration_seconds': round(file_duration, 2),
+                    'transcribed_at': datetime.now().isoformat(),
+                })
+
+                processed_count += 1
+                yield json.dumps({'file': fname, 'status': 'done', 'progress': i + 1, 'total': total_files}) + '\n'
+
+            except Exception as e:
+                yield json.dumps({'file': fname, 'status': 'error', 'reason': str(e)[:200], 'progress': i + 1, 'total': total_files}) + '\n'
+
+            finally:
+                # Clean up temp files
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+        if processed_count == 0:
+            yield json.dumps({'status': 'complete', 'error': 'No files were processed successfully'}) + '\n'
+            return
+
+        # Run classifiers on merged metrics
+        yield json.dumps({'status': 'classifying'}) + '\n'
+        raw = merged.get('_raw', {})
+
+        try:
+            opening = classify_opening(raw.get('first_15s_text', ''))
+            closing = classify_closing(raw.get('last_15s_text', ''))
+            rhythm = classify_rhythm(merged.get('speech_pacing', {}))
+            energy = classify_energy_arc(
+                merged.get('structural_rhythm', {}).get('pacing_first_third_wpm', 0),
+                merged.get('structural_rhythm', {}).get('pacing_middle_third_wpm', 0),
+                merged.get('structural_rhythm', {}).get('pacing_last_third_wpm', 0),
+            )
+            callbacks = detect_callbacks(
+                raw.get('opening_third_text', ''),
+                raw.get('closing_third_text', ''),
+            )
+            topics = estimate_topic_count(
+                raw.get('opening_third_text', '') + ' ' + raw.get('closing_third_text', '')
+            )
+        except Exception as e:
+            # If classifiers fail, use defaults
+            print(f"Classifier error: {e}")
+            opening = 'other'
+            closing = 'other'
+            rhythm = 'conversational'
+            energy = 'balanced'
+            callbacks = False
+            topics = 1
+
+        merged['speech_pacing']['rhythm_descriptor'] = rhythm
+        merged['structural_rhythm']['energy_arc'] = energy
+        merged['content_patterns']['topic_count'] = topics
+
+        story_shape = {
+            'opening_style': opening,
+            'closing_style': closing,
+            'uses_callbacks': callbacks,
+        }
+
+        # Build full profile
+        yield json.dumps({'status': 'generating summary'}) + '\n'
+
+        profile = {
+            'profile_version': '1.0',
+            'feature_name': 'My Style',
+            'created_at': (existing_profile or {}).get('created_at', datetime.now().isoformat()),
+            'updated_at': datetime.now().isoformat(),
+            'active': (existing_profile or {}).get('active', True),
+            'source_files': source_files,
+            'speech_pacing': merged.get('speech_pacing', {}),
+            'structural_rhythm': merged.get('structural_rhythm', {}),
+            'soundbite_craft': merged.get('soundbite_craft', {}),
+            'story_shape': story_shape,
+            'content_patterns': merged.get('content_patterns', {}),
+            'natural_language_summary': '',
+        }
+
+        # Remove _raw from profile before saving
+        for key in list(profile.keys()):
+            if key.startswith('_'):
+                del profile[key]
+
+        try:
+            summary = generate_summary(profile)
+            profile['natural_language_summary'] = summary
+        except Exception as e:
+            print(f"Summary generation error: {e}")
+            profile['natural_language_summary'] = 'Style profile generated but summary unavailable.'
+
+        _edna_save(profile)
+
+        yield json.dumps({'status': 'complete', 'profile': profile}) + '\n'
+
+    from flask import Response
+    return Response(generate(), mimetype='application/x-ndjson')
+
+
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5050, debug=True)

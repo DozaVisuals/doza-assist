@@ -25,6 +25,7 @@
         </button>
         {% if not is_shared %}
         <a href="/" class="btn btn-sm">Projects</a>
+        <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="copyShareLink()" title="Copy shareable link">Share</button>
         <button class="btn btn-sm" onclick="deleteProject()" style="color: var(--red);">Delete</button>
         {% endif %}
@@ -435,6 +436,10 @@
                         </div>
                     </div>
                     <div class="chat-input-area">
+                        <button class="my-style-pill" id="chatStylePill" onclick="toggleMyStylePill()" style="display:none;" title="Toggle My Style for AI suggestions">
+                            <span class="my-style-pill-dot"></span>
+                            <span class="my-style-pill-label">My Style: OFF</span>
+                        </button>
                         <input type="text" class="chat-input" id="chatInput" placeholder="What story are you looking for?"
                                onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }">
                         <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
@@ -456,6 +461,10 @@
 
             <!-- Input bar (above everything) -->
             <div class="story-input-area">
+                <button class="my-style-pill" id="storyStylePill" onclick="toggleMyStylePill()" style="display:none;" title="Toggle My Style for AI suggestions">
+                    <span class="my-style-pill-dot"></span>
+                    <span class="my-style-pill-label">My Style: OFF</span>
+                </button>
                 <input type="text" class="story-input" id="storyInput"
                        placeholder="Build me a 3-minute story about her journey from athlete to coach..."
                        onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); buildStory(); }">
@@ -3576,6 +3585,47 @@ function addToStoryBuilder(start, end, title, btn) {
         btn.disabled = true;
         btn.classList.add('clip-added');
     }
+}
+
+// ===== My Style toggle pills =====
+(function initMyStylePills() {
+    fetch('/my-style/status')
+        .then(r => r.json())
+        .then(data => {
+            const pills = document.querySelectorAll('.my-style-pill');
+            if (!data.profile_exists) {
+                pills.forEach(p => p.style.display = 'none');
+                return;
+            }
+            pills.forEach(p => {
+                p.style.display = 'inline-flex';
+                updatePillState(p, data.active);
+            });
+        })
+        .catch(() => {});
+})();
+
+function updatePillState(pill, active) {
+    const label = pill.querySelector('.my-style-pill-label');
+    if (active) {
+        pill.classList.add('active');
+        label.textContent = 'Using My Style';
+    } else {
+        pill.classList.remove('active');
+        label.textContent = 'My Style: OFF';
+    }
+}
+
+function toggleMyStylePill() {
+    const pills = document.querySelectorAll('.my-style-pill');
+    const isActive = pills[0]?.classList.contains('active');
+    const newState = !isActive;
+    pills.forEach(p => updatePillState(p, newState));
+    fetch('/my-style/toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({active: newState}),
+    });
 }
 </script>
 

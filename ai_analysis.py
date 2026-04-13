@@ -7,6 +7,8 @@ import os
 import json
 import requests
 
+from editorial_dna.injector import inject_my_style
+
 
 def chat_about_transcript(transcript, message, history=None, project_name="Interview", analysis=None):
     """
@@ -58,6 +60,7 @@ TRANSCRIPT:
 
     prompt = f"{conversation}\nUser: {message}\nAssistant:"
 
+    system_prompt = inject_my_style(system_prompt)
     response = _call_ai_chat(prompt, system_prompt)
     return _clean_chat_response(response)
 
@@ -328,6 +331,7 @@ TRANSCRIPT:
 
 Return ONLY valid JSON. No markdown, no extra text."""
 
+    system_prompt = inject_my_style(system_prompt)
     response = _call_ai(prompt, system_prompt)
     return _parse_json_response(response)
 
@@ -586,6 +590,7 @@ Return ONLY valid JSON in this shape:
   ]
 }}"""
 
+    system_prompt = inject_my_style(system_prompt)
     response = _call_ai(prompt, system_prompt)
     parsed = _parse_json_response(response)
     if not isinstance(parsed, dict):

@@ -1,10 +1,12 @@
 # Doza Assist
 
-Local-first AI-powered transcription and clip discovery for interview-driven workflows.
+**Find the story inside your footage, not just the clips.**
+
+Local-first AI editor's assistant for documentary and spoken-word video. Free and open source.
 
 Documentary films, corporate video, podcasts, news, legal depositions, customer testimonials, training content. If someone is talking on camera and you need to find the best moments, this tool does the heavy lifting.
 
-Drop in footage, transcribe it, run AI analysis to surface story beats and soundbites, highlight and organize selects with color labels, and export pre-cut timelines directly to Final Cut Pro. Everything runs on your machine. Nothing uploads. Nothing leaves.
+Drop in footage, transcribe it, chat with the AI about what story you're looking for, build narrative sequences from your transcript, and export pre-cut timelines directly to Final Cut Pro. Everything runs on your machine. Nothing uploads. Nothing leaves.
 
 <!-- Add your demo video here:
 https://github.com/user-attachments/assets/YOUR_VIDEO_ID
@@ -21,7 +23,7 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 **Transcription**
 - Drag and drop video/audio files (MP4, MOV, WAV, MP3, MXF, etc.)
 - Transcribes locally — no cloud uploads
-- Uses NVIDIA Parakeet TDT (via MLX) on Apple Silicon for fast transcription, falls back to OpenAI Whisper
+- Uses NVIDIA Parakeet TDT (via MLX) on Apple Silicon for fast English transcription, WhisperX large-v3 for 99+ languages
 - Word-level timestamps for precise sync
 - Click speaker names to assign who said what
 
@@ -44,19 +46,23 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 - Strongest soundbites identified
 - Every item has play/scrub controls and one-click "Add to Clips"
 
-**AI Chat**
-- Conversational AI that knows your transcript
-- Ask for clips, themes, story angles, soundbites
-- AI suggests clips with timecodes — play them instantly or add to your library
+**Narrative Intelligence (AI Chat)**
+- Conversational AI that knows your transcript — ask for clips, themes, story angles, soundbites
+- Build stories directly from chat: "build me a 3-minute story about her journey from athlete to coach"
+- AI suggests clips with timecodes — play them instantly, add to clips, or build as a story
+- Every timecode is clickable with a `+` button to add as a clip on the spot
+- Pull all suggested clips at once or build them into a story sequence
 - Follow-up questions maintain context
 
 **Story Builder**
 - Describe the story you want to tell and the AI assembles it from your footage
+- Works from Chat or the dedicated Story Builder tab
 - The story agent reads the full transcript, selects the strongest soundbites, and arranges them into a narrative arc — hook, rising action, emotional peak, resolution
 - Returns an ordered sequence of clips with editorial notes explaining why each clip is in that position
 - Drag to reorder clips, remove what doesn't work, rebuild with a different prompt
 - Play All button plays the entire sequence back-to-back so you can hear the story before you cut it
 - One-click export to FCPX — the clips land on your timeline in story order, ready to refine
+- Stories sidebar: browse, rename, switch between, and delete story builds
 - Save multiple story builds per project to compare different angles or versions
 
 **FCPX Export**

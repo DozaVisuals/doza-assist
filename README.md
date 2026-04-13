@@ -82,6 +82,15 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 - Rename, move, clear, delete projects
 - Multi-project workspace — combine interviews in one view
 
+**My Style — An AI That Tells Stories Like You**
+- Teach Doza Assist your editorial voice by importing finished projects you've cut
+- The app transcribes your finished pieces, analyzes how you shape spoken stories (pacing, beat length, cut style, story structure), and builds a style profile
+- Once active, every AI suggestion — chat, story builder, clip selection — reflects your narrative instincts
+- Toggle My Style on or off from the chat input, story builder, or the dedicated My Style page
+- Your style profile stays on your machine and persists across sessions
+- Import more projects over time to refine the profile
+- Export your style as JSON or delete it anytime
+
 **Dark / Light Theme**
 - Toggle between dark and light mode
 - Persists across sessions
@@ -194,6 +203,12 @@ doza-assist/
 ├── transcribe.py        # Whisper transcription engine
 ├── ai_analysis.py       # AI analysis + chat (Ollama/Claude)
 ├── fcpxml_export.py     # FCPXML generation with pre-cut timelines
+├── editorial_dna/       # My Style — editorial voice profiling
+│   ├── transcript_analyzer.py  # Narrative pattern extraction
+│   ├── classifier.py    # AI-powered style classification
+│   ├── summarizer.py    # Natural language summary generation
+│   ├── storage.py       # Profile persistence (~/.doza-assist/)
+│   └── injector.py      # Injects style into AI prompts
 ├── start.sh             # Launch script (developer mode)
 ├── install.sh           # Manual setup (developer mode)
 ├── setup_runner.sh      # Auto-setup phase 1 (Xcode CLT, Homebrew, Python)
@@ -206,6 +221,7 @@ doza-assist/
 ├── templates/
 │   ├── dashboard.html   # Projects page with folders
 │   ├── project.html     # Main project view (all tabs)
+│   ├── my_style.html    # My Style page
 │   └── ...
 ├── projects/            # User data (gitignored)
 └── exports/             # FCPXML exports (gitignored)

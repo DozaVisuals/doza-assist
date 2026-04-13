@@ -83,6 +83,9 @@ cp "${SCRIPT_DIR}/requirements.txt"   "${APP_SRC_DIR}/"
 cp -R "${SCRIPT_DIR}/templates" "${APP_SRC_DIR}/"
 cp -R "${SCRIPT_DIR}/static"    "${APP_SRC_DIR}/"
 
+# Editorial DNA (My Style) module
+cp -R "${SCRIPT_DIR}/editorial_dna" "${APP_SRC_DIR}/"
+
 # Make scripts executable
 chmod +x "${APP_SRC_DIR}/setup_runner.sh"
 chmod +x "${APP_SRC_DIR}/dep_check.sh"

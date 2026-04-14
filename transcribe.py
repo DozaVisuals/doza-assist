@@ -360,11 +360,30 @@ def _transcribe_lightning(audio_path, speaker_labels=None):
 
 
 def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, language='en'):
-    """Transcribe using OpenAI Whisper. Speaker assignment done manually by user."""
+    """Transcribe using OpenAI Whisper. Speaker assignment done manually by user.
+
+    Uses 'turbo' (Whisper large-v3-turbo, 1.62GB) — the same model MacWhisper uses.
+    This is the distilled large-v3 with 4 decoder layers, ~8x faster than large-v3
+    with comparable quality including strong non-English support (Czech, Polish,
+    Russian, etc.). Previously used 'base' (74M params), which produced unusable
+    output for non-English languages.
+    """
     import whisper
 
-    print("Loading Whisper model (base)...")
-    model = whisper.load_model("base")
+    # Try turbo first (best quality/speed balance, matches MacWhisper)
+    # Fall back to large-v3 or base if turbo unavailable (older whisper versions)
+    model = None
+    for model_name in ("turbo", "large-v3", "base"):
+        try:
+            print(f"Loading Whisper model ({model_name})...")
+            model = whisper.load_model(model_name)
+            print(f"Loaded Whisper {model_name}")
+            break
+        except Exception as e:
+            print(f"Could not load {model_name}: {e}")
+            continue
+    if model is None:
+        raise RuntimeError("Could not load any Whisper model")
 
     print(f"Transcribing (language: {language})...")
     transcribe_kwargs = {"word_timestamps": True}

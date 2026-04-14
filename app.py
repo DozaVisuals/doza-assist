@@ -568,6 +568,31 @@ def project_view(project_id):
     for p in projects:
         segment_vectors.extend(load_segment_vectors(p['id']))
 
+    # Auto-detect framerate from primary project source for FCPXML export default
+    detected_framerate = 23.976
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if source_path and os.path.exists(source_path):
+        ffprobe = shutil.which('ffprobe')
+        if not ffprobe:
+            for candidate in ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe']:
+                if os.path.isfile(candidate):
+                    ffprobe = candidate
+                    break
+        if ffprobe:
+            try:
+                result = subprocess.run([
+                    ffprobe, '-v', 'quiet', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0',
+                    source_path
+                ], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and result.stdout.strip():
+                    num, den = result.stdout.strip().split('/')
+                    fps = float(num) / float(den)
+                    standards = [23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0]
+                    detected_framerate = min(standards, key=lambda s: abs(s - fps))
+            except Exception:
+                pass
+
     return render_template('project.html',
                            project=project,
                            projects=projects,
@@ -578,7 +603,8 @@ def project_view(project_id):
                            is_multi=is_multi,
                            is_shared=False,
                            is_video=is_video,
-                           segment_vectors=segment_vectors)
+                           segment_vectors=segment_vectors,
+                           detected_framerate=detected_framerate)
 
 
 @app.route('/project/<project_id>/media')
@@ -878,7 +904,38 @@ def export_fcpxml(project_id):
             pass
         return 1920, 1080
 
-    framerate = request.json.get('framerate', 23.976)
+    def _get_video_framerate(path):
+        """Detect video framerate using ffprobe. Returns nearest standard rate."""
+        if not path or not os.path.exists(path):
+            return None
+        ffprobe = shutil.which('ffprobe')
+        if not ffprobe:
+            for candidate in ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe']:
+                if os.path.isfile(candidate):
+                    ffprobe = candidate
+                    break
+        if not ffprobe:
+            return None
+        try:
+            result = subprocess.run([
+                ffprobe, '-v', 'quiet',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=r_frame_rate',
+                '-of', 'csv=p=0',
+                path
+            ], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                num, den = result.stdout.strip().split('/')
+                fps = float(num) / float(den)
+                # Snap to nearest standard framerate
+                standards = [23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0]
+                return min(standards, key=lambda s: abs(s - fps))
+        except Exception:
+            pass
+        return None
+
+    detected_fps = _get_video_framerate(source_path)
+    framerate = detected_fps or request.json.get('framerate', 23.976)
     export_mode = request.json.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
 
     # Get source file path and media duration for cut-based export
@@ -1016,6 +1073,35 @@ def clear_transcript(project_id):
         os.remove(audio_wav)
 
     return jsonify({'status': 'cleared'})
+
+
+@app.route('/project/<project_id>/retranscribe', methods=['POST'])
+def retranscribe(project_id):
+    """Update language and re-run transcription."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    data = request.get_json() or {}
+    language = data.get('language', project.get('language', 'en')).strip()
+    project['language'] = language
+
+    # Clear existing transcript/analysis
+    project['transcript'] = None
+    project['analysis'] = None
+    project['client_selects'] = []
+    project['social_clips'] = []
+    project['status'] = 'uploaded'
+    project.pop('error', None)
+    save_project(project_id, project)
+
+    # Remove extracted audio so it gets re-extracted
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    audio_wav = os.path.join(project_dir, 'audio.wav')
+    if os.path.exists(audio_wav):
+        os.remove(audio_wav)
+
+    return jsonify({'status': 'cleared', 'language': language})
 
 
 @app.route('/project/<project_id>/delete', methods=['POST'])
@@ -1219,7 +1305,6 @@ def story_export(project_id):
     data = request.json or {}
     clips = data.get('clips', [])
     story_title = data.get('story_title', 'Story')
-    framerate = data.get('framerate', 23.976)
 
     if not clips:
         return jsonify({'error': 'No clips in sequence'}), 400
@@ -1254,10 +1339,11 @@ def story_export(project_id):
     if project.get('transcript') and project['transcript'].get('duration'):
         media_duration = project['transcript']['duration']
 
-    # Detect resolution
+    # Detect resolution and framerate
     source_ext = os.path.splitext(source_path or '')[1].lower()
     is_video = source_ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
     width, height = 1920, 1080
+    detected_fps = None
     if is_video and source_path and os.path.exists(source_path):
         ffprobe = shutil.which('ffprobe')
         if not ffprobe:
@@ -1269,14 +1355,25 @@ def story_export(project_id):
             try:
                 result = subprocess.run([
                     ffprobe, '-v', 'quiet', '-select_streams', 'v:0',
-                    '-show_entries', 'stream=width,height', '-of', 'csv=p=0', source_path
+                    '-show_entries', 'stream=width,height,r_frame_rate',
+                    '-of', 'csv=p=0', source_path
                 ], capture_output=True, text=True, timeout=10)
                 if result.returncode == 0 and result.stdout.strip():
                     parts = result.stdout.strip().split(',')
                     if len(parts) >= 2:
                         width, height = int(parts[0]), int(parts[1])
+                    if len(parts) >= 3:
+                        try:
+                            num, den = parts[2].split('/')
+                            fps = float(num) / float(den)
+                            standards = [23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0]
+                            detected_fps = min(standards, key=lambda s: abs(s - fps))
+                        except Exception:
+                            pass
             except Exception:
                 pass
+
+    framerate = detected_fps or data.get('framerate', 23.976)
 
     fcpxml_content = generate_story_fcpxml(
         markers=markers,

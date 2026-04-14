@@ -27,6 +27,9 @@
         <a href="/" class="btn btn-sm">Projects</a>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="copyShareLink()" title="Copy shareable link">Share</button>
+        {% if project.transcript %}
+        <button class="btn btn-sm" onclick="showRetranscribe()" title="Re-transcribe with different language">Retranscribe</button>
+        {% endif %}
         <button class="btn btn-sm" onclick="deleteProject()" style="color: var(--red);">Delete</button>
         {% endif %}
     </div>
@@ -514,13 +517,14 @@
                     <div class="form-group">
                         <label class="form-label">Framerate</label>
                         <select class="form-input" id="framerate">
-                            <option value="23.976" selected>23.976 fps</option>
-                            <option value="24">24 fps</option>
-                            <option value="25">25 fps (PAL)</option>
-                            <option value="29.97">29.97 fps</option>
-                            <option value="30">30 fps</option>
-                            <option value="59.94">59.94 fps</option>
-                            <option value="60">60 fps</option>
+                            {% set fps = detected_framerate|default(23.976) %}
+                            <option value="23.976"{% if fps == 23.976 %} selected{% endif %}>23.976 fps</option>
+                            <option value="24"{% if fps == 24.0 %} selected{% endif %}>24 fps</option>
+                            <option value="25"{% if fps == 25.0 %} selected{% endif %}>25 fps (PAL)</option>
+                            <option value="29.97"{% if fps == 29.97 %} selected{% endif %}>29.97 fps</option>
+                            <option value="30"{% if fps == 30.0 %} selected{% endif %}>30 fps</option>
+                            <option value="59.94"{% if fps == 59.94 %} selected{% endif %}>59.94 fps</option>
+                            <option value="60"{% if fps == 60.0 %} selected{% endif %}>60 fps</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -2663,6 +2667,69 @@ async function clearTranscript() {
             showToast('Transcript cleared');
             setTimeout(() => location.reload(), 500);
         } else {
+            showToast('Error: ' + (data.error || 'Unknown error'), true);
+        }
+    } catch (err) {
+        showToast('Error: ' + err.message, true);
+    }
+}
+
+// ── Retranscribe ──
+function showRetranscribe() {
+    let overlay = document.getElementById('retranscribeOverlay');
+    if (overlay) overlay.remove();
+
+    const currentLang = PROJECT.language || 'en';
+    const langs = [
+        ['en','English'],['auto','Auto-detect'],
+        ['ar','Arabic'],['zh','Chinese'],['cs','Czech'],['da','Danish'],
+        ['nl','Dutch'],['fi','Finnish'],['fr','French'],['de','German'],
+        ['el','Greek'],['he','Hebrew'],['hi','Hindi'],['hu','Hungarian'],
+        ['id','Indonesian'],['it','Italian'],['ja','Japanese'],['ko','Korean'],
+        ['ms','Malay'],['no','Norwegian'],['pl','Polish'],['pt','Portuguese'],
+        ['ro','Romanian'],['ru','Russian'],['sk','Slovak'],['es','Spanish'],
+        ['sv','Swedish'],['th','Thai'],['tr','Turkish'],['uk','Ukrainian'],
+        ['vi','Vietnamese']
+    ];
+    const options = langs.map(([v,l]) =>
+        `<option value="${v}"${v === currentLang ? ' selected' : ''}>${l}</option>`
+    ).join('');
+
+    overlay = document.createElement('div');
+    overlay.id = 'retranscribeOverlay';
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 420px;">
+            <h2>Retranscribe</h2>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">
+                This will clear the current transcript and re-run transcription with the selected language.
+            </p>
+            <div class="form-group">
+                <label class="form-label">Language</label>
+                <select class="form-input" id="retranscribeLang">${options}</select>
+            </div>
+            <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
+                <button class="btn btn-sm" onclick="document.getElementById('retranscribeOverlay').remove()">Cancel</button>
+                <button class="btn btn-sm btn-purple" onclick="doRetranscribe()">Retranscribe</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+async function doRetranscribe() {
+    const lang = document.getElementById('retranscribeLang').value;
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/retranscribe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ language: lang })
+        });
+        if (res.ok) {
+            showToast('Retranscribing with ' + document.getElementById('retranscribeLang').selectedOptions[0].text + '...');
+            setTimeout(() => location.reload(), 500);
+        } else {
+            const data = await res.json();
             showToast('Error: ' + (data.error || 'Unknown error'), true);
         }
     } catch (err) {

@@ -266,9 +266,12 @@ def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         device = "cpu"  # WhisperX MPS support is limited, CPU is more reliable
 
-    compute_type = "int8"
+    # Use float32 on CPU for best quality (int8 quantization significantly degrades
+    # non-English transcription, especially for morphologically rich languages like
+    # Czech, Polish, Russian). float16 is only supported on CUDA.
+    compute_type = "float16" if device == "cuda" else "float32"
 
-    print("Loading WhisperX model...")
+    print(f"Loading WhisperX model (compute_type={compute_type})...")
     model = whisperx.load_model("large-v3", device, compute_type=compute_type)
 
     print(f"Transcribing (language: {language})...")

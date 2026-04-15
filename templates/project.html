@@ -68,6 +68,21 @@
                     </div>
                 </div>
                 {% endif %}
+                {% if not is_shared %}
+                <!-- Editing Platform (NLE) Selector -->
+                <div class="platform-selector" id="platformSelector" data-platform="{{ editing_platform or 'fcp' }}">
+                    <span class="platform-selector-label">Edit in:</span>
+                    <button type="button" data-platform="fcp"
+                            onclick="setEditingPlatform('fcp')"
+                            title="Final Cut Pro — exports FCPXML">FCP</button>
+                    <button type="button" data-platform="premiere"
+                            onclick="setEditingPlatform('premiere')"
+                            title="Premiere Pro — exports XML (FCP7 format)">Premiere</button>
+                    <button type="button" data-platform="resolve"
+                            onclick="setEditingPlatform('resolve')"
+                            title="DaVinci Resolve — exports EDL (CMX 3600)">Resolve</button>
+                </div>
+                {% endif %}
             </div>
             <p class="page-subtitle">
                 {% if is_multi %}
@@ -319,9 +334,10 @@
         {% if project.analysis.get('story_beats', []) %}
         <div class="analysis-section-header">
             <span>Story Beats</span>
-            <button class="analysis-section-export" onclick="exportFCPXML('story')" title="Export Story Beats to Final Cut Pro">
+            <button class="analysis-section-export" onclick="exportFCPXML('story')"
+                    data-export-label-key="section" data-export-label-tooltip="story">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                FCPX
+                <span data-export-label-text>FCPX</span>
             </button>
         </div>
         <div class="analysis-list">
@@ -355,9 +371,10 @@
         {% if project.analysis.get('social_clips', []) %}
         <div class="analysis-section-header">
             <span>Social Clips</span>
-            <button class="analysis-section-export" onclick="exportFCPXML('social')" title="Export Social Clips to Final Cut Pro">
+            <button class="analysis-section-export" onclick="exportFCPXML('social')"
+                    data-export-label-key="section" data-export-label-tooltip="social">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                FCPX
+                <span data-export-label-text>FCPX</span>
             </button>
         </div>
         <div class="analysis-list">
@@ -392,9 +409,10 @@
         {% if project.analysis.get('strongest_soundbites', []) %}
         <div class="analysis-section-header">
             <span>Soundbites</span>
-            <button class="analysis-section-export" onclick="exportFCPXML('soundbites')" title="Export Soundbites to Final Cut Pro">
+            <button class="analysis-section-export" onclick="exportFCPXML('soundbites')"
+                    data-export-label-key="section" data-export-label-tooltip="soundbites">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                FCPX
+                <span data-export-label-text>FCPX</span>
             </button>
         </div>
         <div class="analysis-list">
@@ -525,7 +543,7 @@
                     <svg id="storyPauseAllIcon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
                     <span id="storyPlayAllLabel">Play All</span>
                 </button>
-                <button class="btn btn-primary" onclick="exportStoryFCPXML()">Export to FCPX</button>
+                <button class="btn btn-primary" onclick="exportStoryFCPXML()" data-export-label-key="story-seq">Export to FCPX</button>
                 <button class="btn btn-green" onclick="addAllStoryClips()">Add All to Clips</button>
                 <button class="btn" onclick="rebuildStory()">Rebuild</button>
             </div>
@@ -541,8 +559,8 @@
     <div class="tab-content" id="tab-export">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
             <div class="card">
-                <div class="card-title" style="margin-bottom: 1rem;">FCPX Export</div>
-                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                <div class="card-title" style="margin-bottom: 1rem;" data-export-label-key="card-title">NLE Export</div>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 1rem;" data-export-label-key="card-blurb">
                     Exports create a timeline in Final Cut Pro with each clip pre-cut at the in/out points.
                     The source media is referenced — just import the .fcpxml and your selects are ready to edit.
                 </p>
@@ -570,16 +588,16 @@
                     </div>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                    <button class="btn btn-primary" onclick="exportFCPXML('labels')">
+                    <button class="btn btn-primary" onclick="exportFCPXML('labels')" data-export-label-key="clips">
                         Export Clips to FCPX
                     </button>
-                    <button class="btn btn-green" onclick="exportFCPXML('social')">
+                    <button class="btn btn-green" onclick="exportFCPXML('social')" data-export-label-key="social">
                         Export AI Social Clips to FCPX
                     </button>
-                    <button class="btn btn-purple" onclick="exportFCPXML('story')">
+                    <button class="btn btn-purple" onclick="exportFCPXML('story')" data-export-label-key="story">
                         Export AI Story Beats to FCPX
                     </button>
-                    <button class="btn" onclick="exportFCPXML('all')">
+                    <button class="btn" onclick="exportFCPXML('all')" data-export-label-key="all">
                         Export All to FCPX
                     </button>
                 </div>
@@ -625,6 +643,79 @@ const PROJECTS_META = {{ projects_meta | tojson }};
 const IS_MULTI = {{ 'true' if is_multi else 'false' }};
 const IS_SHARED = {{ 'true' if is_shared else 'false' }};
 const SHARED_TABS = {{ (shared_tabs or {})|tojson if is_shared else '{}' }};
+
+// ── Editing Platform (NLE) state ──────────────────────────────────
+let EDITING_PLATFORM = {{ (editing_platform or 'fcp') | tojson }};
+
+const PLATFORM_NAMES = { fcp: 'Final Cut Pro', premiere: 'Premiere Pro', resolve: 'DaVinci Resolve' };
+const FORMAT_NAMES   = { fcp: 'FCPXML',        premiere: 'Premiere XML', resolve: 'EDL' };
+const SHORT_NAMES    = { fcp: 'FCPX',          premiere: 'PrPro',        resolve: 'Resolve' };
+
+const EXPORT_LABELS = {
+    'clips':      p => `Export Clips to ${PLATFORM_NAMES[p]}`,
+    'social':     p => `Export AI Social Clips to ${PLATFORM_NAMES[p]}`,
+    'story':      p => `Export AI Story Beats to ${PLATFORM_NAMES[p]}`,
+    'all':        p => `Export All to ${PLATFORM_NAMES[p]}`,
+    'story-seq':  p => `Export to ${PLATFORM_NAMES[p]}`,
+    'section':    p => SHORT_NAMES[p],
+    'card-title': p => `${FORMAT_NAMES[p]} Export`,
+    'card-blurb': p => {
+        if (p === 'fcp')      return 'Exports an FCPXML timeline. Open in Final Cut Pro — the source media is referenced and your selects are pre-cut at the in/out points.';
+        if (p === 'premiere') return 'Exports a Premiere XML (FCP7 XML). In Premiere Pro: File → Import → select the .xml. Source media must be at its original path.';
+        if (p === 'resolve')  return 'Exports a CMX 3600 EDL. In DaVinci Resolve: File → Import → Timeline → Pre-Conformed EDL. Import your source media into the project bin first.';
+        return '';
+    },
+};
+
+const TOOLTIPS = {
+    'story':      { fcp: 'Export Story Beats to Final Cut Pro', premiere: 'Export Story Beats to Premiere Pro', resolve: 'Export Story Beats to DaVinci Resolve' },
+    'social':     { fcp: 'Export Social Clips to Final Cut Pro', premiere: 'Export Social Clips to Premiere Pro', resolve: 'Export Social Clips to DaVinci Resolve' },
+    'soundbites': { fcp: 'Export Soundbites to Final Cut Pro',   premiere: 'Export Soundbites to Premiere Pro',   resolve: 'Export Soundbites to DaVinci Resolve' },
+};
+
+function refreshExportButtonLabels() {
+    document.querySelectorAll('[data-export-label-key]').forEach(el => {
+        const key = el.getAttribute('data-export-label-key');
+        const fn = EXPORT_LABELS[key];
+        if (!fn) return;
+        const text = fn(EDITING_PLATFORM);
+        // If the element wraps a label span, write into that; otherwise write directly.
+        const span = el.querySelector('[data-export-label-text]');
+        if (span) span.textContent = text;
+        else el.textContent = text;
+        // Per-section tooltip updates
+        const tipKey = el.getAttribute('data-export-label-tooltip');
+        if (tipKey && TOOLTIPS[tipKey]) {
+            el.title = TOOLTIPS[tipKey][EDITING_PLATFORM];
+        }
+    });
+    // Update the active pill on the platform selector
+    const sel = document.getElementById('platformSelector');
+    if (sel) sel.setAttribute('data-platform', EDITING_PLATFORM);
+}
+
+async function setEditingPlatform(platform) {
+    if (!['fcp','premiere','resolve'].includes(platform)) return;
+    if (platform === EDITING_PLATFORM) return;
+    const previous = EDITING_PLATFORM;
+    EDITING_PLATFORM = platform;
+    refreshExportButtonLabels();
+    try {
+        const res = await fetch(`/api/projects/${PROJECT_ID}/editing_platform`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform }),
+        });
+        if (!res.ok) throw new Error('save failed');
+        showToast(`Editing platform: ${PLATFORM_NAMES[platform]}`);
+    } catch (err) {
+        EDITING_PLATFORM = previous;
+        refreshExportButtonLabels();
+        showToast('Could not save platform choice', true);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', refreshExportButtonLabels);
 
 // For multi-project, chat/labels use combined ID string
 const COMBINED_ID = PROJECT_IDS.join(',');
@@ -1531,7 +1622,7 @@ function renderChatStoryCard(build) {
 
     html += `<div class="chat-story-result-actions">`;
     html += `<button class="btn btn-primary btn-sm" onclick="sendChatStoryToBuilder('${bid}', this)">Send to Story Builder</button>`;
-    html += `<button class="btn btn-sm" onclick="exportStoryFCPXMLFromChat('${bid}')">Export to FCPX</button>`;
+    html += `<button class="btn btn-sm" onclick="exportStoryFCPXMLFromChat('${bid}')" data-export-label-key="story-seq">Export to ${PLATFORM_NAMES[EDITING_PLATFORM] || 'FCPX'}</button>`;
     html += `</div></div>`;
 
     return html;
@@ -2432,14 +2523,19 @@ async function exportFCPXML(type) {
         });
 
         if (res.ok) {
+            const fmt = res.headers.get('X-Export-Format') || FORMAT_NAMES[EDITING_PLATFORM] || 'export';
+            const platName = res.headers.get('X-Export-Platform') || PLATFORM_NAMES[EDITING_PLATFORM] || '';
+            const ext = res.headers.get('X-Export-Extension') || '.fcpxml';
+            const warnings = res.headers.get('X-Export-Warnings') || '';
             const blob = await res.blob();
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = getFilenameFromResponse(res) || 'export.fcpxml';
+            a.download = getFilenameFromResponse(res) || ('export' + ext);
             a.click();
             URL.revokeObjectURL(url);
-            showToast('FCPXML exported!');
+            const tail = warnings ? ' — ' + warnings.split('|')[0].trim() : '';
+            showToast(`Exported ${fmt} for ${platName}${tail}`);
         } else {
             showToast('Export failed', true);
         }
@@ -3185,14 +3281,19 @@ async function exportStoryFCPXML() {
         });
 
         if (res.ok) {
+            const fmt = res.headers.get('X-Export-Format') || FORMAT_NAMES[EDITING_PLATFORM] || 'export';
+            const platName = res.headers.get('X-Export-Platform') || PLATFORM_NAMES[EDITING_PLATFORM] || '';
+            const ext = res.headers.get('X-Export-Extension') || '.fcpxml';
+            const warnings = res.headers.get('X-Export-Warnings') || '';
             const blob = await res.blob();
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = getFilenameFromResponse(res) || 'story.fcpxml';
+            a.download = getFilenameFromResponse(res) || ('story' + ext);
             a.click();
             URL.revokeObjectURL(url);
-            showToast('Story exported to FCPX!');
+            const tail = warnings ? ' — ' + warnings.split('|')[0].trim() : '';
+            showToast(`Exported ${fmt} for ${platName}${tail}`);
         } else {
             showToast('Export failed', true);
         }

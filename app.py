@@ -17,6 +17,35 @@ from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from werkzeug.utils import secure_filename
 
+from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
+from exporters.media_probe import get_video_resolution, get_video_framerate
+import preferences as prefs
+
+
+def get_project_platform(project: dict) -> str:
+    """Return the project's editing platform, falling back to the global default."""
+    p = (project or {}).get('editing_platform')
+    if p in PLATFORMS:
+        return p
+    return prefs.get_default_platform()
+
+
+def _exporter_response(result, project, exporter):
+    """Send an export file with X-Export-* headers for the frontend toast."""
+    response = send_file(
+        result.file_path,
+        as_attachment=True,
+        download_name=result.filename,
+    )
+    response.headers['X-Export-Format'] = result.format_name
+    response.headers['X-Export-Platform'] = result.platform_name
+    response.headers['X-Export-Extension'] = exporter.file_extension
+    if result.warnings:
+        # Headers must be ASCII-safe; join with " | ".
+        response.headers['X-Export-Warnings'] = ' | '.join(result.warnings)
+    return response
+
+
 app = Flask(__name__)
 app.config['PROJECTS_DIR'] = os.path.join(os.path.dirname(__file__), 'projects')
 app.config['EXPORTS_DIR'] = os.path.join(os.path.dirname(__file__), 'exports')
@@ -151,6 +180,43 @@ def move_project(project_id):
     return jsonify({'status': 'moved', 'folder': folder})
 
 
+# ── Editing platform (NLE) selection ───────────────────────────────
+
+@app.route('/api/projects/<project_id>/editing_platform', methods=['PATCH'])
+def update_editing_platform(project_id):
+    """Set the project's editing platform and remember the choice as the new global default."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    data = request.json or {}
+    platform = data.get('platform')
+    if platform not in PLATFORMS:
+        return jsonify({'error': f'Invalid platform: {platform!r}'}), 400
+    project['editing_platform'] = platform
+    save_project(project_id, project)
+    prefs.set_default_platform(platform)
+    return jsonify({
+        'status': 'updated',
+        'editing_platform': platform,
+        'default_platform': prefs.get_default_platform(),
+    })
+
+
+@app.route('/api/preferences/default_platform', methods=['GET'])
+def get_default_platform_pref():
+    return jsonify({'platform': prefs.get_default_platform()})
+
+
+@app.route('/api/preferences/default_platform', methods=['PATCH'])
+def set_default_platform_pref():
+    data = request.json or {}
+    platform = data.get('platform')
+    if platform not in PLATFORMS:
+        return jsonify({'error': f'Invalid platform: {platform!r}'}), 400
+    prefs.set_default_platform(platform)
+    return jsonify({'platform': prefs.get_default_platform()})
+
+
 @app.route('/create', methods=['POST'])
 def create_project():
     """Create a new project from a local file path."""
@@ -208,6 +274,7 @@ def create_project():
         'analysis': None,
         'client_selects': [],
         'social_clips': [],
+        'editing_platform': prefs.get_default_platform(),
     }
     save_project(project_id, meta)
 
@@ -261,6 +328,7 @@ def upload():
         'analysis': None,
         'client_selects': [],
         'social_clips': [],
+        'editing_platform': prefs.get_default_platform(),
     }
     save_project(project_id, meta)
 
@@ -593,6 +661,8 @@ def project_view(project_id):
             except Exception:
                 pass
 
+    project['editing_platform'] = get_project_platform(project)
+
     return render_template('project.html',
                            project=project,
                            projects=projects,
@@ -604,7 +674,8 @@ def project_view(project_id):
                            is_shared=False,
                            is_video=is_video,
                            segment_vectors=segment_vectors,
-                           detected_framerate=detected_framerate)
+                           detected_framerate=detected_framerate,
+                           editing_platform=project['editing_platform'])
 
 
 @app.route('/project/<project_id>/media')
@@ -812,12 +883,10 @@ def save_labels(project_id):
 
 @app.route('/project/<project_id>/export/fcpxml', methods=['POST'])
 def export_fcpxml(project_id):
-    """Export selections as FCPXML markers."""
+    """Export selections to the project's selected NLE format (FCPXML/Premiere/EDL)."""
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
-
-    from fcpxml_export import generate_fcpxml
 
     export_type = request.json.get('type', 'selects')  # 'selects', 'social', 'all'
     markers = []
@@ -895,121 +964,42 @@ def export_fcpxml(project_id):
                 'category': label_name,
             })
 
-    def _get_video_resolution(path):
-        """Detect video width and height using ffprobe."""
-        if not path or not os.path.exists(path):
-            return 1920, 1080
-        ffprobe = shutil.which('ffprobe')
-        if not ffprobe:
-            for candidate in ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe']:
-                if os.path.isfile(candidate):
-                    ffprobe = candidate
-                    break
-        if not ffprobe:
-            return 1920, 1080
-        try:
-            result = subprocess.run([
-                ffprobe, '-v', 'quiet',
-                '-select_streams', 'v:0',
-                '-show_entries', 'stream=width,height',
-                '-of', 'csv=p=0',
-                path
-            ], capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 and result.stdout.strip():
-                parts = result.stdout.strip().split(',')
-                if len(parts) >= 2:
-                    return int(parts[0]), int(parts[1])
-        except Exception:
-            pass
-        return 1920, 1080
-
-    def _get_video_framerate(path):
-        """Detect video framerate using ffprobe. Returns nearest standard rate."""
-        if not path or not os.path.exists(path):
-            return None
-        ffprobe = shutil.which('ffprobe')
-        if not ffprobe:
-            for candidate in ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe']:
-                if os.path.isfile(candidate):
-                    ffprobe = candidate
-                    break
-        if not ffprobe:
-            return None
-        try:
-            result = subprocess.run([
-                ffprobe, '-v', 'quiet',
-                '-select_streams', 'v:0',
-                '-show_entries', 'stream=r_frame_rate',
-                '-of', 'csv=p=0',
-                path
-            ], capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 and result.stdout.strip():
-                num, den = result.stdout.strip().split('/')
-                fps = float(num) / float(den)
-                # Snap to nearest standard framerate
-                standards = [23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0]
-                return min(standards, key=lambda s: abs(s - fps))
-        except Exception:
-            pass
-        return None
-
-    # Get source file path and media duration for cut-based export
+    # Source file + media metadata
     source_path = project.get('source_path', project.get('filepath', ''))
     media_duration = None
     if project.get('transcript') and project['transcript'].get('duration'):
         media_duration = project['transcript']['duration']
 
-    detected_fps = _get_video_framerate(source_path)
+    detected_fps = get_video_framerate(source_path)
     framerate = detected_fps or request.json.get('framerate', 23.976)
     export_mode = request.json.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
+    width, height = get_video_resolution(source_path)
+    total_clips = request.json.get('total_clips', len(markers)) or len(markers)
 
-    # Detect video resolution from source file
-    width, height = _get_video_resolution(source_path)
-
-    fcpxml_content = generate_fcpxml(
-        markers=markers,
-        project_name=project['name'],
-        framerate=framerate,
-        source_path=source_path,
-        media_duration=media_duration,
-        mode=export_mode,
-        width=width,
-        height=height,
-    )
-
-    # Build clean filename
-    name = project['name']
-    if export_type == 'labels':
-        count = len(markers)
-        if count == 1:
-            clip_title = markers[0].get('text', 'Clip')[:40].strip()
-            suffix = clip_title
-        else:
-            total = request.json.get('total_clips', count)
-            suffix = 'All Clips' if count >= total else f'{count} Clips'
-    elif export_type == 'social':
-        suffix = 'Social Clips'
-    elif export_type == 'story':
-        suffix = 'Story Beats'
-    elif export_type == 'soundbites':
-        suffix = 'Soundbites'
-    elif export_type == 'all':
-        suffix = 'Full Export'
-    else:
-        suffix = export_type
-
-    export_filename = f"{name.strip().rstrip('_')} - {suffix.strip().rstrip('_')}.fcpxml".replace('/', '-').replace('_', ' ')
-    export_path = os.path.join(app.config['EXPORTS_DIR'], export_filename)
+    # Allow per-export platform override; otherwise use project's editing_platform.
+    platform_override = (request.json or {}).get('platform')
+    platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
 
     try:
-        os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
-        with open(export_path, 'w') as f:
-            f.write(fcpxml_content)
+        exporter = get_exporter(platform)
+        result = exporter.export_markers(
+            markers,
+            project_name=project['name'],
+            source_path=source_path,
+            media_duration=media_duration,
+            framerate=framerate,
+            width=width,
+            height=height,
+            export_type=export_type,
+            exports_dir=app.config['EXPORTS_DIR'],
+            export_mode=export_mode,
+            total_clips=total_clips,
+        )
     except Exception as e:
-        app.logger.error('Export failed writing %s: %s', export_path, e)
+        app.logger.error('Export failed for %s: %s', platform, e)
         return jsonify({'error': f'Export failed: {e}'}), 500
 
-    return send_file(export_path, as_attachment=True, download_name=export_filename)
+    return _exporter_response(result, project, exporter)
 
 
 @app.route('/review/<project_id>')
@@ -1326,12 +1316,10 @@ def story_delete(project_id, build_id):
 
 @app.route('/project/<project_id>/story/export', methods=['POST'])
 def story_export(project_id):
-    """Export a story build as FCPXML timeline."""
+    """Export a story build as a timeline in the project's selected NLE format."""
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
-
-    from fcpxml_export import generate_story_fcpxml
 
     data = request.json or {}
     clips = data.get('clips', [])
@@ -1355,14 +1343,15 @@ def story_export(project_id):
         except (ValueError, TypeError):
             return 0.0
 
-    # Convert clips to markers format
+    # Convert clips to the marker shape every exporter consumes.
     markers = []
-    for clip in clips:
+    for i, clip in enumerate(clips):
         markers.append({
             'start': _to_seconds(clip.get('start_time', 0)),
             'end': _to_seconds(clip.get('end_time', 0)),
             'text': clip.get('title', 'Clip'),
             'note': clip.get('editorial_note', ''),
+            '_order': clip.get('order', i),
         })
 
     source_path = project.get('source_path', project.get('filepath', ''))
@@ -1370,65 +1359,31 @@ def story_export(project_id):
     if project.get('transcript') and project['transcript'].get('duration'):
         media_duration = project['transcript']['duration']
 
-    # Detect resolution and framerate
-    source_ext = os.path.splitext(source_path or '')[1].lower()
-    is_video = source_ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
-    width, height = 1920, 1080
-    detected_fps = None
-    if is_video and source_path and os.path.exists(source_path):
-        ffprobe = shutil.which('ffprobe')
-        if not ffprobe:
-            for candidate in ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe']:
-                if os.path.isfile(candidate):
-                    ffprobe = candidate
-                    break
-        if ffprobe:
-            try:
-                result = subprocess.run([
-                    ffprobe, '-v', 'quiet', '-select_streams', 'v:0',
-                    '-show_entries', 'stream=width,height,r_frame_rate',
-                    '-of', 'csv=p=0', source_path
-                ], capture_output=True, text=True, timeout=10)
-                if result.returncode == 0 and result.stdout.strip():
-                    parts = result.stdout.strip().split(',')
-                    if len(parts) >= 2:
-                        width, height = int(parts[0]), int(parts[1])
-                    if len(parts) >= 3:
-                        try:
-                            num, den = parts[2].split('/')
-                            fps = float(num) / float(den)
-                            standards = [23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0]
-                            detected_fps = min(standards, key=lambda s: abs(s - fps))
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
+    width, height = get_video_resolution(source_path)
+    detected_fps = get_video_framerate(source_path)
     framerate = detected_fps or data.get('framerate', 23.976)
 
-    fcpxml_content = generate_story_fcpxml(
-        markers=markers,
-        project_name=project['name'],
-        story_title=story_title,
-        framerate=framerate,
-        source_path=source_path,
-        media_duration=media_duration,
-        width=width,
-        height=height,
-    )
-
-    export_filename = f"{project['name'].strip()} - {story_title.strip()}.fcpxml".replace('/', '-')
-    export_path = os.path.join(app.config['EXPORTS_DIR'], export_filename)
+    platform_override = data.get('platform')
+    platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
 
     try:
-        os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
-        with open(export_path, 'w') as f:
-            f.write(fcpxml_content)
+        exporter = get_exporter(platform)
+        result = exporter.export_story(
+            markers,
+            project_name=project['name'],
+            story_title=story_title,
+            source_path=source_path,
+            media_duration=media_duration,
+            framerate=framerate,
+            width=width,
+            height=height,
+            exports_dir=app.config['EXPORTS_DIR'],
+        )
     except Exception as e:
-        app.logger.error('Story export failed writing %s: %s', export_path, e)
+        app.logger.error('Story export failed for %s: %s', platform, e)
         return jsonify({'error': f'Export failed: {e}'}), 500
 
-    return send_file(export_path, as_attachment=True, download_name=export_filename)
+    return _exporter_response(result, project, exporter)
 
 
 # ── Client Comments ────────────────────────────────────────────────

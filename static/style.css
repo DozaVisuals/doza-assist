@@ -2104,6 +2104,53 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     color: var(--text-primary);
 }
 
+/* ── Editing Platform (NLE) Selector ── */
+
+.platform-selector {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0.4rem 0.25rem 0.6rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+}
+
+.platform-selector-label {
+    font-size: 0.72rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    margin-right: 0.15rem;
+}
+
+.platform-selector button {
+    padding: 0.3rem 0.7rem;
+    border-radius: calc(var(--radius) - 2px);
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    font-family: var(--font);
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.12s;
+}
+
+.platform-selector button:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover, rgba(0,0,0,0.04));
+}
+
+.platform-selector[data-platform="fcp"]      button[data-platform="fcp"],
+.platform-selector[data-platform="premiere"] button[data-platform="premiere"],
+.platform-selector[data-platform="resolve"]  button[data-platform="resolve"] {
+    background: var(--accent);
+    color: var(--bg-card);
+    border-color: var(--accent);
+}
+
 .project-dropdown {
     display: none;
     position: absolute;

@@ -105,9 +105,9 @@ cat > "${CONTENTS_DIR}/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.dozavisuals.transcribe</string>
     <key>CFBundleVersion</key>
-    <string>2.0</string>
+    <string>2.2.3</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0</string>
+    <string>2.2.3</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

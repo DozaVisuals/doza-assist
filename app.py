@@ -934,15 +934,15 @@ def export_fcpxml(project_id):
             pass
         return None
 
-    detected_fps = _get_video_framerate(source_path)
-    framerate = detected_fps or request.json.get('framerate', 23.976)
-    export_mode = request.json.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
-
     # Get source file path and media duration for cut-based export
     source_path = project.get('source_path', project.get('filepath', ''))
     media_duration = None
     if project.get('transcript') and project['transcript'].get('duration'):
         media_duration = project['transcript']['duration']
+
+    detected_fps = _get_video_framerate(source_path)
+    framerate = detected_fps or request.json.get('framerate', 23.976)
+    export_mode = request.json.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
 
     # Detect video resolution from source file
     width, height = _get_video_resolution(source_path)
@@ -979,8 +979,14 @@ def export_fcpxml(project_id):
 
     export_filename = f"{name.strip().rstrip('_')} - {suffix.strip().rstrip('_')}.fcpxml".replace('/', '-').replace('_', ' ')
     export_path = os.path.join(app.config['EXPORTS_DIR'], export_filename)
-    with open(export_path, 'w') as f:
-        f.write(fcpxml_content)
+
+    try:
+        os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
+        with open(export_path, 'w') as f:
+            f.write(fcpxml_content)
+    except Exception as e:
+        app.logger.error('Export failed writing %s: %s', export_path, e)
+        return jsonify({'error': f'Export failed: {e}'}), 500
 
     return send_file(export_path, as_attachment=True, download_name=export_filename)
 
@@ -1388,8 +1394,14 @@ def story_export(project_id):
 
     export_filename = f"{project['name'].strip()} - {story_title.strip()}.fcpxml".replace('/', '-')
     export_path = os.path.join(app.config['EXPORTS_DIR'], export_filename)
-    with open(export_path, 'w') as f:
-        f.write(fcpxml_content)
+
+    try:
+        os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
+        with open(export_path, 'w') as f:
+            f.write(fcpxml_content)
+    except Exception as e:
+        app.logger.error('Story export failed writing %s: %s', export_path, e)
+        return jsonify({'error': f'Export failed: {e}'}), 500
 
     return send_file(export_path, as_attachment=True, download_name=export_filename)
 

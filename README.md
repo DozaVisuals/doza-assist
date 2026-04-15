@@ -6,7 +6,7 @@ Local-first AI editor's assistant for documentary and spoken-word video. Free an
 
 Documentary films, corporate video, podcasts, news, legal depositions, customer testimonials, training content. If someone is talking on camera and you need to find the best moments, this tool does the heavy lifting.
 
-Drop in footage, transcribe it, chat with the AI about what story you're looking for, build narrative sequences from your transcript, and export pre-cut timelines directly to Final Cut Pro. Everything runs on your machine. Nothing uploads. Nothing leaves.
+Drop in footage, transcribe it, chat with the AI about what story you're looking for, build narrative sequences from your transcript, and export pre-cut timelines directly to **Final Cut Pro, Premiere Pro, or DaVinci Resolve**. Everything runs on your machine. Nothing uploads. Nothing leaves.
 
 <!-- Add your demo video here:
 https://github.com/user-attachments/assets/YOUR_VIDEO_ID
@@ -14,7 +14,7 @@ or embed a GIF: ![Demo](demo.gif) -->
 
 ## Why I Built This
 
-I'm a documentary filmmaker and I needed a way to find story beats and soundbites across hours of interview footage without uploading client material to cloud services. Existing tools were either too expensive, too slow, or required sending sensitive footage to third-party servers. So I built something that runs entirely on my Mac, uses AI locally, and exports directly to my Final Cut Pro timeline.
+I'm a documentary filmmaker and I needed a way to find story beats and soundbites across hours of interview footage without uploading client material to cloud services. Existing tools were either too expensive, too slow, or required sending sensitive footage to third-party servers. So I built something that runs entirely on my Mac, uses AI locally, and exports directly to whichever NLE you're cutting in — Final Cut Pro, Premiere Pro, or DaVinci Resolve.
 
 ---
 
@@ -107,14 +107,16 @@ The dashboard has a **Refine my style** box. Type the things the analyzer might 
 - Returns an ordered sequence of clips with editorial notes explaining why each clip is in that position
 - Drag to reorder clips, remove what doesn't work, rebuild with a different prompt
 - Play All button plays the entire sequence back-to-back so you can hear the story before you cut it
-- One-click export to FCPX — the clips land on your timeline in story order, ready to refine
+- One-click export to your NLE — the clips land on your timeline in story order, ready to refine
 - Stories sidebar: browse, rename, switch between, and delete story builds
 - Save multiple story builds per project to compare different angles or versions
 
-**FCPX Export**
-- Pre-cut timeline — each clip becomes an actual edit referencing your source media
-- Import the .fcpxml and your selects are ready to review in Final Cut Pro
-- Keyword ranges on source clip for browser filtering
+**Multi-NLE Export** *(new in v2.4)*
+- Pick your editing platform once with the **Edit in:** selector in the project header — every export button updates automatically
+- **Final Cut Pro** → FCPXML 1.11 pre-cut timeline. Each clip is an actual edit referencing your source media, with keyword ranges on the source clip for browser filtering
+- **Premiere Pro** → Final Cut Pro 7 XML (the format Adobe recommends for third-party round-tripping). Imports cleanly via File → Import with V1 + A1/A2 tracks
+- **DaVinci Resolve** → CMX 3600 EDL. Imports via File → Import → Timeline → Pre-Conformed EDL. Source clip names and editorial notes are preserved as EDL comments
+- Your platform choice persists per-project and sets the default for new projects
 - Also exports SRT subtitles, plain text, and JSON
 
 **Client Sharing**
@@ -216,7 +218,7 @@ The app automatically tries Ollama first and falls back to Claude if configured.
 3. **Assign speakers** — Click speaker names in the transcript to toggle between speakers
 4. **Highlight clips** — Select a color and drag across words to mark selects
 5. **Discover with AI** — Run AI Analysis or ask the Chat for clips and story structure
-6. **Export to FCPX** — Export pre-cut timeline with your clips as edits on the timeline
+6. **Export to your NLE** — Pick Final Cut Pro, Premiere Pro, or DaVinci Resolve at the top of the project. Export buttons generate the right format automatically
 7. **Share with clients** — Click Share to generate a public link for client review
 
 ---
@@ -229,7 +231,7 @@ The app automatically tries Ollama first and falls back to Claude if configured.
 - **AI:** Ollama with Gemma 4 (local, free) or Claude API (optional)
 - **Audio:** ffmpeg for extraction
 - **Sharing:** Cloudflare Tunnel (free, no account needed)
-- **Export:** FCPXML 1.11 with asset references
+- **Export:** FCPXML 1.11 (Final Cut Pro), FCP7 XML / xmeml v5 (Premiere Pro), CMX 3600 EDL (DaVinci Resolve)
 - **Storage:** JSON files per project (no database)
 
 ---
@@ -242,6 +244,14 @@ doza-assist/
 ├── transcribe.py        # Whisper transcription engine
 ├── ai_analysis.py       # AI analysis + chat (Ollama/Claude)
 ├── fcpxml_export.py     # FCPXML generation with pre-cut timelines
+├── exporters/           # Multi-NLE export package (v2.4+)
+│   ├── base.py                 # BaseExporter ABC + ExportResult
+│   ├── router.py               # Platform → exporter instance
+│   ├── fcpxml.py               # FCPXML wrapper (delegates to fcpxml_export.py)
+│   ├── premiere_xml.py         # FCP7 XML / xmeml v5 for Premiere Pro
+│   ├── edl.py                  # CMX 3600 EDL for DaVinci Resolve
+│   └── media_probe.py          # Shared ffprobe helpers
+├── preferences.py       # User prefs (~/Library/Application Support/Doza Assist/)
 ├── editorial_dna/       # My Style — editorial voice profiling
 │   ├── models.py               # StyleProfileSummary schema (v2.1)
 │   ├── profiles.py             # Multi-profile CRUD + v1→v2.1 migration

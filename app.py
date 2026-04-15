@@ -1157,6 +1157,7 @@ def update_speakers(project_id):
 
     project['transcript']['segments'] = segments
     save_project(project_id, project)
+    return jsonify({'status': 'updated'})
 
 
 @app.route('/project/<project_id>/update-speaker-range', methods=['POST'])

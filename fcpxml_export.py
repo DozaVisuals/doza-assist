@@ -190,7 +190,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
 <fcpxml version="1.11">
     <resources>
-        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}"/>
+        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
         <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="0/1s" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
@@ -281,7 +281,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 
 <fcpxml version="1.11">
     <resources>
-        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}"/>
+        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
         <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="0/1s" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
@@ -339,7 +339,7 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
 
 <fcpxml version="1.11">
     <resources>
-        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}"/>
+        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
     </resources>
     <library>
         <event name="{_escape_xml(project_name)} Markers">

@@ -175,7 +175,7 @@
                 {% for speaker in speakers %}
                 <div class="speaker-row" data-original="{{ speaker }}">
                     <div style="width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: {% if loop.index == 1 %}var(--green){% elif loop.index == 2 %}var(--purple){% elif loop.index == 3 %}var(--orange){% else %}var(--accent){% endif %};"></div>
-                    <input type="text" class="speaker-input" value="{{ speaker }}" onchange="renameSpeaker('{{ speaker }}', this.value)">
+                    <input type="text" class="speaker-input" value="{{ speaker }}" onchange="renameSpeaker(this.closest('.speaker-row').dataset.original, this.value)">
                 </div>
                 {% endfor %}
             </div>
@@ -2644,15 +2644,24 @@ async function renameSpeaker(oldName, newName) {
         });
         if (res.ok) {
             // Update all speaker labels in the transcript
+            const interviewer = {{ (project.interviewer_name or '')|tojson }};
             document.querySelectorAll('.para-speaker').forEach(el => {
                 if (el.textContent.trim() === oldName) {
                     el.textContent = newName;
+                    el.classList.remove('speaker-1', 'speaker-2');
+                    el.classList.add(newName === interviewer ? 'speaker-1' : 'speaker-2');
                 }
             });
             // Update the input's data-original for future renames
             const row = document.querySelector(`.speaker-row[data-original="${oldName}"]`);
-            if (row) row.dataset.original = newName;
+            if (row) {
+                row.dataset.original = newName;
+                const input = row.querySelector('.speaker-input');
+                if (input) input.value = newName;
+            }
             showToast(`Renamed "${oldName}" to "${newName}"`);
+        } else {
+            showToast('Failed to rename speaker', true);
         }
     } catch (err) {
         showToast('Error: ' + err.message, true);

@@ -866,6 +866,22 @@ def export_fcpxml(project_id):
                 'category': 'Story Beat',
             })
 
+    if export_type in ('soundbites', 'all'):
+        analysis = project.get('analysis', {})
+        for sb in analysis.get('strongest_soundbites', []):
+            start = _to_seconds(sb.get('start', 0))
+            end = _to_seconds(sb.get('end', start))
+            if end <= start:
+                end = start + 15
+            markers.append({
+                'start': start,
+                'end': end,
+                'text': (sb.get('text', '') or '')[:80],
+                'note': sb.get('why', ''),
+                'color': 'orange',
+                'category': 'Soundbite',
+            })
+
     if export_type in ('labels', 'all'):
         color_labels = project.get('color_labels', {})
         for sec in project.get('labeled_sections', []):
@@ -975,6 +991,8 @@ def export_fcpxml(project_id):
         suffix = 'Social Clips'
     elif export_type == 'story':
         suffix = 'Story Beats'
+    elif export_type == 'soundbites':
+        suffix = 'Soundbites'
     elif export_type == 'all':
         suffix = 'Full Export'
     else:
@@ -1232,6 +1250,7 @@ def story_build(project_id):
             'created_at': datetime.now().isoformat(),
             'story_title': result.get('story_title', 'Untitled'),
             'target_duration': result.get('target_duration', ''),
+            'reasoning': result.get('reasoning', ''),
             'clips': result.get('clips', []),
         }
         builds.append(build_entry)

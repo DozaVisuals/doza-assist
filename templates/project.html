@@ -317,7 +317,13 @@
 
         <!-- Story Beats -->
         {% if project.analysis.get('story_beats', []) %}
-        <div class="analysis-section-header">Story Beats</div>
+        <div class="analysis-section-header">
+            <span>Story Beats</span>
+            <button class="analysis-section-export" onclick="exportFCPXML('story')" title="Export Story Beats to Final Cut Pro">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                FCPX
+            </button>
+        </div>
         <div class="analysis-list">
             {% for beat in project.analysis.story_beats %}
             <div class="analysis-item" data-clip-start="{{ beat.start }}" data-clip-end="{{ beat.end }}">
@@ -347,7 +353,13 @@
 
         <!-- Social Clips -->
         {% if project.analysis.get('social_clips', []) %}
-        <div class="analysis-section-header">Social Clips</div>
+        <div class="analysis-section-header">
+            <span>Social Clips</span>
+            <button class="analysis-section-export" onclick="exportFCPXML('social')" title="Export Social Clips to Final Cut Pro">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                FCPX
+            </button>
+        </div>
         <div class="analysis-list">
             {% for clip in project.analysis.social_clips %}
             <div class="analysis-item" data-clip-start="{{ clip.start }}" data-clip-end="{{ clip.end }}">
@@ -378,7 +390,13 @@
 
         <!-- Soundbites -->
         {% if project.analysis.get('strongest_soundbites', []) %}
-        <div class="analysis-section-header">Soundbites</div>
+        <div class="analysis-section-header">
+            <span>Soundbites</span>
+            <button class="analysis-section-export" onclick="exportFCPXML('soundbites')" title="Export Soundbites to Final Cut Pro">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                FCPX
+            </button>
+        </div>
         <div class="analysis-list">
             {% for sb in project.analysis.strongest_soundbites %}
             <div class="analysis-item" data-clip-start="{{ sb.start }}" data-clip-end="{{ sb.start }}">
@@ -450,8 +468,9 @@
                             style:
                             <select id="chatProfileSelector" onchange="onSessionProfileChange(this.value)"></select>
                         </span>
-                        <input type="text" class="chat-input" id="chatInput" placeholder="What story are you looking for?"
-                               onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }">
+                        <textarea class="chat-input" id="chatInput" rows="1" placeholder="What story are you looking for?  (Shift+Enter for new line)"
+                                  oninput="autoGrowChatInput(this)"
+                                  onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }"></textarea>
                         <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                         </button>
@@ -1340,8 +1359,16 @@ function saveLabels() {
 // ── Chat ──
 let chatHistory = [];
 
+function autoGrowChatInput(el) {
+    el.style.height = 'auto';
+    const max = 220; // px — about 10 lines
+    el.style.height = Math.min(el.scrollHeight, max) + 'px';
+}
+
 function sendSuggestion(btn) {
-    document.getElementById('chatInput').value = btn.textContent;
+    const input = document.getElementById('chatInput');
+    input.value = btn.textContent;
+    autoGrowChatInput(input);
     sendChat();
 }
 
@@ -1356,6 +1383,7 @@ async function sendChat() {
     if (!message) return;
 
     input.value = '';
+    autoGrowChatInput(input);
 
     // Remove welcome if present
     const welcome = document.querySelector('.chat-welcome');
@@ -1478,6 +1506,10 @@ function renderChatStoryCard(build) {
     html += `<svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg> Play All`;
     html += `</button>`;
     html += `</div>`;
+
+    if (build.reasoning) {
+        html += `<div class="chat-story-reasoning">${escapeHtml(build.reasoning)}</div>`;
+    }
 
     // Clip list with individual play buttons
     clips.forEach((clip, i) => {
@@ -1721,17 +1753,9 @@ function renderChatReply(text) {
                 const ws = parseFloat(w.dataset.s);
                 return ws >= start && ws < end;
             });
-            let excerpt = clipWords.map(w => w.textContent).join('').trim();
-            if (excerpt.length > 140) excerpt = excerpt.substring(0, 140) + '...';
-            const excerptHtml = excerpt ? `<div class="chat-clip-excerpt">${escapeHtml(excerpt)}</div>` : '';
+            const excerpt = clipWords.map(w => w.textContent).join('').trim();
 
-            return `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}">
-<div class="cc-row1"><b>${title}</b><span class="cc-dur">${duration}s</span></div>
-<div class="cc-row2"><span class="cc-dot"></span><span class="cc-tc">${fmtTime(start)} – ${fmtTime(end)}</span></div>
-<div class="cc-row3"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div></div>
-<div class="cc-row4"><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Text <svg viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clips</button></div>
-<div class="cc-excerpt">${escapeHtml(excerpt)}</div>
-</div>`;
+            return `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtTime(start)}–${fmtTime(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Text <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div><div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
 
         }
     );
@@ -1746,8 +1770,15 @@ function renderChatReply(text) {
         }
     );
 
+    // Strip blank lines immediately around clip cards so they pack tightly
+    html = html.replace(/\n*(<div class="cc-card"[\s\S]*?<\/div><\/div>)\n*/g, '$1');
+
     // Newlines to <br>
     html = html.replace(/\n/g, '<br>');
+    // Collapse runs of <br> and any <br> hugging a card
+    html = html.replace(/(<br>\s*){2,}/g, '<br>');
+    html = html.replace(/<br>\s*(<div class="cc-card")/g, '$1');
+    html = html.replace(/(<\/div><\/div>)\s*<br>/g, '$1');
 
     return html;
 }

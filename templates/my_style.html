@@ -63,8 +63,23 @@ function toggleTheme() {
 
 {% else %}
 <!-- ==================== POPULATED STATE ==================== -->
+
+<!-- Profile selector + master toggle row -->
 <div class="my-style-header">
-    <h1>My Style</h1>
+    <div class="my-style-header-left">
+        <h1>My Style</h1>
+        <div class="profile-selector-wrap">
+            <select id="profileSelector" class="profile-selector" onchange="onProfileChange(this.value)">
+                {% for p in all_profiles %}
+                <option value="{{ p.id }}" {% if p.is_active %}selected{% endif %}>
+                    {{ p.name }}{% if p.is_active %} · active{% endif %}
+                </option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-sm" onclick="createNewProfile()">+ New profile</button>
+            <button class="btn btn-sm" onclick="renameActiveProfile()">Rename</button>
+        </div>
+    </div>
     <div class="my-style-master-toggle">
         <label class="toggle-switch">
             <input type="checkbox" id="masterToggle" {% if profile.active %}checked{% endif %} onchange="toggleMyStyle(this.checked)">
@@ -74,49 +89,176 @@ function toggleTheme() {
     </div>
 </div>
 
+<!-- Tabs -->
+<div class="edna-tabs">
+    <button class="edna-tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Your Style Profile</button>
+    <button class="edna-tab" data-tab="evolution" onclick="switchTab('evolution')">Evolution</button>
+    <button class="edna-tab" data-tab="data" onclick="switchTab('data')">Data &amp; Export</button>
+</div>
+
 <div class="my-style-body {% if not profile.active %}my-style-dimmed{% endif %}" id="styleBody">
 
+<!-- ==================== DASHBOARD TAB ==================== -->
+<div class="edna-tab-panel" data-tab-panel="dashboard">
+
+    <!-- Header card with counts -->
+    <div class="edna-header-card">
+        <div class="edna-header-card-main">
+            <div class="edna-header-card-name">{{ profile.name or 'My Style' }}</div>
+            {% if profile.description %}<div class="edna-header-card-desc">{{ profile.description }}</div>{% endif %}
+        </div>
+        <div class="edna-header-card-stats">
+            <div>
+                <div class="edna-hc-value">{{ profile.source_files|length }}</div>
+                <div class="edna-hc-label">Projects analyzed</div>
+            </div>
+            <div>
+                <div class="edna-hc-value">{{ ((profile.summary.total_runtime_seconds or 0) / 60)|round(0, 'floor')|int }} min</div>
+                <div class="edna-hc-label">Total runtime</div>
+            </div>
+            <div>
+                <div class="edna-hc-value">{{ (profile.summary.last_updated or profile.updated_at or '')[:10] }}</div>
+                <div class="edna-hc-label">Last updated</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Natural language summary -->
+    {% if profile.natural_language_summary %}
     <div class="style-summary-card">
         <p class="style-summary-text">{{ profile.natural_language_summary }}</p>
     </div>
+    {% endif %}
 
-    <div class="stat-cards-grid">
-        <div class="stat-card">
-            <div class="stat-value">{{ "%.1f"|format(profile.speech_pacing.avg_beat_length) }}s</div>
-            <div class="stat-label">Avg Beat Length</div>
+    <!-- Narrative patterns -->
+    <section class="edna-section">
+        <h3 class="edna-section-title">Narrative patterns</h3>
+        <div class="edna-field-grid">
+            <div class="edna-field">
+                <div class="edna-field-label">Opening style</div>
+                <div class="edna-field-value">{{ profile.summary.narrative_patterns.opening_style }}</div>
+                {% if profile.summary.narrative_patterns.opening_style_confidence %}
+                <div class="edna-field-hint">{{ _confidence_label(profile.summary.narrative_patterns.opening_style_confidence) if _confidence_label is defined else '' }}</div>
+                {% endif %}
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Pacing signature</div>
+                <div class="edna-field-value">{{ profile.summary.narrative_patterns.pacing_signature }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Emotional arc</div>
+                <div class="edna-field-value">{{ profile.summary.narrative_patterns.emotional_arc_shape }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Resolution style</div>
+                <div class="edna-field-value">{{ profile.summary.narrative_patterns.resolution_style }}</div>
+            </div>
+            {% if profile.summary.narrative_patterns.average_clip_length_seconds %}
+            <div class="edna-field">
+                <div class="edna-field-label">Average clip length</div>
+                <div class="edna-field-value">{{ "%.1f"|format(profile.summary.narrative_patterns.average_clip_length_seconds) }}s</div>
+            </div>
+            {% endif %}
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{{ "%.0f"|format(profile.speech_pacing.words_per_minute) }}</div>
-            <div class="stat-label">Words/Min</div>
+    </section>
+
+    <!-- Thematic patterns -->
+    <section class="edna-section">
+        <h3 class="edna-section-title">Thematic patterns</h3>
+        {% if profile.summary.thematic_patterns.common_themes %}
+        <div class="edna-chip-row">
+            {% for t in profile.summary.thematic_patterns.common_themes %}
+            <span class="edna-chip">{{ t }}</span>
+            {% endfor %}
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{{ profile.structural_rhythm.energy_arc }}</div>
-            <div class="stat-label">Energy Arc</div>
+        {% else %}
+        <p class="edna-muted">No recurring themes identified yet. Import more projects or click Regenerate analysis.</p>
+        {% endif %}
+        <div class="edna-field-grid" style="margin-top:14px;">
+            <div class="edna-field">
+                <div class="edna-field-label">Subject focus</div>
+                <div class="edna-field-value">{{ profile.summary.thematic_patterns.subject_focus }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Vulnerability pattern</div>
+                <div class="edna-field-value">{{ profile.summary.thematic_patterns.vulnerability_pattern }}</div>
+            </div>
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{{ "%.0f"|format(profile.soundbite_craft.clean_cut_ratio * 100) }}%</div>
-            <div class="stat-label">Clean Cuts</div>
+    </section>
+
+    <!-- Structural preferences -->
+    <section class="edna-section">
+        <h3 class="edna-section-title">Structural preferences</h3>
+        <div class="edna-peak-bar-wrap">
+            <div class="edna-peak-bar-label">Where you tend to place the emotional peak</div>
+            <div class="edna-peak-bar">
+                <div class="edna-peak-marker"
+                     style="left: {{ (profile.summary.structural_preferences.preferred_position_for_emotional_peak * 100)|round|int }}%;"></div>
+                <div class="edna-peak-ticks"><span>start</span><span>middle</span><span>end</span></div>
+            </div>
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{{ profile.story_shape.opening_style }}</div>
-            <div class="stat-label">Opening Style</div>
+        <div class="edna-field-grid">
+            <div class="edna-field">
+                <div class="edna-field-label">Opens with</div>
+                <div class="edna-field-value">{{ profile.summary.structural_preferences.tends_to_open_with }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Closes with</div>
+                <div class="edna-field-value">{{ profile.summary.structural_preferences.tends_to_close_with }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Chronological</div>
+                <div class="edna-field-value">{{ 'Often' if profile.summary.structural_preferences.favors_chronological else 'Not usually' }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Intercutting</div>
+                <div class="edna-field-value">{{ 'Often' if profile.summary.structural_preferences.uses_intercutting else 'Rarely' }}</div>
+            </div>
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{{ profile.story_shape.closing_style }}</div>
-            <div class="stat-label">Closing Style</div>
+    </section>
+
+    <!-- Voice characteristics -->
+    <section class="edna-section">
+        <h3 class="edna-section-title">Voice characteristics</h3>
+        <div class="edna-field-grid">
+            <div class="edna-field">
+                <div class="edna-field-label">Tone</div>
+                <div class="edna-field-value">{{ profile.summary.voice_characteristics.tone }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Formality</div>
+                <div class="edna-field-value">{{ profile.summary.voice_characteristics.formality_level }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Uses narration</div>
+                <div class="edna-field-value">{{ 'Yes' if profile.summary.voice_characteristics.uses_narration else 'No' }}</div>
+            </div>
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{{ profile.source_files|length }}</div>
-            <div class="stat-label">Projects Analyzed</div>
+    </section>
+
+    <!-- Refine my style -->
+    <section class="edna-section">
+        <h3 class="edna-section-title">Refine my style</h3>
+        <p class="edna-muted">Add notes that describe preferences the analyzer might have missed. These get woven into every AI suggestion.</p>
+        <textarea id="refinementsBox" class="edna-refine-box" rows="4" placeholder="e.g. I prefer cold opens. I avoid voiceover narration. I always end on the subject's face.">{{ profile.summary.user_refinements or '' }}</textarea>
+        <div style="display:flex;gap:10px;margin-top:10px;">
+            <button class="btn btn-accent" onclick="saveRefinements()">Save refinements</button>
+            <span id="refineStatus" class="edna-muted" style="align-self:center;"></span>
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{{ profile.speech_pacing.rhythm_descriptor }}</div>
-            <div class="stat-label">Rhythm</div>
-        </div>
+    </section>
+
+    <!-- Actions -->
+    <div class="my-style-actions">
+        <button type="button" class="btn btn-accent" onclick="document.getElementById('fileInputMore').click()">Import more</button>
+        <input type="file" id="fileInputMore" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a" style="display:none;">
+        <button class="btn" onclick="regenerateAnalysis()">Regenerate analysis</button>
     </div>
 
+    <p class="my-style-privacy">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
+
+    <!-- Imported projects list -->
     <div class="my-style-section">
-        <h3>Imported Projects</h3>
+        <h3>Imported projects</h3>
         <div class="source-files-list">
             {% for sf in profile.source_files %}
             <div class="source-file-row">
@@ -127,14 +269,58 @@ function toggleTheme() {
             {% endfor %}
         </div>
     </div>
-
-    <div class="my-style-actions">
-        <label for="fileInputMore" class="btn btn-accent" style="cursor:pointer;">Import More</label>
-        <input type="file" id="fileInputMore" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a" style="display:none;">
-        <a href="/my-style/export" class="btn">Export Profile (JSON)</a>
-        <button class="btn btn-danger" onclick="deleteProfile()">Delete Profile</button>
-    </div>
 </div>
+
+<!-- ==================== EVOLUTION TAB ==================== -->
+<div class="edna-tab-panel" data-tab-panel="evolution" style="display:none;">
+    <h3 class="edna-section-title">How your style has evolved</h3>
+    {% if snapshots|length == 0 %}
+    <p class="edna-muted">No snapshots yet. Your first snapshot will be taken the next time you import or regenerate.</p>
+    {% else %}
+    <div class="edna-timeline">
+        {% for snap in snapshots %}
+        <div class="edna-snap">
+            <div class="edna-snap-dot"></div>
+            <div class="edna-snap-body">
+                <div class="edna-snap-date">{{ snap.snapshot_date[:10] }}</div>
+                <div class="edna-snap-projects">{{ snap.projects_in_portfolio_at_snapshot }} project{{ 's' if snap.projects_in_portfolio_at_snapshot != 1 else '' }} analyzed</div>
+                {% if snap.note %}<div class="edna-snap-note">{{ snap.note }}</div>{% endif %}
+                {% if snap.delta_from_previous and snap.delta_from_previous.changes %}
+                <ul class="edna-snap-changes">
+                    {% for c in snap.delta_from_previous.changes %}
+                    <li>{{ c }}</li>
+                    {% endfor %}
+                </ul>
+                {% elif snap.delta_from_previous and snap.delta_from_previous.is_first_snapshot %}
+                <div class="edna-muted">Starting point for evolution tracking.</div>
+                {% else %}
+                <div class="edna-muted">No notable changes from the previous snapshot.</div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    <p class="my-style-privacy" style="margin-top:24px;">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
+</div>
+
+<!-- ==================== DATA & EXPORT TAB ==================== -->
+<div class="edna-tab-panel" data-tab-panel="data" style="display:none;">
+    <h3 class="edna-section-title">Export &amp; import</h3>
+    <p class="edna-muted">Download all of your profile data as JSON for backup. Restore it later, or move it to another machine.</p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
+        <a href="/api/editorial_dna/export" class="btn btn-accent">Export all profile data</a>
+        <label for="importFileInput" class="btn" style="cursor:pointer;">Import profile data</label>
+        <input type="file" id="importFileInput" accept="application/json" style="display:none;" onchange="importBundle(this.files[0])">
+    </div>
+    <p class="my-style-privacy" style="margin-top:24px;">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
+
+    <h3 class="edna-section-title" style="margin-top:36px;">Danger zone</h3>
+    <p class="edna-muted">Permanently delete the active profile — the system prompt, summary, and all snapshots. This cannot be undone.</p>
+    <button class="btn btn-danger" onclick="deleteActiveProfile()" style="margin-top:10px;">Delete active profile</button>
+</div>
+
+</div><!-- .my-style-body -->
 
 <!-- Drop zone for importing more (hidden, activates on drag) -->
 <div class="drop-zone drop-zone-overlay" id="dropZoneOverlay" style="display:none;">
@@ -147,19 +333,32 @@ function toggleTheme() {
 <!-- ==================== PROGRESS OVERLAY ==================== -->
 <div class="import-progress-overlay" id="progressOverlay" style="display:none;">
     <div class="import-progress-card">
-        <h2>Analyzing your style...</h2>
-        <p class="import-progress-sub">This takes a few minutes per file. Hang tight.</p>
-        <div id="progressList"></div>
+        <div class="import-progress-spinner"></div>
+        <h2 id="progressHeadline">Analyzing your style...</h2>
+        <p class="import-progress-sub" id="progressSub">Extracting audio, transcribing, and learning how you shape stories. This takes a few minutes per file — please don't close this tab.</p>
         <div class="import-progress-bar-wrap">
             <div class="import-progress-bar" id="progressBar" style="width:0%"></div>
         </div>
-        <p id="progressStatus" class="import-progress-status"></p>
+        <p id="progressStatus" class="import-progress-status">Preparing files...</p>
+        <div id="progressList" class="import-progress-list"></div>
     </div>
 </div>
 
 </div><!-- .container -->
 
 <script>
+const ACTIVE_PROFILE_ID = {{ (profile.id if profile else '')|tojson }};
+
+// ===== Tabs =====
+function switchTab(name) {
+    document.querySelectorAll('.edna-tab').forEach(b => {
+        b.classList.toggle('active', b.dataset.tab === name);
+    });
+    document.querySelectorAll('.edna-tab-panel').forEach(p => {
+        p.style.display = p.dataset.tabPanel === name ? '' : 'none';
+    });
+}
+
 // ===== File upload & import =====
 const dropZone = document.getElementById('dropZone');
 const dropZoneOverlay = document.getElementById('dropZoneOverlay');
@@ -193,7 +392,6 @@ if (fileInputMore) {
     });
 }
 
-// Show overlay drop zone on body drag for populated state
 {% if profile %}
 document.body.addEventListener('dragenter', e => {
     e.preventDefault();
@@ -216,16 +414,25 @@ document.getElementById('dropZoneOverlay')?.addEventListener('drop', e => {
 {% endif %}
 
 async function startImport(fileList) {
+    console.log('[my-style] startImport called with', fileList.length, 'file(s)');
     const overlay = document.getElementById('progressOverlay');
     const list = document.getElementById('progressList');
     const bar = document.getElementById('progressBar');
     const status = document.getElementById('progressStatus');
+    const headline = document.getElementById('progressHeadline');
+    const sub = document.getElementById('progressSub');
+
+    if (!overlay) { alert('Progress overlay missing — please refresh the page.'); return; }
+
+    // Show overlay IMMEDIATELY so user gets instant feedback
     overlay.style.display = 'flex';
     list.innerHTML = '';
-    bar.style.width = '0%';
-    status.textContent = 'Uploading files...';
+    bar.style.width = '4%';
+    const n = fileList.length;
+    headline.textContent = `Importing ${n} file${n === 1 ? '' : 's'}...`;
+    sub.textContent = 'Extracting audio, transcribing, and learning how you shape stories. This takes a few minutes per file — please don\u2019t close this tab.';
+    status.textContent = 'Uploading files to Doza Assist...';
 
-    // Show file list
     for (const f of fileList) {
         const row = document.createElement('div');
         row.className = 'import-file-row';
@@ -235,45 +442,34 @@ async function startImport(fileList) {
     }
 
     const formData = new FormData();
-    for (const f of fileList) {
-        formData.append('files', f);
-    }
+    for (const f of fileList) formData.append('files', f);
+    if (ACTIVE_PROFILE_ID) formData.append('profile_id', ACTIVE_PROFILE_ID);
 
     try {
-        const response = await fetch('/my-style/import', {
-            method: 'POST',
-            body: formData,
-        });
-
+        console.log('[my-style] POSTing to /my-style/import');
+        const response = await fetch('/my-style/import', { method: 'POST', body: formData });
+        console.log('[my-style] response status', response.status);
+        if (!response.ok) {
+            status.textContent = 'Server error ' + response.status + ' — check the Flask console.';
+            return;
+        }
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
-
             const lines = buffer.split('\n');
-            buffer = lines.pop(); // keep incomplete line in buffer
-
+            buffer = lines.pop();
             for (const line of lines) {
                 if (!line.trim()) continue;
-                try {
-                    const msg = JSON.parse(line);
-                    handleProgress(msg, list, bar, status, fileList.length);
-                } catch(e) {}
+                try { handleProgress(JSON.parse(line), list, bar, status, fileList.length); } catch(e) {}
             }
         }
-
-        // Process remaining buffer
         if (buffer.trim()) {
-            try {
-                const msg = JSON.parse(buffer);
-                handleProgress(msg, list, bar, status, fileList.length);
-            } catch(e) {}
+            try { handleProgress(JSON.parse(buffer), list, bar, status, fileList.length); } catch(e) {}
         }
-
     } catch (err) {
         status.textContent = 'Import failed: ' + err.message;
     }
@@ -285,46 +481,28 @@ function handleProgress(msg, list, bar, status, totalFiles) {
         const row = document.getElementById(rowId);
         if (row) {
             const statusEl = row.querySelector('.import-file-status');
-            if (msg.status === 'processing') {
-                statusEl.textContent = msg.step || 'processing';
-                statusEl.className = 'import-file-status processing';
-            } else if (msg.status === 'done') {
-                statusEl.textContent = 'done';
-                statusEl.className = 'import-file-status done';
-            } else if (msg.status === 'error') {
-                statusEl.textContent = 'error';
+            if (msg.status === 'processing') { statusEl.textContent = msg.step || 'processing'; statusEl.className = 'import-file-status processing'; }
+            else if (msg.status === 'done') { statusEl.textContent = 'done'; statusEl.className = 'import-file-status done'; }
+            else if (msg.status === 'error') {
+                statusEl.textContent = 'error: ' + (msg.reason || 'unknown').slice(0, 60);
                 statusEl.className = 'import-file-status error';
                 statusEl.title = msg.reason || '';
-            } else if (msg.status === 'skipped') {
-                statusEl.textContent = 'skipped';
-                statusEl.className = 'import-file-status skipped';
             }
+            else if (msg.status === 'skipped') { statusEl.textContent = 'skipped'; statusEl.className = 'import-file-status skipped'; }
         }
-        if (msg.progress && msg.total) {
-            bar.style.width = Math.round((msg.progress / msg.total) * 80) + '%';
-        }
+        if (msg.progress && msg.total) bar.style.width = Math.round((msg.progress / msg.total) * 70) + '%';
     }
-
-    if (msg.status === 'classifying') {
-        status.textContent = 'Running style classifiers...';
-        bar.style.width = '85%';
-    }
-    if (msg.status === 'generating summary') {
-        status.textContent = 'Generating your style summary...';
-        bar.style.width = '95%';
-    }
+    if (msg.status === 'classifying') { status.textContent = 'Running style classifiers...'; bar.style.width = '80%'; }
+    if (msg.status === 'generating summary') { status.textContent = 'Generating your style summary...'; bar.style.width = '88%'; }
+    if (msg.status === 'generating structured summary') { status.textContent = 'Building structured profile...'; bar.style.width = '95%'; }
     if (msg.status === 'complete') {
         bar.style.width = '100%';
-        if (msg.error) {
-            status.textContent = msg.error;
-        } else {
-            status.textContent = 'Done! Reloading...';
-            setTimeout(() => window.location.reload(), 1000);
-        }
+        if (msg.error) { status.textContent = msg.error; }
+        else { status.textContent = 'Done! Reloading...'; setTimeout(() => window.location.reload(), 1000); }
     }
 }
 
-// ===== Toggle =====
+// ===== Master toggle =====
 function toggleMyStyle(active) {
     fetch('/my-style/toggle', {
         method: 'POST',
@@ -334,17 +512,105 @@ function toggleMyStyle(active) {
         document.getElementById('toggleLabel').innerHTML =
             'My Style is currently <strong>' + (active ? 'ON' : 'OFF') + '</strong>';
         const body = document.getElementById('styleBody');
-        if (body) {
-            if (active) body.classList.remove('my-style-dimmed');
-            else body.classList.add('my-style-dimmed');
-        }
+        if (body) body.classList.toggle('my-style-dimmed', !active);
     });
 }
 
-// ===== Delete =====
-function deleteProfile() {
-    if (!confirm('Delete your style profile? This cannot be undone.')) return;
-    fetch('/my-style/delete', {method: 'POST'}).then(() => window.location.reload());
+// ===== Profile management =====
+async function onProfileChange(profileId) {
+    if (!profileId || profileId === ACTIVE_PROFILE_ID) return;
+    await fetch(`/api/editorial_dna/profiles/${profileId}/activate`, { method: 'POST' });
+    window.location.reload();
+}
+
+async function createNewProfile() {
+    const name = prompt('Name this new style profile (e.g. "My Doc Style", "My Social Cuts"):');
+    if (!name || !name.trim()) return;
+    const res = await fetch('/api/editorial_dna/profiles', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name.trim()}),
+    });
+    const data = await res.json();
+    if (data.id) {
+        await fetch(`/api/editorial_dna/profiles/${data.id}/activate`, { method: 'POST' });
+        window.location.reload();
+    }
+}
+
+async function renameActiveProfile() {
+    if (!ACTIVE_PROFILE_ID) return;
+    const newName = prompt('Rename this profile to:');
+    if (!newName || !newName.trim()) return;
+    await fetch(`/api/editorial_dna/profiles/${ACTIVE_PROFILE_ID}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: newName.trim()}),
+    });
+    window.location.reload();
+}
+
+async function deleteActiveProfile() {
+    if (!ACTIVE_PROFILE_ID) return;
+    if (!confirm('Permanently delete this profile and all its data? This cannot be undone.')) return;
+    await fetch(`/api/editorial_dna/profiles/${ACTIVE_PROFILE_ID}`, { method: 'DELETE' });
+    window.location.reload();
+}
+
+// ===== Refine / regenerate =====
+async function saveRefinements() {
+    if (!ACTIVE_PROFILE_ID) return;
+    const text = document.getElementById('refinementsBox').value;
+    const statusEl = document.getElementById('refineStatus');
+    statusEl.textContent = 'saving...';
+    await fetch(`/api/editorial_dna/profiles/${ACTIVE_PROFILE_ID}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({user_refinements: text}),
+    });
+    statusEl.textContent = 'saved. New suggestions will reflect this.';
+    setTimeout(() => { statusEl.textContent = ''; }, 4000);
+}
+
+async function regenerateAnalysis() {
+    if (!ACTIVE_PROFILE_ID) return;
+    if (!confirm('Re-run the style analysis on the current portfolio? This may take a minute.')) return;
+    const overlay = document.getElementById('progressOverlay');
+    const status = document.getElementById('progressStatus');
+    const bar = document.getElementById('progressBar');
+    overlay.style.display = 'flex';
+    document.getElementById('progressList').innerHTML = '';
+    bar.style.width = '30%';
+    status.textContent = 'Re-running analysis...';
+    try {
+        const res = await fetch(`/api/editorial_dna/profiles/${ACTIVE_PROFILE_ID}/regenerate`, { method: 'POST' });
+        const data = await res.json();
+        bar.style.width = '100%';
+        if (!data.had_transcripts) {
+            status.textContent = 'Done. Note: no stored transcripts for this profile, so narrative/thematic fields remain placeholders. Import new projects to generate them.';
+            setTimeout(() => window.location.reload(), 3500);
+        } else {
+            status.textContent = 'Done! Reloading...';
+            setTimeout(() => window.location.reload(), 1000);
+        }
+    } catch (e) {
+        status.textContent = 'Regeneration failed: ' + e.message;
+    }
+}
+
+// ===== Import bundle =====
+async function importBundle(file) {
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/editorial_dna/import', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.imported_profile_ids) {
+        alert(`Imported ${data.imported_profile_ids.length} profile(s).`);
+        window.location.reload();
+    } else {
+        alert('Import failed: ' + (data.error || 'unknown'));
+    }
 }
 </script>
 

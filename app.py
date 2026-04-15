@@ -22,7 +22,7 @@ app.config['PROJECTS_DIR'] = os.path.join(os.path.dirname(__file__), 'projects')
 app.config['EXPORTS_DIR'] = os.path.join(os.path.dirname(__file__), 'exports')
 
 # Small file drag-and-drop limit (500MB)
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 * 1024  # 32 GB — My Style imports multiple large masters
 
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'mp4', 'mov', 'aac', 'm4a', 'flac', 'aif', 'aiff', 'mxf'}
 
@@ -736,6 +736,7 @@ def chat(project_id):
     data = request.json or {}
     message = data.get('message', '').strip()
     history = data.get('history', [])
+    profile_id = data.get('profile_id')  # session-only override from the UI
 
     if not message:
         return jsonify({'error': 'No message provided'}), 400
@@ -751,6 +752,7 @@ def chat(project_id):
                 history=history,
                 project_name=p.get('name', 'Interview'),
                 analysis=p.get('analysis'),
+                profile_id=profile_id,
             )
         else:
             # Multi-project: combine transcripts with project labels
@@ -773,6 +775,7 @@ def chat(project_id):
                 history=history,
                 project_name=' + '.join(project_names),
                 analysis=None,
+                profile_id=profile_id,
             )
 
         return jsonify({'reply': reply})
@@ -1197,6 +1200,7 @@ def story_build(project_id):
 
     data = request.json or {}
     message = data.get('message', '').strip()
+    profile_id = data.get('profile_id')  # session-only override from the UI
     if not message:
         return jsonify({'error': 'No story description provided'}), 400
 
@@ -1209,6 +1213,7 @@ def story_build(project_id):
             message=message,
             project_name=project.get('name', 'Interview'),
             segment_vectors=segment_vectors or None,
+            profile_id=profile_id,
         )
 
         # Save the build to story_builds.json
@@ -1561,28 +1566,204 @@ def tunnel_status():
 
 
 # ---------------------------------------------------------------------------
-# My Style (Editorial DNA) routes
+# Editorial DNA v2.1 — multi-profile routes
 # ---------------------------------------------------------------------------
 
-from editorial_dna.storage import (
-    load_profile as _edna_load,
-    save_profile as _edna_save,
-    delete_profile as _edna_delete,
-    export_profile as _edna_export,
-    set_active as _edna_set_active,
-    is_active as _edna_is_active,
-)
+from editorial_dna import profiles as edna_profiles
+from editorial_dna import snapshots as edna_snapshots
+from editorial_dna import analysis as edna_analysis
+
+
+def _active_profile_for_page():
+    """Return the currently-active profile or None, for rendering the page.
+
+    Unlike the injector, this ignores the `active` toggle state so the
+    dashboard can still render a profile the user has toggled off.
+    """
+    pid = edna_profiles.get_active_profile_id()
+    if not pid:
+        return None
+    return edna_profiles.get_profile(pid)
 
 
 @app.route('/my-style')
 def my_style_page():
-    profile = _edna_load()
-    return render_template('my_style.html', profile=profile)
+    profile = _active_profile_for_page()
+    all_profiles = edna_profiles.list_profiles()
+    snapshots = edna_snapshots.list_snapshots(profile['id']) if profile else []
+    return render_template(
+        'my_style.html',
+        profile=profile,
+        all_profiles=all_profiles,
+        snapshots=snapshots,
+    )
 
+
+# ── Profile CRUD ────────────────────────────────────────────────────────────
+
+@app.route('/api/editorial_dna/profiles', methods=['GET'])
+def edna_list_profiles():
+    return jsonify({
+        'profiles': edna_profiles.list_profiles(),
+        'active_profile_id': edna_profiles.get_active_profile_id(),
+    })
+
+
+@app.route('/api/editorial_dna/profiles', methods=['POST'])
+def edna_create_profile():
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip() or 'Untitled Style'
+    description = (data.get('description') or '').strip()
+    pid = edna_profiles.create_profile(name, description)
+    return jsonify({'id': pid, 'name': name})
+
+
+@app.route('/api/editorial_dna/profiles/<profile_id>', methods=['GET'])
+def edna_get_profile(profile_id):
+    profile = edna_profiles.get_profile(profile_id)
+    if profile is None:
+        return jsonify({'error': 'Profile not found'}), 404
+    return jsonify(profile)
+
+
+@app.route('/api/editorial_dna/profiles/<profile_id>', methods=['PATCH'])
+def edna_patch_profile(profile_id):
+    data = request.get_json(force=True) or {}
+    if 'name' in data:
+        edna_profiles.rename_profile(profile_id, data['name'])
+    if 'active' in data:
+        edna_profiles.set_profile_active_toggle(profile_id, bool(data['active']))
+    if 'user_refinements' in data:
+        profile = edna_profiles.get_profile(profile_id)
+        if profile:
+            summary = profile.get('summary') or {}
+            summary['user_refinements'] = data.get('user_refinements') or ''
+            edna_profiles.save_summary(profile_id, summary)
+            # Rebuild the system prompt so the refinements take effect immediately
+            try:
+                metrics = {k: profile.get(k, {}) for k in (
+                    'speech_pacing', 'structural_rhythm', 'soundbite_craft',
+                    'story_shape', 'content_patterns', 'natural_language_summary'
+                )}
+                new_prompt = edna_analysis.generate_system_prompt(
+                    profile_id, profile.get('name', 'My Style'), metrics, summary,
+                )
+                edna_profiles.save_system_prompt(profile_id, new_prompt)
+            except Exception as e:
+                print(f"[edna] prompt rebuild on refinement failed: {e}")
+    return jsonify({'status': 'updated'})
+
+
+@app.route('/api/editorial_dna/profiles/<profile_id>', methods=['DELETE'])
+def edna_delete_profile(profile_id):
+    edna_profiles.delete_profile(profile_id)
+    return jsonify({'status': 'deleted'})
+
+
+@app.route('/api/editorial_dna/profiles/<profile_id>/activate', methods=['POST'])
+def edna_activate_profile(profile_id):
+    ok = edna_profiles.set_active(profile_id)
+    if not ok:
+        return jsonify({'error': 'Profile not found'}), 404
+    return jsonify({'active_profile_id': profile_id})
+
+
+# ── Regenerate / refine ─────────────────────────────────────────────────────
+
+@app.route('/api/editorial_dna/profiles/<profile_id>/regenerate', methods=['POST'])
+def edna_regenerate(profile_id):
+    """Re-run the structured analysis pass on an existing profile.
+
+    Uses whatever transcript text is stored in source_files.json (new imports
+    capture this; migrated v1 profiles don't have it and will get
+    placeholder narrative fields back with a flag indicating so).
+    """
+    profile = edna_profiles.get_profile(profile_id)
+    if profile is None:
+        return jsonify({'error': 'Profile not found'}), 404
+
+    metrics = {k: profile.get(k, {}) for k in (
+        'speech_pacing', 'structural_rhythm', 'soundbite_craft',
+        'story_shape', 'content_patterns', 'natural_language_summary'
+    )}
+    source_files = profile.get('source_files') or []
+    transcripts_text = '\n\n'.join(
+        sf.get('transcript_text', '') for sf in source_files if sf.get('transcript_text')
+    )
+
+    new_summary = edna_analysis.generate_structured_summary(
+        profile_id, profile.get('name', 'My Style'),
+        metrics, source_files,
+        transcripts_text=transcripts_text,
+        existing_summary=profile.get('summary'),
+    )
+    edna_profiles.save_summary(profile_id, new_summary)
+
+    # Also refresh the human-readable prose summary that shows on the dashboard
+    try:
+        from editorial_dna.summarizer import generate_summary as _gen_sum
+        fresh_prose = _gen_sum(metrics, transcripts_text=transcripts_text)
+        metrics['natural_language_summary'] = fresh_prose
+        edna_profiles.save_profile(profile_id, metrics)
+    except Exception as e:
+        print(f"[edna] regenerate prose failed: {e}")
+
+    new_prompt = edna_analysis.generate_system_prompt(
+        profile_id, profile.get('name', 'My Style'), metrics, new_summary,
+    )
+    edna_profiles.save_system_prompt(profile_id, new_prompt)
+
+    # Take a new snapshot so evolution tracking picks up the change
+    edna_snapshots.create_snapshot(profile_id, note='Manual regeneration')
+
+    return jsonify({
+        'status': 'regenerated',
+        'summary': new_summary,
+        'had_transcripts': bool(transcripts_text.strip()),
+    })
+
+
+# ── Snapshots ───────────────────────────────────────────────────────────────
+
+@app.route('/api/editorial_dna/profiles/<profile_id>/snapshots', methods=['GET'])
+def edna_list_snapshots(profile_id):
+    return jsonify({'snapshots': edna_snapshots.list_snapshots(profile_id)})
+
+
+# ── Export / import ─────────────────────────────────────────────────────────
+
+@app.route('/api/editorial_dna/export')
+def edna_export_all():
+    import io
+    bundle = edna_profiles.export_all()
+    buf = io.BytesIO(json.dumps(bundle, indent=2).encode('utf-8'))
+    buf.seek(0)
+    return send_file(buf, mimetype='application/json', as_attachment=True,
+                     download_name='doza_editorial_dna_export.json')
+
+
+@app.route('/api/editorial_dna/import', methods=['POST'])
+def edna_import_bundle():
+    # Accept either a file upload or a JSON body
+    bundle = None
+    if request.files.get('file'):
+        try:
+            bundle = json.load(request.files['file'].stream)
+        except Exception as e:
+            return jsonify({'error': f'Invalid JSON: {e}'}), 400
+    else:
+        bundle = request.get_json(force=True, silent=True)
+    if not bundle:
+        return jsonify({'error': 'No bundle provided'}), 400
+    ids = edna_profiles.import_bundle(bundle)
+    return jsonify({'imported_profile_ids': ids})
+
+
+# ── Legacy /my-style/* aliases kept for backwards compat ───────────────────
 
 @app.route('/my-style/profile')
 def my_style_profile():
-    profile = _edna_load()
+    profile = _active_profile_for_page()
     if profile is None:
         return jsonify({'error': 'No profile exists'}), 404
     return jsonify(profile)
@@ -1590,9 +1771,12 @@ def my_style_profile():
 
 @app.route('/my-style/status')
 def my_style_status():
-    profile = _edna_load()
+    profile = _active_profile_for_page()
+    active = False
+    if profile is not None:
+        active = bool(profile.get('active', True))
     return jsonify({
-        'active': _edna_is_active(),
+        'active': active,
         'profile_exists': profile is not None,
     })
 
@@ -1601,28 +1785,34 @@ def my_style_status():
 def my_style_toggle():
     data = request.get_json(force=True)
     active = data.get('active', True)
-    ok = _edna_set_active(active)
-    if not ok:
+    pid = edna_profiles.get_active_profile_id()
+    if not pid:
         return jsonify({'error': 'No profile to toggle'}), 404
+    edna_profiles.set_profile_active_toggle(pid, active)
     return jsonify({'active': active})
 
 
 @app.route('/my-style/delete', methods=['POST'])
 def my_style_delete_route():
-    _edna_delete()
+    """Legacy: delete the active profile."""
+    pid = edna_profiles.get_active_profile_id()
+    if pid:
+        edna_profiles.delete_profile(pid)
     return jsonify({'status': 'deleted'})
 
 
 @app.route('/my-style/export')
 def my_style_export_route():
-    profile = _edna_export()
+    """Legacy: export the active profile only."""
+    pid = edna_profiles.get_active_profile_id()
+    profile = edna_profiles.get_profile(pid) if pid else None
     if profile is None:
         return jsonify({'error': 'No profile'}), 404
     import io
-    buf = io.BytesIO(json.dumps(profile, indent=2).encode('utf-8'))
+    buf = io.BytesIO(json.dumps(profile, indent=2, default=str).encode('utf-8'))
     buf.seek(0)
     return send_file(buf, mimetype='application/json', as_attachment=True,
-                     download_name='my_style_profile.json')
+                     download_name=f'{profile.get("name", "profile")}.json')
 
 
 @app.route('/my-style/import', methods=['POST'])
@@ -1647,34 +1837,64 @@ def my_style_import():
     if not files:
         return jsonify({'error': 'No files uploaded'}), 400
 
+    # Which profile are we importing into? Optional query/form field; defaults
+    # to the currently-active profile, creating a new "My Style" profile if
+    # none exists yet.
+    target_profile_id = request.form.get('profile_id') or edna_profiles.get_active_profile_id()
+    if not target_profile_id:
+        target_profile_id = edna_profiles.create_profile('My Style')
+    # Make sure the target is active so the import page re-renders with it
+    edna_profiles.set_active(target_profile_id)
+
     # Supported extensions for My Style import
     style_extensions = {'mp4', 'mov', 'm4v', 'mkv', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'aif', 'aiff'}
 
+    # IMPORTANT: Flask's request.files stream closes as soon as the response
+    # generator starts yielding — so we must save every upload to disk BEFORE
+    # entering the streaming generator. Otherwise we get "read of closed file".
+    staged = []  # list of (original_filename, tmp_path, tmp_dir)
+    for i, f in enumerate(files):
+        fname = f.filename or f'file_{i}'
+        tmp_dir = tempfile.mkdtemp(prefix='doza_style_')
+        tmp_path = os.path.join(tmp_dir, fname)
+        try:
+            f.save(tmp_path)
+            staged.append((fname, tmp_path, tmp_dir))
+        except Exception as e:
+            print(f"[my-style import] failed to stage {fname}: {e}")
+            staged.append((fname, None, tmp_dir))
+
     def generate():
         """Stream progress as newline-delimited JSON."""
-        existing_profile = _edna_load()
-        source_files = (existing_profile or {}).get('source_files', [])
-        merged = existing_profile  # None on first import
+        existing_profile = edna_profiles.get_profile(target_profile_id) or {}
+        source_files = list(existing_profile.get('source_files') or [])
+        # Build a v1-shaped metrics dict from existing profile (for merge_metrics)
+        merged = None
+        if existing_profile.get('speech_pacing'):
+            merged = {
+                'speech_pacing': existing_profile.get('speech_pacing', {}),
+                'structural_rhythm': existing_profile.get('structural_rhythm', {}),
+                'soundbite_craft': existing_profile.get('soundbite_craft', {}),
+                'content_patterns': existing_profile.get('content_patterns', {}),
+            }
 
         processed_count = 0
-        total_files = len(files)
+        total_files = len(staged)
 
-        for i, f in enumerate(files):
-            fname = f.filename or f'file_{i}'
+        for i, (fname, tmp_path, tmp_dir) in enumerate(staged):
             ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
 
             if ext not in style_extensions:
                 yield json.dumps({'file': fname, 'status': 'skipped', 'reason': 'unsupported format', 'progress': i + 1, 'total': total_files}) + '\n'
                 continue
 
+            if tmp_path is None:
+                yield json.dumps({'file': fname, 'status': 'error', 'reason': 'failed to stage upload', 'progress': i + 1, 'total': total_files}) + '\n'
+                continue
+
             yield json.dumps({'file': fname, 'status': 'processing', 'step': 'saving', 'progress': i + 1, 'total': total_files}) + '\n'
 
             try:
-                # Save uploaded file to temp location
-                tmp_dir = tempfile.mkdtemp(prefix='doza_style_')
-                tmp_path = os.path.join(tmp_dir, fname)
-                f.save(tmp_path)
-
                 # Extract audio
                 yield json.dumps({'file': fname, 'status': 'processing', 'step': 'extracting audio'}) + '\n'
                 audio_path = extract_audio(tmp_path, project_dir=tmp_dir)
@@ -1698,18 +1918,29 @@ def my_style_import():
                 merged_metrics['_raw'] = metrics.get('_raw', {})
                 merged = merged_metrics
 
+                # Capture the raw transcript text so the v2.1 structured
+                # analysis pass can run later. We keep this local to the
+                # profile folder — it never leaves the machine.
+                transcript_text = ' '.join(
+                    seg.get('text', '') for seg in transcript.get('segments', [])
+                ).strip()
+
                 source_files.append({
                     'filename': fname,
                     'imported_at': datetime.now().isoformat(),
                     'duration_seconds': round(file_duration, 2),
                     'transcribed_at': datetime.now().isoformat(),
+                    'transcript_text': transcript_text,
                 })
 
                 processed_count += 1
                 yield json.dumps({'file': fname, 'status': 'done', 'progress': i + 1, 'total': total_files}) + '\n'
 
             except Exception as e:
-                yield json.dumps({'file': fname, 'status': 'error', 'reason': str(e)[:200], 'progress': i + 1, 'total': total_files}) + '\n'
+                import traceback
+                print(f"[my-style import] ERROR on {fname}: {e}")
+                traceback.print_exc()
+                yield json.dumps({'file': fname, 'status': 'error', 'reason': str(e)[:300], 'progress': i + 1, 'total': total_files}) + '\n'
 
             finally:
                 # Clean up temp files
@@ -1765,13 +1996,7 @@ def my_style_import():
         # Build full profile
         yield json.dumps({'status': 'generating summary'}) + '\n'
 
-        profile = {
-            'profile_version': '1.0',
-            'feature_name': 'My Style',
-            'created_at': (existing_profile or {}).get('created_at', datetime.now().isoformat()),
-            'updated_at': datetime.now().isoformat(),
-            'active': (existing_profile or {}).get('active', True),
-            'source_files': source_files,
+        metric_fields = {
             'speech_pacing': merged.get('speech_pacing', {}),
             'structural_rhythm': merged.get('structural_rhythm', {}),
             'soundbite_craft': merged.get('soundbite_craft', {}),
@@ -1780,21 +2005,58 @@ def my_style_import():
             'natural_language_summary': '',
         }
 
-        # Remove _raw from profile before saving
-        for key in list(profile.keys()):
-            if key.startswith('_'):
-                del profile[key]
-
         try:
-            summary = generate_summary(profile)
-            profile['natural_language_summary'] = summary
+            # Build the concatenated transcript text for grounding the prose
+            nl_transcripts = '\n\n'.join(
+                sf.get('transcript_text', '') for sf in source_files
+                if sf.get('transcript_text')
+            )
+            nl_summary = generate_summary(metric_fields, transcripts_text=nl_transcripts)
+            metric_fields['natural_language_summary'] = nl_summary
         except Exception as e:
+            import traceback
             print(f"Summary generation error: {e}")
-            profile['natural_language_summary'] = 'Style profile generated but summary unavailable.'
+            traceback.print_exc()
+            metric_fields['natural_language_summary'] = 'Style profile generated but summary unavailable.'
 
-        _edna_save(profile)
+        # Persist the metric fields + source files to the active v2.1 profile
+        edna_profiles.save_profile(target_profile_id, metric_fields)
+        edna_profiles.save_source_files(target_profile_id, source_files)
 
-        yield json.dumps({'status': 'complete', 'profile': profile}) + '\n'
+        # Run the structured analysis pass on the newly imported transcripts
+        yield json.dumps({'status': 'generating structured summary'}) + '\n'
+        try:
+            transcripts_text = '\n\n'.join(
+                sf.get('transcript_text', '') for sf in source_files
+                if sf.get('transcript_text')
+            )
+            existing_summary_for_merge = (edna_profiles.get_profile(target_profile_id) or {}).get('summary')
+            new_summary = edna_analysis.generate_structured_summary(
+                target_profile_id,
+                (edna_profiles.get_profile(target_profile_id) or {}).get('name', 'My Style'),
+                metric_fields, source_files,
+                transcripts_text=transcripts_text,
+                existing_summary=existing_summary_for_merge,
+            )
+            edna_profiles.save_summary(target_profile_id, new_summary)
+
+            new_prompt = edna_analysis.generate_system_prompt(
+                target_profile_id,
+                (edna_profiles.get_profile(target_profile_id) or {}).get('name', 'My Style'),
+                metric_fields, new_summary,
+            )
+            edna_profiles.save_system_prompt(target_profile_id, new_prompt)
+        except Exception as e:
+            print(f"[edna] structured summary failed: {e}")
+
+        # Take an evolution snapshot for this import
+        try:
+            edna_snapshots.create_snapshot(target_profile_id, note='Import')
+        except Exception as e:
+            print(f"[edna] snapshot after import failed: {e}")
+
+        final_profile = edna_profiles.get_profile(target_profile_id)
+        yield json.dumps({'status': 'complete', 'profile': final_profile}) + '\n'
 
     from flask import Response
     return Response(generate(), mimetype='application/x-ndjson')

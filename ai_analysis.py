@@ -10,7 +10,7 @@ import requests
 from editorial_dna.injector import inject_my_style
 
 
-def chat_about_transcript(transcript, message, history=None, project_name="Interview", analysis=None):
+def chat_about_transcript(transcript, message, history=None, project_name="Interview", analysis=None, profile_id=None):
     """
     Chat with AI about the transcript. Supports follow-up questions.
     Returns the AI reply as a string (may contain embedded clip suggestions).
@@ -60,7 +60,7 @@ TRANSCRIPT:
 
     prompt = f"{conversation}\nUser: {message}\nAssistant:"
 
-    system_prompt = inject_my_style(system_prompt)
+    system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
     response = _call_ai_chat(prompt, system_prompt)
     return _clean_chat_response(response)
 
@@ -280,7 +280,7 @@ def _get_ollama_model():
     return 'gemma4:latest'
 
 
-def build_story(transcript, message, project_name="Interview", segment_vectors=None):
+def build_story(transcript, message, project_name="Interview", segment_vectors=None, profile_id=None):
     """
     Build a narrative sequence from the transcript based on the user's description.
     Returns a dict with story_title, target_duration, and clips array.
@@ -290,7 +290,7 @@ def build_story(transcript, message, project_name="Interview", segment_vectors=N
     much more consistent across runs.
     """
     if segment_vectors:
-        return _build_story_from_vectors(segment_vectors, message, project_name)
+        return _build_story_from_vectors(segment_vectors, message, project_name, profile_id=profile_id)
 
     formatted = _format_transcript_for_ai(transcript)
 
@@ -331,7 +331,7 @@ TRANSCRIPT:
 
 Return ONLY valid JSON. No markdown, no extra text."""
 
-    system_prompt = inject_my_style(system_prompt)
+    system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
     response = _call_ai(prompt, system_prompt)
     return _parse_json_response(response)
 
@@ -528,7 +528,7 @@ def _extract_excerpt_for_range(transcript, tc_in, tc_out, max_words=50):
     return ' '.join(words)
 
 
-def _build_story_from_vectors(segment_vectors, message, project_name):
+def _build_story_from_vectors(segment_vectors, message, project_name, profile_id=None):
     """Build a narrative using pre-classified segment vectors as the menu of clips.
 
     Prioritizes "high" narrative scores; uses "episodic" segments for key moments
@@ -590,7 +590,7 @@ Return ONLY valid JSON in this shape:
   ]
 }}"""
 
-    system_prompt = inject_my_style(system_prompt)
+    system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
     response = _call_ai(prompt, system_prompt)
     parsed = _parse_json_response(response)
     if not isinstance(parsed, dict):

@@ -441,8 +441,15 @@
                     <div class="chat-input-area">
                         <button class="my-style-pill" id="chatStylePill" onclick="toggleMyStylePill()" style="display:none;" title="Toggle My Style for AI suggestions">
                             <span class="my-style-pill-dot"></span>
-                            <span class="my-style-pill-label">My Style: OFF</span>
+                            <span class="my-style-pill-text">
+                                <span class="my-style-pill-label">STYLE: OFF</span>
+                                <span class="my-style-pill-profile">—</span>
+                            </span>
                         </button>
+                        <span class="project-style-selector" id="chatProfileSelectorWrap" style="display:none;">
+                            style:
+                            <select id="chatProfileSelector" onchange="onSessionProfileChange(this.value)"></select>
+                        </span>
                         <input type="text" class="chat-input" id="chatInput" placeholder="What story are you looking for?"
                                onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }">
                         <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
@@ -466,8 +473,15 @@
             <div class="story-input-area">
                 <button class="my-style-pill" id="storyStylePill" onclick="toggleMyStylePill()" style="display:none;" title="Toggle My Style for AI suggestions">
                     <span class="my-style-pill-dot"></span>
-                    <span class="my-style-pill-label">My Style: OFF</span>
+                    <span class="my-style-pill-text">
+                        <span class="my-style-pill-label">STYLE: OFF</span>
+                        <span class="my-style-pill-profile">—</span>
+                    </span>
                 </button>
+                <span class="project-style-selector" id="storyProfileSelectorWrap" style="display:none;">
+                    style:
+                    <select id="storyProfileSelector" onchange="onSessionProfileChange(this.value)"></select>
+                </span>
                 <input type="text" class="story-input" id="storyInput"
                        placeholder="Build me a 3-minute story about her journey from athlete to coach..."
                        onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); buildStory(); }">
@@ -1369,7 +1383,7 @@ async function sendChat() {
         const res = await fetch(`/project/${COMBINED_ID}/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, history: chatHistory }),
+            body: JSON.stringify({ message, history: chatHistory, profile_id: window.sessionProfileId || null }),
         });
         const data = await res.json();
         typing.remove();
@@ -1418,7 +1432,7 @@ async function buildStoryFromChat(message) {
         const res = await fetch(`/project/${PROJECT_ID}/story/build`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message }),
+            body: JSON.stringify({ message, profile_id: window.sessionProfileId || null }),
         });
         const data = await res.json();
         typing.remove();
@@ -2809,7 +2823,7 @@ async function buildStory() {
         const res = await fetch(`/project/${PROJECT_ID}/story/build`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message }),
+            body: JSON.stringify({ message, profile_id: window.sessionProfileId || null }),
             signal: storyAbort.signal,
         });
         clearTimeout(storyTimeout);
@@ -3655,32 +3669,48 @@ function addToStoryBuilder(start, end, title, btn) {
 }
 
 // ===== My Style toggle pills =====
+window._activeProfileName = '';
+
 (function initMyStylePills() {
-    fetch('/my-style/status')
-        .then(r => r.json())
-        .then(data => {
-            const pills = document.querySelectorAll('.my-style-pill');
-            if (!data.profile_exists) {
-                pills.forEach(p => p.style.display = 'none');
-                return;
-            }
-            pills.forEach(p => {
-                p.style.display = 'inline-flex';
-                updatePillState(p, data.active);
-            });
-        })
-        .catch(() => {});
+    Promise.all([
+        fetch('/my-style/status').then(r => r.json()).catch(() => null),
+        fetch('/api/editorial_dna/profiles').then(r => r.json()).catch(() => null),
+    ]).then(([status, profData]) => {
+        const pills = document.querySelectorAll('.my-style-pill');
+        if (!status || !status.profile_exists) {
+            pills.forEach(p => p.style.display = 'none');
+            return;
+        }
+        const profiles = (profData && profData.profiles) || [];
+        const active = profiles.find(p => p.is_active);
+        window._activeProfileName = active ? active.name : 'My Style';
+        pills.forEach(p => {
+            p.style.display = 'inline-flex';
+            updatePillState(p, status.active);
+        });
+    });
 })();
 
 function updatePillState(pill, active) {
     const label = pill.querySelector('.my-style-pill-label');
+    const profileEl = pill.querySelector('.my-style-pill-profile');
+    // Figure out which profile name to show — session override wins
+    let name = window._activeProfileName || 'My Style';
+    if (window.sessionProfileId) {
+        const sel = document.getElementById('chatProfileSelector') || document.getElementById('storyProfileSelector');
+        if (sel) {
+            const opt = sel.options[sel.selectedIndex];
+            if (opt) name = opt.textContent.replace(' · active', '').trim();
+        }
+    }
     if (active) {
         pill.classList.add('active');
-        label.textContent = 'Using My Style';
+        if (label) label.textContent = 'STYLE: ON';
     } else {
         pill.classList.remove('active');
-        label.textContent = 'My Style: OFF';
+        if (label) label.textContent = 'STYLE: OFF';
     }
+    if (profileEl) profileEl.textContent = name;
 }
 
 function toggleMyStylePill() {
@@ -3692,6 +3722,58 @@ function toggleMyStylePill() {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({active: newState}),
+    });
+}
+
+// ===== Editorial DNA v2.1 — session profile selector =====
+// window.sessionProfileId holds an OVERRIDE for this browser session only.
+// Null = use the server's active profile. Setting it reroutes chat + story
+// AI calls to a different style profile for this session.
+window.sessionProfileId = null;
+
+(function initSessionProfileSelector() {
+    fetch('/api/editorial_dna/profiles')
+        .then(r => r.json())
+        .then(data => {
+            const profiles = data.profiles || [];
+            if (!profiles.length) return;
+            const chatWrap = document.getElementById('chatProfileSelectorWrap');
+            const storyWrap = document.getElementById('storyProfileSelectorWrap');
+            const chatSel = document.getElementById('chatProfileSelector');
+            const storySel = document.getElementById('storyProfileSelector');
+            if (profiles.length < 2) {
+                // With only one profile there's nothing to switch between.
+                return;
+            }
+            [chatSel, storySel].forEach(sel => {
+                if (!sel) return;
+                sel.innerHTML = '';
+                profiles.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.id;
+                    opt.textContent = p.name + (p.is_active ? ' · active' : '');
+                    if (p.is_active) opt.selected = true;
+                    sel.appendChild(opt);
+                });
+            });
+            if (chatWrap) chatWrap.style.display = 'inline-flex';
+            if (storyWrap) storyWrap.style.display = 'inline-flex';
+            // Default sessionProfileId stays null — we only override when user picks something
+        })
+        .catch(() => {});
+})();
+
+function onSessionProfileChange(profileId) {
+    if (!profileId) { window.sessionProfileId = null; return; }
+    window.sessionProfileId = profileId;
+    // Keep both selectors in sync
+    const chatSel = document.getElementById('chatProfileSelector');
+    const storySel = document.getElementById('storyProfileSelector');
+    if (chatSel && chatSel.value !== profileId) chatSel.value = profileId;
+    if (storySel && storySel.value !== profileId) storySel.value = profileId;
+    // Refresh pills so the profile name subtitle updates too
+    document.querySelectorAll('.my-style-pill').forEach(p => {
+        updatePillState(p, p.classList.contains('active'));
     });
 }
 </script>

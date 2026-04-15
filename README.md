@@ -18,6 +18,52 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 
 ---
 
+## ✨ My Style — An AI That Edits Like You
+
+**The core idea:** most AI editors sound generic because they've never seen *your* work. My Style fixes that. You feed Doza Assist the finished pieces you've already cut, and it learns the way *you* shape spoken stories — pacing, openings, what you cut around, what you let breathe, what subjects you gravitate toward. From that point on, every AI suggestion in the app sounds like you made it.
+
+Everything runs locally. Your finished work never leaves your machine.
+
+### What it learns from your cuts
+
+- **Narrative patterns** — how long you typically hold on a speaker before cutting, how you open, how you resolve, where you place the emotional peak
+- **Thematic fingerprint** — recurring subjects and angles that appear across your portfolio, vulnerability patterns, who your pieces tend to center
+- **Structural habits** — cold opens vs. scene-setting, chronological vs. intercut, button endings vs. open-ended
+- **Voice characteristics** — tone, formality, whether you rely on narration or let subjects carry the story
+- **Grounded prose summary** — a short description of your sensibility that's actually specific to *your* work, not generic "cinematic, measured, observational" filler
+
+### How it shows up while you edit
+
+- A bright green **STYLE: ON** pill in both Chat and Story Builder tells you at a glance that your voice is being applied, and shows which profile is active
+- Toggle it off with one click when you want neutral suggestions
+- Every AI call — clip finding, story building, chat Q&A — runs through your profile automatically
+
+### Multiple profiles for different kinds of work
+
+You probably don't cut a long-form documentary the same way you cut a 60-second social piece. My Style supports as many profiles as you need:
+
+- Create separate profiles like "Doc Style," "Social Cuts," "Corporate Testimonials" — each learned from the finished work you import into it
+- A dropdown in Chat / Story Builder lets you switch profiles *per session* without changing your default
+- Rename, delete, or toggle any profile on and off independently
+
+### Evolution tracking
+
+Every time you import new projects or regenerate your analysis, Doza Assist takes a **snapshot** of your style at that moment. The Evolution tab shows how your voice has shifted over time — new themes appearing, pacing getting tighter, endings opening up. It's a private changelog of your editorial growth.
+
+### Refine it in your own words
+
+The dashboard has a **Refine my style** box. Type the things the analyzer might not catch — "I prefer cold opens," "I never use voiceover narration," "I always end on the subject's face" — and those notes get woven into every AI suggestion with high priority.
+
+### It stays yours
+
+- 100% local. Transcripts, profiles, snapshots, and system prompts all live in `~/.doza-assist/editorial_dna/` on your machine
+- **Export** your entire profile library as a single JSON file for backup or to move to another Mac
+- **Import** that bundle on any install to restore everything
+- **Delete** any profile permanently, including all its snapshots, from the Data & Export tab
+- Upgrading from an older version? Your existing "My Style" profile is migrated automatically on first launch — nothing to do, nothing lost
+
+---
+
 ## Features
 
 **Transcription**
@@ -82,14 +128,7 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 - Rename, move, clear, delete projects
 - Multi-project workspace — combine interviews in one view
 
-**My Style — An AI That Tells Stories Like You**
-- Teach Doza Assist your editorial voice by importing finished projects you've cut
-- The app transcribes your finished pieces, analyzes how you shape spoken stories (pacing, beat length, cut style, story structure), and builds a style profile
-- Once active, every AI suggestion — chat, story builder, clip selection — reflects your narrative instincts
-- Toggle My Style on or off from the chat input, story builder, or the dedicated My Style page
-- Your style profile stays on your machine and persists across sessions
-- Import more projects over time to refine the profile
-- Export your style as JSON or delete it anytime
+**My Style** (see the full section above) — multi-profile editorial voice learning, live dashboard, evolution snapshots, bright ON/OFF indicator in chat & story builder.
 
 **Dark / Light Theme**
 - Toggle between dark and light mode
@@ -204,11 +243,14 @@ doza-assist/
 ├── ai_analysis.py       # AI analysis + chat (Ollama/Claude)
 ├── fcpxml_export.py     # FCPXML generation with pre-cut timelines
 ├── editorial_dna/       # My Style — editorial voice profiling
+│   ├── models.py               # StyleProfileSummary schema (v2.1)
+│   ├── profiles.py             # Multi-profile CRUD + v1→v2.1 migration
+│   ├── snapshots.py            # Evolution tracking + delta computation
+│   ├── analysis.py             # Structured LLM analysis pass
 │   ├── transcript_analyzer.py  # Narrative pattern extraction
-│   ├── classifier.py    # AI-powered style classification
-│   ├── summarizer.py    # Natural language summary generation
-│   ├── storage.py       # Profile persistence (~/.doza-assist/)
-│   └── injector.py      # Injects style into AI prompts
+│   ├── classifier.py           # AI-powered style classification
+│   ├── summarizer.py           # Grounded prose summary generation
+│   └── injector.py             # Injects active profile into AI prompts
 ├── start.sh             # Launch script (developer mode)
 ├── install.sh           # Manual setup (developer mode)
 ├── setup_runner.sh      # Auto-setup phase 1 (Xcode CLT, Homebrew, Python)

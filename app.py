@@ -133,6 +133,63 @@ def format_file_size(size_bytes):
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
 
 
+# ── Activity log ─────────────────────────────────────────────────────────
+
+def _activity_path(project_id):
+    return os.path.join(app.config['PROJECTS_DIR'], project_id, 'activity.json')
+
+
+def log_activity(project_id, event_type, description):
+    """Append an event to the project's activity log (newest first, capped at 50)."""
+    path = _activity_path(project_id)
+    entries = []
+    if os.path.exists(path):
+        try:
+            with open(path, 'r') as f:
+                entries = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            entries = []
+    entries.insert(0, {
+        'ts': int(time.time()),
+        'type': event_type,
+        'description': description,
+    })
+    entries = entries[:50]
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(entries, f, indent=2)
+    except OSError:
+        pass
+
+
+def get_recent_activity(project_id, limit=6):
+    """Return the most recent activity entries with a pre-formatted relative timestamp."""
+    path = _activity_path(project_id)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r') as f:
+            entries = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    now = int(time.time())
+    out = []
+    for e in entries[:limit]:
+        out.append({**e, 'relative': _relative_time(now - int(e.get('ts', now)))})
+    return out
+
+
+def _relative_time(seconds):
+    if seconds < 60:
+        return 'just now'
+    if seconds < 3600:
+        return f'{seconds // 60}m ago'
+    if seconds < 86400:
+        return f'{seconds // 3600}h ago'
+    return f'{seconds // 86400}d ago'
+
+
 # ── Routes ──────────────────────────────────────────────────────────────
 
 @app.route('/')
@@ -663,6 +720,15 @@ def project_view(project_id):
 
     project['editing_platform'] = get_project_platform(project)
 
+    # Recent activity across all active projects, merged and sorted by time.
+    recent_activity = []
+    for p in projects:
+        for entry in get_recent_activity(p['id'], limit=20):
+            entry['project_name'] = p.get('name', 'Untitled')
+            recent_activity.append(entry)
+    recent_activity.sort(key=lambda e: e.get('ts', 0), reverse=True)
+    recent_activity = recent_activity[:6]
+
     return render_template('project.html',
                            project=project,
                            projects=projects,
@@ -675,7 +741,8 @@ def project_view(project_id):
                            is_video=is_video,
                            segment_vectors=segment_vectors,
                            detected_framerate=detected_framerate,
-                           editing_platform=project['editing_platform'])
+                           editing_platform=project['editing_platform'],
+                           recent_activity=recent_activity)
 
 
 @app.route('/project/<project_id>/media')
@@ -734,6 +801,9 @@ def transcribe(project_id):
         project['transcript'] = result
         project['status'] = 'transcribed'
         save_project(project_id, project)
+        seg_count = len((result or {}).get('segments', []))
+        log_activity(project_id, 'transcribed',
+                     f"{project.get('name', 'Project')} transcribed · {seg_count} segments")
         return jsonify({'status': 'transcribed', 'transcript': result})
 
     except Exception as e:
@@ -781,6 +851,8 @@ def analyze(project_id):
                 json.dump(segment_vectors, f, indent=2)
 
         save_project(project_id, project)
+        title = result.get('suggested_title') or project.get('name', 'Project')
+        log_activity(project_id, 'analyzed', f"AI analysis run · \"{title}\"")
         return jsonify({
             'status': 'analyzed',
             'analysis': result,
@@ -875,9 +947,18 @@ def save_labels(project_id):
         return jsonify({'error': 'Project not found'}), 404
 
     data = request.json or {}
+    prev_count = len(project.get('labeled_sections', []) or [])
     project['color_labels'] = data.get('color_labels', {})
     project['labeled_sections'] = data.get('labeled_sections', [])
     save_project(project_id, project)
+    new_count = len(project['labeled_sections'])
+    delta = new_count - prev_count
+    if delta > 0:
+        log_activity(project_id, 'clip_added',
+                     f"{delta} clip{'s' if delta != 1 else ''} added · {new_count} total")
+    elif delta < 0:
+        log_activity(project_id, 'clip_removed',
+                     f"{-delta} clip{'s' if -delta != 1 else ''} removed · {new_count} total")
     return jsonify({'status': 'saved', 'count': len(project['labeled_sections'])})
 
 
@@ -1142,8 +1223,11 @@ def rename_project(project_id):
     if not name:
         return jsonify({'error': 'Name cannot be empty'}), 400
 
+    old_name = project.get('name', 'Project')
     project['name'] = name
     save_project(project_id, project)
+    if old_name != name:
+        log_activity(project_id, 'renamed', f"Renamed \"{old_name}\" → \"{name}\"")
     return jsonify({'status': 'renamed', 'name': name})
 
 
@@ -1248,6 +1332,11 @@ def story_build(project_id):
         with open(builds_path, 'w') as f:
             json.dump(builds, f, indent=2)
 
+        clip_count = len(build_entry.get('clips', []))
+        log_activity(
+            project_id, 'story_built',
+            f"Story \"{build_entry['story_title']}\" built · {clip_count} clip{'s' if clip_count != 1 else ''}",
+        )
         return jsonify({'status': 'built', 'build': build_entry})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1306,11 +1395,13 @@ def story_delete(project_id, build_id):
     with open(builds_path, 'r') as f:
         builds = json.load(f)
 
+    deleted_title = next((b.get('story_title', 'Story') for b in builds if b['id'] == build_id), 'Story')
     builds = [b for b in builds if b['id'] != build_id]
 
     with open(builds_path, 'w') as f:
         json.dump(builds, f, indent=2)
 
+    log_activity(project_id, 'story_deleted', f"Story \"{deleted_title}\" deleted")
     return jsonify({'status': 'deleted'})
 
 

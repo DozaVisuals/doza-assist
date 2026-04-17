@@ -202,6 +202,32 @@
             <p style="font-size: 0.75rem; color: var(--text-muted);">labeled sections</p>
         </div>
 
+        <!-- Summary (from AI analysis) -->
+        {% if project.analysis and project.analysis.summary %}
+        <div class="left-section sidebar-block sidebar-story">
+            <div class="card-title">Summary</div>
+            {% if project.analysis.suggested_title %}
+            <div class="sidebar-story-title">{{ project.analysis.suggested_title }}</div>
+            {% endif %}
+            <p class="sidebar-story-text">{{ project.analysis.summary }}</p>
+        </div>
+        {% endif %}
+
+        <!-- Recent activity log -->
+        {% if recent_activity %}
+        <div class="left-section sidebar-block sidebar-activity">
+            <div class="card-title">Recent Activity</div>
+            <ul class="sidebar-activity-list">
+                {% for entry in recent_activity %}
+                <li class="sidebar-activity-item">
+                    <div class="sidebar-activity-time">{{ entry.relative }}</div>
+                    <div class="sidebar-activity-desc">{{ entry.description }}</div>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
         <!-- Stories list (visible when Story tab active) -->
         <div class="left-section story-only-section" id="storyListSidebar" style="display:none;">
             <div class="card-title" style="margin-bottom: 0.5rem;">Stories</div>

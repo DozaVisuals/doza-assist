@@ -556,6 +556,58 @@ body {
     border-top: 1px solid var(--border);
 }
 
+.sidebar-block {
+    padding: 1rem 0 0.25rem;
+}
+
+.sidebar-block .card-title {
+    margin-bottom: 0.65rem;
+}
+
+.sidebar-story-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.4rem;
+    line-height: 1.35;
+}
+
+.sidebar-story-text {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.55;
+    margin: 0;
+}
+
+.sidebar-activity-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.sidebar-activity-item {
+    padding: 0.55rem 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.sidebar-activity-item:last-child {
+    border-bottom: none;
+}
+
+.sidebar-activity-time {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-bottom: 0.15rem;
+    letter-spacing: 0.02em;
+}
+
+.sidebar-activity-desc {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
 .transcript-right {
     min-width: 0;
 }

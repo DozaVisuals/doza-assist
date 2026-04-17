@@ -34,6 +34,45 @@ log() {
     echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
+# ── Helpers ──
+
+# Show an error dialog that includes the last 15 lines of a log file, so the
+# user can diagnose without having to open Application Support themselves.
+show_error_dialog() {
+    local message="$1"
+    local log_path="${2:-}"
+
+    /usr/bin/osascript <<APPLESCRIPT 2>/dev/null || true
+set dialogText to "$message"
+set logPath to "$log_path"
+if logPath is not "" then
+    try
+        set logTail to do shell script "/usr/bin/tail -15 " & quoted form of logPath & " 2>/dev/null || true"
+        if logTail is not "" then
+            set dialogText to dialogText & "
+
+Last lines of log:
+
+" & logTail & "
+
+Full log: " & logPath
+        end if
+    end try
+end if
+display dialog dialogText with title "Doza Assist" buttons {"OK"} default button "OK" with icon stop
+APPLESCRIPT
+}
+
+# PID of whatever is listening on the given TCP port, or empty if free.
+port_holder_pid() {
+    /usr/sbin/lsof -iTCP:"$1" -sTCP:LISTEN -t -n -P 2>/dev/null | head -1
+}
+
+# Short name of a process (e.g. "Python", "node", "nginx").
+pid_name() {
+    /bin/ps -p "$1" -o comm= 2>/dev/null | awk -F/ '{print $NF}'
+}
+
 # ── Ensure Homebrew on PATH ──
 if [ -d "/opt/homebrew/bin" ]; then
     export PATH="/opt/homebrew/bin:$PATH"
@@ -47,16 +86,52 @@ if /usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null | grep -q "1"; then
     ARCH_PREFIX="arch -arm64"
 fi
 
-# ── If Flask server already running, just open browser ──
-if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
-    log "Server already running, opening browser."
+# ── Port conflict check / already-running detection ──
+# If the port is already serving HTTP, assume it's our own running server
+# and hand off to the browser. If the port is bound but not serving HTTP,
+# it's a conflict — fail fast with the offending PID instead of letting
+# Flask silently fail to bind and then timing out 30 seconds later.
+if /usr/bin/curl -sf --max-time 2 "${FLASK_URL}" > /dev/null 2>&1; then
+    log "Server already running on ${FLASK_PORT}, opening browser."
     /usr/bin/open "${FLASK_URL}"
     exit 0
+fi
+
+HOLDER_PID=$(port_holder_pid "${FLASK_PORT}")
+if [ -n "$HOLDER_PID" ]; then
+    HOLDER_NAME=$(pid_name "$HOLDER_PID")
+    log "ERROR: Port ${FLASK_PORT} held by PID $HOLDER_PID ($HOLDER_NAME), not serving HTTP."
+    /usr/bin/osascript <<APPLESCRIPT 2>/dev/null || true
+display dialog "Doza Assist cannot start — port ${FLASK_PORT} is in use by another process (PID $HOLDER_PID — $HOLDER_NAME).
+
+To free the port, open Terminal and run:
+    kill $HOLDER_PID
+
+Then relaunch Doza Assist." with title "Doza Assist — Port Conflict" buttons {"OK"} default button "OK" with icon stop
+APPLESCRIPT
+    exit 1
 fi
 
 # ── Quick dependency check ──
 log "Running dependency check..."
 MISSING=$( bash "${APP_SRC}/dep_check.sh" 2>/dev/null ) || true
+
+# ── Auto-start ollama daemon if the binary is installed but not running ──
+# Most "ollama installed but not running" cases are benign: Homebrew users who
+# didn't enable the service, or someone who quit Ollama.app. Start it silently
+# instead of forcing the user through the full setup flow.
+if echo "$MISSING" | grep -q "^ollama_daemon$"; then
+    log "Ollama daemon not running — starting in background."
+    nohup ollama serve > "$SUPPORT_DIR/ollama.log" 2>&1 &
+    for _ in {1..10}; do
+        if /usr/bin/curl -sf --max-time 1 "http://127.0.0.1:11434/api/tags" > /dev/null 2>&1; then
+            log "Ollama daemon started."
+            break
+        fi
+        sleep 0.5
+    done
+    MISSING=$(echo "$MISSING" | grep -v "^ollama_daemon$" || true)
+fi
 
 if [ -z "$MISSING" ]; then
     # ── All dependencies present — launch directly ──
@@ -83,7 +158,7 @@ if [ -z "$MISSING" ]; then
     done
 
     log "ERROR: Server failed to start within 30 seconds."
-    osascript -e 'display dialog "Doza Assist failed to start.\n\nCheck the log at:\n'"$SUPPORT_DIR/server.log"'" with title "Doza Assist" buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
+    show_error_dialog "Doza Assist failed to start within 30 seconds." "$SUPPORT_DIR/server.log"
     exit 1
 fi
 
@@ -217,5 +292,5 @@ for _ in {1..60}; do
 done
 
 log "ERROR: Server failed to start after setup."
-osascript -e 'display dialog "Doza Assist server failed to start after setup.\n\nCheck the log at:\n'"$SUPPORT_DIR/server.log"'" with title "Doza Assist" buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
+show_error_dialog "Doza Assist server failed to start after setup." "$SUPPORT_DIR/server.log"
 exit 1

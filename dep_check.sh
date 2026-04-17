@@ -36,15 +36,26 @@ if ! command -v ffmpeg &>/dev/null; then
     missing=1
 fi
 
-# Check ollama
+# Check ollama binary
 if ! command -v ollama &>/dev/null; then
     echo "ollama"
     missing=1
+else
+    # Daemon listening on 11434? Binary alone is not enough — AI features
+    # hang at use-time if the daemon isn't running. The launcher will try
+    # to start it automatically when it sees this.
+    if ! /usr/bin/curl -sf --max-time 2 "http://127.0.0.1:11434/api/tags" > /dev/null 2>&1; then
+        echo "ollama_daemon"
+        missing=1
+    fi
 fi
 
-# Check Flask is installed in venv
+# Check the core runtime deps in venv. A bare `import flask` let shipped
+# bundles through where werkzeug/requests/certifi were broken, surfacing
+# only when the user tried to transcribe. Check the full set used at
+# app.py import time.
 if [ -x "$VENV_DIR/bin/python3" ]; then
-    if ! "$VENV_DIR/bin/python3" -c "import flask" 2>/dev/null; then
+    if ! "$VENV_DIR/bin/python3" -c "import flask, werkzeug, requests, certifi" 2>/dev/null; then
         echo "pip_packages"
         missing=1
     fi

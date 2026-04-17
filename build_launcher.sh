@@ -68,26 +68,40 @@ cp "/tmp/DozaAssist.icns" "${RESOURCES_DIR}/AppIcon.icns"
 echo ""
 echo "4. Bundling application files..."
 
-# Core Python files
-for f in app.py transcribe.py ai_analysis.py fcpxml_export.py preferences.py; do
-    cp "${SCRIPT_DIR}/${f}" "${APP_SRC_DIR}/"
-done
-
-# Setup system files
-cp "${SCRIPT_DIR}/setup_assistant.py" "${APP_SRC_DIR}/"
-cp "${SCRIPT_DIR}/setup_runner.sh"    "${APP_SRC_DIR}/"
-cp "${SCRIPT_DIR}/dep_check.sh"       "${APP_SRC_DIR}/"
-cp "${SCRIPT_DIR}/requirements.txt"   "${APP_SRC_DIR}/"
-
-# Templates and static assets
-cp -R "${SCRIPT_DIR}/templates" "${APP_SRC_DIR}/"
-cp -R "${SCRIPT_DIR}/static"    "${APP_SRC_DIR}/"
-
-# Editorial DNA (My Style) module
-cp -R "${SCRIPT_DIR}/editorial_dna" "${APP_SRC_DIR}/"
-
-# Exporters (FCPXML / Premiere XML / EDL) module
-cp -R "${SCRIPT_DIR}/exporters" "${APP_SRC_DIR}/"
+# Copy the entire repo into the bundle using a denylist. Anything not
+# excluded below is bundled automatically — so adding a new top-level
+# Python module or package no longer requires touching this script.
+# (This is what broke v2.4.0: the new exporters/ and preferences.py were
+# added to the source tree but forgotten here.)
+rsync -a \
+    --exclude='.git' \
+    --exclude='.gitignore' \
+    --exclude='.DS_Store' \
+    --exclude='__pycache__' \
+    --exclude='*.pyc' \
+    --exclude='*.pyo' \
+    --exclude='venv' \
+    --exclude='tests' \
+    --exclude='projects' \
+    --exclude='exports' \
+    --exclude='docs' \
+    --exclude='icon_build' \
+    --exclude='build_launcher.sh' \
+    --exclude='install.sh' \
+    --exclude='uninstall.sh' \
+    --exclude='start.sh' \
+    --exclude='launcher.sh' \
+    --exclude='make_icon.py' \
+    --exclude='Build Doza Assist.command' \
+    --exclude='README.md' \
+    --exclude='LICENSE' \
+    --exclude='*.dmg' \
+    --exclude='*.app' \
+    --exclude='*.png' \
+    --exclude='*.jpg' \
+    --exclude='*.jpeg' \
+    --exclude='*.xmp' \
+    "${SCRIPT_DIR}/" "${APP_SRC_DIR}/"
 
 # Make scripts executable
 chmod +x "${APP_SRC_DIR}/setup_runner.sh"
@@ -135,16 +149,57 @@ cp "${SCRIPT_DIR}/launcher.sh" "${MACOS_DIR}/launch"
 
 chmod +x "${MACOS_DIR}/launch"
 
-# ── Step 7: Clean up build artifacts ──
+# ── Step 7: Smoke test the bundle ──
+# Import the bundled app.py with only the bundle directory on sys.path. This
+# catches any ModuleNotFoundError before we ever create the DMG — exactly the
+# class of bug that shipped in v2.4.0 (missing exporters/ and preferences.py).
+# Uses the dev venv so Flask/whisper/etc. resolve (the end-user installer
+# provisions these on first launch via setup_runner.sh).
 echo ""
-echo "6. Cleaning up..."
+echo "6. Smoke testing bundled app..."
+
+SMOKE_PY="${SCRIPT_DIR}/venv/bin/python3"
+if [ ! -x "${SMOKE_PY}" ]; then
+    echo "   Skipping smoke test — ${SMOKE_PY} not found."
+    echo "   (Create the dev venv with \`python3 -m venv venv && venv/bin/pip install -r requirements.txt\` to enable this guard.)"
+else
+    SMOKE_LOG="$(mktemp)"
+    if ( cd "${APP_SRC_DIR}" && PYTHONDONTWRITEBYTECODE=1 "${SMOKE_PY}" -c "import sys; sys.path.insert(0, '.'); import app" ) >"${SMOKE_LOG}" 2>&1; then
+        # app.py creates projects/ and exports/ at import time. Scrub them
+        # so the shipped bundle stays clean and empty user-data dirs are
+        # created on first launch at the user's data path instead.
+        rm -rf "${APP_SRC_DIR}/projects" "${APP_SRC_DIR}/exports" "${APP_SRC_DIR}/__pycache__"
+        echo "   Bundle imports cleanly."
+        rm -f "${SMOKE_LOG}"
+    else
+        echo ""
+        echo "   BUILD ABORTED — bundled app.py failed to import."
+        echo "   The .app would crash at startup if we shipped this."
+        echo ""
+        echo "   Error:"
+        sed 's/^/     /' "${SMOKE_LOG}"
+        echo ""
+        echo "   Likely causes:"
+        echo "     - A new source file is excluded by build_launcher.sh's rsync denylist"
+        echo "     - A real import bug in the source tree"
+        echo "     - A new PyPI dep was added but is not in the dev venv"
+        echo ""
+        echo "   Fix the above and re-run. No DMG was created."
+        rm -f "${SMOKE_LOG}"
+        exit 1
+    fi
+fi
+
+# ── Step 8: Clean up build artifacts ──
+echo ""
+echo "7. Cleaning up..."
 rm -rf "${ICON_BUILD}"
 rm -rf "${ICONSET_DIR}"
 rm -f "/tmp/DozaAssist.icns"
 
-# ── Step 8: Create .dmg ──
+# ── Step 9: Create .dmg ──
 echo ""
-echo "7. Creating .dmg for distribution..."
+echo "8. Creating .dmg for distribution..."
 
 DMG_NAME="${APP_NAME}"
 DMG_DIR="/tmp/DozaAssist_dmg"

@@ -69,7 +69,7 @@ echo ""
 echo "4. Bundling application files..."
 
 # Core Python files
-for f in app.py transcribe.py ai_analysis.py fcpxml_export.py; do
+for f in app.py transcribe.py ai_analysis.py fcpxml_export.py preferences.py; do
     cp "${SCRIPT_DIR}/${f}" "${APP_SRC_DIR}/"
 done
 
@@ -85,6 +85,9 @@ cp -R "${SCRIPT_DIR}/static"    "${APP_SRC_DIR}/"
 
 # Editorial DNA (My Style) module
 cp -R "${SCRIPT_DIR}/editorial_dna" "${APP_SRC_DIR}/"
+
+# Exporters (FCPXML / Premiere XML / EDL) module
+cp -R "${SCRIPT_DIR}/exporters" "${APP_SRC_DIR}/"
 
 # Make scripts executable
 chmod +x "${APP_SRC_DIR}/setup_runner.sh"
@@ -105,9 +108,9 @@ cat > "${CONTENTS_DIR}/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.dozavisuals.transcribe</string>
     <key>CFBundleVersion</key>
-    <string>2.4.0</string>
+    <string>2.4.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.4.0</string>
+    <string>2.4.1</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

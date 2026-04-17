@@ -111,10 +111,17 @@ install_homebrew() {
     fi
 
     log "Installing Homebrew..."
-    show_password_dialog "Doza Assist needs to install Homebrew (a package manager for macOS).\n\nYou may be asked for your Mac password in the Terminal window that appears.\n\nThis is normal and required for installation."
+    show_password_dialog "Doza Assist needs to install Homebrew (a package manager for macOS).\n\nThe Terminal window will ask for your Mac password — type it and press Return.\n(The characters won't appear on screen as you type. That's normal.)"
 
-    # Run Homebrew installer non-interactively
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" >> "$LOG_FILE" 2>&1
+    # Run Homebrew installer INTERACTIVELY so sudo can prompt for the user's
+    # password in the Terminal window the launcher opened. NONINTERACTIVE=1
+    # would require passwordless sudo, which fails for normal admin users
+    # with a misleading "needs to be an Administrator" error.
+    # Redirect installer stdout to stderr (visible in Terminal) so our final
+    # python_path echo on stdout stays clean for the caller.
+    {
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" 2>&1 | tee -a "$LOG_FILE"
+    } >&2
 
     # Add Homebrew to PATH for this session
     ensure_homebrew_on_path

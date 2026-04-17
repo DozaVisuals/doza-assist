@@ -39,6 +39,22 @@ def _ensure_ffmpeg_on_path():
 _ensure_ffmpeg_on_path()
 
 
+# ── Model cache ──
+# Transcription models are expensive to load (5–15s) and large (~600MB for
+# Parakeet-TDT, ~3GB for Whisper large-v3). Loading once per process and
+# reusing across transcriptions saves that cost for every file after the
+# first. Memory stays high while the app runs — this is a desktop app,
+# which is fine. A single process lock serializes the first load so two
+# concurrent transcriptions don't race to load the same model.
+import threading
+
+_model_lock = threading.Lock()
+_parakeet_model = None
+_whisperx_model = None          # (model, device, compute_type)
+_whisperx_align_cache = {}      # {lang_code: (model_a, metadata, device)}
+_whisper_cache = {}             # {model_name: model}
+
+
 def _find_ffmpeg():
     """Find the ffmpeg binary, checking common Homebrew paths if not on PATH."""
     path = shutil.which('ffmpeg')
@@ -147,14 +163,18 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
 
     Chunks long audio into 5-minute segments to avoid Metal GPU memory limits.
     """
+    global _parakeet_model
     import numpy as np
-    from parakeet_mlx import from_pretrained
     from parakeet_mlx.audio import load_audio
 
-    print("Loading Parakeet TDT model...", flush=True)
-    model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
-
-    import numpy as np
+    with _model_lock:
+        if _parakeet_model is None:
+            from parakeet_mlx import from_pretrained
+            print("Loading Parakeet TDT model...", flush=True)
+            _parakeet_model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
+        else:
+            print("Using cached Parakeet TDT model.", flush=True)
+        model = _parakeet_model
 
     print("Loading audio...", flush=True)
     audio_data = load_audio(filepath, model.preprocessor_config.sample_rate)
@@ -257,6 +277,7 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
 
 def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
     """Transcribe using WhisperX with word-level timestamps and diarization."""
+    global _whisperx_model
     import whisperx
     import torch
 
@@ -271,8 +292,15 @@ def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
     # Czech, Polish, Russian). float16 is only supported on CUDA.
     compute_type = "float16" if device == "cuda" else "float32"
 
-    print(f"Loading WhisperX model (compute_type={compute_type})...")
-    model = whisperx.load_model("large-v3", device, compute_type=compute_type)
+    with _model_lock:
+        cache_key = (device, compute_type)
+        if _whisperx_model is None or _whisperx_model[1] != cache_key:
+            print(f"Loading WhisperX model (compute_type={compute_type})...")
+            model = whisperx.load_model("large-v3", device, compute_type=compute_type)
+            _whisperx_model = (model, cache_key)
+        else:
+            print("Using cached WhisperX model.")
+            model = _whisperx_model[0]
 
     print(f"Transcribing (language: {language})...")
     audio = whisperx.load_audio(audio_path)
@@ -283,8 +311,16 @@ def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
     result = model.transcribe(audio, **transcribe_kwargs)
 
     # Align whisper output for word-level timestamps
-    print("Aligning timestamps...")
-    model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=device)
+    lang_code = result["language"]
+    with _model_lock:
+        align_entry = _whisperx_align_cache.get(lang_code)
+        if align_entry is None or align_entry[2] != device:
+            print(f"Loading align model for '{lang_code}'...")
+            model_a, metadata = whisperx.load_align_model(language_code=lang_code, device=device)
+            _whisperx_align_cache[lang_code] = (model_a, metadata, device)
+        else:
+            print(f"Using cached align model for '{lang_code}'.")
+            model_a, metadata = align_entry[0], align_entry[1]
     result = whisperx.align(result["segments"], model_a, metadata, audio, device)
 
     # Speaker diarization
@@ -373,15 +409,24 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
     # Try turbo first (best quality/speed balance, matches MacWhisper)
     # Fall back to large-v3 or base if turbo unavailable (older whisper versions)
     model = None
-    for model_name in ("turbo", "large-v3", "base"):
-        try:
-            print(f"Loading Whisper model ({model_name})...")
-            model = whisper.load_model(model_name)
-            print(f"Loaded Whisper {model_name}")
+    with _model_lock:
+        # Reuse any previously loaded Whisper model — first cache hit wins.
+        for cached_name, cached_model in _whisper_cache.items():
+            print(f"Using cached Whisper model ({cached_name}).")
+            model = cached_model
             break
-        except Exception as e:
-            print(f"Could not load {model_name}: {e}")
-            continue
+
+        if model is None:
+            for model_name in ("turbo", "large-v3", "base"):
+                try:
+                    print(f"Loading Whisper model ({model_name})...")
+                    model = whisper.load_model(model_name)
+                    _whisper_cache[model_name] = model
+                    print(f"Loaded Whisper {model_name}")
+                    break
+                except Exception as e:
+                    print(f"Could not load {model_name}: {e}")
+                    continue
     if model is None:
         raise RuntimeError("Could not load any Whisper model")
 

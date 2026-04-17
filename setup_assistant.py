@@ -42,7 +42,7 @@ setup_state = {
         {"id": "venv",      "name": "Create Python environment",          "status": "pending", "detail": ""},
         {"id": "pip",       "name": "Install Python packages",            "status": "pending", "detail": ""},
         {"id": "transcribe","name": "Install transcription engine",       "status": "pending", "detail": ""},
-        {"id": "model",     "name": "Download AI model (gemma4)",         "status": "pending", "detail": ""},
+        {"id": "model",     "name": "Download AI model (gemma4 or gemma3)", "status": "pending", "detail": ""},
     ],
     "error": None,
 }
@@ -464,26 +464,83 @@ def native_cmd(args_list):
     return args_list
 
 
+def _do_pull(ollama_path, model, attempt, max_attempts):
+    """Stream one ollama pull attempt. Returns True on success, False on failure."""
+    if attempt == 1:
+        update_step(STEP_MODEL, "running",
+                    f"Downloading {model} — this can take 5‑15 min depending on your connection...")
+    else:
+        update_step(STEP_MODEL, "running",
+                    f"Retrying download of {model} (attempt {attempt}/{max_attempts})...")
+
+    last_lines = []
+    try:
+        proc = subprocess.Popen(
+            native_cmd([ollama_path, "pull", model]),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            last_lines.append(line)
+            if len(last_lines) > 8:
+                last_lines.pop(0)
+
+            pct_match = re.search(r'(\d+)%', line)
+            if pct_match:
+                pct = pct_match.group(1)
+                size_match = re.search(r'([\d.]+\s*[GMKT]B)\s*/\s*([\d.]+\s*[GMKT]B)', line)
+                if size_match:
+                    detail = f"Downloading {model}... {pct}% ({size_match.group(1)} / {size_match.group(2)})"
+                else:
+                    detail = f"Downloading {model}... {pct}%"
+                update_step(STEP_MODEL, "running", detail)
+            elif "success" in line.lower():
+                update_step(STEP_MODEL, "running", f"{model} downloaded!")
+            log(f"ollama pull {model}: {line}")
+
+        proc.wait()
+
+        if proc.returncode == 0:
+            log(f"{model} pulled successfully.")
+            return True
+
+        # Surface the actual error to the browser
+        error_detail = " | ".join(last_lines[-3:]) if last_lines else "unknown error"
+        log(f"ERROR: ollama pull {model} failed (rc={proc.returncode}): {error_detail}")
+        update_step(STEP_MODEL, "running", f"Download failed: {error_detail[:160]}")
+        return False
+
+    except Exception as e:
+        log(f"ERROR: ollama pull {model} exception: {e}")
+        update_step(STEP_MODEL, "running", f"Download error: {e}")
+        return False
+
+
 def pull_ollama_model():
     ensure_path()
     ollama_path = shutil.which("ollama")
     if not ollama_path:
-        # Check common locations directly
         for p in ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"]:
             if os.path.isfile(p):
                 ollama_path = p
                 break
     if not ollama_path:
         log("ERROR: ollama not found on PATH.")
+        update_step(STEP_MODEL, "error", "Ollama not found. The install step may have failed — click Retry.")
         return False
 
-    # Check if model already exists
+    # Check if any usable model is already present
     rc, out, _ = run_cmd(f'arch -arm64 "{ollama_path}" list' if is_apple_silicon() else f'"{ollama_path}" list')
-    if rc == 0 and "gemma4" in out:
-        log("gemma4 model already available.")
-        return True
+    for existing in ("gemma4", "gemma3"):
+        if rc == 0 and existing in out:
+            log(f"{existing} model already available.")
+            return True
 
-    # Start Ollama if not running
+    # Ensure Ollama service is running
     rc, _, _ = run_cmd("curl -sf http://127.0.0.1:11434/api/version")
     if rc != 0:
         log("Starting Ollama service...")
@@ -494,56 +551,38 @@ def pull_ollama_model():
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        # Wait for Ollama to be ready
         for _ in range(30):
             time.sleep(1)
             rc, _, _ = run_cmd("curl -sf http://127.0.0.1:11434/api/version")
             if rc == 0:
                 break
         else:
-            log("ERROR: Ollama failed to start.")
+            log("ERROR: Ollama service failed to start within 30 seconds.")
+            update_step(STEP_MODEL, "error",
+                        "Ollama service didn't start. Try running 'ollama serve' in Terminal, then click Retry.")
             return False
 
-    # Pull the model with progress tracking
-    log("Pulling gemma4 model...")
-    update_step(STEP_MODEL, "running", "Downloading AI model (this may take several minutes)...")
+    # Try preferred models in order, each with up to 2 attempts
+    models_to_try = ["gemma4", "gemma3"]
+    max_attempts = 2
 
-    try:
-        proc = subprocess.Popen(
-            native_cmd([ollama_path, "pull", "gemma4"]),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        for line in proc.stdout:
-            line = line.strip()
-            if line:
-                # Parse progress from ollama output
-                # Typical: "pulling abc123... 45% ▕██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░▏ 1.2 GB/3.5 GB"
-                pct_match = re.search(r'(\d+)%', line)
-                if pct_match:
-                    pct = pct_match.group(1)
-                    # Try to extract size info
-                    size_match = re.search(r'([\d.]+\s*[GMKT]B)\s*/\s*([\d.]+\s*[GMKT]B)', line)
-                    if size_match:
-                        detail = f"Downloading AI model... {pct}% ({size_match.group(1)} / {size_match.group(2)})"
-                    else:
-                        detail = f"Downloading AI model... {pct}%"
-                    update_step(STEP_MODEL, "running", detail)
-                elif "success" in line.lower():
-                    update_step(STEP_MODEL, "running", "Model downloaded successfully!")
-                log(f"ollama pull: {line}")
+    for model in models_to_try:
+        log(f"Trying to pull {model}...")
+        for attempt in range(1, max_attempts + 1):
+            if _do_pull(ollama_path, model, attempt, max_attempts):
+                return True
+            if attempt < max_attempts:
+                wait = attempt * 15
+                log(f"Waiting {wait}s before retry...")
+                update_step(STEP_MODEL, "running", f"Waiting {wait}s before retry...")
+                time.sleep(wait)
+        log(f"All attempts for {model} failed. Trying next model...")
 
-        proc.wait()
-        if proc.returncode != 0:
-            log("ERROR: ollama pull failed.")
-            return False
-    except Exception as e:
-        log(f"ERROR: ollama pull exception: {e}")
-        return False
-
-    log("gemma4 model pulled successfully.")
-    return True
+    # All models failed — give a clear, actionable message
+    update_step(STEP_MODEL, "error",
+                "Model download failed after retries. Check your internet connection, then click Retry. "
+                "You can also skip this and set up Ollama manually: run 'ollama pull gemma3' in Terminal.")
+    return False
 
 
 def save_setup_state():

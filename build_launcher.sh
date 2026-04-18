@@ -97,10 +97,10 @@ rsync -a \
     --exclude='LICENSE' \
     --exclude='*.dmg' \
     --exclude='*.app' \
-    --exclude='*.png' \
-    --exclude='*.jpg' \
-    --exclude='*.jpeg' \
-    --exclude='*.xmp' \
+    --exclude='/*.png' \
+    --exclude='/*.jpg' \
+    --exclude='/*.jpeg' \
+    --exclude='/*.xmp' \
     "${SCRIPT_DIR}/" "${APP_SRC_DIR}/"
 
 # Make scripts executable
@@ -122,9 +122,9 @@ cat > "${CONTENTS_DIR}/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.dozavisuals.transcribe</string>
     <key>CFBundleVersion</key>
-    <string>2.4.1</string>
+    <string>2.4.5</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.4.1</string>
+    <string>2.4.5</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

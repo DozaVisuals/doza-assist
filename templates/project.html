@@ -2882,15 +2882,111 @@ function showRetranscribe() {
             </p>
             <div class="form-group">
                 <label class="form-label">Language</label>
-                <select class="form-input" id="retranscribeLang">${options}</select>
+                <select class="form-input" id="retranscribeLang" onchange="updateWhisperBanner()">${options}</select>
             </div>
+            <div id="whisperBanner" style="display:none; padding: 0.75rem; margin: 0.5rem 0 0; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
             <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
                 <button class="btn btn-sm" onclick="document.getElementById('retranscribeOverlay').remove()">Cancel</button>
-                <button class="btn btn-sm btn-purple" onclick="doRetranscribe()">Retranscribe</button>
+                <button class="btn btn-sm btn-purple" id="retranscribeBtn" onclick="doRetranscribe()">Retranscribe</button>
             </div>
         </div>`;
     document.body.appendChild(overlay);
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+    // Fetch engine availability so the banner can render before any selection.
+    fetch('/api/transcription-engines')
+        .then(r => r.json())
+        .then(engines => {
+            window._transcriptionEngines = engines;
+            updateWhisperBanner();
+        })
+        .catch(() => { /* banner stays hidden — non-English will fail loudly later */ });
+}
+
+// Renders / hides the Whisper-install banner inside the Retranscribe modal
+// based on the selected language and whether the Whisper engine is installed.
+function updateWhisperBanner() {
+    const sel = document.getElementById('retranscribeLang');
+    const banner = document.getElementById('whisperBanner');
+    const btn = document.getElementById('retranscribeBtn');
+    if (!sel || !banner || !btn) return;
+
+    const engines = window._transcriptionEngines || { parakeet: true, whisper: true };
+    const lang = sel.value;
+    // 'auto' uses Whisper internally, so it also needs the engine.
+    const needsWhisper = (lang !== 'en') && !engines.whisper;
+
+    if (!needsWhisper) {
+        banner.style.display = 'none';
+        btn.disabled = false;
+        return;
+    }
+
+    banner.style.display = 'block';
+    banner.innerHTML = `
+        <div style="color: var(--text-secondary); margin-bottom: 0.5rem;">
+            <strong style="color: var(--text-primary);">Non-English requires the Whisper engine.</strong><br>
+            Not installed yet — about 200&nbsp;MB, 5–10 minutes on a typical connection.
+        </div>
+        <button class="btn btn-sm btn-purple" id="installWhisperBtn" onclick="startWhisperInstall()">
+            Install non-English support
+        </button>
+    `;
+    btn.disabled = true;
+}
+
+let _whisperPollTimer = null;
+
+async function startWhisperInstall() {
+    const banner = document.getElementById('whisperBanner');
+    if (!banner) return;
+    banner.innerHTML = '<div style="color: var(--text-secondary);">Starting install…</div>';
+
+    try {
+        const res = await fetch('/api/install-whisper', { method: 'POST' });
+        if (!res.ok) {
+            banner.innerHTML = '<div style="color: var(--danger, #f85149);">Failed to start install. Check the server log.</div>';
+            return;
+        }
+    } catch (err) {
+        banner.innerHTML = `<div style="color: var(--danger, #f85149);">Network error: ${err.message}</div>`;
+        return;
+    }
+
+    // Poll every 2s until done or error. Banner shows live `detail` from the
+    // worker so the user sees `Installing OpenAI Whisper (~200MB)…` etc.
+    if (_whisperPollTimer) clearInterval(_whisperPollTimer);
+    _whisperPollTimer = setInterval(async () => {
+        let state;
+        try {
+            const sres = await fetch('/api/install-whisper/status');
+            state = await sres.json();
+        } catch (err) { return; }
+
+        if (state.status === 'done' || state.available) {
+            clearInterval(_whisperPollTimer);
+            _whisperPollTimer = null;
+            window._transcriptionEngines = { ...(window._transcriptionEngines || {}), whisper: true };
+            banner.innerHTML = '<div style="color: var(--success, #3fb950);">Done. You can transcribe in any language now.</div>';
+            const btn = document.getElementById('retranscribeBtn');
+            if (btn) btn.disabled = false;
+        } else if (state.status === 'error') {
+            clearInterval(_whisperPollTimer);
+            _whisperPollTimer = null;
+            banner.innerHTML = `
+                <div style="color: var(--danger, #f85149); margin-bottom: 0.5rem;">
+                    Install failed: ${(state.detail || 'unknown error').replace(/</g, '&lt;')}
+                </div>
+                <button class="btn btn-sm btn-purple" onclick="startWhisperInstall()">Try again</button>
+            `;
+        } else {
+            banner.innerHTML = `
+                <div style="color: var(--text-secondary);">
+                    ${(state.detail || 'Installing…').replace(/</g, '&lt;')}
+                </div>
+            `;
+        }
+    }, 2000);
 }
 
 async function doRetranscribe() {

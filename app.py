@@ -766,6 +766,121 @@ def serve_media(project_id):
     return jsonify({'error': 'Source file not found'}), 404
 
 
+# ── Optional non-English (Whisper) engine, installed on demand ─────────────
+# Default install ships only Parakeet MLX (English). Whisper is the gateway
+# to 99-language support but adds ~200MB of PyTorch+cmake to setup, so it's
+# moved behind this on-demand install. The Retranscribe modal calls these
+# endpoints when the user picks a non-English language and Whisper is missing.
+
+import importlib.util as _impu
+import sys as _sys
+
+_whisper_install_state = {
+    'status': 'idle',  # idle | running | done | error
+    'detail': '',
+    'started_at': None,
+}
+_whisper_install_lock = threading.Lock()
+
+
+def _engine_available(name):
+    """Return True if `name` is currently importable. Used over try/import so
+    we don't pay the cost (or pollute sys.modules) of a real import every poll."""
+    try:
+        return _impu.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _install_whisper_worker():
+    """Background install of openai-whisper into the running venv. Updates
+    _whisper_install_state so the frontend can poll for progress."""
+    global _whisper_install_state
+
+    def set_state(status, detail):
+        with _whisper_install_lock:
+            _whisper_install_state['status'] = status
+            _whisper_install_state['detail'] = detail
+
+    try:
+        # cmake is a transitive build-time dep of some whisper sub-packages on
+        # certain Python versions. Best-effort install — if brew isn't present
+        # or the install fails, pip will tell us when it actually needs cmake.
+        set_state('running', 'Installing cmake (build dependency)...')
+        for brew_path in ('/opt/homebrew/bin/brew', '/usr/local/bin/brew'):
+            if os.path.isfile(brew_path):
+                subprocess.run(
+                    [brew_path, 'install', 'cmake'],
+                    capture_output=True, timeout=600,
+                )
+                break
+
+        # pip install into the same venv this Flask process is running from.
+        # sys.executable resolves to venv/bin/python3 because launcher.sh
+        # sources the venv before exec'ing app.py.
+        set_state('running', 'Installing OpenAI Whisper (~200MB) — this takes a few minutes...')
+        proc = subprocess.run(
+            [_sys.executable, '-m', 'pip', 'install', 'openai-whisper'],
+            capture_output=True, text=True, timeout=1800,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or '')[-400:]
+            set_state('error', f'pip install failed: {tail}')
+            return
+
+        # Force a re-scan of the import system so transcribe.py picks up the
+        # new package without restarting Flask.
+        import importlib
+        importlib.invalidate_caches()
+
+        if _engine_available('whisper'):
+            set_state('done', 'Done — non-English transcription is now available.')
+        else:
+            set_state('error', 'Install completed but whisper module is not importable.')
+
+    except subprocess.TimeoutExpired:
+        set_state('error', 'Install timed out after 30 minutes. Check your internet connection.')
+    except Exception as e:
+        set_state('error', f'Install failed: {e}')
+
+
+@app.route('/api/transcription-engines', methods=['GET'])
+def transcription_engines():
+    """Report which transcription engines are currently installed."""
+    return jsonify({
+        'parakeet': _engine_available('parakeet_mlx'),
+        'whisper': _engine_available('whisper'),
+    })
+
+
+@app.route('/api/install-whisper', methods=['POST'])
+def install_whisper():
+    """Kick off a background install of openai-whisper. Idempotent — returns
+    immediately if already installed or already running."""
+    with _whisper_install_lock:
+        if _engine_available('whisper'):
+            _whisper_install_state['status'] = 'done'
+            _whisper_install_state['detail'] = 'Already installed.'
+            return jsonify({'status': 'done'})
+        if _whisper_install_state['status'] == 'running':
+            return jsonify({'status': 'running'})
+        _whisper_install_state['status'] = 'running'
+        _whisper_install_state['detail'] = 'Starting install...'
+        _whisper_install_state['started_at'] = time.time()
+
+    threading.Thread(target=_install_whisper_worker, daemon=True).start()
+    return jsonify({'status': 'started'})
+
+
+@app.route('/api/install-whisper/status', methods=['GET'])
+def install_whisper_status():
+    """Poll endpoint for the frontend install banner."""
+    with _whisper_install_lock:
+        state = dict(_whisper_install_state)
+    state['available'] = _engine_available('whisper')
+    return jsonify(state)
+
+
 @app.route('/project/<project_id>/transcribe', methods=['POST'])
 def transcribe(project_id):
     """Run transcription on the source file."""
@@ -777,6 +892,21 @@ def transcribe(project_id):
     source_path = project.get('source_path', project.get('filepath', ''))
     if not source_path or not os.path.exists(source_path):
         return jsonify({'error': 'Source file not found. It may have been moved or deleted.'}), 404
+
+    # Guard non-English requests when only Parakeet (English-only) is installed.
+    # Without this we'd kick off the full transcribe pipeline only to fail
+    # with a generic "no engine" error after the audio extraction. The frontend
+    # uses needs_whisper_install to render an inline install prompt.
+    requested_language = project.get('language', 'en')
+    if requested_language not in ('en', 'auto') and not _engine_available('whisper'):
+        project['status'] = 'error'
+        project['error'] = 'whisper_not_installed'
+        save_project(project_id, project)
+        return jsonify({
+            'error': f'Non-English transcription ({requested_language}) requires the Whisper engine, which is not installed.',
+            'needs_whisper_install': True,
+            'requested_language': requested_language,
+        }), 400
 
     project['status'] = 'transcribing'
     save_project(project_id, project)

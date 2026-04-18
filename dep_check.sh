@@ -59,6 +59,22 @@ if [ -x "$VENV_DIR/bin/python3" ]; then
         echo "pip_packages"
         missing=1
     fi
+
+    # Transcription engines: at least one of parakeet_mlx / whisper must be
+    # importable, otherwise the user can launch the UI but every transcribe
+    # call fails with "No transcription engine found". MLX needs arm64 on
+    # Apple Silicon, so probe under the matching arch.
+    ARCH_PREFIX=""
+    if /usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null | grep -q "1"; then
+        ARCH_PREFIX="arch -arm64"
+    fi
+    if ! $ARCH_PREFIX "$VENV_DIR/bin/python3" -c "
+import importlib.util, sys
+sys.exit(0 if (importlib.util.find_spec('parakeet_mlx') or importlib.util.find_spec('whisper')) else 1)
+" 2>/dev/null; then
+        echo "transcription_engine"
+        missing=1
+    fi
 fi
 
 exit $missing

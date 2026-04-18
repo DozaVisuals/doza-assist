@@ -41,7 +41,8 @@ setup_state = {
         {"id": "ollama",    "name": "Install Ollama (AI engine)",          "status": "pending", "detail": ""},
         {"id": "venv",      "name": "Create Python environment",          "status": "pending", "detail": ""},
         {"id": "pip",       "name": "Install Python packages",            "status": "pending", "detail": ""},
-        {"id": "transcribe","name": "Install transcription engine",       "status": "pending", "detail": ""},
+        {"id": "transcribe","name": "Install transcription engine (English)", "status": "pending", "detail": ""},
+        {"id": "transcribe_model","name": "Download transcription model (~636MB)", "status": "pending", "detail": ""},
         {"id": "model",     "name": "Download AI model (gemma4 or gemma3)", "status": "pending", "detail": ""},
     ],
     "error": None,
@@ -150,8 +151,9 @@ STEP_FFMPEG     = 2
 STEP_OLLAMA     = 3
 STEP_VENV       = 4
 STEP_PIP        = 5
-STEP_TRANSCRIBE = 6
-STEP_MODEL      = 7
+STEP_TRANSCRIBE       = 6
+STEP_TRANSCRIBE_MODEL = 7
+STEP_MODEL            = 8
 
 
 # ── Installation Steps ──
@@ -396,7 +398,15 @@ def install_pip_packages():
 
 
 def install_transcription_engine():
-    """Install Parakeet MLX (primary) and optionally OpenAI Whisper (fallback)."""
+    """Install Parakeet MLX (the default English transcription engine).
+
+    OpenAI Whisper (the non-English / 99-language fallback) is intentionally
+    NOT installed at first launch — it pulls PyTorch (~200MB) plus cmake and
+    historically dominated the setup wall-time, dragging total install from
+    ~3 minutes to 10-15 minutes. Parakeet alone covers the English-language
+    primary use case. Non-English support is added on demand from the app's
+    settings (see /install-whisper endpoint, TODO).
+    """
     pip_path = os.path.join(VENV_DIR, "bin", "pip")
     python_path = os.path.join(VENV_DIR, "bin", "python3")
     if not os.path.isfile(pip_path):
@@ -407,53 +417,118 @@ def install_transcription_engine():
     # The .app bundle may launch Python under Rosetta, so we force arch -arm64.
     arm_prefix = "arch -arm64 " if is_apple_silicon() else ""
 
-    # Install Parakeet MLX (fast, Apple Silicon native, no cmake needed)
     update_step(STEP_TRANSCRIBE, "running", "Installing Parakeet MLX (Apple Silicon transcription)...")
     # Use --force-reinstall to resolve conflicts from previous failed installs
     rc, out, err = run_cmd(f'{arm_prefix}"{pip_path}" install --force-reinstall parakeet-mlx')
     if rc != 0:
-        log(f"WARNING: parakeet-mlx install failed: {err}")
-        update_step(STEP_TRANSCRIBE, "running", "Parakeet failed, trying OpenAI Whisper...")
-    else:
-        log("Parakeet MLX installed successfully.")
-        # Verify it imports (must use arm64 for MLX)
-        rc2, _, err2 = run_cmd(f'{arm_prefix}"{python_path}" -c "import parakeet_mlx"')
-        if rc2 == 0:
-            log("Parakeet MLX verified.")
-            update_step(STEP_TRANSCRIBE, "running", "Parakeet MLX installed! Installing Whisper as fallback...")
-        else:
-            log(f"WARNING: parakeet-mlx installed but import failed: {err2}")
-
-    # Try OpenAI Whisper as fallback — needs cmake
-    update_step(STEP_TRANSCRIBE, "running", "Installing cmake (needed for Whisper)...")
-    ensure_path()
-    cmake_cmd = brew_cmd("install cmake")
-    if cmake_cmd:
-        run_cmd(cmake_cmd)
-    # Also try cmake via pip as backup
-    run_cmd(f'{arm_prefix}"{pip_path}" install cmake')
-
-    update_step(STEP_TRANSCRIBE, "running", "Installing OpenAI Whisper (fallback engine)...")
-    rc, out, err = run_cmd(f'{arm_prefix}"{pip_path}" install openai-whisper')
-    if rc != 0:
-        log(f"WARNING: openai-whisper install failed: {err}")
-        # Not fatal — parakeet is the primary engine
-
-    # Verify at least one engine works (use arm64 for MLX compatibility)
-    rc_p, _, _ = run_cmd(f'{arm_prefix}"{python_path}" -c "import parakeet_mlx"')
-    rc_w, _, _ = run_cmd(f'{arm_prefix}"{python_path}" -c "import whisper"')
-
-    if rc_p != 0 and rc_w != 0:
-        log("ERROR: No transcription engine could be installed.")
-        update_step(STEP_TRANSCRIBE, "error", "No transcription engine installed. Try: pip install parakeet-mlx")
+        log(f"ERROR: parakeet-mlx install failed: {err}")
+        update_step(STEP_TRANSCRIBE, "error",
+                    "Parakeet MLX install failed. Check your internet connection and retry. "
+                    f"Error: {err[:200]}")
         return False
 
-    engines = []
-    if rc_p == 0:
-        engines.append("Parakeet MLX")
-    if rc_w == 0:
-        engines.append("OpenAI Whisper")
-    log(f"Transcription engines installed: {', '.join(engines)}")
+    log("Parakeet MLX installed successfully.")
+    # Verify it imports (must use arm64 for MLX)
+    rc2, _, err2 = run_cmd(f'{arm_prefix}"{python_path}" -c "import parakeet_mlx"')
+    if rc2 != 0:
+        log(f"ERROR: parakeet-mlx installed but import failed: {err2}")
+        update_step(STEP_TRANSCRIBE, "error",
+                    f"Parakeet installed but cannot be imported. {err2[:200]}")
+        return False
+
+    log("Parakeet MLX verified.")
+    return True
+
+
+def _dir_size_bytes(path):
+    """Sum size of all files under path. Returns 0 if path doesn't exist."""
+    total = 0
+    try:
+        for root, _, files in os.walk(path):
+            for fn in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, fn))
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+# Approx total bytes after Parakeet TDT 0.6b v2 finishes downloading. Used to
+# render a percentage in the setup UI. Off-by-a-few-MB is fine — we cap display
+# at 99% until the subprocess actually exits.
+PARAKEET_MODEL_BYTES = 636 * 1024 * 1024
+
+
+def download_parakeet_model():
+    """Pre-download the Parakeet model during setup so first-transcribe is instant.
+
+    Without this step the model fetch (~636MB, ~5-15min) happens silently the
+    first time the user clicks Transcribe, with no progress indication — they
+    see a generic "Transcribing..." spinner for 10+ minutes and assume the app
+    is broken. Doing it here surfaces real progress and front-loads the wait
+    into the setup phase where users expect things to take a while.
+    """
+    python_path = os.path.join(VENV_DIR, "bin", "python3")
+    if not os.path.isfile(python_path):
+        log("ERROR: venv python not found, cannot pre-download model.")
+        update_step(STEP_TRANSCRIBE_MODEL, "error", "Python venv missing.")
+        return False
+
+    arm_prefix = ["arch", "-arm64"] if is_apple_silicon() else []
+    cache_dir = os.path.expanduser(
+        "~/.cache/huggingface/hub/models--mlx-community--parakeet-tdt-0.6b-v2"
+    )
+
+    # If the model is already on disk (idempotent setup re-run), skip.
+    if _dir_size_bytes(cache_dir) > 0.95 * PARAKEET_MODEL_BYTES:
+        log("Parakeet model already present, skipping download.")
+        update_step(STEP_TRANSCRIBE_MODEL, "running", "Model already present.")
+        return True
+
+    update_step(STEP_TRANSCRIBE_MODEL, "running",
+                "Connecting to HuggingFace... (first transcription will be instant after this)")
+
+    # from_pretrained triggers the same download path the app uses at runtime,
+    # so we get exact same files in exact same cache layout.
+    fetch_cmd = arm_prefix + [
+        python_path, "-c",
+        "from parakeet_mlx import from_pretrained; "
+        "from_pretrained('mlx-community/parakeet-tdt-0.6b-v2'); "
+        "print('OK')"
+    ]
+    log(f"Spawning model download: {' '.join(fetch_cmd)}")
+    # Inherit parent stdout/stderr (which the launcher already redirects to
+    # setup.log). Piping risks deadlock if huggingface_hub's tqdm fills the
+    # pipe buffer faster than we drain it.
+    proc = subprocess.Popen(fetch_cmd, env=os.environ.copy())
+
+    # Poll the cache directory size and report progress until the subprocess
+    # exits. ~636MB target — we report bytes downloaded so the user sees the
+    # number climb, which is the signal that "something is happening".
+    last_logged_pct = -10
+    while proc.poll() is None:
+        time.sleep(1.5)
+        downloaded = _dir_size_bytes(cache_dir)
+        mb = downloaded / (1024 * 1024)
+        pct = min(99, int((downloaded / PARAKEET_MODEL_BYTES) * 100))
+        update_step(STEP_TRANSCRIBE_MODEL, "running",
+                    f"Downloading transcription model: {mb:.0f} / 636 MB ({pct}%)")
+        if pct >= last_logged_pct + 10:
+            log(f"Model download progress: {mb:.0f} MB ({pct}%)")
+            last_logged_pct = pct
+
+    if proc.returncode != 0:
+        log(f"ERROR: Parakeet model download failed (exit {proc.returncode})")
+        update_step(STEP_TRANSCRIBE_MODEL, "error",
+                    "Model download failed. Check your internet connection and retry. "
+                    "(The app will still try to download on first transcribe.)")
+        return False
+
+    final_mb = _dir_size_bytes(cache_dir) / (1024 * 1024)
+    log(f"Parakeet model downloaded successfully ({final_mb:.0f} MB).")
+    update_step(STEP_TRANSCRIBE_MODEL, "running", f"Done — {final_mb:.0f} MB cached.")
     return True
 
 
@@ -607,14 +682,15 @@ def save_setup_state():
 def run_setup():
     """Execute all setup steps sequentially."""
     steps = [
-        (STEP_XCODE,      "xcode",      install_xcode_clt),
-        (STEP_HOMEBREW,   "homebrew",   install_homebrew),
-        (STEP_FFMPEG,     "ffmpeg",     install_ffmpeg),
-        (STEP_OLLAMA,     "ollama",     install_ollama),
-        (STEP_VENV,       "venv",       create_venv),
-        (STEP_PIP,        "pip",        install_pip_packages),
-        (STEP_TRANSCRIBE, "transcribe", install_transcription_engine),
-        (STEP_MODEL,      "model",      pull_ollama_model),
+        (STEP_XCODE,            "xcode",            install_xcode_clt),
+        (STEP_HOMEBREW,         "homebrew",         install_homebrew),
+        (STEP_FFMPEG,           "ffmpeg",           install_ffmpeg),
+        (STEP_OLLAMA,           "ollama",           install_ollama),
+        (STEP_VENV,             "venv",             create_venv),
+        (STEP_PIP,              "pip",              install_pip_packages),
+        (STEP_TRANSCRIBE,       "transcribe",       install_transcription_engine),
+        (STEP_TRANSCRIBE_MODEL, "transcribe_model", download_parakeet_model),
+        (STEP_MODEL,            "model",            pull_ollama_model),
     ]
 
     for idx, name, func in steps:

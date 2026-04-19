@@ -18,6 +18,7 @@ import os
 import math
 import uuid
 from fractions import Fraction
+from urllib.parse import quote
 
 
 def seconds_to_fcpxml_time(seconds, framerate=23.976):
@@ -57,15 +58,20 @@ def seconds_to_fcpxml_time(seconds, framerate=23.976):
 
 
 def get_frame_duration(framerate=23.976):
-    """Get the frame duration string for FCPXML."""
+    """Get the frame duration string for FCPXML.
+
+    Integer frame rates use reduced fractions (1/N) to match the timebase
+    used by seconds_to_fcpxml_time, avoiding denominator mismatches that
+    cause FCP to reject clips as invalid edits.
+    """
     rates = {
         23.976: "1001/24000s",
-        24.0: "100/2400s",
-        25.0: "100/2500s",
+        24.0: "1/24s",
+        25.0: "1/25s",
         29.97: "1001/30000s",
-        30.0: "100/3000s",
+        30.0: "1/30s",
         59.94: "1001/60000s",
-        60.0: "100/6000s",
+        60.0: "1/60s",
     }
     return rates.get(framerate, "1001/24000s")
 
@@ -130,7 +136,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     media_dur_str = seconds_to_fcpxml_time(media_duration, framerate)
 
     # File reference — use file:// URL for the source media
-    file_url = 'file://' + source_path.replace(' ', '%20')
+    file_url = 'file://' + quote(source_path, safe='/')
     ext = os.path.splitext(source_path)[1].lower()
 
     # Determine if video or audio-only
@@ -235,7 +241,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 
     media_dur_str = seconds_to_fcpxml_time(media_duration, framerate)
 
-    file_url = 'file://' + source_path.replace(' ', '%20')
+    file_url = 'file://' + quote(source_path, safe='/')
     ext = os.path.splitext(source_path)[1].lower()
     is_video = ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
 

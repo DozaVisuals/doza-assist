@@ -197,8 +197,8 @@ Open **http://localhost:5050**
 brew install ollama
 ollama serve
 
-# Pull a model (gemma4 recommended)
-ollama pull gemma4
+# Pull a model (Gemma 4 recommended — the app auto-selects the right size for your hardware)
+ollama pull gemma4:e4b   # mid-tier default (9.6 GB); use gemma4:e2b for <16 GB RAM
 ```
 
 **Cloud with Claude API (higher quality, optional):**
@@ -228,7 +228,7 @@ The app automatically tries Ollama first and falls back to Claude if configured.
 - **Backend:** Python / Flask
 - **Frontend:** Vanilla JS, CSS custom properties
 - **Transcription:** Parakeet TDT via MLX (fast, Apple Silicon native) with OpenAI Whisper fallback
-- **AI:** Ollama with Gemma 4 (local, free) or Claude API (optional)
+- **AI:** Ollama with Gemma 4 — auto-selected variant based on your hardware (local, free) or Claude API (optional)
 - **Audio:** ffmpeg for extraction
 - **Sharing:** Cloudflare Tunnel (free, no account needed)
 - **Export:** FCPXML 1.11 (Final Cut Pro), FCP7 XML / xmeml v5 (Premiere Pro), CMX 3600 EDL (DaVinci Resolve)
@@ -317,6 +317,27 @@ The installer saves a full log to `install_log.txt` in the project folder. Attac
 ## License
 
 MIT
+
+---
+
+## Licensing
+
+This project is released under the **MIT License** (see `LICENSE`).
+
+**Third-party models used at runtime (not bundled):**
+
+| Component | License | Notes |
+|-----------|---------|-------|
+| [Gemma 4](https://ai.google.dev/gemma) (via Ollama) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | Downloaded at runtime by the user via Ollama. Google LLC retains copyright. See [Gemma model card](https://huggingface.co/collections/google/gemma-4-release-6797d58b53b0d7fcba9a14ef). |
+| [OpenAI Whisper](https://github.com/openai/whisper) | [MIT](https://github.com/openai/whisper/blob/main/LICENSE) | Non-English transcription fallback. |
+| [Parakeet TDT 0.6B v2](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2) (via Hugging Face) | [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) | English transcription engine; converted from nvidia/parakeet-tdt-0.6b-v2 by the MLX Community. |
+| [Ollama](https://ollama.com) | [MIT](https://github.com/ollama/ollama/blob/main/LICENSE) | Local model runner. Downloaded and installed separately by the user. |
+
+**Model weights are never bundled** in this repository or in any release artifact. All models are downloaded at runtime by the user via Ollama or Hugging Face.
+
+**Gemma 4 variant selection:** On first run the app detects your hardware (RAM, architecture) and automatically selects an appropriate Gemma 4 variant. You can override this with `--model-tier small|medium|large|xlarge` or by editing `~/Library/Application Support/DozaAssist/model_config.json`. See `model_config.py` for details.
+
+Users are responsible for complying with the licenses of any models they download, including Ollama's terms and any additional usage policies published by the model providers.
 
 ---
 

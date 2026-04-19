@@ -43,7 +43,7 @@ setup_state = {
         {"id": "pip",       "name": "Install Python packages",            "status": "pending", "detail": ""},
         {"id": "transcribe","name": "Install transcription engine (English)", "status": "pending", "detail": ""},
         {"id": "transcribe_model","name": "Download transcription model (~636MB)", "status": "pending", "detail": ""},
-        {"id": "model",     "name": "Download AI model (gemma4 or gemma3)", "status": "pending", "detail": ""},
+        {"id": "model",     "name": "Download AI model (Gemma 4)", "status": "pending", "detail": ""},
     ],
     "error": None,
 }
@@ -608,12 +608,26 @@ def pull_ollama_model():
         update_step(STEP_MODEL, "error", "Ollama not found. The install step may have failed — click Retry.")
         return False
 
-    # Check if any usable model is already present
+    # Determine which Gemma 4 variant to pull based on hardware
+    try:
+        sys.path.insert(0, APP_DIR)
+        import model_config as _mc
+        variant_info = _mc.get_gemma4_variant()
+        model_to_pull = variant_info['variant']
+        selection_msg = _mc.format_selection_message(variant_info)
+        log(f"Gemma 4 variant selected:\n{selection_msg}")
+        update_step(STEP_MODEL, "running",
+                    f"Auto-selected {model_to_pull} ({variant_info['download_size']}) — {variant_info['reason']}")
+        time.sleep(2)  # let user read the selection info in the UI
+    except Exception as e:
+        log(f"WARNING: model_config import failed ({e}), defaulting to gemma4:e4b")
+        model_to_pull = 'gemma4:e4b'
+
+    # Check if a usable Gemma 4 model is already present
     rc, out, _ = run_cmd(f'arch -arm64 "{ollama_path}" list' if is_apple_silicon() else f'"{ollama_path}" list')
-    for existing in ("gemma4", "gemma3"):
-        if rc == 0 and existing in out:
-            log(f"{existing} model already available.")
-            return True
+    if rc == 0 and 'gemma4' in out:
+        log("Gemma 4 model already available.")
+        return True
 
     # Ensure Ollama service is running
     rc, _, _ = run_cmd("curl -sf http://127.0.0.1:11434/api/version")
@@ -637,26 +651,21 @@ def pull_ollama_model():
                         "Ollama service didn't start. Try running 'ollama serve' in Terminal, then click Retry.")
             return False
 
-    # Try preferred models in order, each with up to 2 attempts
-    models_to_try = ["gemma4", "gemma3"]
+    # Pull the selected variant, with up to 2 attempts
     max_attempts = 2
+    log(f"Pulling {model_to_pull}...")
+    for attempt in range(1, max_attempts + 1):
+        if _do_pull(ollama_path, model_to_pull, attempt, max_attempts):
+            return True
+        if attempt < max_attempts:
+            wait = attempt * 15
+            log(f"Waiting {wait}s before retry...")
+            update_step(STEP_MODEL, "running", f"Waiting {wait}s before retry...")
+            time.sleep(wait)
 
-    for model in models_to_try:
-        log(f"Trying to pull {model}...")
-        for attempt in range(1, max_attempts + 1):
-            if _do_pull(ollama_path, model, attempt, max_attempts):
-                return True
-            if attempt < max_attempts:
-                wait = attempt * 15
-                log(f"Waiting {wait}s before retry...")
-                update_step(STEP_MODEL, "running", f"Waiting {wait}s before retry...")
-                time.sleep(wait)
-        log(f"All attempts for {model} failed. Trying next model...")
-
-    # All models failed — give a clear, actionable message
     update_step(STEP_MODEL, "error",
-                "Model download failed after retries. Check your internet connection, then click Retry. "
-                "You can also skip this and set up Ollama manually: run 'ollama pull gemma3' in Terminal.")
+                f"Model download failed after retries. Check your internet connection, then click Retry. "
+                f"You can also set up Ollama manually: run 'ollama pull {model_to_pull}' in Terminal.")
     return False
 
 

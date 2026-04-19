@@ -256,32 +256,42 @@ def _call_ai(prompt, system_prompt=""):
 
     raise RuntimeError(
         "No AI backend available. Either:\n"
-        "  1. Start Ollama: ollama serve (then pull a model like gemma3:27b)\n"
+        "  1. Start Ollama: ollama serve (then pull a model like gemma4:e4b)\n"
         "  2. Set ANTHROPIC_API_KEY environment variable for Claude API"
     )
 
 
 def _get_ollama_model():
-    """Detect which Ollama model is available. Prefers fast models for responsiveness."""
+    """Get the Ollama model to use, honoring hardware-tier config."""
+    try:
+        import model_config
+        selected_variant = model_config.get_gemma4_variant()['variant']
+    except Exception:
+        selected_variant = 'gemma4:e4b'
+
     try:
         response = requests.get('http://localhost:11434/api/tags', timeout=5)
         if response.status_code == 200:
             models = response.json().get('models', [])
-            # Prefer smaller/faster models for snappy UX — quality is good enough
-            preferred = [
-                'gemma4:latest', 'gemma3:12b', 'llama3:8b', 'mistral',
-                'gemma4:31b', 'gemma3:27b', 'llama3:70b',
-            ]
             available = [m['name'] for m in models]
-            for pref in preferred:
+            # Try the hardware-selected Gemma 4 variant first
+            for avail in available:
+                if selected_variant in avail:
+                    return avail
+            # Fall back through other Gemma 4 variants, then other models
+            fallback = [
+                'gemma4:e4b', 'gemma4:latest', 'gemma4:e2b', 'gemma4:26b', 'gemma4:31b',
+                'llama3:8b', 'mistral', 'llama3:70b',
+            ]
+            for pref in fallback:
                 for avail in available:
                     if pref in avail:
                         return avail
             if available:
                 return available[0]
-    except:
+    except Exception:
         pass
-    return 'gemma4:latest'
+    return selected_variant
 
 
 def build_story(transcript, message, project_name="Interview", segment_vectors=None, profile_id=None):

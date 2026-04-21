@@ -103,6 +103,24 @@ class TestModeASelectsAsNewProject:
             assert "audio" in enables
             assert "video" in enables
 
+    def test_note_precedes_mc_source_per_dtd(self, output):
+        # FCPXML 1.13/1.14 DTD: <mc-clip> content model is
+        # (note?, timing-params, intrinsic-params-audio, mc-source*, ...)
+        # so <note> MUST come before <mc-source> children. FCP silently
+        # drops the mc-source overrides if the order is wrong, which
+        # reproduces as "audio imports but video is missing".
+        root = etree.fromstring(output)
+        for clip in root.findall(".//spine/mc-clip"):
+            children = list(clip)
+            note_idx = next((i for i, c in enumerate(children) if c.tag == "note"), None)
+            first_mcsource_idx = next(
+                (i for i, c in enumerate(children) if c.tag == "mc-source"), None
+            )
+            if note_idx is not None and first_mcsource_idx is not None:
+                assert note_idx < first_mcsource_idx, (
+                    "note must precede mc-source per FCPXML DTD"
+                )
+
     def test_round_trips_through_parser(self, output):
         # The proof that the writer emits well-formed, self-consistent FCPXML:
         # feed it back through the parser and confirm the structure.

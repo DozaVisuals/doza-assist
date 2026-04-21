@@ -119,6 +119,16 @@ def _build_select_mc_clip(
     mc.set("start", seconds_to_rational(container_in, fd))
     mc.set("duration", seconds_to_rational(duration, fd))
 
+    # FCPXML 1.13/1.14 DTD requires children in order:
+    #   (note?, timing-params, intrinsic-params-audio, mc-source*, anchor_items*, ...)
+    # <note> must come first; <mc-source> must come before anchor-items.
+    # Violating this order makes FCP silently drop the mc-source overrides
+    # and fall back to the multicam's default angle — which manifests as
+    # "audio but no video" on import.
+    if select.note:
+        note = etree.SubElement(mc, "note")
+        note.text = select.note
+
     # Replay the source timeline's mc-source enablement so both the video and
     # audio angles match what the editor had on the original timeline.
     source_sample = parsed.spine_segments[0] if parsed.spine_segments else None
@@ -132,10 +142,6 @@ def _build_select_mc_clip(
         sub = etree.SubElement(mc, "mc-source")
         sub.set("angleID", parsed.active_audio_angle_id)
         sub.set("srcEnable", "audio")
-
-    if select.note:
-        note = etree.SubElement(mc, "note")
-        note.text = select.note
 
     return mc
 
@@ -165,6 +171,7 @@ def _build_select_sync_asset_clip(
     ac.set("start", seconds_to_rational(container_in, fd))
     ac.set("duration", seconds_to_rational(duration, fd))
     ac.set("audioRole", "dialogue")
+    # Per FCPXML DTD, <note> must be the first child of asset-clip.
     if select.note:
         note = etree.SubElement(ac, "note")
         note.text = select.note

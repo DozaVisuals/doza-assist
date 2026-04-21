@@ -161,7 +161,9 @@ The detected audio path is shown at the top of the project view so you can verif
 
 ### Round-tripping selects back into FCP
 
-Once you've made selects in Doza Assist, the **Export** tab gives you two FCPXML output modes that preserve the original multicam/sync-clip container:
+> **For anything with multicam angles or sync-clips, always use the Export tab → "FCPXML Round-Trip" section.** The regular "Export FCPXML" button at the top of the Export tab writes a flat asset-clip timeline against the audio file only — it doesn't carry the multicam angle enablement, so selects would import into FCP with audio but no video. The **FCPXML Round-Trip** section is the one that preserves your original multicam / sync-clip container and re-attaches video in FCP.
+
+Once you've made selects in Doza Assist, the **FCPXML Round-Trip** section gives you two output modes that preserve the original multicam/sync-clip container:
 
 - **Selects as new project** — each select becomes an `<mc-clip>` (or an `<asset-clip>` for sync-clip sources) on a brand-new timeline, reusing the same `ref`, the same angle enablement, and the same `<resources>` block as the source FCPXML. Import it into FCP and your selects drop as a fresh project against the original multicam with video and synced audio intact.
 - **Markers on existing timeline** — a copy of the original timeline with `<marker>` elements injected at each select's in-point. Marker style encodes the select type (completion markers for strongest picks, standard markers for supporting, to-do markers for questions).
@@ -175,7 +177,7 @@ The original `<resources>` block — including the asset IDs and the base64 book
 3. **Verify the detected audio path** at the top of the project view — it should point at the audio source your multicam or sync-clip is using.
 4. **Transcription starts automatically** against that audio file. No proxies, no exports, no reconnection dance.
 5. **Make selects** the usual way: highlight moments in the transcript, run AI Analysis for story beats or social clips, etc.
-6. **Export**: on the project's Export tab, pick **"Export FCPXML — Selects as new project"** (or **"Markers on existing timeline"** if you'd rather keep your current edit and annotate it).
+6. **Export**: on the project's **Export tab**, scroll to the **"FCPXML Round-Trip"** section (this is the multicam / sync-clip aware path — don't use the plain "Export FCPXML" button at the top, which emits an audio-only timeline). Pick **"Selects as new project"** or **"Markers on existing timeline"**.
 7. **Back in FCP**: `File > Import > XML…` → pick the file Doza Assist just produced. The new project (or marker-annotated copy) appears in the event, pointing at the same multicam media that's already in your library. Selects drop against the existing multicam with video and synced audio intact.
 
 ---

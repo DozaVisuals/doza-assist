@@ -3,6 +3,7 @@ flask
 werkzeug
 requests
 certifi
+lxml
 
 # AI Chat & Analysis (uses Ollama locally — no package needed)
 # Install Ollama separately: https://ollama.com

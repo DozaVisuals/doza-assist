@@ -19,6 +19,10 @@ from werkzeug.utils import secure_filename
 
 from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
 from exporters.media_probe import get_video_resolution, get_video_framerate
+from doza_assist.fcpxml import (
+    parse_fcpxml, ParseError, Select, WriterError,
+    write_selects_as_new_project, write_markers_on_timeline,
+)
 import preferences as prefs
 
 
@@ -53,7 +57,7 @@ app.config['EXPORTS_DIR'] = os.path.join(os.path.dirname(__file__), 'exports')
 # Small file drag-and-drop limit (500MB)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 * 1024  # 32 GB — My Style imports multiple large masters
 
-ALLOWED_EXTENSIONS = {'wav', 'mp3', 'mp4', 'mov', 'aac', 'm4a', 'flac', 'aif', 'aiff', 'mxf'}
+ALLOWED_EXTENSIONS = {'wav', 'mp3', 'mp4', 'mov', 'aac', 'm4a', 'flac', 'aif', 'aiff', 'mxf', 'fcpxml'}
 
 os.makedirs(app.config['PROJECTS_DIR'], exist_ok=True)
 os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
@@ -61,6 +65,72 @@ os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _resolve_fcpxml_path(source_path: str) -> str:
+    """Given either a .fcpxml file or a .fcpxmld bundle directory, return the
+    path to the actual FCPXML document inside.
+
+    FCP exports the bundle form by default (a directory with Info.fcpxml inside);
+    editors who "Export XML" can get either form depending on FCP's dialog.
+    """
+    if os.path.isdir(source_path) and source_path.rstrip('/').endswith('.fcpxmld'):
+        inner = os.path.join(source_path, 'Info.fcpxml')
+        if not os.path.isfile(inner):
+            raise ValueError(f'FCPXML bundle missing Info.fcpxml: {source_path}')
+        return inner
+    return source_path
+
+
+def _is_fcpxml_input(path: str) -> bool:
+    lower = path.lower().rstrip('/')
+    return lower.endswith('.fcpxml') or lower.endswith('.fcpxmld')
+
+
+def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
+    """Parse an FCPXML, verify its audio source is on disk, and return a dict
+    of fields to merge into the project's meta.json.
+
+    Raises :class:`ValueError` with an editor-friendly message if the audio
+    source cannot be located — typically because the edit drive is not mounted.
+    """
+    inner_path = _resolve_fcpxml_path(fcpxml_path)
+
+    try:
+        parsed = parse_fcpxml(inner_path)
+    except ParseError as e:
+        raise ValueError(f'Could not read FCPXML: {e}') from e
+
+    audio_path = parsed.audio_file_path
+    if not os.path.exists(audio_path):
+        # Most common cause: the edit drive named in the FCPXML bookmark is not
+        # mounted. Surface that explicitly so the editor knows what to check.
+        vol = ''
+        if audio_path.startswith('/Volumes/'):
+            vol = audio_path.split('/', 3)[2] if len(audio_path.split('/', 3)) > 2 else ''
+        hint = f' Is the "{vol}" drive mounted?' if vol else ''
+        raise ValueError(
+            f'FCPXML parsed OK, but the audio file it references was not found: '
+            f'{audio_path}.{hint}'
+        )
+
+    # Stash the original FCPXML inside the project directory so the writer
+    # module (pass B) can round-trip selects back out without needing the user
+    # to still have the source file accessible.
+    os.makedirs(project_dir, exist_ok=True)
+    fcpxml_copy_name = os.path.basename(inner_path) or 'source.fcpxml'
+    fcpxml_copy_path = os.path.join(project_dir, fcpxml_copy_name)
+    if os.path.abspath(inner_path) != os.path.abspath(fcpxml_copy_path):
+        shutil.copy2(inner_path, fcpxml_copy_path)
+
+    return {
+        'audio_path': audio_path,
+        'fcpxml_source': {
+            **parsed.to_metadata_dict(),
+            'original_fcpxml_path': inner_path,
+            'stored_fcpxml_path': fcpxml_copy_path,
+        },
+    }
 
 
 def get_project(project_id):
@@ -289,10 +359,11 @@ def create_project():
     if not os.path.exists(source_path):
         return jsonify({'error': f'File not found: {source_path}'}), 400
 
-    if not os.path.isfile(source_path):
+    is_fcpxml = _is_fcpxml_input(source_path)
+    if not is_fcpxml and not os.path.isfile(source_path):
         return jsonify({'error': 'Path is not a file'}), 400
 
-    if not allowed_file(source_path):
+    if not is_fcpxml and not allowed_file(source_path):
         ext = source_path.rsplit('.', 1)[-1].lower() if '.' in source_path else 'unknown'
         return jsonify({'error': f'Unsupported file type: .{ext}'}), 400
 
@@ -303,14 +374,28 @@ def create_project():
     num_speakers = int(data.get('num_speakers', 2))
     language = data.get('language', 'en').strip()
 
-    if not project_name:
-        project_name = Path(source_path).stem.replace('_', ' ').replace('-', ' ')
-
-    file_size = os.path.getsize(source_path)
-
     project_id = str(uuid.uuid4())[:8]
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     os.makedirs(project_dir, exist_ok=True)
+
+    fcpxml_meta = None
+    if is_fcpxml:
+        try:
+            ingest = _ingest_fcpxml(source_path, project_dir)
+        except ValueError as e:
+            shutil.rmtree(project_dir, ignore_errors=True)
+            return jsonify({'error': str(e)}), 400
+        audio_path = ingest['audio_path']
+        fcpxml_meta = ingest['fcpxml_source']
+        if not project_name:
+            project_name = fcpxml_meta.get('project_name') or Path(source_path).stem
+        media_source_path = audio_path
+    else:
+        if not project_name:
+            project_name = Path(source_path).stem.replace('_', ' ').replace('-', ' ')
+        media_source_path = source_path
+
+    file_size = os.path.getsize(media_source_path)
 
     meta = {
         'id': project_id,
@@ -320,9 +405,9 @@ def create_project():
         'subject_name': subject_name,
         'num_speakers': num_speakers,
         'language': language,
-        'filename': os.path.basename(source_path),
-        'source_path': source_path,
-        'filepath': source_path,
+        'filename': os.path.basename(media_source_path),
+        'source_path': media_source_path,
+        'filepath': media_source_path,
         'file_size': file_size,
         'file_size_formatted': format_file_size(file_size),
         'created_at': datetime.now().isoformat(),
@@ -333,6 +418,8 @@ def create_project():
         'social_clips': [],
         'editing_platform': prefs.get_default_platform(),
     }
+    if fcpxml_meta is not None:
+        meta['fcpxml_source'] = fcpxml_meta
     save_project(project_id, meta)
 
     return jsonify({'project_id': project_id, 'status': 'created'})
@@ -365,7 +452,21 @@ def upload():
     filepath = os.path.join(project_dir, filename)
     file.save(filepath)
 
-    file_size = os.path.getsize(filepath)
+    fcpxml_meta = None
+    if filename.lower().endswith('.fcpxml'):
+        try:
+            ingest = _ingest_fcpxml(filepath, project_dir)
+        except ValueError as e:
+            shutil.rmtree(project_dir, ignore_errors=True)
+            return jsonify({'error': str(e)}), 400
+        media_path = ingest['audio_path']
+        fcpxml_meta = ingest['fcpxml_source']
+        media_filename = os.path.basename(media_path)
+    else:
+        media_path = filepath
+        media_filename = filename
+
+    file_size = os.path.getsize(media_path)
 
     meta = {
         'id': project_id,
@@ -374,9 +475,9 @@ def upload():
         'interviewer_name': interviewer_name,
         'subject_name': subject_name,
         'language': language,
-        'filename': filename,
-        'source_path': filepath,
-        'filepath': filepath,
+        'filename': media_filename,
+        'source_path': media_path,
+        'filepath': media_path,
         'file_size': file_size,
         'file_size_formatted': format_file_size(file_size),
         'created_at': datetime.now().isoformat(),
@@ -387,6 +488,8 @@ def upload():
         'social_clips': [],
         'editing_platform': prefs.get_default_platform(),
     }
+    if fcpxml_meta is not None:
+        meta['fcpxml_source'] = fcpxml_meta
     save_project(project_id, meta)
 
     return jsonify({'project_id': project_id, 'status': 'uploaded'})
@@ -412,11 +515,35 @@ def find_file():
     matches = []
     seen = set()
 
+    # FCP package bundles (e.g. .fcpxmld) are directories on disk, but the
+    # browser drag-drop reports them as a single "file" with size 0. Match
+    # on dirnames and skip size-checking when the target is a bundle.
+    is_bundle = filename.lower().endswith(('.fcpxmld', '.fcpbundle'))
+
     for root_dir in search_roots:
         try:
             for dirpath, dirnames, filenames in os.walk(root_dir, followlinks=True):
-                # Skip hidden directories and system dirs
-                dirnames[:] = [d for d in dirnames if not d.startswith('.') and d not in ('node_modules', '__pycache__', '.Trash')]
+                # Match bundle before we prune — a bundle is a dir that happens
+                # to match the target name.
+                if is_bundle and filename in dirnames:
+                    target_path = os.path.join(dirpath, filename)
+                    real_path = os.path.realpath(target_path)
+                    if real_path not in seen:
+                        seen.add(real_path)
+                        matches.append({
+                            'path': target_path,
+                            'size': 0,
+                            'size_formatted': 'bundle',
+                        })
+
+                # Prune: skip hidden/system dirs, and don't descend into any
+                # package bundle (otherwise we'd walk every .fcpxmld's internals).
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not d.startswith('.')
+                    and d not in ('node_modules', '__pycache__', '.Trash')
+                    and not d.lower().endswith(('.fcpxmld', '.fcpbundle'))
+                ]
 
                 if filename in filenames:
                     full_path = os.path.join(dirpath, filename)
@@ -1211,6 +1338,170 @@ def export_fcpxml(project_id):
         return jsonify({'error': f'Export failed: {e}'}), 500
 
     return _exporter_response(result, project, exporter)
+
+
+def _project_selects_for_fcpxml(project: dict, source: str):
+    """Build ``Select`` objects from a project, pulling from the requested bucket.
+
+    ``source`` is one of:
+      - ``'client_selects'``: editor-chosen labels (default)
+      - ``'social'``: AI-identified social clips
+      - ``'story'``: AI-identified story beats
+      - ``'soundbites'``: AI-identified strongest soundbites
+      - ``'all'``: everything combined, in chronological order
+    """
+    def _to_seconds(val):
+        if isinstance(val, (int, float)):
+            return float(val)
+        val = str(val or '').strip()
+        if ':' in val:
+            parts = val.split(':')
+            try:
+                if len(parts) == 3:
+                    return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                if len(parts) == 2:
+                    return float(parts[0]) * 60 + float(parts[1])
+            except ValueError:
+                pass
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _kind_for_color(color: str) -> str:
+        # Greenish/completion → strong; red → question; everything else → standard.
+        c = (color or '').lower()
+        if c in ('green', 'purple'):
+            return 'strong'
+        if c in ('red',):
+            return 'question'
+        return 'standard'
+
+    selects: list[Select] = []
+
+    if source in ('client_selects', 'all'):
+        for sec in project.get('labeled_sections') or []:
+            color_labels = project.get('color_labels', {})
+            label_name = color_labels.get(sec.get('color', ''), sec.get('color', '')) or 'Select'
+            selects.append(Select(
+                start_seconds=_to_seconds(sec.get('start', 0)),
+                end_seconds=_to_seconds(sec.get('end', 0)),
+                label=label_name,
+                note=(sec.get('text') or '')[:80],
+                kind=_kind_for_color(sec.get('color', '')),
+            ))
+
+    if source in ('social', 'all'):
+        analysis = project.get('analysis') or {}
+        for clip in analysis.get('social_clips') or []:
+            selects.append(Select(
+                start_seconds=_to_seconds(clip.get('start', 0)),
+                end_seconds=_to_seconds(clip.get('end', 0)),
+                label=clip.get('title') or 'Social Clip',
+                note=clip.get('platform', ''),
+                kind='strong',
+            ))
+
+    if source in ('story', 'all'):
+        analysis = project.get('analysis') or {}
+        for beat in analysis.get('story_beats') or []:
+            start = _to_seconds(beat.get('start', 0))
+            end = _to_seconds(beat.get('end', start))
+            if end <= start:
+                end = start + 15
+            selects.append(Select(
+                start_seconds=start, end_seconds=end,
+                label=beat.get('label') or 'Story Beat',
+                note=(beat.get('description') or '')[:120],
+                kind='strong',
+            ))
+
+    if source in ('soundbites', 'all'):
+        analysis = project.get('analysis') or {}
+        for sb in analysis.get('strongest_soundbites') or []:
+            start = _to_seconds(sb.get('start', 0))
+            end = _to_seconds(sb.get('end', start))
+            if end <= start:
+                end = start + 15
+            selects.append(Select(
+                start_seconds=start, end_seconds=end,
+                label=(sb.get('text') or 'Soundbite')[:60],
+                note=(sb.get('why') or '')[:120],
+                kind='strong',
+            ))
+
+    return selects
+
+
+@app.route('/project/<project_id>/export/fcpxml-multicam', methods=['POST'])
+def export_fcpxml_multicam(project_id):
+    """Round-trip selects back into FCP-importable FCPXML via the multicam writer.
+
+    Only available on projects that were ingested from an FCPXML (i.e. have a
+    ``fcpxml_source`` metadata block). Two modes:
+
+      - ``selects_project``: emits a new project whose spine is the selects
+        laid end-to-end as mc-clips (multicam) or asset-clips (sync-clip).
+      - ``markers_timeline``: emits the original timeline with markers injected
+        at each select's in-point.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    fcpxml_source = project.get('fcpxml_source')
+    if not fcpxml_source:
+        return jsonify({
+            'error': 'This project was not imported from an FCPXML. '
+                     'Use the standard FCPX export instead.'
+        }), 400
+
+    stored_path = fcpxml_source.get('stored_fcpxml_path')
+    if not stored_path or not os.path.isfile(stored_path):
+        return jsonify({
+            'error': 'The original FCPXML file is no longer available in the project directory.'
+        }), 400
+
+    data = request.json or {}
+    mode = data.get('mode', 'selects_project')
+    source = data.get('source', 'client_selects')
+
+    try:
+        parsed = parse_fcpxml(stored_path)
+    except ParseError as e:
+        return jsonify({'error': f'Could not re-read stored FCPXML: {e}'}), 500
+
+    selects = _project_selects_for_fcpxml(project, source)
+    if not selects:
+        return jsonify({
+            'error': f'No selects available for source={source!r}. '
+                     'Pick a source with content, or add clip labels first.'
+        }), 400
+
+    try:
+        if mode == 'markers_timeline':
+            output = write_markers_on_timeline(parsed, selects)
+            suffix = 'Doza Notes'
+        else:
+            output = write_selects_as_new_project(parsed, selects)
+            suffix = 'Doza Selects'
+    except WriterError as e:
+        return jsonify({'error': f'Export failed: {e}'}), 400
+
+    base = (project.get('name') or 'Project').strip().replace('/', '-')
+    filename = f"{base} - {suffix}.fcpxml"
+    exports_dir = app.config['EXPORTS_DIR']
+    os.makedirs(exports_dir, exist_ok=True)
+    out_path = os.path.join(exports_dir, filename)
+    with open(out_path, 'wb') as fh:
+        fh.write(output)
+
+    response = send_file(out_path, as_attachment=True, download_name=filename)
+    response.headers['X-Export-Format'] = 'FCPXML'
+    response.headers['X-Export-Platform'] = 'Final Cut Pro'
+    response.headers['X-Export-Extension'] = '.fcpxml'
+    response.headers['X-Export-Mode'] = mode
+    return response
 
 
 @app.route('/review/<project_id>')

@@ -100,6 +100,16 @@
                 Source file not found. It may have been moved or deleted. Transcription will not work until the file is accessible again.
             </div>
             {% endif %}
+            {% if project.fcpxml_source %}
+            <div style="margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: rgba(74, 158, 255, 0.08); border: 1px solid rgba(74, 158, 255, 0.25); border-radius: var(--radius); font-size: 0.8rem; color: var(--text-secondary);">
+                <strong style="color: var(--accent);">Imported from FCPXML</strong>
+                &middot; {{ project.fcpxml_source.container_type }}
+                {% if project.fcpxml_source.project_name %} &middot; &ldquo;{{ project.fcpxml_source.project_name }}&rdquo;{% endif %}
+                <br>
+                <span style="color: var(--text-muted);">Audio source:</span>
+                <code style="font-size: 0.75rem;">{{ project.fcpxml_source.audio_file_path }}</code>
+            </div>
+            {% endif %}
         </div>
         <div class="btn-group">
             {% if project.status == 'transcribed' %}
@@ -627,6 +637,33 @@
                         Export All to FCPX
                     </button>
                 </div>
+                {% if project.fcpxml_source %}
+                <div style="margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+                    <div class="card-title" style="margin-bottom: 0.5rem; font-size: 0.95rem;">FCPXML Round-Trip</div>
+                    <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.75rem;">
+                        These exports reuse the original multicam / sync-clip container so selects drop
+                        against the same angles with video and audio sync intact.
+                    </p>
+                    <div class="form-group" style="margin-bottom: 0.75rem;">
+                        <label class="form-label">Selects from</label>
+                        <select class="form-input" id="fcpxmlMulticamSource">
+                            <option value="client_selects" selected>Clip labels</option>
+                            <option value="social">AI social clips</option>
+                            <option value="story">AI story beats</option>
+                            <option value="soundbites">AI soundbites</option>
+                            <option value="all">Everything</option>
+                        </select>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        <button class="btn btn-primary" onclick="exportFCPXMLMulticam('selects_project')">
+                            Export FCPXML — Selects as new project
+                        </button>
+                        <button class="btn" onclick="exportFCPXMLMulticam('markers_timeline')">
+                            Export FCPXML — Markers on existing timeline
+                        </button>
+                    </div>
+                </div>
+                {% endif %}
             </div>
 
             <div class="card">
@@ -2564,6 +2601,48 @@ async function exportFCPXML(type) {
             showToast(`Exported ${fmt} for ${platName}${tail}`);
         } else {
             showToast('Export failed', true);
+        }
+    } catch (err) {
+        showToast('Export error: ' + err.message, true);
+    }
+}
+
+// ── FCPXML multicam round-trip (for projects imported from an FCPXML) ──
+async function exportFCPXMLMulticam(mode) {
+    // Persist the latest clip labels before export so "Clip labels" source is fresh.
+    if (typeof labelSections !== 'undefined' && labelSections.length) {
+        const sections = labelSections.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
+        });
+    }
+
+    const source = document.getElementById('fcpxmlMulticamSource')?.value || 'client_selects';
+
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode, source }),
+        });
+
+        if (res.ok) {
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = getFilenameFromResponse(res) || 'Doza Selects.fcpxml';
+            a.click();
+            URL.revokeObjectURL(url);
+            const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
+            showToast(`Exported FCPXML — ${modeLabel}`);
+        } else {
+            const err = await res.json().catch(() => ({}));
+            showToast(err.error || 'Export failed', true);
         }
     } catch (err) {
         showToast('Export error: ' + err.message, true);

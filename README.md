@@ -24,8 +24,6 @@ I'm a documentary filmmaker and I needed a way to find story beats and soundbite
 
 Everything runs locally. Your finished work never leaves your machine.
 
-![My Style dashboard — profile selector, ON pill, grounded prose summary, narrative patterns grid, thematic chips](docs/screenshots/my-style-dashboard.png)
-
 ### What it learns from your cuts
 
 - **Narrative patterns** — how long you typically hold on a speaker before cutting, how you open, how you resolve, where you place the emotional peak
@@ -102,12 +100,7 @@ The dashboard has a **Refine my style** box. Type the things the analyzer might 
 - Pull all suggested clips at once or build them into a story sequence
 - Follow-up questions maintain context
 
-![AI Chat answering a question about emotional arc with clickable timecodes, then building a full story sequence right in the conversation](docs/screenshots/chat-narrative.png)
-
 **Story Builder**
-
-![Story Builder — AI-assembled narrative sequence with numbered beats, editorial notes, and per-clip playback](docs/screenshots/story-builder.png)
-
 - Describe the story you want to tell and the AI assembles it from your footage
 - Works from Chat or the dedicated Story Builder tab
 - The story agent reads the full transcript, selects the strongest soundbites, and arranges them into a narrative arc — hook, rising action, emotional peak, resolution
@@ -169,16 +162,6 @@ Once you've made selects in Doza Assist, the **FCPXML Round-Trip** section gives
 - **Markers on existing timeline** — a copy of the original timeline with `<marker>` elements injected at each select's in-point. Marker style encodes the select type (completion markers for strongest picks, standard markers for supporting, to-do markers for questions).
 
 The original `<resources>` block — including the asset IDs and the base64 bookmark blobs that FCP uses to locate media on re-import — is preserved byte-for-byte in the output. FCP is strict about bookmark mismatches, so this is what makes the round-trip land cleanly.
-
-### 60-second demo
-
-1. **In FCP**: Select the project on your timeline → `File > Export XML…` → save the `.fcpxmld` bundle somewhere local.
-2. **Drop the bundle onto Doza Assist**. The dashboard drop zone accepts it directly.
-3. **Verify the detected audio path** at the top of the project view — it should point at the audio source your multicam or sync-clip is using.
-4. **Transcription starts automatically** against that audio file. No proxies, no exports, no reconnection dance.
-5. **Make selects** the usual way: highlight moments in the transcript, run AI Analysis for story beats or social clips, etc.
-6. **Export**: on the project's **Export tab**, scroll to the **"FCPXML Round-Trip"** section (this is the multicam / sync-clip aware path — don't use the plain "Export FCPXML" button at the top, which emits an audio-only timeline). Pick **"Selects as new project"** or **"Markers on existing timeline"**.
-7. **Back in FCP**: `File > Import > XML…` → pick the file Doza Assist just produced. The new project (or marker-annotated copy) appears in the event, pointing at the same multicam media that's already in your library. Selects drop against the existing multicam with video and synced audio intact.
 
 ---
 

@@ -1,0 +1,236 @@
+{# AI Model settings modal — shared between the dashboard and the project page.
+
+   Callers open it via ``openAIModelModal(optionalProjectId)``. When a project
+   ID is passed (or the page exposes ``window.PROJECT_ID``), per-variant
+   estimates reflect the full analysis time for THAT project. Without a
+   project context, the modal falls back to a generic per-call estimate.
+
+   On successful model switch, if the current page has an ``#analyzeBtn``
+   (the project view does; the dashboard doesn't), the modal triggers a
+   re-fetch of its estimate and repaints the badge live — no reload needed.
+#}
+
+<div id="aiModelModal" class="ai-modal-overlay" style="display:none;" onclick="if(event.target===this)closeAIModelModal()">
+    <div class="ai-modal">
+        <div class="ai-modal-header">
+            <div>
+                <h2 class="ai-modal-title">AI Analysis Model</h2>
+                <p class="ai-modal-subtitle">Choose the Gemma 4 variant that runs story analysis, social clips, and chat on this Mac.</p>
+            </div>
+            <button class="ai-modal-close" onclick="closeAIModelModal()" aria-label="Close">×</button>
+        </div>
+        <div class="ai-modal-hw" id="aiModalHardware">Detecting hardware…</div>
+        <div class="ai-modal-variants" id="aiModalVariants"></div>
+        <div class="ai-modal-footnote" id="aiModalFootnote">
+            Times are rough estimates on this machine. Bigger models give slightly better phrasing and tighter structured output; smaller models let you iterate faster.
+        </div>
+    </div>
+</div>
+
+<script>
+// Remembered across open/close so button-refresh after a model switch knows
+// which project's estimates to request and which buttons to repaint.
+let _aiModalProjectId = null;
+
+async function openAIModelModal(projectId) {
+    // Argument takes priority; otherwise fall back to any PROJECT_ID the host
+    // page already exposes (project.html defines it; dashboard.html doesn't).
+    if (projectId === undefined && typeof PROJECT_ID !== 'undefined') {
+        projectId = PROJECT_ID;
+    }
+    _aiModalProjectId = projectId || null;
+
+    const modal = document.getElementById('aiModelModal');
+    modal.style.display = 'flex';
+    document.getElementById('aiModalHardware').textContent = 'Detecting hardware…';
+    document.getElementById('aiModalVariants').innerHTML = '';
+    try {
+        const url = _aiModalProjectId
+            ? `/api/ai-model/status?project_id=${encodeURIComponent(_aiModalProjectId)}`
+            : '/api/ai-model/status';
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+        renderAIModelModal(data);
+    } catch (e) {
+        document.getElementById('aiModalHardware').textContent = 'Could not load model status: ' + e.message;
+    }
+}
+
+function closeAIModelModal() {
+    document.getElementById('aiModelModal').style.display = 'none';
+}
+
+function renderAIModelModal(data) {
+    const hw = data.hardware;
+    const projectNote = data.project_context
+        ? `Estimates are for a full analysis of <strong>${data.project_context.project_name}</strong> (${_formatMinutes(data.project_context.duration_seconds)}).`
+        : 'Estimates below are per call. Full analysis time scales with transcript length.';
+    document.getElementById('aiModalHardware').innerHTML =
+        `Your Mac: <strong>${hw.arch_label}</strong> · <strong>${hw.ram_gb} GB RAM</strong> · ${hw.disk_gb} GB free. ` + projectNote;
+
+    const container = document.getElementById('aiModalVariants');
+    container.innerHTML = '';
+    data.variants.forEach(v => {
+        const isCurrent = v.tier === data.current.tier;
+        const card = document.createElement('div');
+        card.className = 'ai-variant' + (isCurrent ? ' is-current' : '');
+
+        const primaryBtn = v.downloaded
+            ? `<button class="btn btn-sm ai-variant-btn" data-tier="${v.tier}" data-action="use" ${isCurrent ? 'disabled' : ''}>${isCurrent ? 'In use' : 'Use this'}</button>`
+            : `<button class="btn btn-sm ai-variant-btn" data-tier="${v.tier}" data-action="download">Download · ${v.download_size}</button>`;
+
+        const metaParts = [];
+        if (v.total_params) metaParts.push(v.total_params);
+        metaParts.push(v.download_size);
+        metaParts.push(v.downloaded ? 'Downloaded' : 'Not downloaded');
+
+        card.innerHTML = `
+            <div class="ai-variant-head">
+                <div class="ai-variant-name">
+                    ${v.display_name}
+                    ${isCurrent ? '<span class="ai-badge ai-badge-current">Active</span>' : ''}
+                </div>
+                ${primaryBtn}
+            </div>
+            <div class="ai-variant-meta">${metaParts.join(' · ')}</div>
+            <div class="ai-variant-time">${v.estimated_casual}</div>
+            <div class="ai-download-progress" data-tier="${v.tier}" style="display:none;">
+                <div class="ai-download-bar"><div class="ai-download-fill" style="width:0%;"></div></div>
+                <div class="ai-download-status">Starting…</div>
+            </div>
+        `;
+        container.appendChild(card);
+    });
+
+    container.querySelectorAll('.ai-variant-btn[data-tier]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const action = btn.dataset.action;
+            const tier = btn.dataset.tier;
+            if (action === 'download') {
+                await _downloadAIVariant(tier, btn);
+            } else {
+                await _useAIVariant(tier, btn);
+            }
+        });
+    });
+}
+
+function _formatMinutes(seconds) {
+    seconds = Math.round(seconds || 0);
+    if (seconds < 60) return `${seconds}s`;
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return `${h}h ${String(mm).padStart(2, '0')}m`;
+}
+
+async function _useAIVariant(tier, btn) {
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+        const resp = await fetch('/api/ai-model', {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tier}),
+        });
+        if (!resp.ok) throw new Error((await resp.json()).error || resp.status);
+        await openAIModelModal(_aiModalProjectId);
+    } catch (e) {
+        alert('Could not set model: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Use this';
+    }
+}
+
+function _formatBytes(n) {
+    if (!n || n <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(i >= 2 ? 1 : 0) + ' ' + units[i];
+}
+
+async function _downloadAIVariant(tier, btn) {
+    const card = btn.closest('.ai-variant');
+    const progress = card.querySelector('.ai-download-progress');
+    const bar = progress.querySelector('.ai-download-fill');
+    const statusEl = progress.querySelector('.ai-download-status');
+
+    btn.disabled = true;
+    btn.textContent = 'Downloading…';
+    progress.style.display = '';
+    statusEl.textContent = 'Connecting to Ollama…';
+
+    let succeeded = false;
+    let errorMsg = null;
+    try {
+        const resp = await fetch('/api/ai-model/pull', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tier}),
+        });
+        if (!resp.ok || !resp.body) {
+            throw new Error('HTTP ' + resp.status);
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf('\n')) !== -1) {
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+                if (!line) continue;
+                let evt;
+                try { evt = JSON.parse(line); } catch { continue; }
+                if (evt.status === 'success') {
+                    succeeded = true;
+                    statusEl.textContent = 'Download complete';
+                    bar.style.width = '100%';
+                } else if (evt.status === 'error') {
+                    errorMsg = evt.message || 'Unknown download error';
+                    statusEl.textContent = errorMsg;
+                } else if (evt.total && evt.completed != null) {
+                    const pct = Math.max(0, Math.min(100, (evt.completed / evt.total) * 100));
+                    bar.style.width = pct.toFixed(1) + '%';
+                    statusEl.textContent =
+                        `${evt.status || 'downloading'} · ${_formatBytes(evt.completed)} / ${_formatBytes(evt.total)} (${pct.toFixed(0)}%)`;
+                } else if (evt.status) {
+                    statusEl.textContent = evt.status;
+                }
+            }
+        }
+    } catch (e) {
+        errorMsg = e.message;
+    }
+
+    if (!succeeded) {
+        alert('Download failed: ' + (errorMsg || 'unknown error'));
+        btn.disabled = false;
+        btn.textContent = btn.dataset.originalText || 'Download';
+        progress.style.display = 'none';
+        return;
+    }
+
+    try {
+        await fetch('/api/ai-model', {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tier}),
+        });
+    } catch (e) {
+        // Non-fatal — the user can click "Use this" after refresh.
+    }
+    await openAIModelModal(_aiModalProjectId);
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeAIModelModal();
+});
+</script>

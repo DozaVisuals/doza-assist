@@ -19,21 +19,37 @@
         <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>
     </div>
     <div class="btn-group">
-        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
-            <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-            <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
-        </button>
         {% if not is_shared %}
         <a href="/" class="btn btn-sm">Projects</a>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="copyShareLink()" title="Copy shareable link">Share</button>
-        {% if project.transcript %}
-        <button class="btn btn-sm" onclick="showRetranscribe()" title="Re-transcribe with different language">Retranscribe</button>
-        {% endif %}
-        <button class="btn btn-sm" onclick="deleteProject()" style="color: var(--red);">Delete</button>
+        <div class="gear-menu-wrap" id="gearMenuWrap">
+            <button class="gear-btn" onclick="toggleGearMenu(event)" title="Settings" aria-label="Settings">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+            <div class="gear-menu" id="gearMenu">
+                <button class="gear-menu-item" onclick="closeGearMenu(); openAIModelModal();">AI Model</button>
+                {% if project.transcript %}
+                <button class="gear-menu-item" onclick="closeGearMenu(); showRetranscribe();">Retranscribe</button>
+                {% endif %}
+                <button class="gear-menu-item" onclick="closeGearMenu(); toggleTheme();">
+                    <span class="gear-theme-label-dark">Light theme</span>
+                    <span class="gear-theme-label-light">Dark theme</span>
+                </button>
+                <div class="gear-menu-divider"></div>
+                <button class="gear-menu-item gear-menu-danger" onclick="closeGearMenu(); deleteProject();">Delete project</button>
+            </div>
+        </div>
+        {% else %}
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+            <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        </button>
         {% endif %}
     </div>
 </header>
+
+{% if not is_shared %}{% include '_ai_model_modal.html' %}{% endif %}
 
 <div class="container-wide">
     <div class="page-title-area">
@@ -114,7 +130,7 @@
         <div class="btn-group">
             {% if project.status == 'transcribed' %}
             <button class="btn btn-purple" id="analyzeBtn" onclick="runAnalysis()">
-                AI Analysis
+                <span class="btn-label">AI Analysis</span>
             </button>
             {% endif %}
         </div>
@@ -483,13 +499,15 @@
             <div class="empty-state" id="preAnalysis">
                 <h3>Run AI Analysis</h3>
                 <p>Analyze the transcript for story structure and social media clip opportunities.</p>
-                <button class="btn btn-purple" style="margin-top: 1rem;" onclick="runAnalysis()">
-                    Run Analysis
+                <button class="btn btn-purple" style="margin-top: 1rem;" id="runAnalysisBtn" onclick="runAnalysis()">
+                    <span class="btn-label">Run Analysis</span>
                 </button>
+                <p class="analysis-subtitle">This may take several minutes</p>
             </div>
             <div id="analysisProgress" style="display:none; padding: 2rem; text-align:center;">
                 <div class="spinner" style="margin: 0 auto 1rem;"></div>
-                <p>Analyzing transcript with AI...</p>
+                <p>Analyzing transcript with AI<span id="analysisProgressTail">…</span></p>
+                <p class="analysis-subtitle">This may take several minutes</p>
             </div>
         </div>
         {% endif %}
@@ -528,6 +546,7 @@
                         <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                         </button>
+                        <button class="btn btn-sm chat-clear-btn" id="chatClearBtn" onclick="clearChat()" title="Clear this project's chat history" style="display:none;">Clear</button>
                     </div>
                 </div>
     </div>
@@ -600,6 +619,31 @@
                     Exports create a timeline in Final Cut Pro with each clip pre-cut at the in/out points.
                     The source media is referenced — just import the .fcpxml and your selects are ready to edit.
                 </p>
+                {% set social_count = (project.analysis.social_clips if project.analysis else [])|length %}
+                {% set story_count  = (project.analysis.story_beats if project.analysis else [])|length %}
+                {% set label_count  = (project.labeled_sections or [])|length %}
+                {% set transcript_count = (project.transcript.segments if project.transcript else [])|length %}
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label class="form-label">Select what to include</label>
+                    <div class="export-categories" id="exportCategories">
+                        <label class="export-category">
+                            <input type="checkbox" id="exportCatLabels" checked>
+                            <span>My Clips (<span id="exportCatLabelsCount">{{ label_count }}</span>)</span>
+                        </label>
+                        <label class="export-category">
+                            <input type="checkbox" id="exportCatSocial">
+                            <span>AI Social Clips (<span id="exportCatSocialCount">{{ social_count }}</span>)</span>
+                        </label>
+                        <label class="export-category">
+                            <input type="checkbox" id="exportCatStory">
+                            <span>AI Story Beats (<span id="exportCatStoryCount">{{ story_count }}</span>)</span>
+                        </label>
+                        <label class="export-category">
+                            <input type="checkbox" id="exportCatTranscript">
+                            <span>Full Transcript (<span id="exportCatTranscriptCount">{{ transcript_count }}</span>)</span>
+                        </label>
+                    </div>
+                </div>
                 <div class="form-row" style="margin-bottom: 1rem;">
                     <div class="form-group">
                         <label class="form-label">Framerate</label>
@@ -623,22 +667,11 @@
                         </select>
                     </div>
                 </div>
-                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                    <button class="btn btn-primary" onclick="exportFCPXML('labels')" data-export-label-key="clips">
-                        Export Clips to FCPX
-                    </button>
-                    <button class="btn btn-green" onclick="exportFCPXML('social')" data-export-label-key="social">
-                        Export AI Social Clips to FCPX
-                    </button>
-                    <button class="btn btn-purple" onclick="exportFCPXML('story')" data-export-label-key="story">
-                        Export AI Story Beats to FCPX
-                    </button>
-                    <button class="btn" onclick="exportFCPXML('all')" data-export-label-key="all">
-                        Export All to FCPX
-                    </button>
-                </div>
+                <button class="btn btn-primary" id="exportFCPXMLBtn" onclick="exportFCPXML()" data-export-label-key="unified" style="width:100%;">
+                    Export to FCPX
+                </button>
                 {% if project.fcpxml_source %}
-                <div style="margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+                <div class="export-roundtrip">
                     <div class="card-title" style="margin-bottom: 0.5rem; font-size: 0.95rem;">FCPXML Round-Trip</div>
                     <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.75rem;">
                         These exports reuse the original multicam / sync-clip container so selects drop
@@ -668,10 +701,16 @@
 
             <div class="card">
                 <div class="card-title" style="margin-bottom: 1rem;">Other Formats</div>
-                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                    <button class="btn" onclick="downloadJSON()">Download Transcript JSON</button>
-                    <button class="btn" onclick="downloadSRT()">Download SRT Subtitles</button>
-                    <button class="btn" onclick="downloadTXT()">Download Plain Text</button>
+                <div class="form-row" style="align-items: end;">
+                    <div class="form-group" style="flex: 1;">
+                        <label class="form-label">Format</label>
+                        <select class="form-input" id="otherFormat">
+                            <option value="json" selected>JSON</option>
+                            <option value="srt">SRT</option>
+                            <option value="txt">Plain Text</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" onclick="downloadOtherFormat()">Download</button>
                 </div>
             </div>
         </div>
@@ -715,10 +754,7 @@ const FORMAT_NAMES   = { fcp: 'FCPXML',        premiere: 'Premiere XML', resolve
 const SHORT_NAMES    = { fcp: 'FCPX',          premiere: 'PrPro',        resolve: 'Resolve' };
 
 const EXPORT_LABELS = {
-    'clips':      p => `Export Clips to ${PLATFORM_NAMES[p]}`,
-    'social':     p => `Export AI Social Clips to ${PLATFORM_NAMES[p]}`,
-    'story':      p => `Export AI Story Beats to ${PLATFORM_NAMES[p]}`,
-    'all':        p => `Export All to ${PLATFORM_NAMES[p]}`,
+    'unified':    p => `Export to ${SHORT_NAMES[p]}`,
     'story-seq':  p => `Export to ${PLATFORM_NAMES[p]}`,
     'section':    p => SHORT_NAMES[p],
     'card-title': p => `${FORMAT_NAMES[p]} Export`,
@@ -730,11 +766,7 @@ const EXPORT_LABELS = {
     },
 };
 
-const TOOLTIPS = {
-    'story':      { fcp: 'Export Story Beats to Final Cut Pro', premiere: 'Export Story Beats to Premiere Pro', resolve: 'Export Story Beats to DaVinci Resolve' },
-    'social':     { fcp: 'Export Social Clips to Final Cut Pro', premiere: 'Export Social Clips to Premiere Pro', resolve: 'Export Social Clips to DaVinci Resolve' },
-    'soundbites': { fcp: 'Export Soundbites to Final Cut Pro',   premiere: 'Export Soundbites to Premiere Pro',   resolve: 'Export Soundbites to DaVinci Resolve' },
-};
+const TOOLTIPS = {};
 
 function refreshExportButtonLabels() {
     document.querySelectorAll('[data-export-label-key]').forEach(el => {
@@ -778,7 +810,16 @@ async function setEditingPlatform(platform) {
     }
 }
 
-document.addEventListener('DOMContentLoaded', refreshExportButtonLabels);
+document.addEventListener('DOMContentLoaded', () => {
+    refreshExportButtonLabels();
+    // Wire up export-category checkboxes so the single "Export to FCPX"
+    // button disables when nothing is checked.
+    ['exportCatLabels', 'exportCatSocial', 'exportCatStory', 'exportCatTranscript'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', _refreshExportButtonState);
+    });
+    if (typeof _refreshExportButtonState === 'function') _refreshExportButtonState();
+});
 
 // For multi-project, chat/labels use combined ID string
 const COMBINED_ID = PROJECT_IDS.join(',');
@@ -824,7 +865,20 @@ document.addEventListener('click', (e) => {
     if (sel && !sel.contains(e.target)) {
         document.getElementById('projectDropdown').classList.remove('open');
     }
+    const gear = document.getElementById('gearMenuWrap');
+    if (gear && !gear.contains(e.target)) {
+        const menu = document.getElementById('gearMenu');
+        if (menu) menu.classList.remove('open');
+    }
 });
+
+function toggleGearMenu(e) {
+    if (e) e.stopPropagation();
+    document.getElementById('gearMenu').classList.toggle('open');
+}
+function closeGearMenu() {
+    document.getElementById('gearMenu').classList.remove('open');
+}
 
 // ── Tab Switching ──
 function switchTab(tab) {
@@ -1480,6 +1534,9 @@ function renderAllHighlights() {
 function updateSelectCount() {
     const el = document.getElementById('selectCount');
     if (el) el.textContent = labelSections.length;
+    const exportCountEl = document.getElementById('exportCatLabelsCount');
+    if (exportCountEl) exportCountEl.textContent = labelSections.length;
+    _refreshExportButtonState();
 }
 
 function clearAllLabels() {
@@ -1511,7 +1568,63 @@ function saveLabels() {
 }
 
 // ── Chat ──
-let chatHistory = [];
+// Preloaded from meta.json on render so the conversation survives reloads
+// and app restarts. Falls back to empty array on new projects. Multi-project
+// chats don't persist (see app.py chat() docstring).
+let chatHistory = {{ (project.chat_history or []) | tojson }};
+
+function replayChatHistory() {
+    if (!chatHistory || chatHistory.length === 0) return;
+    const welcome = document.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+    for (const turn of chatHistory) {
+        if (turn.role === 'assistant') {
+            // Re-inflate [CLIP:] markers into interactive cards so reloaded
+            // replies keep their buttons.
+            const rendered = renderChatReply(turn.content);
+            appendChatMessage('assistant', rendered, true);
+        } else {
+            appendChatMessage('user', turn.content || '');
+        }
+    }
+}
+
+async function clearChat() {
+    if (chatHistory.length > 0 && !confirm('Clear this project\'s chat history? This cannot be undone.')) {
+        return;
+    }
+    try {
+        await fetch(`/project/${COMBINED_ID}/chat`, { method: 'DELETE' });
+    } catch (err) {
+        console.warn('Clear chat request failed:', err);
+    }
+    chatHistory = [];
+    const container = document.getElementById('chatMessages');
+    container.innerHTML = `
+        <div class="chat-welcome">
+            <h3>Narrative Intelligence</h3>
+            <p>Explore what this interview is really about. Tell it what kind of story you're making and let it find the moments that matter.</p>
+            <div class="chat-suggestions">
+                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the emotional arc of this interview?</button>
+                <button class="chat-suggestion" onclick="sendSuggestion(this)">Where does the energy shift?</button>
+                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the most revealing thing they said about themselves?</button>
+                <button class="chat-suggestion" onclick="sendSuggestion(this)">I'm making a film about resilience — what supports that?</button>
+            </div>
+        </div>
+    `;
+    updateChatClearBtn();
+}
+
+function updateChatClearBtn() {
+    const btn = document.getElementById('chatClearBtn');
+    if (!btn) return;
+    btn.style.display = (chatHistory && chatHistory.length > 0) ? '' : 'none';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    replayChatHistory();
+    updateChatClearBtn();
+});
 
 function autoGrowChatInput(el) {
     el.style.height = 'auto';
@@ -1546,6 +1659,7 @@ async function sendChat() {
     // Add user message
     appendChatMessage('user', message);
     chatHistory.push({ role: 'user', content: message });
+    updateChatClearBtn();
 
     // Detect story-building intent
     if (isStoryRequest(message)) {
@@ -1555,6 +1669,23 @@ async function sendChat() {
 
     // Show typing indicator
     const typing = appendChatMessage('assistant', '<span class="chat-typing"><span></span><span></span><span></span></span>', true);
+
+    // Long interviews (> 60 min) trigger Layer 2 chunked search on the
+    // backend — 25-45s of parallel per-chunk Ollama calls. Without a
+    // progress hint the user sees three dots for 30+ seconds and assumes
+    // something hung. Swap the dots for an explicit status message after
+    // 2s; short interviews answer faster than that so the hint never shows.
+    let longInterview = false;
+    try {
+        const segs = (PROJECT && PROJECT.transcript && PROJECT.transcript.segments) || [];
+        if (segs.length > 0) {
+            const lastEnd = segs[segs.length - 1].end || 0;
+            longInterview = lastEnd > 60 * 60;
+        }
+    } catch (e) { /* fall through — worst case no progress hint */ }
+    const progressTimer = longInterview ? setTimeout(() => {
+        typing.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> Searching across the full interview…';
+    }, 2000) : null;
 
     // Disable input
     const btn = document.getElementById('chatSendBtn');
@@ -1568,6 +1699,7 @@ async function sendChat() {
             body: JSON.stringify({ message, history: chatHistory, profile_id: window.sessionProfileId || null }),
         });
         const data = await res.json();
+        if (progressTimer) clearTimeout(progressTimer);
         typing.remove();
 
         if (data.reply) {
@@ -1589,6 +1721,7 @@ async function sendChat() {
             appendChatMessage('assistant', 'Error: ' + (data.error || 'No response'));
         }
     } catch (err) {
+        if (progressTimer) clearTimeout(progressTimer);
         typing.remove();
         appendChatMessage('assistant', 'Error: ' + err.message);
     }
@@ -1892,11 +2025,24 @@ function renderChatReply(text) {
         return parseFloat(tc) || 0;
     }
 
-    // Convert clip markers to buttons — handle both seconds and timecode formats
-    // Match: [CLIP: start=... end=... title="..."] with either literal or escaped quotes
+    // Convert clip markers to buttons — handle both seconds and timecode formats.
+    // Canonical form is [CLIP: start=HH:MM:SS end=HH:MM:SS title="..." note="..."]
+    // (note is optional). The server-side normalizer in
+    // ai_analysis._clean_chat_response rewrites the variants small local models
+    // emit (single quotes, curly quotes, alt keys, missing colon) into this
+    // shape, so the regex only needs to be lenient about the title quote style
+    // — double, single, escaped, or curly — because escapeHtml() runs before
+    // this regex and turns a real `"` into `&quot;`.
+    //
+    // Cards are stashed with placeholders BEFORE the free-text timecode regex
+    // runs, then restored afterward. Without the stash pass the timecodes
+    // INSIDE card HTML (e.g. "14:46" in the .cc-tc span) get wrapped by the
+    // free-text regex, producing stray "+" buttons on each timestamp and
+    // the old "00:14:46" HH:MM:SS format instead of the compact "14:46".
+    const CARD_STASH = [];
     html = html.replace(
-        /\[CLIP:\s*start=([^\s]+)\s+end=([^\s]+)\s+title=(?:&quot;|")(.*?)(?:&quot;|")\]/gi,
-        (match, startRaw, endRaw, title) => {
+        /\[CLIP:?\s*start=([^\s]+)\s+end=([^\s]+)\s+title=(?:&quot;|"|'|&#39;|\u201c|\u2018)(.*?)(?:&quot;|"|'|&#39;|\u201d|\u2019)(?:\s+note=(?:&quot;|"|'|&#39;|\u201c|\u2018)(.*?)(?:&quot;|"|'|&#39;|\u201d|\u2019))?\s*\]/gi,
+        (match, startRaw, endRaw, title, note) => {
             const start = tcToSec(startRaw);
             const end = tcToSec(endRaw);
             const safeTitle = title.replace(/['"]/g, '').replace(/[^\w\s.,!?()-]/g, '').trim();
@@ -1908,13 +2054,20 @@ function renderChatReply(text) {
                 return ws >= start && ws < end;
             });
             const excerpt = clipWords.map(w => w.textContent).join('').trim();
+            const noteHtml = note && note.trim()
+                ? `<div class="cc-note">${note.trim()}</div>`
+                : '';
 
-            return `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtTime(start)}–${fmtTime(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Text <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div><div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
-
+            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtTime(start)}–${fmtTime(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
+            const idx = CARD_STASH.length;
+            CARD_STASH.push(cardHtml);
+            return `\uE000CCCARD${idx}\uE001`;
         }
     );
 
-    // Convert timecodes in text to clickable links with + button (HH:MM:SS or MM:SS)
+    // Convert FREE-TEXT timecodes (outside cards) to clickable links with + button.
+    // Cards are already stashed above, so this only touches narration text
+    // and doesn't mangle timecodes rendered inside the card HTML.
     html = html.replace(
         /(\d{1,2}:\d{2}:\d{2})/g,
         (match) => {
@@ -1923,6 +2076,9 @@ function renderChatReply(text) {
             return `<span class="chat-tc-group"><span class="chat-tc-link" onclick="jumpTo(${secs})">${match}</span><button class="chat-tc-add" onclick="addClipFromChat(${secs},${end},'Clip at ${match}',this)" title="Add as clip">+</button></span>`;
         }
     );
+
+    // Restore stashed card HTML.
+    html = html.replace(/\uE000CCCARD(\d+)\uE001/g, (m, idx) => CARD_STASH[+idx]);
 
     // Strip blank lines immediately around clip cards so they pack tightly
     html = html.replace(/\n*(<div class="cc-card"[\s\S]*?<\/div><\/div>)\n*/g, '$1');
@@ -2511,11 +2667,18 @@ async function startTranscription() {
 // ── AI Analysis ──
 async function runAnalysis() {
     const btn = document.getElementById('analyzeBtn');
+    const runBtn = document.getElementById('runAnalysisBtn');
+
     if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<span class="spinner"></span> Analyzing...';
+        btn.classList.add('is-analyzing');
+        const label = btn.querySelector('.btn-label');
+        if (label) label.textContent = 'Analyzing…';
     }
-    
+    if (runBtn) {
+        runBtn.disabled = true;
+    }
+
     if (document.getElementById('preAnalysis')) {
         document.getElementById('preAnalysis').style.display = 'none';
     }
@@ -2547,7 +2710,13 @@ function resetAnalyzeBtn() {
     const btn = document.getElementById('analyzeBtn');
     if (btn) {
         btn.disabled = false;
-        btn.innerHTML = 'AI Analysis';
+        btn.classList.remove('is-analyzing');
+        const label = btn.querySelector('.btn-label');
+        if (label) label.textContent = 'AI Analysis';
+    }
+    const runBtn = document.getElementById('runAnalysisBtn');
+    if (runBtn) {
+        runBtn.disabled = false;
     }
     if (document.getElementById('preAnalysis')) {
         document.getElementById('preAnalysis').style.display = 'block';
@@ -2558,14 +2727,45 @@ function resetAnalyzeBtn() {
 }
 
 // ── Export FCPXML ──
-async function exportFCPXML(type) {
-    // If exporting clips, save labels first
-    if (type === 'labels' || type === 'all') {
-        if (labelSections.length === 0 && type === 'labels') {
-            showToast('No clips to export. Highlight some in the transcript first.');
+// Read the current checkbox state from the Export tab. Returns the list of
+// category keys the backend understands: labels | social | story | transcript.
+function _collectExportCategories() {
+    const map = {
+        exportCatLabels: 'labels',
+        exportCatSocial: 'social',
+        exportCatStory: 'story',
+        exportCatTranscript: 'transcript',
+    };
+    const picked = [];
+    for (const [id, key] of Object.entries(map)) {
+        const el = document.getElementById(id);
+        if (el && el.checked) picked.push(key);
+    }
+    return picked;
+}
+
+// Keep the single "Export to FCPX" button in sync with checkbox state —
+// disabled when nothing is selected, enabled otherwise. Call after any
+// checkbox change AND when clip counts update (labelSections mutates often).
+function _refreshExportButtonState() {
+    const btn = document.getElementById('exportFCPXMLBtn');
+    if (!btn) return;
+    btn.disabled = _collectExportCategories().length === 0;
+}
+
+async function exportFCPXML() {
+    const types = _collectExportCategories();
+    if (types.length === 0) {
+        showToast('Check at least one category to export.');
+        return;
+    }
+
+    if (types.includes('labels')) {
+        if (labelSections.length === 0) {
+            showToast('No clips to export. Uncheck "My Clips" or highlight some in the transcript first.');
             return;
         }
-        // Ensure labels are saved before export
+        // Persist labels before export so the server sees the latest state.
         const sections = labelSections.map(s => ({
             start: s.start, end: s.end, color: s.color, text: s.text
         }));
@@ -2582,7 +2782,7 @@ async function exportFCPXML(type) {
         const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type, framerate, mode: document.getElementById('exportMode')?.value || 'cuts', total_clips: labelSections.length }),
+            body: JSON.stringify({ types, framerate, mode: document.getElementById('exportMode')?.value || 'cuts', total_clips: labelSections.length }),
         });
 
         if (res.ok) {
@@ -2650,6 +2850,13 @@ async function exportFCPXMLMulticam(mode) {
 }
 
 // ── Download Formats ──
+function downloadOtherFormat() {
+    const fmt = document.getElementById('otherFormat')?.value || 'json';
+    if (fmt === 'srt') downloadSRT();
+    else if (fmt === 'txt') downloadTXT();
+    else downloadJSON();
+}
+
 function downloadJSON() {
     if (!PROJECT.transcript) return;
     const blob = new Blob([JSON.stringify(PROJECT.transcript, null, 2)], { type: 'application/json' });
@@ -3154,9 +3361,20 @@ async function buildStory() {
     document.getElementById('storyActions').style.display = 'none';
     document.getElementById('storyLoading').style.display = 'block';
 
+    // Long-running hint — after ~90s the spinner is indistinguishable from
+    // a stuck UI, so swap in a reassuring message. Cleared on resolution.
+    const loadingP = document.querySelector('#storyLoading p');
+    const originalLoadingText = loadingP ? loadingP.textContent : null;
+    const hintTimer = loadingP ? setTimeout(() => {
+        loadingP.textContent = 'Still building — the AI is picking clips from a long transcript. This can take a few minutes on larger models.';
+    }, 90000) : null;
+
     try {
         const storyAbort = new AbortController();
-        const storyTimeout = setTimeout(() => storyAbort.abort(), 600000); // 10 min timeout
+        // 20 min — backs off the prior 10-min cap that was aborting legitimate
+        // builds on 8B Gemma against long (100+ min) interviews. Backend has
+        // its own 15-min ollama timeout below that.
+        const storyTimeout = setTimeout(() => storyAbort.abort(), 1200000);
         const res = await fetch(`/project/${PROJECT_ID}/story/build`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -3164,6 +3382,8 @@ async function buildStory() {
             signal: storyAbort.signal,
         });
         clearTimeout(storyTimeout);
+        if (hintTimer) clearTimeout(hintTimer);
+        if (loadingP && originalLoadingText) loadingP.textContent = originalLoadingText;
         const data = await res.json();
         document.getElementById('storyLoading').style.display = 'none';
 
@@ -3179,9 +3399,11 @@ async function buildStory() {
             if (storyBuilds.length === 0) document.getElementById('storyEmpty').style.display = '';
         }
     } catch (err) {
+        if (hintTimer) clearTimeout(hintTimer);
+        if (loadingP && originalLoadingText) loadingP.textContent = originalLoadingText;
         document.getElementById('storyLoading').style.display = 'none';
         const msg = err.name === 'AbortError'
-            ? 'Request timed out. The AI may be processing a long transcript — try again.'
+            ? 'Request timed out after 20 minutes. The transcript may be too long for the current Gemma variant — try a smaller model (AI Model settings) or a shorter prompt.'
             : err.message;
         showToast('Error: ' + msg, true);
         if (storyBuilds.length === 0) document.getElementById('storyEmpty').style.display = '';

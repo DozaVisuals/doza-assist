@@ -285,7 +285,10 @@ echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
 for _ in {1..60}; do
     if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
         log "Server ready after setup. PID: $SERVER_PID"
-        /usr/bin/open "${FLASK_URL}"
+        # Don't call `open` here — the setup UI already has a browser tab
+        # and navigates itself to FLASK_URL as soon as it sees the server
+        # is reachable. A launcher-side `open` races with that navigation
+        # and ends up spawning a second, duplicate tab.
         exit 0
     fi
     sleep 0.5

@@ -23,6 +23,9 @@ from doza_assist.fcpxml import (
     parse_fcpxml, ParseError, Select, WriterError,
     write_selects_as_new_project, write_markers_on_timeline,
 )
+from doza_assist.fcpxml.timeline_audio import (
+    render_timeline_audio, TimelineAudioError,
+)
 import preferences as prefs
 
 
@@ -88,10 +91,16 @@ def _is_fcpxml_input(path: str) -> bool:
 
 
 def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
-    """Parse an FCPXML, verify its audio source is on disk, and return a dict
-    of fields to merge into the project's meta.json.
+    """Parse an FCPXML, verify its audio source(s) are on disk, and return a
+    dict of fields to merge into the project's meta.json.
 
-    Raises :class:`ValueError` with an editor-friendly message if the audio
+    For single-source spines, the project's ``audio_path`` is the referenced
+    source file directly. For multi-source spines (mixed mc-clip/sync-clip or
+    multiple distinct audio assets), a composed timeline WAV is rendered into
+    the project directory and used as ``audio_path`` — transcription then
+    produces timestamps aligned to the sequence timeline.
+
+    Raises :class:`ValueError` with an editor-friendly message if any audio
     source cannot be located — typically because the edit drive is not mounted.
     """
     inner_path = _resolve_fcpxml_path(fcpxml_path)
@@ -101,27 +110,52 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     except ParseError as e:
         raise ValueError(f'Could not read FCPXML: {e}') from e
 
-    audio_path = parsed.audio_file_path
-    if not os.path.exists(audio_path):
-        # Most common cause: the edit drive named in the FCPXML bookmark is not
-        # mounted. Surface that explicitly so the editor knows what to check.
-        vol = ''
-        if audio_path.startswith('/Volumes/'):
-            vol = audio_path.split('/', 3)[2] if len(audio_path.split('/', 3)) > 2 else ''
-        hint = f' Is the "{vol}" drive mounted?' if vol else ''
-        raise ValueError(
-            f'FCPXML parsed OK, but the audio file it references was not found: '
-            f'{audio_path}.{hint}'
-        )
+    # Check every referenced source, not just the representative one — a
+    # multi-source spine can reference several drives.
+    unique_paths = []
+    seen = set()
+    for seg in parsed.spine_segments:
+        if seg.audio_source is None:
+            continue
+        p = seg.audio_source.path
+        if p in seen:
+            continue
+        seen.add(p)
+        unique_paths.append(p)
+
+    for p in unique_paths:
+        if not os.path.exists(p):
+            vol = ''
+            if p.startswith('/Volumes/'):
+                parts = p.split('/', 3)
+                vol = parts[2] if len(parts) > 2 else ''
+            hint = f' Is the "{vol}" drive mounted?' if vol else ''
+            raise ValueError(
+                f'FCPXML parsed OK, but the audio file it references was not found: '
+                f'{p}.{hint}'
+            )
 
     # Stash the original FCPXML inside the project directory so the writer
-    # module (pass B) can round-trip selects back out without needing the user
-    # to still have the source file accessible.
+    # module can round-trip selects back out without needing the user to still
+    # have the source file accessible.
     os.makedirs(project_dir, exist_ok=True)
     fcpxml_copy_name = os.path.basename(inner_path) or 'source.fcpxml'
     fcpxml_copy_path = os.path.join(project_dir, fcpxml_copy_name)
     if os.path.abspath(inner_path) != os.path.abspath(fcpxml_copy_path):
         shutil.copy2(inner_path, fcpxml_copy_path)
+
+    if parsed.is_multi_source:
+        # Compose the sequence's dialogue into one timeline-space WAV so the
+        # transcription pipeline (which takes one audio file) produces
+        # timeline-relative timestamps end-to-end.
+        timeline_wav = os.path.join(project_dir, 'timeline_audio.wav')
+        try:
+            render_timeline_audio(parsed, timeline_wav)
+        except TimelineAudioError as e:
+            raise ValueError(f'Could not render timeline audio from FCPXML: {e}') from e
+        audio_path = timeline_wav
+    else:
+        audio_path = parsed.audio_file_path
 
     return {
         'audio_path': audio_path,
@@ -129,6 +163,7 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
             **parsed.to_metadata_dict(),
             'original_fcpxml_path': inner_path,
             'stored_fcpxml_path': fcpxml_copy_path,
+            'timeline_audio_rendered': parsed.is_multi_source,
         },
     }
 
@@ -342,6 +377,132 @@ def set_default_platform_pref():
         return jsonify({'error': f'Invalid platform: {platform!r}'}), 400
     prefs.set_default_platform(platform)
     return jsonify({'platform': prefs.get_default_platform()})
+
+
+@app.route('/api/ai-model/status', methods=['GET'])
+def ai_model_status():
+    """Return the current Gemma 4 variant plus per-variant speed/quality estimates.
+
+    When a ``?project_id=...`` is supplied, the ``estimated_casual`` on each
+    variant reflects the full analysis time for that project's transcript
+    (chunked per 15-minute slice × 2 AI calls per chunk). Without a project
+    context the estimate falls back to a single representative call, with the
+    casual phrase ending in "per call" rather than "for this project" so the
+    user isn't misled.
+    """
+    import model_config
+    hw = model_config.detect_hardware_tier()
+    current = model_config.get_gemma4_variant()
+
+    project_id = (request.args.get('project_id') or '').strip()
+    project_context = None
+    total_seconds = None
+    if project_id:
+        p = get_project(project_id)
+        if p and p.get('transcript'):
+            segments = p['transcript'].get('segments', [])
+            if segments:
+                total_seconds = segments[-1].get('end', 0)
+                project_context = {
+                    'project_id': project_id,
+                    'project_name': p.get('name', 'Project'),
+                    'duration_seconds': total_seconds,
+                }
+
+    variants = model_config.get_variant_estimates(hw, total_seconds=total_seconds)
+    return jsonify({
+        'hardware': {
+            'ram_gb': round(hw['ram_gb'], 1),
+            'arch': hw['arch'],
+            'arch_label': 'Apple Silicon' if hw['arch'].startswith('arm') else 'Intel',
+            'disk_gb': round(hw['disk_gb'], 1),
+        },
+        'current': {
+            'tier': current['tier'],
+            'variant': current['variant'],
+            'source': current['source'],
+            'reason': current.get('reason', ''),
+        },
+        'variants': variants,
+        'project_context': project_context,
+    })
+
+
+@app.route('/api/ai-model', methods=['PATCH'])
+def set_ai_model():
+    """Switch the active Gemma 4 variant. Persists to model_config.json.
+
+    Body: ``{"tier": "small" | "medium" | "large" | "xlarge"}``.
+    """
+    import model_config
+    data = request.json or {}
+    tier = data.get('tier', '').strip().lower()
+    try:
+        info = model_config.set_variant_manually(tier)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify({
+        'tier': info['tier'],
+        'variant': info['variant'],
+        'description': info['description'],
+        'source': info['source'],
+    })
+
+
+@app.route('/api/ai-model/pull', methods=['POST'])
+def pull_ai_model():
+    """Stream Ollama's download progress for a Gemma variant as NDJSON.
+
+    Body: ``{"tier": "small" | "medium" | "large" | "xlarge"}``.
+
+    Each line is a JSON object matching Ollama's ``/api/pull`` event schema,
+    roughly:
+
+    - ``{"status": "pulling manifest"}``
+    - ``{"status": "downloading", "digest": "...", "total": N, "completed": M}``
+    - ``{"status": "success"}``
+    - ``{"status": "error", "message": "..."}``   (our synthetic terminus on failure)
+
+    The frontend consumes these to render a progress bar in the AI Model
+    settings modal and refresh the "downloaded" badges when the pull ends.
+    """
+    import model_config
+    import requests as _requests
+    data = request.json or {}
+    tier = data.get('tier', '').strip().lower()
+    if tier not in model_config.VALID_TIERS:
+        return jsonify({'error': f'invalid tier {tier!r}'}), 400
+    variant, _size, _desc = model_config.GEMMA4_VARIANTS[tier]
+
+    def _err_event(message: str) -> bytes:
+        return (json.dumps({'status': 'error', 'message': message}) + '\n').encode('utf-8')
+
+    def generate():
+        try:
+            upstream = _requests.post(
+                'http://localhost:11434/api/pull',
+                json={'name': variant, 'stream': True},
+                stream=True,
+                timeout=None,
+            )
+            if upstream.status_code != 200:
+                yield _err_event(f'Ollama pull failed with HTTP {upstream.status_code}')
+                return
+            # iter_lines(decode_unicode=True) only actually decodes when the
+            # upstream response exposes an encoding. Ollama's /api/pull
+            # doesn't, so we stay in bytes-land end-to-end — mixing str and
+            # bytes chunks in a Flask streaming response crashes with
+            # "can't concat str to bytes".
+            for line in upstream.iter_lines():
+                if line:
+                    yield line + b'\n'
+        except _requests.exceptions.ConnectionError:
+            yield _err_event('Could not reach Ollama at localhost:11434. Is the Ollama app running?')
+        except Exception as e:
+            yield _err_event(str(e))
+
+    from flask import Response
+    return Response(generate(), mimetype='application/x-ndjson')
 
 
 @app.route('/create', methods=['POST'])
@@ -773,6 +934,13 @@ def project_view(project_id):
         if p:
             exists, _ = check_source_file(p)
             p['source_exists'] = exists
+            # Canonicalize analysis field names on read so projects analyzed by
+            # a small model (which may have emitted `beat_description`,
+            # `start_time`, etc.) still render correctly without re-running
+            # analysis. Idempotent — safe for already-normalized data.
+            if p.get('analysis'):
+                from ai_analysis import normalize_analysis
+                p['analysis'] = normalize_analysis(p['analysis'])
             projects.append(p)
 
     if not projects:
@@ -1178,9 +1346,36 @@ def chat(project_id):
                 profile_id=profile_id,
             )
 
+        # Persist chat history on single-project chats. Multi-project sessions
+        # (comma-separated IDs) stay ephemeral — ownership is ambiguous and we
+        # don't want to fork writes across multiple meta.json files.
+        if len(projects_for_chat) == 1:
+            p = projects_for_chat[0]
+            pid = p['id']
+            stored = get_project(pid) or p
+            history_log = list(stored.get('chat_history') or [])
+            now_iso = datetime.now().isoformat()
+            history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
+            history_log.append({'role': 'assistant', 'content': reply, 'ts': now_iso})
+            stored['chat_history'] = history_log
+            save_project(pid, stored)
+
         return jsonify({'reply': reply})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/project/<project_id>/chat', methods=['DELETE'])
+def clear_chat(project_id):
+    """Wipe persisted chat history for a project. Multi-project IDs clear only
+    the first project (others weren't persisted in the first place)."""
+    pid = project_id.split(',', 1)[0].strip()
+    project = get_project(pid)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    project['chat_history'] = []
+    save_project(pid, project)
+    return jsonify({'status': 'cleared'})
 
 
 @app.route('/project/<project_id>/selects', methods=['POST'])
@@ -1226,7 +1421,24 @@ def export_fcpxml(project_id):
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
-    export_type = request.json.get('type', 'selects')  # 'selects', 'social', 'all'
+    # Accept either a list (``types``) or the legacy single ``type`` string.
+    # The new checkbox UI sends ``types=['labels', 'social', ...]``; callers
+    # that still send ``type='all'`` expand to the full set so existing tests
+    # and any third-party integrations keep working.
+    body = request.json or {}
+    raw_types = body.get('types')
+    if isinstance(raw_types, list) and raw_types:
+        requested = {str(t).strip().lower() for t in raw_types if t}
+    else:
+        single = str(body.get('type', 'labels')).strip().lower()
+        if single == 'all':
+            requested = {'labels', 'social', 'story', 'soundbites'}
+        elif single in ('selects', 'clips'):
+            requested = {'labels'}
+        else:
+            requested = {single}
+
+    export_type = 'all' if requested >= {'labels', 'social', 'story'} else next(iter(requested), 'labels')
     markers = []
 
     def _to_seconds(val):
@@ -1245,7 +1457,7 @@ def export_fcpxml(project_id):
         except (ValueError, TypeError):
             return 0.0
 
-    if export_type in ('social', 'all'):
+    if 'social' in requested:
         analysis = project.get('analysis', {})
         for clip in analysis.get('social_clips', []):
             markers.append({
@@ -1257,7 +1469,7 @@ def export_fcpxml(project_id):
                 'category': 'Social Clip',
             })
 
-    if export_type in ('story', 'all'):
+    if 'story' in requested:
         analysis = project.get('analysis', {})
         for beat in analysis.get('story_beats', []):
             start = _to_seconds(beat.get('start', 0))
@@ -1273,7 +1485,7 @@ def export_fcpxml(project_id):
                 'category': 'Story Beat',
             })
 
-    if export_type in ('soundbites', 'all'):
+    if 'soundbites' in requested:
         analysis = project.get('analysis', {})
         for sb in analysis.get('strongest_soundbites', []):
             start = _to_seconds(sb.get('start', 0))
@@ -1289,7 +1501,7 @@ def export_fcpxml(project_id):
                 'category': 'Soundbite',
             })
 
-    if export_type in ('labels', 'all'):
+    if 'labels' in requested:
         color_labels = project.get('color_labels', {})
         for sec in project.get('labeled_sections', []):
             label_name = color_labels.get(sec.get('color', ''), sec.get('color', ''))
@@ -1300,6 +1512,28 @@ def export_fcpxml(project_id):
                 'note': sec.get('text', '')[:80],
                 'color': sec.get('color', 'blue'),
                 'category': label_name,
+            })
+
+    if 'transcript' in requested:
+        # Emit one marker per transcript segment so editors can navigate the
+        # full interview in the NLE timeline. Kept separate from the other
+        # categories because it can be noisy — user opts in explicitly.
+        transcript = project.get('transcript') or {}
+        for seg in transcript.get('segments', []):
+            start = _to_seconds(seg.get('start', 0))
+            end = _to_seconds(seg.get('end', start))
+            if end <= start:
+                end = start + 1
+            speaker = (seg.get('speaker') or '').strip()
+            text = (seg.get('text') or '').strip()
+            label = speaker or 'Transcript'
+            markers.append({
+                'start': start,
+                'end': end,
+                'text': label,
+                'note': text[:160],
+                'color': 'blue',
+                'category': 'Transcript',
             })
 
     # Source file + media metadata
@@ -1537,6 +1771,11 @@ def shared_view(project_id):
     source_exists, _ = check_source_file(project)
     project['source_exists'] = source_exists
 
+    # Normalize small-model field drift so the read-only view renders correctly.
+    if project.get('analysis'):
+        from ai_analysis import normalize_analysis
+        project['analysis'] = normalize_analysis(project['analysis'])
+
     all_projects = [p for p in list_projects() if p.get('transcript')]
     project_ids = [project_id]
     projects_meta = [{'id': project['id'], 'name': project.get('name', 'Untitled'), 'color': 'accent'}]
@@ -1719,9 +1958,31 @@ def story_build(project_id):
         return jsonify({'error': 'No story description provided'}), 400
 
     try:
-        from ai_analysis import build_story
-        # Prefer pre-generated segment vectors — much more consistent across runs.
+        from ai_analysis import build_story, generate_segment_vectors
+        # Prefer pre-generated segment vectors — much more consistent across
+        # runs and the only reliable path on long (>15 min) interviews.
         segment_vectors = load_segment_vectors(project_id)
+        project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+        if not segment_vectors:
+            # Backfill the vector menu on demand. This used to be generated by
+            # /analyze but the pre-chunking version silently failed on long
+            # transcripts, leaving /story/build to fall through to a
+            # raw-transcript path that also can't cope with 100-minute inputs.
+            # Rather than push the user back to re-run analysis, regenerate
+            # here and persist for reuse.
+            try:
+                segment_vectors = generate_segment_vectors(
+                    project['transcript'],
+                    project_name=project.get('name', 'Interview'),
+                )
+                if segment_vectors:
+                    os.makedirs(project_dir, exist_ok=True)
+                    vectors_path = os.path.join(project_dir, 'segment_vectors.json')
+                    with open(vectors_path, 'w') as f:
+                        json.dump(segment_vectors, f, indent=2)
+            except Exception as ve:
+                print(f"[story build] on-demand vector generation failed: {ve}")
+
         result = build_story(
             project['transcript'],
             message=message,
@@ -1730,8 +1991,21 @@ def story_build(project_id):
             profile_id=profile_id,
         )
 
+        clips = result.get('clips') or []
+        if not clips:
+            # The model returned a valid shell (or nothing) but zero clips —
+            # signalling it couldn't commit to a narrative from what it saw.
+            # Don't persist the empty build; surface a friendly error instead.
+            return jsonify({
+                'error': (
+                    "The AI returned 0 clips for this prompt. This usually means "
+                    "the transcript is long enough to overwhelm the model. Try a "
+                    "shorter, more specific prompt, or switch to a larger Gemma "
+                    "variant in AI Model settings."
+                ),
+            }), 500
+
         # Save the build to story_builds.json
-        project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
         builds_path = os.path.join(project_dir, 'story_builds.json')
 
         builds = []
@@ -1746,7 +2020,7 @@ def story_build(project_id):
             'story_title': result.get('story_title', 'Untitled'),
             'target_duration': result.get('target_duration', ''),
             'reasoning': result.get('reasoning', ''),
-            'clips': result.get('clips', []),
+            'clips': clips,
         }
         builds.append(build_entry)
 
@@ -2550,4 +2824,5 @@ def my_style_import():
 
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5050, debug=True)
+    port = int(os.environ.get('PORT', '5050'))
+    app.run(host='127.0.0.1', port=port, debug=True)

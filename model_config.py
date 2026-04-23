@@ -13,13 +13,21 @@ import time
 SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/DozaAssist")
 MODEL_CONFIG_FILE = os.path.join(SUPPORT_DIR, "model_config.json")
 
-# Real Gemma 4 tags from ollama.com/library/gemma4 (verified 2026-04-19)
+# Real Gemma 4 tags from ollama.com/library/gemma4 (verified 2026-04-22
+# against /api/tags + /api/show on the user's machine).
+#
+# The ``e2b`` and ``e4b`` tags are "effective" / mixture-of-experts variants:
+# they run at the speed of a 2B / 4B model (only that many parameters active
+# per forward pass) but carry the full 5.1B / 8B weights in memory. So the
+# download size is the total parameter count; the speed table below reflects
+# the smaller effective count.
+#
 # tier -> (ollama_tag, download_size, description)
 GEMMA4_VARIANTS = {
-    'small':  ('gemma4:e2b', '7.2 GB', 'Gemma 4 2B (smallest, fastest)'),
-    'medium': ('gemma4:e4b', '9.6 GB', 'Gemma 4 4B (balanced)'),
-    'large':  ('gemma4:26b', '18 GB',  'Gemma 4 27B (high quality)'),
-    'xlarge': ('gemma4:31b', '20 GB',  'Gemma 4 32B (highest quality)'),
+    'small':  ('gemma4:e2b', '8.4 GB',  'Gemma 4 2B · 5B total (smallest, fastest)'),
+    'medium': ('gemma4:e4b', '11.5 GB', 'Gemma 4 4B · 8B total (balanced)'),
+    'large':  ('gemma4:26b', '18 GB',   'Gemma 4 27B (high quality)'),
+    'xlarge': ('gemma4:31b', '19 GB',   'Gemma 4 32B (highest quality)'),
 }
 
 VALID_TIERS = ('small', 'medium', 'large', 'xlarge')
@@ -221,3 +229,296 @@ def format_selection_message(info):
         "  To override, run with:  --model-tier small|medium|large|xlarge",
         f"  Or edit config at:      {MODEL_CONFIG_FILE}",
     ])
+
+
+# ---------------------------------------------------------------------------
+# Hardware-aware speed / quality estimates
+# ---------------------------------------------------------------------------
+#
+# Decode tokens/sec estimates across common hardware/variant combinations.
+# Calibrated against observed wall-clock on a 96 GB Apple Silicon machine
+# running gemma4:e2b / gemma4:e4b / gemma4:31b — previous values were roughly
+# 2× too optimistic because they didn't account for prefill on long inputs
+# or the MoE "effective vs total" parameter distinction. Adjusted downward
+# to match reality; the generic "per call" chip number now matches what
+# users actually observe on a cold chat turn.
+#
+# Keys: (arch_class, ram_class) → {tier: tokens_per_second}.
+#   arch_class: 'apple_silicon' (arm64) or 'x86_64'
+#   ram_class:  'low'   (<16 GB)
+#               'mid'   (16–32 GB)
+#               'high'  (32–64 GB)
+#               'xhigh' (64 GB+)
+_SPEED_TABLE = {
+    ('apple_silicon', 'low'):   {'small': 25, 'medium': 12, 'large': 2.5, 'xlarge': 1.5},
+    ('apple_silicon', 'mid'):   {'small': 35, 'medium': 20, 'large': 5.0, 'xlarge': 3.0},
+    ('apple_silicon', 'high'):  {'small': 50, 'medium': 30, 'large': 8.0, 'xlarge': 5.5},
+    ('apple_silicon', 'xhigh'): {'small': 60, 'medium': 35, 'large': 10.0, 'xlarge': 7.0},
+    ('x86_64', 'low'):          {'small': 7,  'medium': 3,  'large': 0.6, 'xlarge': 0.3},
+    ('x86_64', 'mid'):          {'small': 12, 'medium': 5,  'large': 1.2, 'xlarge': 0.7},
+    ('x86_64', 'high'):         {'small': 18, 'medium': 8,  'large': 1.8, 'xlarge': 1.1},
+    ('x86_64', 'xhigh'):        {'small': 22, 'medium': 10, 'large': 2.2, 'xlarge': 1.5},
+}
+
+# Typical output length for a full transcript-analysis pass — used for the
+# "estimated wait" copy. The analyze_transcript / segment-vectors prompts emit
+# structured JSON in roughly this range; conservative upper bound.
+_REPRESENTATIVE_OUTPUT_TOKENS = 2000
+
+def _classify_ram(ram_gb: float) -> str:
+    if ram_gb < 16:
+        return 'low'
+    if ram_gb < 32:
+        return 'mid'
+    if ram_gb < 64:
+        return 'high'
+    return 'xhigh'
+
+
+def _classify_arch(arch: str) -> str:
+    return 'apple_silicon' if arch.lower().startswith('arm') else 'x86_64'
+
+
+def _ollama_installed_models() -> set:
+    """Return the set of Ollama model tags already pulled on this machine.
+
+    Queries the Ollama HTTP API at ``localhost:11434/api/tags`` first — that
+    works anywhere the Ollama app/daemon is running, including inside a
+    ``.app`` bundle launched from Finder where ``/usr/local/bin`` isn't on
+    PATH and ``shutil.which('ollama')`` can't find the binary. Falls back to
+    shelling out for dev setups where the API isn't reachable but the CLI is.
+
+    Empty set on both failing — the caller treats "unknown" and "not
+    installed" the same (show "needs download"), which is the safe default.
+    """
+    # Primary: HTTP API. Stdlib-only per the module-level contract.
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            'http://localhost:11434/api/tags',
+            headers={'Accept': 'application/json'},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        tags = set()
+        for m in data.get('models') or []:
+            name = m.get('name') or m.get('model')
+            if name:
+                tags.add(name)
+        if tags:
+            return tags
+    except Exception:
+        # Silent fall-through — the CLI path below might still work.
+        pass
+
+    # Fallback: shell out to `ollama list`.
+    try:
+        result = subprocess.run(
+            ['ollama', 'list'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return set()
+        tags = set()
+        for line in result.stdout.splitlines()[1:]:  # skip header row
+            parts = line.split()
+            if parts:
+                tags.add(parts[0])
+        return tags
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return set()
+
+
+def _split_model_description(description: str) -> tuple:
+    """Split a GEMMA4_VARIANTS description into ``(display_name, total_params)``.
+
+    Examples:
+      "Gemma 4 4B · 8B total (balanced)" → ("Gemma 4 4B (balanced)", "8B total")
+      "Gemma 4 27B (high quality)"       → ("Gemma 4 27B (high quality)", "27B total")
+
+    For dense models (no " · " segment) we pull the params from the name tail
+    so the metadata row still has a total-params value — keeping the card
+    layout consistent across variants.
+    """
+    import re
+    paren_match = re.search(r'\s*\(([^)]+)\)\s*$', description)
+    paren = paren_match.group(1) if paren_match else ''
+    prefix = description[:paren_match.start()].strip() if paren_match else description.strip()
+
+    if '·' in prefix:
+        parts = [p.strip() for p in prefix.split('·')]
+        name = parts[0]
+        total = parts[1] if len(parts) > 1 else ''
+    else:
+        name = prefix
+        size_match = re.search(r'(\d+\.?\d*\s*B)\s*$', name)
+        total = f"{size_match.group(1).replace(' ', '')} total" if size_match else ''
+
+    display_name = f"{name} ({paren})" if paren else name
+    return display_name, total
+
+
+def _format_casual_estimate(seconds: float, has_project_context: bool) -> str:
+    """Cast a seconds estimate into a loosely-rounded, lowercase phrase.
+
+    Scaled examples:
+      - 30 s  → "About 30 sec ..."
+      - 75 s  → "About 1 min ..."
+      - 4 min → "About 3–5 min ..."
+      - 27 min → "About 25–30 min ..."
+      - 75 min → "About 60–90 min ..."
+
+    The range is intentionally wide: hardware speed tables are approximate and
+    the model's output length varies, so a single precise number misleads more
+    than a loose range helps.
+    """
+    tail = 'for this project' if has_project_context else 'per call'
+    if not seconds or seconds <= 0:
+        return f"Time varies {tail}"
+
+    if seconds < 45:
+        s = max(5, int(round(seconds / 5.0) * 5))
+        return f"About {s} sec {tail}"
+
+    minutes = seconds / 60.0
+    if minutes < 1.25:
+        return f"About 1 min {tail}"
+    if minutes < 2.25:
+        return f"About 2 min {tail}"
+    if minutes < 10:
+        low = max(1, int(round(minutes - 1)))
+        high = int(round(minutes + 1))
+        if high <= low:
+            high = low + 1
+        return f"About {low}–{high} min {tail}"
+
+    def _r5(x):
+        return max(5, int(round(x / 5.0)) * 5)
+
+    low = _r5(minutes * 0.85)
+    high = _r5(minutes * 1.15)
+    if high <= low:
+        high = low + 5
+    return f"About {low}–{high} min {tail}"
+
+
+_ANALYSIS_CHUNK_MINUTES = 15  # keep in sync with ai_analysis.CHUNK_MINUTES
+_OVERHEAD_SECONDS_PER_CALL = 3  # mirror ai_analysis._ESTIMATE_OVERHEAD_SECONDS_PER_CALL
+
+# Each analysis call prefills ~10k input tokens (a 15-minute transcript
+# slice + the analysis system prompt). On Apple Silicon prefill runs roughly
+# 4–6× the decode token rate; we use 5× as the typical ratio. Ignoring this
+# used to make long-interview estimates half what they should be.
+_ANALYSIS_INPUT_TOKENS_PER_CALL = 10000
+_PREFILL_VS_DECODE_RATIO = 5.0
+
+
+def _chunks_for_duration(duration_seconds: float) -> int:
+    """How many AI-analysis chunks a transcript of this length produces.
+
+    Mirrors the chunking threshold in ``ai_analysis._iter_transcript_chunks``:
+    short transcripts get one pass, anything 15 min or longer is split into
+    ceil(duration / 15min) slices.
+    """
+    if not duration_seconds or duration_seconds <= 0:
+        return 0
+    chunk_seconds = _ANALYSIS_CHUNK_MINUTES * 60
+    if duration_seconds < chunk_seconds:
+        return 1
+    import math
+    return max(1, math.ceil(duration_seconds / chunk_seconds))
+
+
+def _full_analysis_seconds(duration_seconds: float, tokens_per_sec: float) -> int:
+    """Wall-clock estimate for a full ``analyze_transcript`` run.
+
+    Accounts for both prefill (reading the ~10k input tokens per chunk at
+    ~5× decode speed) and decode (emitting ~2k output tokens at the variant's
+    decode rate). Previous iteration only counted decode, which made the
+    estimate half the real wall-clock on long interviews.
+    """
+    chunks = _chunks_for_duration(duration_seconds)
+    if chunks <= 0 or tokens_per_sec <= 0:
+        return 0
+    calls = chunks * 2  # story + social per chunk (UI default)
+    prefill_per_call = _ANALYSIS_INPUT_TOKENS_PER_CALL / (tokens_per_sec * _PREFILL_VS_DECODE_RATIO)
+    decode_per_call = _REPRESENTATIVE_OUTPUT_TOKENS / float(tokens_per_sec)
+    per_call = prefill_per_call + decode_per_call + _OVERHEAD_SECONDS_PER_CALL
+    return int(round(calls * per_call))
+
+
+def get_variant_estimates(hw_info: dict = None, total_seconds: float = None) -> list:
+    """Return per-variant info for the AI Model picker UI.
+
+    Each entry has:
+      - tier, variant, description (raw from GEMMA4_VARIANTS)
+      - display_name ("Gemma 4 4B (balanced)") — for the card title
+      - total_params ("8B total") — for the metadata row
+      - download_size ("11.5 GB") — for the metadata row and download button
+      - tokens_per_sec (float) — internal, not displayed
+      - estimated_casual ("About 25–30 min for this project") — for the card
+      - downloaded (bool)
+
+    If ``total_seconds`` is supplied (typically a real project's transcript
+    duration), ``estimated_casual`` reflects a full analysis run for that
+    length — chunks × 2 AI calls × per-call time. Without it, we fall back to
+    a single representative call and the suffix changes to "per call".
+    """
+    if hw_info is None:
+        hw_info = detect_hardware_tier()
+
+    arch_class = _classify_arch(hw_info.get('arch', ''))
+    ram_class = _classify_ram(float(hw_info.get('ram_gb', 8.0)))
+    speeds = _SPEED_TABLE.get((arch_class, ram_class), _SPEED_TABLE[('apple_silicon', 'mid')])
+
+    installed = _ollama_installed_models()
+    has_project_context = total_seconds is not None and total_seconds > 0
+
+    rows = []
+    for tier in VALID_TIERS:
+        variant, download_size, description = GEMMA4_VARIANTS[tier]
+        tps = speeds.get(tier, 0.0)
+        is_downloaded = variant in installed
+        if tier == 'medium' and 'gemma4:latest' in installed:
+            is_downloaded = True
+
+        if has_project_context:
+            estimated_seconds = _full_analysis_seconds(total_seconds, tps)
+        elif tps > 0:
+            estimated_seconds = _REPRESENTATIVE_OUTPUT_TOKENS / tps
+        else:
+            estimated_seconds = 0
+
+        display_name, total_params = _split_model_description(description)
+
+        rows.append({
+            'tier': tier,
+            'variant': variant,
+            'description': description,
+            'display_name': display_name,
+            'total_params': total_params,
+            'download_size': download_size,
+            'tokens_per_sec': tps,
+            'estimated_casual': _format_casual_estimate(estimated_seconds, has_project_context),
+            'downloaded': is_downloaded,
+        })
+    return rows
+
+
+def set_variant_manually(tier: str) -> dict:
+    """Save a user-chosen tier to config (auto_selected=False) and return info.
+
+    Raises ValueError for an invalid tier so the HTTP handler can surface a
+    400 without special-casing.
+    """
+    if tier not in GEMMA4_VARIANTS:
+        raise ValueError(f"invalid tier {tier!r}; must be one of {list(VALID_TIERS)}")
+    variant, download_size, description = GEMMA4_VARIANTS[tier]
+    save_model_config(tier, variant, auto_selected=False)
+    return {
+        'tier': tier,
+        'variant': variant,
+        'download_size': download_size,
+        'description': description,
+        'source': 'manual',
+    }

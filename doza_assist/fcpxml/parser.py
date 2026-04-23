@@ -2,15 +2,24 @@
 
 Walks an FCPXML document to:
 
-- Identify the spine's container elements (``<mc-clip>`` or ``<sync-clip>``).
-- For multicam: resolve the container's ``ref`` to a ``<media>/<multicam>``,
-  find the angle enabled for audio via ``<mc-source srcEnable="audio">``, and
-  resolve that angle's asset to a filesystem path.
-- For sync-clip: find the inline ``<asset-clip audioRole="dialogue">`` and
-  resolve it to a filesystem path.
+- Identify every ``<mc-clip>`` or ``<sync-clip>`` element on the main spine.
+- For each segment, resolve the audio source:
+  - mc-clip → find the angle enabled by ``<mc-source srcEnable="audio">`` on
+    that segment, locate it in the referenced ``<media>/<multicam>``, and
+    resolve the angle's ``<asset-clip>`` to a filesystem path.
+  - sync-clip → find the inline ``<asset-clip audioRole="dialogue">`` (either a
+    direct child of ``<sync-clip>`` or nested in ``<sync-clip>/<spine>``) and
+    resolve it to a filesystem path. Also read
+    ``<sync-source>/<audio-role-source@active>`` to detect FCP-muted segments.
 - Preserve the verbatim ``<resources>`` block and full source bytes so the
-  writer module (pass B) can round-trip Mode A output without regenerating
-  asset IDs or bookmark data.
+  writer module can round-trip output without regenerating asset IDs or
+  bookmark data.
+
+Mixed-container spines (e.g. two interview multicams plus pick-up sync-clips
+on the same storyline) are supported: each segment carries its own resolved
+:class:`SegmentAudioSource`. Callers that only need a single representative
+audio path still find it at :attr:`ParsedFCPXML.audio_file_path` (the first
+non-muted segment).
 
 Supports FCPXML 1.13 and 1.14.
 """
@@ -37,6 +46,36 @@ class ParseError(ValueError):
 
 
 @dataclass
+class SegmentAudioSource:
+    """Audio resolved for a single spine segment.
+
+    ``is_muted`` reflects FCP's own play state for the segment — currently
+    derived from ``<audio-role-source@active>`` on sync-clips (default active).
+    Muted segments still carry a path so callers can inspect the source, but
+    the timeline-audio renderer skips them.
+    """
+
+    path: str
+    asset_id: str
+    angle_offset_fraction: Fraction
+    angle_start_fraction: Fraction
+    active_audio_angle_id: Optional[str] = None
+    is_muted: bool = False
+
+    def to_dict(self) -> dict:
+        def _frac(f: Fraction) -> str:
+            return f"{f.numerator}/{f.denominator}"
+        return {
+            "path": self.path,
+            "asset_id": self.asset_id,
+            "angle_offset_fraction": _frac(self.angle_offset_fraction),
+            "angle_start_fraction": _frac(self.angle_start_fraction),
+            "active_audio_angle_id": self.active_audio_angle_id,
+            "is_muted": self.is_muted,
+        }
+
+
+@dataclass
 class SpineSegment:
     """One ``<mc-clip>`` or ``<sync-clip>`` entry in the sequence spine.
 
@@ -44,6 +83,8 @@ class SpineSegment:
     mc-clip (typically one audio + one video angle). The writer replays these
     verbatim on each emitted select so the new project shows the same angle
     mix as the source timeline.
+
+    ``audio_source`` is the resolved audio for this segment specifically.
     """
 
     kind: str                     # 'mc-clip' | 'sync-clip'
@@ -53,6 +94,7 @@ class SpineSegment:
     start_fraction: Fraction
     duration_fraction: Fraction
     mc_sources: List[dict] = field(default_factory=list)
+    audio_source: Optional[SegmentAudioSource] = None
 
     @property
     def offset_seconds(self) -> float:
@@ -69,7 +111,7 @@ class SpineSegment:
     def to_dict(self) -> dict:
         def _frac(f: Fraction) -> str:
             return f"{f.numerator}/{f.denominator}"
-        return {
+        d = {
             "kind": self.kind,
             "ref": self.ref,
             "name": self.name,
@@ -81,6 +123,9 @@ class SpineSegment:
             "duration_seconds": self.duration_seconds,
             "mc_sources": list(self.mc_sources),
         }
+        if self.audio_source is not None:
+            d["audio_source"] = self.audio_source.to_dict()
+        return d
 
 
 @dataclass
@@ -90,16 +135,18 @@ class ParsedFCPXML:
     version: str
     source_path: str
 
-    container_type: str                           # 'mc-clip' | 'sync-clip'
-    container_ref: str                            # resource id (mc-clip) or '' (inline sync-clip)
+    container_type: str                           # 'mc-clip' | 'sync-clip' (first segment's kind)
+    container_ref: str                            # first segment's ref ("" for inline sync-clip)
 
-    audio_file_path: str                          # decoded absolute filesystem path
-    audio_asset_id: str                           # resource id of the audio asset
-    active_audio_angle_id: Optional[str]          # only set for mc-clip containers
+    audio_file_path: str                          # first non-muted segment's audio path
+    audio_asset_id: str                           # corresponding asset id
+    active_audio_angle_id: Optional[str]          # first mc-clip segment's active angle, if any
 
-    # Parameters for source-time → timeline-time translation.
-    audio_angle_offset_fraction: Fraction         # offset of audio asset-clip inside its container
-    audio_angle_start_fraction: Fraction          # start attribute of audio asset-clip (usually 0)
+    # Parameters for source-time → timeline-time translation on the
+    # representative (first non-muted) segment. For multi-source spines, use
+    # each segment's own ``audio_source`` instead.
+    audio_angle_offset_fraction: Fraction
+    audio_angle_start_fraction: Fraction
 
     sequence_format_id: str
     sequence_frame_duration: Fraction             # e.g. 1001/24000
@@ -110,6 +157,7 @@ class ParsedFCPXML:
     library_location: Optional[str]
 
     spine_segments: List[SpineSegment]
+    is_multi_source: bool                         # True if segments reference >1 distinct audio asset
 
     original_resources_xml: bytes                 # verbatim byte-slice from the source
     original_fcpxml_bytes: bytes
@@ -124,6 +172,21 @@ class ParsedFCPXML:
         if fd == 0:
             return 0.0
         return float(Fraction(fd.denominator, fd.numerator))
+
+    def unique_audio_sources(self) -> List[SegmentAudioSource]:
+        """Distinct audio sources across all segments, keyed by (path, asset_id)."""
+        seen = set()
+        out: List[SegmentAudioSource] = []
+        for seg in self.spine_segments:
+            src = seg.audio_source
+            if src is None:
+                continue
+            key = (src.path, src.asset_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(src)
+        return out
 
     def to_metadata_dict(self) -> dict:
         """A JSON-serializable snapshot for project meta.json. Excludes raw bytes."""
@@ -147,6 +210,7 @@ class ParsedFCPXML:
             "project_name": self.project_name,
             "event_name": self.event_name,
             "library_location": self.library_location,
+            "is_multi_source": self.is_multi_source,
             "spine_segments": [s.to_dict() for s in self.spine_segments],
         }
 
@@ -242,22 +306,101 @@ def _resolve_multicam_audio(
     }
 
 
+def _sync_source_dialogue_muted(sync_clip_el) -> bool:
+    """True when ``<sync-source>/<audio-role-source>`` mutes the dialogue role.
+
+    FCP uses this on sync-clips that pair a camera clip (with its built-in
+    scratch mic) with a higher-quality external recorder on a connected lane.
+    The camera mic's dialogue role is marked ``active="0"`` so only the
+    external audio plays.
+    """
+    sync_source = sync_clip_el.find("sync-source")
+    if sync_source is None:
+        return False
+    for ars in sync_source.findall("audio-role-source"):
+        role = ars.get("role", "")
+        if role.startswith("dialogue"):
+            return ars.get("active", "1") == "0"
+    return False
+
+
+def _pick_dialogue_asset_clip(clips, resource_by_id):
+    """From a list of asset-clip elements, return the one most likely to be
+    dialogue audio. Prefers ``audioRole="dialogue"``; falls back to the first
+    whose asset declares ``hasAudio="1"``; finally falls back to the first.
+    Returns None on an empty list.
+    """
+    if not clips:
+        return None
+    for ac in clips:
+        if ac.get("audioRole") == "dialogue":
+            return ac
+    for ac in clips:
+        asset = resource_by_id.get(ac.get("ref"))
+        if asset is not None and asset.tag == "asset" and asset.get("hasAudio") == "1":
+            return ac
+    return clips[0]
+
+
 def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
-    """Resolve the dialogue asset-clip inside an inline ``<sync-clip>``."""
-    # Prefer audioRole="dialogue"; fall back to the first asset-clip with audio enabled.
-    candidates = sync_clip_el.findall("asset-clip")
-    if not candidates:
+    """Resolve the dialogue audio FCP actually plays for a ``<sync-clip>``.
+
+    FCP produces two common shapes:
+
+    1. Asset-clips as direct children of ``<sync-clip>`` (older/synthetic form).
+    2. A nested ``<sync-clip>/<spine>`` with the main camera asset-clip, plus
+       an externally-recorded audio asset-clip attached on a connected lane
+       (``lane != 0``) nested inside a ``<gap>``.
+
+    When ``<sync-source>`` marks the primary dialogue role as ``active="0"``,
+    the camera mic is muted and the external recorder is what FCP plays. We
+    pick that lane-attached clip in that case, so the timeline-audio render
+    includes the real dialogue instead of silence.
+
+    Sync-clip's own ``start`` attribute already measures the source time into
+    the chosen audio asset, so the returned ``angle_offset`` / ``angle_start``
+    are zero — the segment's ``start`` is used directly as the source time.
+
+    Returns ``{path, asset_id, angle_offset, angle_start, is_muted}``. Sets
+    ``is_muted`` only when the primary is muted and no lane replacement is
+    available — i.e. when FCP itself plays silence there.
+    """
+    primary_candidates = list(sync_clip_el.findall("asset-clip"))
+    lane_candidates: List = []
+    inner_spine = sync_clip_el.find("spine")
+    if inner_spine is not None:
+        primary_candidates.extend(inner_spine.findall("asset-clip"))
+        # Connected clips: asset-clips with a non-zero lane attribute, usually
+        # nested inside a <gap> (the way FCP records "attached external audio").
+        for gap in inner_spine.findall("gap"):
+            for ac in gap.findall("asset-clip"):
+                lane = ac.get("lane", "")
+                if lane and lane != "0":
+                    lane_candidates.append(ac)
+        # Some FCP exports attach the lane clip directly under the inner spine.
+        for ac in inner_spine.findall("asset-clip"):
+            lane = ac.get("lane", "")
+            if lane and lane != "0":
+                lane_candidates.append(ac)
+
+    primary = _pick_dialogue_asset_clip(primary_candidates, resource_by_id)
+    lane = _pick_dialogue_asset_clip(lane_candidates, resource_by_id)
+
+    if primary is None and lane is None:
         raise ParseError("sync-clip contains no <asset-clip> children")
 
-    dialogue = None
-    for ac in candidates:
-        if ac.get("audioRole") == "dialogue":
-            dialogue = ac
-            break
-    if dialogue is None:
-        # Fall back to the first asset-clip. A stricter check (hasAudio on asset) is
-        # possible but editors sometimes omit audioRole on mono interview sources.
-        dialogue = candidates[0]
+    primary_muted = _sync_source_dialogue_muted(sync_clip_el)
+
+    if primary_muted and lane is not None:
+        # Camera mic muted, external recorder takes over — what FCP plays.
+        dialogue = lane
+        is_muted = False
+    elif primary is not None:
+        dialogue = primary
+        is_muted = primary_muted
+    else:
+        dialogue = lane
+        is_muted = False
 
     asset_ref = dialogue.get("ref")
     asset_el = resource_by_id.get(asset_ref)
@@ -267,16 +410,45 @@ def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
     return {
         "path": _resolve_asset_path(asset_el),
         "asset_id": asset_ref,
-        "angle_offset": parse_rational(dialogue.get("offset")),
-        "angle_start": parse_rational(dialogue.get("start")),
+        # Sync-clip@start maps directly to source time; collapse the angle
+        # offsets so downstream math reduces to source_time = segment.start.
+        "angle_offset": Fraction(0),
+        "angle_start": Fraction(0),
+        "is_muted": is_muted,
     }
 
 
-def _find_first_spine_sync_clip(spine) -> Optional[object]:
-    for c in spine:
-        if c.tag == "sync-clip":
-            return c
-    return None
+def _resolve_segment_audio(
+    child, resource_by_id: dict, mc_sources: List[dict]
+) -> SegmentAudioSource:
+    """Resolve the audio source for a single spine segment."""
+    if child.tag == "mc-clip":
+        angle_id = None
+        for ms in mc_sources:
+            enable = (ms.get("srcEnable") or "").lower()
+            # srcEnable can be "video", "audio", "all", or a mix like "audio video"
+            if "audio" in enable or enable == "all":
+                angle_id = ms.get("angleID")
+                break
+        info = _resolve_multicam_audio(resource_by_id, child.get("ref") or "", angle_id)
+        return SegmentAudioSource(
+            path=info["path"],
+            asset_id=info["asset_id"],
+            angle_offset_fraction=info["angle_offset"],
+            angle_start_fraction=info["angle_start"],
+            active_audio_angle_id=angle_id,
+            is_muted=False,
+        )
+    else:  # sync-clip
+        info = _resolve_sync_clip_audio(child, resource_by_id)
+        return SegmentAudioSource(
+            path=info["path"],
+            asset_id=info["asset_id"],
+            angle_offset_fraction=info["angle_offset"],
+            angle_start_fraction=info["angle_start"],
+            active_audio_angle_id=None,
+            is_muted=info["is_muted"],
+        )
 
 
 def parse_fcpxml(path) -> ParsedFCPXML:
@@ -323,9 +495,6 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         raise ParseError("sequence has no <spine>")
 
     segments: List[SpineSegment] = []
-    container_type: Optional[str] = None
-    container_ref: Optional[str] = None
-    active_audio_angle_id: Optional[str] = None
 
     for child in spine:
         if child.tag not in ("mc-clip", "sync-clip"):
@@ -339,6 +508,8 @@ def parse_fcpxml(path) -> ParsedFCPXML:
                     "srcEnable": ms.get("srcEnable") or "",
                 })
 
+        audio_source = _resolve_segment_audio(child, resource_by_id, mc_sources)
+
         seg = SpineSegment(
             kind=child.tag,
             ref=child.get("ref") or "",
@@ -347,40 +518,27 @@ def parse_fcpxml(path) -> ParsedFCPXML:
             start_fraction=parse_rational(child.get("start")),
             duration_fraction=parse_rational(child.get("duration")),
             mc_sources=mc_sources,
+            audio_source=audio_source,
         )
         segments.append(seg)
-
-        if container_type is None:
-            container_type = child.tag
-            container_ref = seg.ref
-            if child.tag == "mc-clip":
-                for ms in mc_sources:
-                    enable = (ms.get("srcEnable") or "").lower()
-                    # srcEnable can be "video", "audio", "all", or a mix like "audio video"
-                    if "audio" in enable or enable == "all":
-                        active_audio_angle_id = ms.get("angleID")
-                        break
-        else:
-            # Pass-A simplification: all spine containers must point at the same source.
-            if child.tag != container_type:
-                raise ParseError(
-                    "spine mixes mc-clip and sync-clip containers; not supported in pass A"
-                )
-            if child.tag == "mc-clip" and seg.ref != container_ref:
-                raise ParseError(
-                    f"spine mc-clips reference multiple containers ({container_ref!r} and {seg.ref!r}); "
-                    "not supported in pass A"
-                )
 
     if not segments:
         raise ParseError("spine contains no <mc-clip> or <sync-clip> elements")
 
-    if container_type == "mc-clip":
-        audio_info = _resolve_multicam_audio(resource_by_id, container_ref, active_audio_angle_id)
-    else:
-        first_sync = _find_first_spine_sync_clip(spine)
-        # _find_first returns the same element that was walked above; always present here.
-        audio_info = _resolve_sync_clip_audio(first_sync, resource_by_id)
+    # Representative source: first non-muted segment, else first segment.
+    representative = next(
+        (s for s in segments if s.audio_source and not s.audio_source.is_muted),
+        segments[0],
+    )
+    rep_audio = representative.audio_source
+    assert rep_audio is not None  # every segment resolves audio above
+
+    # Multi-source when segments span more than one distinct audio asset, or
+    # mix container kinds (so ingest renders a composed timeline WAV).
+    distinct_sources = {(s.audio_source.path, s.audio_source.asset_id)
+                        for s in segments if s.audio_source is not None}
+    distinct_kinds = {s.kind for s in segments}
+    is_multi_source = len(distinct_sources) > 1 or len(distinct_kinds) > 1
 
     library_el = root.find("library")
     library_location = library_el.get("location") if library_el is not None else None
@@ -394,13 +552,13 @@ def parse_fcpxml(path) -> ParsedFCPXML:
     return ParsedFCPXML(
         version=version,
         source_path=path_str,
-        container_type=container_type,
-        container_ref=container_ref or "",
-        audio_file_path=audio_info["path"],
-        audio_asset_id=audio_info["asset_id"],
-        active_audio_angle_id=active_audio_angle_id if container_type == "mc-clip" else None,
-        audio_angle_offset_fraction=audio_info["angle_offset"],
-        audio_angle_start_fraction=audio_info["angle_start"],
+        container_type=segments[0].kind,
+        container_ref=segments[0].ref,
+        audio_file_path=rep_audio.path,
+        audio_asset_id=rep_audio.asset_id,
+        active_audio_angle_id=rep_audio.active_audio_angle_id,
+        audio_angle_offset_fraction=rep_audio.angle_offset_fraction,
+        audio_angle_start_fraction=rep_audio.angle_start_fraction,
         sequence_format_id=sequence_format_id,
         sequence_frame_duration=frame_duration,
         timeline_duration_fraction=sequence_duration,
@@ -408,6 +566,7 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         event_name=event_name,
         library_location=library_location,
         spine_segments=segments,
+        is_multi_source=is_multi_source,
         original_resources_xml=original_resources_xml,
         original_fcpxml_bytes=raw_bytes,
     )

@@ -417,6 +417,19 @@ def install_transcription_engine():
     # The .app bundle may launch Python under Rosetta, so we force arch -arm64.
     arm_prefix = "arch -arm64 " if is_apple_silicon() else ""
 
+    # Idempotent fast-path: if parakeet_mlx already imports cleanly, skip the
+    # --force-reinstall below. The reinstall always takes ~10-15s even when
+    # nothing actually changes, and on re-launched setup runs that extra time
+    # makes the next step ("Download AI model") look like it's stalling
+    # because the UI lingers on the last-seen "running" state. --force-reinstall
+    # was only added to repair broken installs from prior failures; a clean
+    # import proves nothing's broken.
+    rc_check, _, _ = run_cmd(f'{arm_prefix}"{python_path}" -c "import parakeet_mlx"')
+    if rc_check == 0:
+        log("Parakeet MLX already installed and importable — skipping reinstall.")
+        update_step(STEP_TRANSCRIBE, "running", "Parakeet MLX already installed.")
+        return True
+
     update_step(STEP_TRANSCRIBE, "running", "Installing Parakeet MLX (Apple Silicon transcription)...")
     # Use --force-reinstall to resolve conflicts from previous failed installs
     rc, out, err = run_cmd(f'{arm_prefix}"{pip_path}" install --force-reinstall parakeet-mlx')
@@ -869,6 +882,19 @@ SETUP_HTML = r"""<!DOCTYPE html>
 
 <script>
 const FLASK_PORT = """ + str(FLASK_PORT) + r""";
+const FLASK_URL = 'http://127.0.0.1:' + FLASK_PORT;
+
+// State used by poll() to decide what to do when the setup server vanishes.
+// The server self-terminates ~3s after it marks status complete, so if the
+// browser tab was backgrounded (Chrome throttles timers to ~1 per minute)
+// the 'complete' poll can be missed entirely — leaving the UI frozen at
+// whatever 'running' state was last rendered. Tracking these flags lets us
+// recover: a consistently unreachable server plus a last-seen state that
+// looked finished means "redirect to Flask" rather than "wait forever."
+let failedPollCount = 0;
+let seenComplete = false;
+let allStepsDoneLastSeen = false;
+let redirecting = false;
 
 function iconHTML(status) {
   switch(status) {
@@ -894,10 +920,7 @@ function render(state) {
   `).join('');
 
   if (state.status === 'complete') {
-    msgEl.innerHTML = '<div class="message complete">Setup complete! Launching Doza Assist...</div>';
-    setTimeout(() => {
-      window.location.href = 'http://127.0.0.1:' + FLASK_PORT;
-    }, 2000);
+    redirectToFlask();
   } else if (state.status === 'error') {
     msgEl.innerHTML = `
       <div class="message error">${state.error || 'An error occurred during setup.'}</div>
@@ -908,16 +931,63 @@ function render(state) {
   }
 }
 
+function redirectToFlask() {
+  if (redirecting) return;
+  redirecting = true;
+  document.getElementById('message').innerHTML =
+    '<div class="message complete">Setup complete! Launching Doza Assist...</div>';
+  // Flask may still be starting up — poll it until it responds, then navigate.
+  // Cross-origin fetch with no-cors lets us detect reachability without
+  // needing CORS headers from Flask.
+  let attempts = 0;
+  const maxAttempts = 90;  // ~90s — enough for a slow Flask cold start
+  const check = () => {
+    attempts++;
+    fetch(FLASK_URL, { mode: 'no-cors' })
+      .then(() => { window.location.href = FLASK_URL; })
+      .catch(() => {
+        if (attempts < maxAttempts) {
+          setTimeout(check, 1000);
+        } else {
+          document.getElementById('message').innerHTML =
+            '<div class="message error">Setup finished but Doza Assist didn\'t start. Please relaunch.</div>';
+        }
+      });
+  };
+  check();
+}
+
 function poll() {
+  if (redirecting) return;
   fetch('/api/status')
     .then(r => r.json())
     .then(state => {
+      failedPollCount = 0;
+      if (state.status === 'complete') seenComplete = true;
+      allStepsDoneLastSeen = state.steps.every(s => s.status === 'done');
       render(state);
       if (state.status === 'running') {
         setTimeout(poll, 1000);
       }
     })
     .catch(() => {
+      failedPollCount++;
+      // Server vanished. If the last state we saw was complete (or every
+      // step had reached 'done'), the setup assistant has shut itself down
+      // after finishing — redirect to Flask instead of spinning forever.
+      // Three consecutive failures ≈ 6s of no connectivity, enough to
+      // distinguish "server gone" from a transient blip.
+      if (failedPollCount >= 3 && (seenComplete || allStepsDoneLastSeen)) {
+        redirectToFlask();
+        return;
+      }
+      // Long unreachability (20s+) without ever seeing a complete state
+      // still means the setup server isn't coming back. Try Flask anyway —
+      // it may have launched from a previous run.
+      if (failedPollCount >= 10) {
+        redirectToFlask();
+        return;
+      }
       setTimeout(poll, 2000);
     });
 }

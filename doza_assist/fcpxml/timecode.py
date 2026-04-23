@@ -110,3 +110,25 @@ def audio_source_to_timeline(
         if seg.start <= container_time < seg.start + seg.duration:
             return seg.offset + (container_time - seg.start)
     return None
+
+
+def timeline_to_segment(
+    spine_segments: Iterable,
+    timeline_seconds: float | Fraction,
+):
+    """Find the spine segment that covers a timeline time.
+
+    Inverse of :func:`audio_source_to_timeline`: given a timeline-relative time,
+    return ``(segment, container_time_in_segment)`` where ``container_time_in_segment``
+    is ``segment.start + (timeline_seconds - segment.offset)``.
+
+    Returns ``(None, None)`` when the time falls in a gap between segments.
+    The caller returned is the original segment object (SpineSegment or dict),
+    not the ``_SegmentView`` used internally.
+    """
+    t = Fraction(timeline_seconds)
+    for raw in spine_segments:
+        seg = _coerce_segment(raw)
+        if seg.offset <= t < seg.offset + seg.duration:
+            return raw, seg.start + (t - seg.offset)
+    return None, None

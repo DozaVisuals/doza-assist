@@ -54,8 +54,13 @@ def _exporter_response(result, project, exporter):
 
 
 app = Flask(__name__)
-app.config['PROJECTS_DIR'] = os.path.join(os.path.dirname(__file__), 'projects')
-app.config['EXPORTS_DIR'] = os.path.join(os.path.dirname(__file__), 'exports')
+# Data dir: honor DOZA_DATA_DIR if set (the packaged .app launcher points this
+# at ~/Library/Application Support/DozaAssist). Fall back to the source tree
+# for `python3 app.py` dev runs. Must never default to a path inside a signed
+# .app bundle — those are read-only and os.makedirs below would EPERM.
+_data_dir = os.environ.get('DOZA_DATA_DIR') or os.path.dirname(__file__)
+app.config['PROJECTS_DIR'] = os.path.join(_data_dir, 'projects')
+app.config['EXPORTS_DIR'] = os.path.join(_data_dir, 'exports')
 
 # Small file drag-and-drop limit (500MB)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 * 1024  # 32 GB — My Style imports multiple large masters

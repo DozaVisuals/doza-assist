@@ -164,11 +164,11 @@ if [ ! -x "${SMOKE_PY}" ]; then
     echo "   (Create the dev venv with \`python3 -m venv venv && venv/bin/pip install -r requirements.txt\` to enable this guard.)"
 else
     SMOKE_LOG="$(mktemp)"
-    if ( cd "${APP_SRC_DIR}" && PYTHONDONTWRITEBYTECODE=1 "${SMOKE_PY}" -c "import sys; sys.path.insert(0, '.'); import app" ) >"${SMOKE_LOG}" 2>&1; then
-        # app.py creates projects/ and exports/ at import time. Scrub them
-        # so the shipped bundle stays clean and empty user-data dirs are
-        # created on first launch at the user's data path instead.
-        rm -rf "${APP_SRC_DIR}/projects" "${APP_SRC_DIR}/exports" "${APP_SRC_DIR}/__pycache__"
+    # app.py creates projects/ and exports/ under $DOZA_DATA_DIR at import time.
+    # Point it at a throwaway tempdir so the bundle source tree stays clean.
+    SMOKE_DATA_DIR="$(mktemp -d)"
+    if ( cd "${APP_SRC_DIR}" && PYTHONDONTWRITEBYTECODE=1 DOZA_DATA_DIR="${SMOKE_DATA_DIR}" "${SMOKE_PY}" -c "import sys; sys.path.insert(0, '.'); import app" ) >"${SMOKE_LOG}" 2>&1; then
+        rm -rf "${SMOKE_DATA_DIR}" "${APP_SRC_DIR}/__pycache__"
         echo "   Bundle imports cleanly."
         rm -f "${SMOKE_LOG}"
     else
@@ -186,6 +186,7 @@ else
         echo ""
         echo "   Fix the above and re-run. No DMG was created."
         rm -f "${SMOKE_LOG}"
+        rm -rf "${SMOKE_DATA_DIR}"
         exit 1
     fi
 fi

@@ -21,13 +21,10 @@ mkdir -p "$SUPPORT_DIR"
 mkdir -p "$SUPPORT_DIR/projects"
 mkdir -p "$SUPPORT_DIR/exports"
 
-# ── Symlink data directories so project data persists outside the .app bundle ──
-if [ ! -e "${APP_SRC}/projects" ]; then
-    ln -s "$SUPPORT_DIR/projects" "${APP_SRC}/projects"
-fi
-if [ ! -e "${APP_SRC}/exports" ]; then
-    ln -s "$SUPPORT_DIR/exports" "${APP_SRC}/exports"
-fi
+# Signed .app bundles are read-only; writing inside Contents/Resources/app
+# (even a symlink) returns EPERM and invalidates the Developer ID signature.
+# Instead we point app.py at Application Support via DOZA_DATA_DIR.
+export DOZA_DATA_DIR="$SUPPORT_DIR"
 
 # ── Logging ──
 log() {

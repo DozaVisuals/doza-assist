@@ -1,23 +1,27 @@
-name: Build & Release
+name: Build & Validate
 
 # Triggers:
-#   - Push a version tag to build and publish a release:  git tag v1.2.3 && git push origin v1.2.3
-#   - Open a PR or push to main to validate without releasing
-#   - Run manually from the Actions tab (Actions → Build & Release → Run workflow)
+#   - Open a PR or push to main to validate and produce a test DMG artifact
+#   - Run manually from the Actions tab (Actions → Build & Validate → Run workflow)
+#
+# NOTE: Version tags (v*) intentionally do NOT trigger this workflow. Releases
+# are published manually with the signed + notarized DMG produced by
+# scripts/sign-and-notarize.sh on a machine with the Developer ID cert. CI here
+# cannot sign (no secrets wired up) and an unsigned build would fail Gatekeeper
+# on a fresh Mac, so we keep the release step out-of-band.
 on:
   push:
-    tags: ['v*']
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to stamp (e.g. 1.2.3). Defaults to 0.0.0-dev when run manually without a tag.'
+        description: 'Version to stamp (e.g. 1.2.3). Defaults to 0.0.0-dev when run manually.'
         required: false
 
 permissions:
-  contents: write  # required to create GitHub Releases
+  contents: read
 
 # ─────────────────────────────────────────────
 # Job 1: Validate — runs on every push and PR
@@ -52,7 +56,8 @@ jobs:
           echo "All shell scripts OK."
 
   # ─────────────────────────────────────────────
-  # Job 2: Build — runs on tags and manual trigger
+  # Job 2: Build — runs on push-to-main and manual trigger (smoke-test only,
+  #                artifact is retained 7 days; release publishing is manual)
   # ─────────────────────────────────────────────
   build:
     name: Build DMG
@@ -73,9 +78,7 @@ jobs:
       - name: Resolve version
         id: version
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          elif [[ -n "${{ inputs.version }}" ]]; then
+          if [[ -n "${{ inputs.version }}" ]]; then
             VERSION="${{ inputs.version }}"
           else
             VERSION="0.0.0-dev+$(git rev-parse --short HEAD)"
@@ -188,28 +191,3 @@ jobs:
             ${{ steps.dmg.outputs.path }}
             ${{ steps.checksum.outputs.path }}
           retention-days: 7
-
-  # ─────────────────────────────────────────────
-  # Job 3: Release — runs only on version tags
-  # ─────────────────────────────────────────────
-  release:
-    name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.dmg_name }}
-          path: dist/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Doza Assist ${{ needs.build.outputs.version }}
-          generate_release_notes: true
-          files: dist/*
-          # Tags with a hyphen (e.g. v1.0.0-beta.1) are marked as pre-releases
-          prerelease: ${{ contains(github.ref_name, '-') }}

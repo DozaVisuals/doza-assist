@@ -1,12 +1,14 @@
 # Doza Assist
 
-**Find the story inside your footage, not just the clips.**
+### Find the story inside your footage, not just the clips.
 
-Local-first AI editor's assistant for documentary and spoken-word video. Free and open source.
+An AI editor's assistant that learns *your* style from your own cuts, then does the first pass for you. Not a generic model. Not trained on someone else's taste. Yours.
 
-Documentary films, corporate video, podcasts, news, legal depositions, customer testimonials, training content. If someone is talking on camera and you need to find the best moments, this tool does the heavy lifting.
+Drop in an interview. Get back a rough cut shaped by your editorial voice, ready for **Final Cut Pro**, **Premiere Pro**, or **DaVinci Resolve**. Everything runs on your machine. Nothing uploads. Free and open source under MIT.
 
-Drop in footage, transcribe it, chat with the AI about what story you're looking for, build narrative sequences from your transcript, and export pre-cut timelines directly to **Final Cut Pro, Premiere Pro, or DaVinci Resolve**. Everything runs on your machine. Nothing uploads. Nothing leaves.
+**Editorial DNA is the whole point.** Feed the app your finished work and it builds a profile of how you shape spoken stories: pacing, opening patterns, structural habits, tonal choices. Every suggestion after that gets filtered through your voice. Build multiple profiles for different kinds of work. A documentary profile. A social cuts profile. A corporate testimonial profile. It's fully in the open source version. No paywall.
+
+Built for documentary editors first, because that's where the pain is sharpest and the craft is most refined. Works just as well for anyone cutting interview-driven video: corporate case studies, podcast-to-video, branded docs, event highlights, long-form creator work. If someone's talking on camera and you need the moments that carry the story, this tool does the heavy lifting.
 
 <!-- Add your demo video here:
 https://github.com/user-attachments/assets/YOUR_VIDEO_ID

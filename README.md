@@ -2,6 +2,8 @@
 
 ### Find the story inside your footage, not just the clips.
 
+[![Doza Assist Demo](https://img.youtube.com/vi/VDJN8pzdLq0/maxresdefault.jpg)](https://www.youtube.com/watch?v=VDJN8pzdLq0)
+
 An AI editor's assistant that learns *your* style from your own cuts, then does the first pass for you. Not a generic model. Not trained on someone else's taste. Yours.
 
 Drop in an interview. Get back a rough cut shaped by your editorial voice, ready for **Final Cut Pro**, **Premiere Pro**, or **DaVinci Resolve**. Everything runs on your machine. Nothing uploads. Free and open source under MIT.

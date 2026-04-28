@@ -112,11 +112,11 @@ class TestTopLevelKeyDrift:
 
     def test_beats_alias_surfaces_story_beats(self, monkeypatch):
         import ai_analysis
-        monkeypatch.setattr(ai_analysis, "_analyze_story", lambda t, n: {
+        monkeypatch.setattr(ai_analysis, "_analyze_story", lambda t, n, **k: {
             "summary": "short",
             "beats": [{"description": "intro", "start_time": "0:00", "end_time": "0:10"}],
         })
-        monkeypatch.setattr(ai_analysis, "_analyze_social", lambda t, n: {"clips": []})
+        monkeypatch.setattr(ai_analysis, "_analyze_social", lambda t, n, **k: {"clips": []})
         monkeypatch.setattr(ai_analysis, "_format_transcript_for_ai", lambda t: "x")
         out = ai_analysis.analyze_transcript({"segments": [{"start": 0, "end": 1, "text": "x"}]})
         assert len(out["story_beats"]) == 1
@@ -124,8 +124,8 @@ class TestTopLevelKeyDrift:
 
     def test_clips_alias_surfaces_social_clips(self, monkeypatch):
         import ai_analysis
-        monkeypatch.setattr(ai_analysis, "_analyze_story", lambda t, n: {})
-        monkeypatch.setattr(ai_analysis, "_analyze_social", lambda t, n: {
+        monkeypatch.setattr(ai_analysis, "_analyze_story", lambda t, n, **k: {})
+        monkeypatch.setattr(ai_analysis, "_analyze_social", lambda t, n, **k: {
             "clips": [{"name": "x", "start_time": "1:00", "end_time": "1:15", "quote": "q"}],
         })
         monkeypatch.setattr(ai_analysis, "_format_transcript_for_ai", lambda t: "x")

@@ -11,10 +11,11 @@ import time
 import shutil
 import subprocess
 import threading
+import hashlib
 import re as _re
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, Response, stream_with_context
 from werkzeug.utils import secure_filename
 
 from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
@@ -194,6 +195,19 @@ def load_segment_vectors(project_id):
         return data if isinstance(data, list) else []
     except (json.JSONDecodeError, OSError):
         return []
+
+
+def _paragraph_index_path(project_id):
+    return os.path.join(app.config['PROJECTS_DIR'], project_id, 'paragraph_index.json')
+
+
+def load_paragraph_index(project_id):
+    """Load the TF-IDF paragraph retrieval index for a project, or None if
+    not yet generated. Used by /chat to rank relevance via cosine similarity
+    in addition to literal keyword matching.
+    """
+    from doza_assist.retrieval import load_index
+    return load_index(_paragraph_index_path(project_id))
 
 
 def save_project(project_id, data):
@@ -1243,6 +1257,67 @@ def transcribe(project_id):
         return jsonify({'error': str(e)}), 500
 
 
+def _analyze_status_path(project_id):
+    return os.path.join(app.config['PROJECTS_DIR'], project_id, 'analyze_status.json')
+
+
+def _make_progress_writer(project_id):
+    """Return a ``write(step, total, current)`` callable that persists per-step
+    analyze progress to disk for the frontend status poll to read.
+
+    Records ``started_at`` once (on creation) so the UI can compute elapsed
+    and ETA from the latest snapshot. ``updated_at`` refreshes on every call,
+    so the frontend can detect a stalled analyze (no updates for >2 min ⇒
+    likely a hung Ollama call). Failures are swallowed — progress is
+    advisory and must never break the actual analysis.
+    """
+    status_path = _analyze_status_path(project_id)
+    started_at = datetime.now().isoformat()
+
+    def _write(step, total, current):
+        try:
+            os.makedirs(os.path.dirname(status_path), exist_ok=True)
+            payload = {
+                'step': int(step),
+                'total': int(total),
+                'current': str(current),
+                'started_at': started_at,
+                'updated_at': datetime.now().isoformat(),
+                'done': bool(int(step) >= int(total)),
+            }
+            with open(status_path, 'w') as f:
+                json.dump(payload, f)
+        except Exception:
+            pass
+    return _write
+
+
+def _clear_analyze_status(project_id):
+    """Remove the per-project analyze_status.json. Called on /analyze
+    completion (success or failure) so the next polled status reads as
+    'idle' for a fresh page load.
+    """
+    try:
+        os.remove(_analyze_status_path(project_id))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def _transcript_hash(transcript):
+    """Stable fingerprint for the transcript content. Caches AI analysis on
+    this so re-running /analyze on an unchanged transcript returns instantly.
+
+    Hashes only the segments list — not surrounding metadata like
+    speaker_labels, since label edits don't change the analytic content the
+    model would produce.
+    """
+    segments = (transcript or {}).get('segments', []) or []
+    payload = json.dumps(segments, sort_keys=True, default=str).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
 @app.route('/project/<project_id>/analyze', methods=['POST'])
 def analyze(project_id):
     """Run AI analysis on the transcript."""
@@ -1251,23 +1326,78 @@ def analyze(project_id):
         return jsonify({'error': 'No transcript available'}), 400
 
     analysis_type = request.json.get('type', 'all')  # 'story', 'social', 'all'
+    force = bool(request.json.get('force'))
 
+    # Cache lookup keyed by (transcript content, analysis_type). The model is
+    # expensive on long interviews, and re-clicking Analyze used to redo it
+    # from scratch. The user can still bust the cache by passing
+    # ``{"force": true}`` (e.g. after a model or prompt upgrade).
+    transcript_hash = _transcript_hash(project['transcript'])
+    cache = project.get('analysis_cache') if isinstance(project.get('analysis_cache'), dict) else {}
+    bucket = cache.get(transcript_hash) if isinstance(cache.get(transcript_hash), dict) else {}
+    cached_entry = bucket.get(analysis_type) if isinstance(bucket.get(analysis_type), dict) else None
+    if not force and cached_entry and isinstance(cached_entry.get('analysis'), dict):
+        project['analysis'] = cached_entry['analysis']
+        save_project(project_id, project)
+        return jsonify({
+            'status': 'cached',
+            'analysis': cached_entry['analysis'],
+            'segment_vectors': load_segment_vectors(project_id),
+        })
+
+    progress = _make_progress_writer(project_id)
     try:
-        from ai_analysis import analyze_transcript, generate_segment_vectors
+        from ai_analysis import analyze_transcript, generate_segment_vectors, expected_vector_chunks
+        # Reuse vectors from a previous run if they're on disk so the cap+rerank
+        # pass can score by narrative_score instead of falling back to length.
+        # First-ever analysis runs without this signal — that's expected; the
+        # caller still gets the ≤7 cap, just less curated.
+        existing_vectors = load_segment_vectors(project_id)
+
+        # Each chunk of vector generation is its own LLM call, so it has to
+        # count as its own progress step or the bar races to ~94% and stalls
+        # while the vector phase grinds on for several minutes. Pre-compute
+        # how many vector chunks the analyzer will run so we can size the
+        # global step total correctly.
+        n_vector_chunks = expected_vector_chunks(project['transcript'])
+        post_analyzer_steps = n_vector_chunks + 1  # +1 for paragraph index
+
+        # Wrap the analyzer's progress callback so its step count rolls into
+        # a global total that includes the vector + index phases. The
+        # analyzer reports e.g. step=5, total=16; we publish step=5 of 24.
+        analyzer_state = {'step': 0, 'total': 1}
+
+        def _from_analyzer(step, total, current):
+            analyzer_state['step'] = step
+            analyzer_state['total'] = total
+            progress(step=step, total=total + post_analyzer_steps, current=current)
+
         result = analyze_transcript(
             project['transcript'],
             project_name=project['name'],
-            analysis_type=analysis_type
+            analysis_type=analysis_type,
+            segment_vectors=existing_vectors or None,
+            progress_callback=_from_analyzer,
         )
         project['analysis'] = result
 
-        # Also generate structured segment vectors and persist them alongside meta.
-        # This is the source of truth Story Builder + Clips badges read from.
+        analyzer_total = analyzer_state['total']
+        global_total = analyzer_total + post_analyzer_steps
+
+        # Vector phase: each chunk = one progress step. With this the bar
+        # advances at a real per-LLM-call cadence through the second half of
+        # the run instead of jumping from "94%" to "100%".
+        def _from_vectors(chunk_idx=1, total_chunks=1, label="vectors"):
+            progress(step=analyzer_total + int(chunk_idx),
+                     total=global_total,
+                     current=label)
+
         segment_vectors = []
         try:
             segment_vectors = generate_segment_vectors(
                 project['transcript'],
                 project_name=project['name'],
+                progress_callback=_from_vectors,
             )
         except Exception as ve:
             # Don't fail the whole analysis if vector generation hiccups —
@@ -1280,9 +1410,36 @@ def analyze(project_id):
             with open(vectors_path, 'w') as f:
                 json.dump(segment_vectors, f, indent=2)
 
+        # Final step: paragraph index build (instant, but worth a tick so
+        # the user sees the bar finish properly).
+        progress(step=global_total, total=global_total,
+                 current="building paragraph index")
+        try:
+            from doza_assist.retrieval import build_paragraph_index, save_index
+            paragraph_index = build_paragraph_index(project['transcript'])
+            project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+            save_index(paragraph_index, _paragraph_index_path(project_id))
+        except Exception as ie:
+            print(f"Paragraph index build failed: {ie}")
+
+        # Update cache. Keyed by (transcript_hash, analysis_type) so the same
+        # transcript can hold separate entries for 'story', 'social', and
+        # 'all'. Drop stale buckets — anything keyed off a different hash is
+        # for a transcript content that no longer matches.
+        project['analysis_cache'] = {
+            transcript_hash: {
+                **(cache.get(transcript_hash, {}) if isinstance(cache, dict) else {}),
+                analysis_type: {
+                    'analysis': result,
+                    'cached_at': datetime.now().isoformat(),
+                },
+            }
+        }
+
         save_project(project_id, project)
         title = result.get('suggested_title') or project.get('name', 'Project')
         log_activity(project_id, 'analyzed', f"AI analysis run · \"{title}\"")
+        _clear_analyze_status(project_id)
         return jsonify({
             'status': 'analyzed',
             'analysis': result,
@@ -1290,7 +1447,32 @@ def analyze(project_id):
         })
 
     except Exception as e:
+        _clear_analyze_status(project_id)
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/project/<project_id>/analyze/status', methods=['GET'])
+def analyze_status(project_id):
+    """Return the current analyze progress for ``project_id``.
+
+    Shape when an analyze is in flight:
+        {step, total, current, started_at, updated_at, done}
+
+    Shape when no analyze is running (file absent or read failure):
+        {idle: true}
+
+    Frontend polls this every ~1s while its /analyze fetch is in flight,
+    computes elapsed and ETA, and stops polling on done==true (or when the
+    fetch resolves, whichever comes first).
+    """
+    path = _analyze_status_path(project_id)
+    if not os.path.exists(path):
+        return jsonify({'idle': True})
+    try:
+        with open(path) as f:
+            return jsonify(json.load(f))
+    except (json.JSONDecodeError, OSError):
+        return jsonify({'idle': True})
 
 
 @app.route('/project/<project_id>/chat', methods=['POST'])
@@ -1319,6 +1501,12 @@ def chat(project_id):
 
         if len(projects_for_chat) == 1:
             p = projects_for_chat[0]
+            # segment_vectors and paragraph_index are both built by /analyze.
+            # When present, they upgrade chat retrieval: theme_tags become
+            # an extra search vocabulary, high-narrative-score windows get
+            # prioritized as relevant excerpts, and TF-IDF cosine similarity
+            # ranks paragraphs better than substring matching does. Without
+            # them, behavior falls back to literal-keyword matching.
             reply = chat_about_transcript(
                 transcript=p['transcript'],
                 message=message,
@@ -1326,9 +1514,14 @@ def chat(project_id):
                 project_name=p.get('name', 'Interview'),
                 analysis=p.get('analysis'),
                 profile_id=profile_id,
+                segment_vectors=load_segment_vectors(p['id']) or None,
+                paragraph_index=load_paragraph_index(p['id']),
             )
         else:
-            # Multi-project: combine transcripts with project labels
+            # Multi-project: combine transcripts with project labels.
+            # No segment_vectors here — vectors are per-project and combining
+            # them would require offsetting timecodes; not worth the
+            # complexity until multi-project chat is in heavy use.
             combined_segments = []
             project_names = []
             for p in projects_for_chat:
@@ -1368,6 +1561,94 @@ def chat(project_id):
         return jsonify({'reply': reply})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/project/<project_id>/chat-stream', methods=['POST'])
+def chat_stream(project_id):
+    """Server-sent-events variant of /chat. Yields token chunks as the model
+    produces them so the UI can render progressively instead of blocking on
+    the whole reply. Falls back to /chat semantically: same payload, same
+    persistence, same retrieval signals — just streamed.
+    """
+    pids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
+    projects_for_chat = []
+    for pid in pids:
+        p = get_project(pid)
+        if p and p.get('transcript'):
+            projects_for_chat.append(p)
+    if not projects_for_chat:
+        return jsonify({'error': 'No transcript available'}), 400
+
+    data = request.json or {}
+    message = data.get('message', '').strip()
+    history = data.get('history', [])
+    profile_id = data.get('profile_id')
+    if not message:
+        return jsonify({'error': 'No message provided'}), 400
+
+    from ai_analysis import chat_about_transcript_stream
+
+    if len(projects_for_chat) == 1:
+        p = projects_for_chat[0]
+        stream_kwargs = {
+            'transcript': p['transcript'],
+            'message': message,
+            'history': history,
+            'project_name': p.get('name', 'Interview'),
+            'analysis': p.get('analysis'),
+            'profile_id': profile_id,
+            'segment_vectors': load_segment_vectors(p['id']) or None,
+            'paragraph_index': load_paragraph_index(p['id']),
+        }
+        single_pid = p['id']
+    else:
+        combined_segments = []
+        project_names = []
+        for p in projects_for_chat:
+            project_names.append(p.get('name', 'Untitled'))
+            for seg in p['transcript'].get('segments', []):
+                seg_copy = dict(seg)
+                seg_copy['_project'] = p.get('name', 'Untitled')
+                combined_segments.append(seg_copy)
+        stream_kwargs = {
+            'transcript': {'segments': combined_segments, 'language': 'en'},
+            'message': message,
+            'history': history,
+            'project_name': ' + '.join(project_names),
+            'analysis': None,
+            'profile_id': profile_id,
+        }
+        single_pid = None
+
+    def _generate():
+        final_reply = ''
+        try:
+            for event_type, payload in chat_about_transcript_stream(**stream_kwargs):
+                if event_type == 'done':
+                    final_reply = payload or ''
+                yield f"data: {json.dumps({'event': event_type, 'data': payload})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'event': 'error', 'data': str(e)})}\n\n"
+            return
+
+        # Persist on single-project chats only — same rule the non-streaming
+        # endpoint enforces. Multi-project sessions stay ephemeral.
+        if single_pid:
+            try:
+                stored = get_project(single_pid) or {}
+                history_log = list(stored.get('chat_history') or [])
+                now_iso = datetime.now().isoformat()
+                history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
+                history_log.append({'role': 'assistant', 'content': final_reply, 'ts': now_iso})
+                stored['chat_history'] = history_log
+                save_project(single_pid, stored)
+            except Exception as e:
+                print(f"[chat-stream] history persist failed: {e}")
+
+    return Response(stream_with_context(_generate()), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',  # disable nginx buffering if proxied
+    })
 
 
 @app.route('/project/<project_id>/chat', methods=['DELETE'])

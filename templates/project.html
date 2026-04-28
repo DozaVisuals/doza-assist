@@ -506,7 +506,11 @@
             </div>
             <div id="analysisProgress" style="display:none; padding: 2rem; text-align:center;">
                 <div class="spinner" style="margin: 0 auto 1rem;"></div>
-                <p>Analyzing transcript with AI<span id="analysisProgressTail">…</span></p>
+                <p id="analysisProgressLabel">Analyzing transcript with AI<span id="analysisProgressTail">…</span></p>
+                <div id="analysisProgressBar" style="display:none; max-width:420px; margin:1rem auto 0; height:8px; background:rgba(255,255,255,0.1); border-radius:4px; overflow:hidden;">
+                    <div id="analysisProgressFill" style="width:0%; height:100%; background:#a78bfa; transition:width .4s ease;"></div>
+                </div>
+                <p id="analysisProgressTimes" class="analysis-subtitle" style="display:none; margin-top:.75rem; opacity:.7;"></p>
                 <p class="analysis-subtitle">This may take several minutes</p>
             </div>
         </div>
@@ -1693,32 +1697,60 @@ async function sendChat() {
     btn.disabled = true;
 
     try {
-        const res = await fetch(`/project/${COMBINED_ID}/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, history: chatHistory, profile_id: window.sessionProfileId || null }),
+        // Streaming path: SSE pipes Ollama tokens to the chat bubble as they
+        // arrive. First token typically lands in 0.3-0.8s instead of waiting
+        // 4-7s for the full reply. On stream errors or browsers without
+        // ReadableStream the catch block falls back to the original /chat
+        // endpoint so behavior degrades gracefully.
+        const streamed = await streamChatReply({
+            message,
+            typing,
+            progressTimer,
         });
-        const data = await res.json();
-        if (progressTimer) clearTimeout(progressTimer);
-        typing.remove();
-
-        if (data.reply) {
-            const rendered = renderChatReply(data.reply);
-            const msg = appendChatMessage('assistant', rendered, true);
-            chatHistory.push({ role: 'assistant', content: data.reply });
-
-            // If reply contains clips, append action prompts
-            const clipCards = msg.querySelectorAll('.cc-card');
-            if (clipCards.length > 0) {
-                const pullPrompt = document.createElement('div');
-                pullPrompt.className = 'chat-pull-prompt';
-                pullPrompt.innerHTML = `Want me to pull ${clipCards.length === 1 ? 'that clip' : 'those ' + clipCards.length + ' clips'} for you?`
-                    + ` <button class="btn btn-primary btn-sm chat-pull-btn" onclick="addAllChatClips(this)">Pull Clips</button>`
-                    + ` <button class="btn btn-sm chat-pull-btn" onclick="buildStoryFromChatClips(this)" style="margin-left:4px;">Build as Story</button>`;
-                msg.appendChild(pullPrompt);
+        if (streamed.ok) {
+            const finalReply = streamed.reply || '';
+            chatHistory.push({ role: 'assistant', content: finalReply });
+            // Replace the streaming bubble's plain text with the rendered
+            // version (clip cards instead of raw [CLIP:] markers).
+            if (streamed.bubble && finalReply) {
+                streamed.bubble.innerHTML = renderChatReply(finalReply);
+                const clipCards = streamed.bubble.querySelectorAll('.cc-card');
+                if (clipCards.length > 0) {
+                    const pullPrompt = document.createElement('div');
+                    pullPrompt.className = 'chat-pull-prompt';
+                    pullPrompt.innerHTML = `Want me to pull ${clipCards.length === 1 ? 'that clip' : 'those ' + clipCards.length + ' clips'} for you?`
+                        + ` <button class="btn btn-primary btn-sm chat-pull-btn" onclick="addAllChatClips(this)">Pull Clips</button>`
+                        + ` <button class="btn btn-sm chat-pull-btn" onclick="buildStoryFromChatClips(this)" style="margin-left:4px;">Build as Story</button>`;
+                    streamed.bubble.appendChild(pullPrompt);
+                }
             }
-        } else {
-            appendChatMessage('assistant', 'Error: ' + (data.error || 'No response'));
+        } else if (streamed.fallback) {
+            // Streaming endpoint failed — try the original /chat endpoint.
+            const res = await fetch(`/project/${COMBINED_ID}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message, history: chatHistory, profile_id: window.sessionProfileId || null }),
+            });
+            const data = await res.json();
+            if (progressTimer) clearTimeout(progressTimer);
+            typing.remove();
+
+            if (data.reply) {
+                const rendered = renderChatReply(data.reply);
+                const msg = appendChatMessage('assistant', rendered, true);
+                chatHistory.push({ role: 'assistant', content: data.reply });
+                const clipCards = msg.querySelectorAll('.cc-card');
+                if (clipCards.length > 0) {
+                    const pullPrompt = document.createElement('div');
+                    pullPrompt.className = 'chat-pull-prompt';
+                    pullPrompt.innerHTML = `Want me to pull ${clipCards.length === 1 ? 'that clip' : 'those ' + clipCards.length + ' clips'} for you?`
+                        + ` <button class="btn btn-primary btn-sm chat-pull-btn" onclick="addAllChatClips(this)">Pull Clips</button>`
+                        + ` <button class="btn btn-sm chat-pull-btn" onclick="buildStoryFromChatClips(this)" style="margin-left:4px;">Build as Story</button>`;
+                    msg.appendChild(pullPrompt);
+                }
+            } else {
+                appendChatMessage('assistant', 'Error: ' + (data.error || 'No response'));
+            }
         }
     } catch (err) {
         if (progressTimer) clearTimeout(progressTimer);
@@ -1729,6 +1761,93 @@ async function sendChat() {
     input.disabled = false;
     btn.disabled = false;
     input.focus();
+}
+
+async function streamChatReply({ message, typing, progressTimer }) {
+    // Returns {ok: true, reply, bubble} on success, {ok: false, fallback: true}
+    // when the SSE stream errored before completing — caller falls back to
+    // the non-streaming endpoint. Older browsers without ReadableStream
+    // short-circuit immediately into the fallback.
+    if (!window.ReadableStream || typeof TextDecoder === 'undefined') {
+        return { ok: false, fallback: true };
+    }
+    let res;
+    try {
+        res = await fetch(`/project/${COMBINED_ID}/chat-stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, history: chatHistory, profile_id: window.sessionProfileId || null }),
+        });
+    } catch (e) {
+        return { ok: false, fallback: true };
+    }
+    if (!res.ok || !res.body) {
+        return { ok: false, fallback: true };
+    }
+
+    if (progressTimer) clearTimeout(progressTimer);
+    // Replace the typing dots with an empty bubble we'll stream into. This
+    // way the user sees the first token within ~500ms instead of waiting
+    // for the whole reply to land.
+    const bubble = typing;
+    bubble.innerHTML = '';
+    bubble.classList.add('chat-streaming');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let streamedText = '';
+    let finalReply = '';
+    let sawDone = false;
+
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            // SSE frames are separated by blank lines. Each frame starts
+            // with "data: " followed by JSON.
+            let parts = buffer.split('\n\n');
+            buffer = parts.pop();
+            for (const part of parts) {
+                const line = part.trim();
+                if (!line.startsWith('data:')) continue;
+                let payload;
+                try { payload = JSON.parse(line.slice(5).trim()); }
+                catch (_) { continue; }
+                const ev = payload.event;
+                if (ev === 'token') {
+                    streamedText += String(payload.data || '');
+                    bubble.textContent = streamedText;
+                } else if (ev === 'progress') {
+                    // Progress events come from Layer 2 chunked search
+                    // ("Searching across the full interview…"). Show them
+                    // so the user knows work is happening.
+                    if (!streamedText) bubble.textContent = String(payload.data || '');
+                } else if (ev === 'done') {
+                    finalReply = String(payload.data || '');
+                    sawDone = true;
+                } else if (ev === 'error') {
+                    bubble.classList.remove('chat-streaming');
+                    return { ok: false, fallback: true };
+                }
+            }
+        }
+    } catch (e) {
+        bubble.classList.remove('chat-streaming');
+        return { ok: false, fallback: true };
+    }
+
+    bubble.classList.remove('chat-streaming');
+    if (!sawDone) {
+        // Stream cut off mid-reply. If we have any tokens, treat them as the
+        // reply; otherwise fall back.
+        if (streamedText) {
+            return { ok: true, reply: streamedText, bubble };
+        }
+        return { ok: false, fallback: true };
+    }
+    return { ok: true, reply: finalReply || streamedText, bubble };
 }
 
 // Store pending chat story builds (not yet sent to Story Builder)
@@ -2665,6 +2784,8 @@ async function startTranscription() {
 }
 
 // ── AI Analysis ──
+let analyzeProgressTimer = null;
+
 async function runAnalysis() {
     const btn = document.getElementById('analyzeBtn');
     const runBtn = document.getElementById('runAnalysisBtn');
@@ -2686,6 +2807,8 @@ async function runAnalysis() {
         document.getElementById('analysisProgress').style.display = 'block';
     }
 
+    startAnalyzeProgressPoll();
+
     try {
         const res = await fetch(`/project/${PROJECT_ID}/analyze`, {
             method: 'POST',
@@ -2693,17 +2816,87 @@ async function runAnalysis() {
             body: JSON.stringify({ type: 'all' }),
         });
         const data = await res.json();
-        if (data.status === 'analyzed') {
-            showToast('Analysis complete!');
+        stopAnalyzeProgressPoll();
+        if (data.status === 'analyzed' || data.status === 'cached') {
+            showToast(data.status === 'cached' ? 'Loaded cached analysis' : 'Analysis complete!');
             setTimeout(() => location.reload(), 1000);
         } else {
             showToast('Error: ' + (data.error || 'Unknown error'), true);
             resetAnalyzeBtn();
         }
     } catch (err) {
+        stopAnalyzeProgressPoll();
         showToast('Error: ' + err.message, true);
         resetAnalyzeBtn();
     }
+}
+
+function startAnalyzeProgressPoll() {
+    // Poll the per-project analyze_status.json every second. ETA is computed
+    // from real elapsed-per-step measurements — gets more accurate as more
+    // steps complete. Network blips are non-fatal: each poll is independent.
+    if (analyzeProgressTimer) clearInterval(analyzeProgressTimer);
+    const tick = async () => {
+        try {
+            const r = await fetch(`/project/${PROJECT_ID}/analyze/status`, { cache: 'no-store' });
+            if (!r.ok) return;
+            const data = await r.json();
+            if (data.idle) return;
+            renderAnalyzeProgress(data);
+        } catch (e) { /* keep polling */ }
+    };
+    tick();  // first tick immediately so the bar appears without a 1s gap
+    analyzeProgressTimer = setInterval(tick, 1000);
+}
+
+function stopAnalyzeProgressPoll() {
+    if (analyzeProgressTimer) {
+        clearInterval(analyzeProgressTimer);
+        analyzeProgressTimer = null;
+    }
+}
+
+function renderAnalyzeProgress(data) {
+    const labelEl = document.getElementById('analysisProgressLabel');
+    const tailEl = document.getElementById('analysisProgressTail');
+    const barEl = document.getElementById('analysisProgressBar');
+    const fillEl = document.getElementById('analysisProgressFill');
+    const timesEl = document.getElementById('analysisProgressTimes');
+    if (!labelEl || !barEl || !fillEl || !timesEl) return;
+
+    const step = Number(data.step) || 0;
+    const total = Math.max(1, Number(data.total) || 1);
+    const ratio = Math.min(1, Math.max(0, step / total));
+    const startedMs = data.started_at ? Date.parse(data.started_at) : Date.now();
+    const elapsedSec = Math.max(0, (Date.now() - startedMs) / 1000);
+    // ETA: extrapolate from average per-completed-step time. After step 1,
+    // we already have a credible estimate — improves with every tick.
+    let remainingSec = 0;
+    if (step > 0 && step < total) {
+        remainingSec = (elapsedSec / step) * (total - step);
+    }
+
+    if (tailEl) tailEl.textContent = '';
+    labelEl.firstChild && (labelEl.firstChild.textContent = `Analyzing — ${data.current || 'working'}`);
+    if (labelEl.childNodes.length === 1) {
+        labelEl.textContent = `Analyzing — ${data.current || 'working'}`;
+    }
+
+    barEl.style.display = 'block';
+    fillEl.style.width = `${(ratio * 100).toFixed(1)}%`;
+
+    timesEl.style.display = 'block';
+    timesEl.textContent =
+        `Step ${step} of ${total} · ${formatProgressDuration(elapsedSec)} elapsed` +
+        (remainingSec > 0 ? ` · ~${formatProgressDuration(remainingSec)} remaining` : '');
+}
+
+function formatProgressDuration(sec) {
+    sec = Math.max(0, Math.round(sec));
+    if (sec < 60) return `${sec}s`;
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }
 
 function resetAnalyzeBtn() {

@@ -53,7 +53,8 @@ def transcribed_project(client, tmp_path, monkeypatch):
     meta_path.write_text(json.dumps(meta))
 
     # Stub the AI call — this test is about persistence, not model output.
-    def _fake_chat(transcript, message, history=None, project_name="", analysis=None, profile_id=None):
+    def _fake_chat(transcript, message, history=None, project_name="", analysis=None,
+                   profile_id=None, segment_vectors=None, paragraph_index=None):
         return f"You said: {message}"
 
     monkeypatch.setattr("ai_analysis.chat_about_transcript", _fake_chat)
@@ -146,7 +147,8 @@ class TestChatHistoryMultiProject:
             meta_path.write_text(json.dumps(meta))
             pids.append(pid)
 
-        def _fake_chat(transcript, message, history=None, project_name="", analysis=None, profile_id=None):
+        def _fake_chat(transcript, message, history=None, project_name="", analysis=None,
+                   profile_id=None, segment_vectors=None, paragraph_index=None):
             return "multi reply"
         monkeypatch.setattr("ai_analysis.chat_about_transcript", _fake_chat)
 

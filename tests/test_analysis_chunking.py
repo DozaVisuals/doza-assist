@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import ai_analysis  # noqa: E402
 from ai_analysis import (  # noqa: E402
+    ANALYSIS_PER_CATEGORY_CAP,
     CHUNK_MINUTES,
     _iter_transcript_chunks,
     _seconds_to_tc,
@@ -84,7 +85,7 @@ class TestAnalyzeTranscriptRouting:
         segs = _mk_segments(5 * 60)  # under 15-min threshold
         calls = {'story': 0, 'social': 0}
 
-        def _stub_story(text, name):
+        def _stub_story(text, name, **kwargs):
             calls['story'] += 1
             return {
                 'summary': 'short', 'suggested_title': 'T',
@@ -93,7 +94,7 @@ class TestAnalyzeTranscriptRouting:
                 'strongest_soundbites': [],
             }
 
-        def _stub_social(text, name):
+        def _stub_social(text, name, **kwargs):
             calls['social'] += 1
             return {'social_clips': [{'title': 'c', 'start': '0:10', 'end': '0:20',
                                       'text': 'q'}]}
@@ -112,28 +113,41 @@ class TestAnalyzeTranscriptRouting:
         segs = _mk_segments(65 * 60)
         calls = {'story': [], 'social': []}
 
-        def _stub_story(text, name):
+        def _stub_story(text, name, **kwargs):
             calls['story'].append(name)
-            # Each chunk returns 2 beats and 1 soundbite.
+            n = len(calls['story'])
+            # Distinct timecodes per chunk so the post-merge dedup pass doesn't
+            # collapse identical ranges across chunks. Each chunk returns 2
+            # beats and 1 soundbite anchored to its own ~15-min window so the
+            # merged + capped output reflects actual chunk coverage.
+            base = (n - 1) * 15 * 60
             return {
-                'summary': f'sum {len(calls["story"])}',
-                'suggested_title': f'T{len(calls["story"])}',
+                'summary': f'sum {n}',
+                'suggested_title': f'T{n}',
                 'story_beats': [
-                    {'label': f'beat-{len(calls["story"])}-1', 'description': 'x',
-                     'start': '0:00', 'end': '0:30'},
-                    {'label': f'beat-{len(calls["story"])}-2', 'description': 'y',
-                     'start': '0:30', 'end': '1:00'},
+                    {'label': f'beat-{n}-1', 'description': 'x',
+                     'start': _seconds_to_tc(base + 30),
+                     'end': _seconds_to_tc(base + 60)},
+                    {'label': f'beat-{n}-2', 'description': 'y',
+                     'start': _seconds_to_tc(base + 90),
+                     'end': _seconds_to_tc(base + 120)},
                 ],
-                'strongest_soundbites': [{'text': f'sb-{len(calls["story"])}',
-                                          'start': '0:15', 'why': 'z'}],
+                'strongest_soundbites': [{'text': f'sb-{n}',
+                                          'start': _seconds_to_tc(base + 45),
+                                          'end': _seconds_to_tc(base + 60),
+                                          'why': 'z'}],
                 'themes': ['art', 'resilience'],
             }
 
-        def _stub_social(text, name):
+        def _stub_social(text, name, **kwargs):
             calls['social'].append(name)
+            n = len(calls['social'])
+            base = (n - 1) * 15 * 60
             return {'social_clips': [
-                {'title': f'clip-{len(calls["social"])}', 'start': '0:10',
-                 'end': '0:25', 'text': 'hi'},
+                {'title': f'clip-{n}',
+                 'start': _seconds_to_tc(base + 30),
+                 'end': _seconds_to_tc(base + 50),
+                 'text': 'hi'},
             ]}
 
         # Stub the overall-summary synthesis call so it doesn't try to hit
@@ -161,10 +175,15 @@ class TestAnalyzeTranscriptRouting:
         assert len(calls['story']) >= 4  # 65 min / 15 = ~4-5
         # Chunk labels include the "part X/N" suffix so the model sees context.
         assert all('part' in name for name in calls['story'])
-        # Coverage: all chunk outputs merged.
-        assert len(out['story_beats']) == 2 * len(calls['story'])
-        assert len(out['strongest_soundbites']) == len(calls['story'])
-        assert len(out['social_clips']) == len(calls['social'])
+        # Coverage: chunks merged into the accumulator. The post-merge cap
+        # enforces ≤ ANALYSIS_PER_CATEGORY_CAP per category, but chunks stay
+        # represented (every list is non-empty when a chunk produced items).
+        assert len(out['story_beats']) <= ANALYSIS_PER_CATEGORY_CAP
+        assert len(out['story_beats']) == min(2 * len(calls['story']), ANALYSIS_PER_CATEGORY_CAP)
+        assert len(out['strongest_soundbites']) <= ANALYSIS_PER_CATEGORY_CAP
+        assert len(out['strongest_soundbites']) == min(len(calls['story']), ANALYSIS_PER_CATEGORY_CAP)
+        assert len(out['social_clips']) <= ANALYSIS_PER_CATEGORY_CAP
+        assert len(out['social_clips']) == min(len(calls['social']), ANALYSIS_PER_CATEGORY_CAP)
         # The synthesis pass ran once with every chunk's summary/title, so the
         # sidebar describes the whole timeline — not just the first 15 minutes.
         assert synth_calls['count'] == 1
@@ -179,15 +198,18 @@ class TestAnalyzeTranscriptRouting:
         segs = _mk_segments(50 * 60)
         call_count = {'story': 0}
 
-        def _flaky_story(text, name):
+        def _flaky_story(text, name, **kwargs):
             call_count['story'] += 1
             if call_count['story'] == 2:
                 raise RuntimeError("model timed out on chunk 2")
-            return {'story_beats': [{'label': 'x', 'description': 'y',
-                                     'start': '0:00', 'end': '0:30'}]}
+            n = call_count['story']
+            base = (n - 1) * 15 * 60
+            return {'story_beats': [{'label': f'x{n}', 'description': 'y',
+                                     'start': _seconds_to_tc(base + 30),
+                                     'end': _seconds_to_tc(base + 60)}]}
 
         monkeypatch.setattr(ai_analysis, '_analyze_story', _flaky_story)
-        monkeypatch.setattr(ai_analysis, '_analyze_social', lambda t, n: {'social_clips': []})
+        monkeypatch.setattr(ai_analysis, '_analyze_social', lambda t, n, **k: {'social_clips': []})
         # Synthesis also runs on the surviving chunk summaries — stub it out
         # so this test doesn't try to hit an AI backend.
         monkeypatch.setattr(
@@ -196,7 +218,9 @@ class TestAnalyzeTranscriptRouting:
         )
 
         out = analyze_transcript({'segments': segs}, project_name='Flaky', analysis_type='story')
-        # One chunk failed, the rest survived.
+        # One chunk failed, the rest survived. Each surviving chunk emitted a
+        # distinct-timecode beat so the cap (>= number of survivors here) does
+        # not trim them.
         assert len(out['story_beats']) == call_count['story'] - 1
         assert call_count['story'] >= 2
 

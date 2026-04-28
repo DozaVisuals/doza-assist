@@ -10,14 +10,42 @@ import requests
 from editorial_dna.injector import inject_my_style
 
 
-def chat_about_transcript(transcript, message, history=None, project_name="Interview", analysis=None, profile_id=None):
+def chat_about_transcript(transcript, message, history=None, project_name="Interview",
+                          analysis=None, profile_id=None, segment_vectors=None,
+                          paragraph_index=None):
     """
     Chat with AI about the transcript. Supports follow-up questions.
     Returns the AI reply as a string (may contain embedded clip suggestions).
+
+    ``segment_vectors`` is the optional pre-classified segment list emitted
+    by ``generate_segment_vectors``. When provided, theme tags become an
+    additional search vocabulary (so "show me the resilience moments" finds
+    paragraphs flagged with that theme even when the speaker never said the
+    word) and high-narrative-score segments get prioritized as relevant
+    excerpts.
+
+    ``paragraph_index`` is an optional :class:`doza_assist.retrieval.TfidfIndex`
+    over the transcript's paragraphs. When supplied, the top cosine-similarity
+    matches for the user's query feed into the relevant-excerpts pool. This
+    is what catches abstract-synthesis queries that share no surface words
+    with the transcript ("what's the most revealing moment?") — TF-IDF
+    weights distinctive terms higher than common ones, so the result reads
+    more like a topic-relevant subset than a substring match.
+
+    Without both signals, behavior falls back to literal keyword matching —
+    same as before this change.
     """
     segments = (transcript or {}).get('segments', [])
     duration = segments[-1].get('end', 0) if segments else 0
     phrases, words = _extract_query_keywords(message)
+    theme_phrases = _collect_theme_phrases_from_vectors(segment_vectors, message)
+    tfidf_hits = []
+    if paragraph_index is not None:
+        try:
+            tfidf_hits = paragraph_index.query_paragraphs(message, k=8) or []
+        except Exception as e:
+            print(f"[chat] TF-IDF retrieval failed: {e}")
+            tfidf_hits = []
 
     # ── Routing ──────────────────────────────────────────────────────────
     # > 60 min  → Layer 2 is the engine. Keywords (if any) are passed into
@@ -34,15 +62,26 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         return _chat_layer2_chunked_search(
             paragraphs, message, history, project_name,
             phrases, words, profile_id, analysis,
+            segment_vectors=segment_vectors, theme_phrases=theme_phrases,
+            tfidf_hits=tfidf_hits,
         )
 
     formatted = _format_transcript_for_ai(transcript)
     relevant_excerpts_block = ''
-    if phrases or words:
+    if phrases or words or theme_phrases or tfidf_hits:
         # Layer 1 on short interviews: segments have the same shape the
         # paragraph helpers expect, so the matcher runs against segments
         # directly with ±2 context.
-        matched = _find_relevant_paragraphs(segments, phrases, words, context=2)
+        matched = _find_relevant_paragraphs(
+            segments, phrases, words, context=2, theme_phrases=theme_phrases,
+        )
+        # Fold in TF-IDF top hits (over the paragraph corpus, not segments).
+        # These come pre-ranked by cosine similarity and bring abstract
+        # queries onto a sensible answer pool even with zero literal match.
+        matched = _merge_paragraph_lists(matched, tfidf_hits)
+        # Augment with high-narrative-score segments overlapping any literal
+        # match — when vectors are present, these are pre-curated highlights.
+        matched = _augment_with_high_score_vectors(matched, segments, segment_vectors, theme_phrases)
         relevant_excerpts_block = _build_relevant_excerpts_block(matched)
     analysis_block = _build_chat_analysis_index(analysis)
 
@@ -112,7 +151,188 @@ Your reply MUST contain 2-5 [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] mark
 
     system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
     response = _call_ai_chat(prompt, system_prompt)
-    return _clean_chat_response(response)
+    cleaned = _clean_chat_response(response)
+    return _validate_clip_markers_in_text(cleaned, segments)
+
+
+def _call_ai_chat_stream(prompt, system_prompt=""):
+    """Streaming variant of :func:`_call_ai_chat` that yields token chunks.
+
+    Yields ``str`` pieces as they arrive from Ollama. On Claude fallback the
+    HTTP API returns the whole reply at once (we don't use the SSE variant
+    on that path), so the entire reply is yielded as a single chunk — the
+    UX win there is bounded but still real (no buffer waiting for the full
+    parse). Yields nothing on hard backend failure; the caller should treat
+    that the same as a non-streaming empty reply.
+    """
+    try:
+        with requests.post(
+            'http://localhost:11434/api/generate',
+            json={
+                'model': _get_ollama_model(),
+                'prompt': prompt,
+                'system': system_prompt,
+                'stream': True,
+                'options': {
+                    'temperature': 0.4,
+                    'num_predict': 4096,
+                    'num_ctx': 32768,
+                }
+            },
+            timeout=300,
+            stream=True,
+        ) as response:
+            if response.status_code == 200:
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except (ValueError, json.JSONDecodeError):
+                        continue
+                    piece = chunk.get('response', '')
+                    if piece:
+                        yield piece
+                    if chunk.get('done'):
+                        break
+                return
+    except requests.exceptions.ConnectionError:
+        pass
+    except Exception as e:
+        print(f"Ollama streaming error: {e}")
+
+    # Claude fallback — non-streaming HTTP, but we yield the result as a
+    # single chunk so the SSE client logic still flows.
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    if not api_key:
+        return
+    try:
+        response = requests.post(
+            'https://api.anthropic.com/v1/messages',
+            headers={
+                'Content-Type': 'application/json',
+                'x-api-key': api_key,
+                'anthropic-version': '2023-06-01',
+            },
+            json={
+                'model': 'claude-sonnet-4-20250514',
+                'max_tokens': 2048,
+                'system': system_prompt,
+                'messages': [{'role': 'user', 'content': prompt}],
+            },
+            timeout=60,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            yield data['content'][0]['text']
+    except Exception as e:
+        print(f"Claude API streaming-fallback error: {e}")
+
+
+def chat_about_transcript_stream(transcript, message, history=None, project_name="Interview",
+                                 analysis=None, profile_id=None, segment_vectors=None,
+                                 paragraph_index=None):
+    """Streaming variant of :func:`chat_about_transcript`.
+
+    Layer 1 yields ``('token', piece)`` events as Ollama produces them, then
+    a single ``('done', cleaned_reply)`` once the response completes and
+    the post-processing pipeline (marker normalization, timecode validation,
+    markdown stripping) has run on the full text. Layer 2's chunked search
+    isn't a single LLM stream, so it yields ``('progress', label)`` updates
+    as chunks finish and a final ``('done', reply)`` with the formatted
+    clips. Either way the consumer sees a steady stream and can render
+    progress immediately instead of waiting on the full reply.
+
+    On hard failure (no AI backend), yields ``('done', '')`` so the SSE
+    client can show an error rather than hanging.
+    """
+    segments = (transcript or {}).get('segments', [])
+    duration = segments[-1].get('end', 0) if segments else 0
+    phrases, words = _extract_query_keywords(message)
+    theme_phrases = _collect_theme_phrases_from_vectors(segment_vectors, message)
+    tfidf_hits = []
+    if paragraph_index is not None:
+        try:
+            tfidf_hits = paragraph_index.query_paragraphs(message, k=8) or []
+        except Exception:
+            tfidf_hits = []
+
+    if duration > _LONG_CHAT_SECONDS:
+        # Layer 2 is parallel by chunk; no streaming token feed is meaningful.
+        # Emit a progress hint, then deliver the final reply as one chunk.
+        yield ('progress', 'Searching across the full interview…')
+        paragraphs = _build_paragraphs(transcript)
+        reply = _chat_layer2_chunked_search(
+            paragraphs, message, history, project_name,
+            phrases, words, profile_id, analysis,
+            segment_vectors=segment_vectors, theme_phrases=theme_phrases,
+            tfidf_hits=tfidf_hits,
+        )
+        yield ('done', reply)
+        return
+
+    # Layer 1: build the same prompt the non-streaming path builds, then
+    # stream the model's tokens. Mirrors `chat_about_transcript` so prompt
+    # construction stays in one place — a shared `_build_layer1_prompt`
+    # helper would be cleaner, but the inline block keeps the streaming
+    # path self-contained for now.
+    formatted = _format_transcript_for_ai(transcript)
+    relevant_excerpts_block = ''
+    if phrases or words or theme_phrases or tfidf_hits:
+        matched = _find_relevant_paragraphs(
+            segments, phrases, words, context=2, theme_phrases=theme_phrases,
+        )
+        matched = _merge_paragraph_lists(matched, tfidf_hits)
+        matched = _augment_with_high_score_vectors(matched, segments, segment_vectors, theme_phrases)
+        relevant_excerpts_block = _build_relevant_excerpts_block(matched)
+    analysis_block = _build_chat_analysis_index(analysis)
+
+    system_prompt = f"""You are an expert editorial consultant embedded in a documentary and interview editing tool called Doza Assist. You have the full transcript of the project "{project_name}" loaded in context.
+
+═══════════════════════════════════════════════════════════════
+HARD OUTPUT CONTRACT — THIS IS THE ONLY FORMAT THAT WORKS:
+
+Every response MUST cite 2-5 specific moments from the transcript using this EXACT marker:
+
+  [CLIP: start=HH:MM:SS end=HH:MM:SS title="short descriptive title"]
+
+The frontend renders these markers as playable clip cards. Pure prose without markers fails the user.
+
+GROUNDING RULE: every timecode MUST come from the transcript segment markers below. Never invent timecodes.
+
+Personality: seasoned doc editor leaning over the desk, warm, opinionated, short. No filler.
+
+TRANSCRIPT:
+{formatted}{analysis_block}{relevant_excerpts_block}
+
+═══════════════════════════════════════════════════════════════
+FINAL REMINDER: Your reply MUST contain 2-5 [CLIP: ...] markers using real timecodes from the transcript above.
+═══════════════════════════════════════════════════════════════"""
+
+    conversation = ""
+    if history:
+        for msg in history[-6:]:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            if role == 'user':
+                conversation += f"\nUser: {content}"
+            else:
+                conversation += f"\nAssistant: {content}"
+    prompt = f"{conversation}\nUser: {message}\nAssistant:"
+
+    system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
+
+    pieces = []
+    for piece in _call_ai_chat_stream(prompt, system_prompt):
+        pieces.append(piece)
+        yield ('token', piece)
+
+    # Run the same post-processing the non-streaming path runs so the final
+    # text is identical regardless of which endpoint the client used.
+    full = ''.join(pieces)
+    cleaned = _clean_chat_response(full)
+    cleaned = _validate_clip_markers_in_text(cleaned, segments)
+    yield ('done', cleaned)
 
 
 def _call_ai_chat(prompt, system_prompt=""):
@@ -164,6 +384,85 @@ def _call_ai_chat(prompt, system_prompt=""):
             print(f"Claude API error: {e}")
 
     raise RuntimeError("No AI backend available.")
+
+
+def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
+    """Drop ``[CLIP:]`` markers whose timecodes don't anchor to the transcript.
+
+    Small local models occasionally invent timecodes that look plausible
+    (``02:31:14`` on a 90-min interview) but fall outside any transcript
+    segment, so the resulting clip card scrubs to silence. This pass parses
+    the canonical marker form, looks up each ``start`` against the segment
+    list, and removes the marker line when start falls more than
+    ``grace_seconds`` outside any segment's ``[start, end]`` window.
+
+    The grace window mirrors ``_parse_chunk_response``'s ±5s tolerance — a
+    legitimately-anchored clip that ends in trailing silence shouldn't be
+    dropped just because the model rounded ``end`` past the last spoken word.
+
+    Returns ``text`` unchanged when ``segments`` is empty or no markers
+    are present, so callers can apply this unconditionally.
+    """
+    import re
+    if not text or not segments:
+        return text
+
+    # Collect transcript bounds + per-segment ranges. Total bounds let us
+    # short-circuit obvious off-the-end timecodes; the per-segment list is
+    # used for "is this start time inside any segment" checks.
+    seg_ranges = []
+    for s in segments:
+        try:
+            seg_start = float(s.get('start', 0) or 0)
+            seg_end = float(s.get('end', seg_start) or seg_start)
+        except (TypeError, ValueError):
+            continue
+        if seg_end >= seg_start:
+            seg_ranges.append((seg_start, seg_end))
+    if not seg_ranges:
+        return text
+    transcript_start = seg_ranges[0][0]
+    transcript_end = max(end for _, end in seg_ranges)
+
+    def _start_in_transcript(start_sec):
+        # Outside the whole-transcript window? Drop.
+        if start_sec < transcript_start - grace_seconds:
+            return False
+        if start_sec > transcript_end + grace_seconds:
+            return False
+        # Inside the global window but not anchored to any specific segment?
+        # Tolerate small gaps between segments (silences) by accepting any
+        # start within `grace_seconds` of a segment edge.
+        for seg_start, seg_end in seg_ranges:
+            if seg_start - grace_seconds <= start_sec <= seg_end + grace_seconds:
+                return True
+        return False
+
+    marker_re = re.compile(r'\[CLIP:[^\]]*?start=([^\s\]]+)[^\]]*\]')
+
+    def _is_valid(match):
+        start_str = match.group(1).strip().strip('"\'')
+        try:
+            return _start_in_transcript(_tc_to_seconds(start_str))
+        except Exception:
+            return True  # if we can't parse, leave it for the renderer to sort out
+
+    # Walk lines so we strip both the marker AND the editorial sentence that
+    # rides along with it. A "moment doesn't exist" line with explanatory
+    # prose underneath would just confuse the user.
+    cleaned_lines = []
+    for line in text.split('\n'):
+        bad_marker = False
+        for m in marker_re.finditer(line):
+            if not _is_valid(m):
+                bad_marker = True
+                break
+        if not bad_marker:
+            cleaned_lines.append(line)
+    cleaned = '\n'.join(cleaned_lines)
+    # Collapse blank-line runs the dropped markers might have left behind.
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+    return cleaned
 
 
 def _clean_chat_response(text):
@@ -498,6 +797,13 @@ _CHAT_STOPWORDS = frozenset({
     'section', 'sections', 'pull', 'pulled', 'pick', 'best', 'good', 'great',
     'really', 'just', 'also', 'get', 'got', 'make', 'made', 'know', 'think',
     'going', 'want', 'need', 'like', 'something', 'anything', 'everything',
+    # Intent/perception verbs that signal the kind of moment a user wants but
+    # aren't search terms themselves. Without these, "show me what they felt
+    # about the trustees" anchors heavily on every paragraph containing
+    # "felt" — which on a 90-min interview is almost every paragraph.
+    'feel', 'feels', 'felt', 'feeling', 'look', 'looks', 'looking', 'looked',
+    'see', 'sees', 'seeing', 'seen', 'seem', 'seems', 'seemed', 'seeming',
+    'sounds', 'sounded',
 })
 
 
@@ -545,14 +851,61 @@ def _extract_query_keywords(message):
     return _dedupe(phrases), _dedupe(words)
 
 
-def _find_relevant_paragraphs(paragraphs, phrases, words, context=1):
+def _collect_theme_phrases_from_vectors(segment_vectors, message):
+    """Return ``theme_tags`` from segment_vectors that overlap the user's query.
+
+    Each segment_vector carries 2-4 short ``theme_tags`` (e.g. ``["loss",
+    "decision"]``). When the user's query mentions one of those tag words
+    (or contains a tag word as a substring of a multi-word query token),
+    we treat the tag itself as an additional search phrase. This rescues
+    abstract queries — "show me the resilience moments" finds paragraphs
+    flagged with ``resilience`` even when the speaker never literally
+    said the word.
+
+    Returns a deduped list of lowercase phrases. Empty when no overlaps,
+    so callers can pass through unconditionally.
+    """
+    if not segment_vectors or not message:
+        return []
+    import re
+    msg_tokens = set(re.findall(r"[a-z0-9']+", message.lower()))
+    if not msg_tokens:
+        return []
+    matches = []
+    seen = set()
+    for v in segment_vectors:
+        if not isinstance(v, dict):
+            continue
+        for tag in (v.get('theme_tags') or []):
+            if not isinstance(tag, str):
+                continue
+            tag_lc = tag.strip().lower()
+            if not tag_lc or tag_lc in seen:
+                continue
+            tag_tokens = set(re.findall(r"[a-z0-9']+", tag_lc))
+            if tag_tokens & msg_tokens:
+                seen.add(tag_lc)
+                matches.append(tag_lc)
+    return matches
+
+
+def _find_relevant_paragraphs(paragraphs, phrases, words, context=1, theme_phrases=None):
     """Return the subset of ``paragraphs`` matching the user's query, each
     expanded by ``context`` paragraphs of lead-in and lead-out so the model
     sees the moment in context rather than a bare one-liner.
 
-    Matching is case-insensitive substring. Phrase matching is tried first;
-    individual-word fallback runs only if no phrase scored any hits, so
+    Matching is case-insensitive substring. Phrase matching is tried first
+    (and outranks individual-word matches whenever any phrase hits) so
     "Moose Hill" doesn't balloon into every "hill" mention on the timeline.
+
+    ``theme_phrases`` is an optional list of canonical phrases — typically
+    pulled from ``segment_vectors[*].theme_tags`` — that we treat as a
+    domain vocabulary. When a user query contains a token that matches a
+    theme phrase, paragraphs tagged with that theme get an automatic match
+    even if they don't literally contain the user's word. This is what
+    rescues abstract queries like "show me the resilience moments" when
+    the speaker never literally said "resilience."
+
     Duplicate/overlapping paragraphs are de-duplicated by index.
     """
     if not paragraphs:
@@ -576,6 +929,10 @@ def _find_relevant_paragraphs(paragraphs, phrases, words, context=1):
     phrase_hit = _scan(phrases)
     if not phrase_hit:
         _scan(words)
+    # Theme matching is additive on top of literal hits — even when literal
+    # phrase matches landed, theme overlaps deepen the relevance pool with
+    # paragraphs that share the topic but used different words.
+    _scan(theme_phrases or [])
 
     if not hit_indices:
         return []
@@ -587,6 +944,92 @@ def _find_relevant_paragraphs(paragraphs, phrases, words, context=1):
             expanded.add(j)
 
     return [paragraphs[i] for i in sorted(expanded)]
+
+
+def _merge_paragraph_lists(*lists):
+    """Merge paragraph lists, deduping by ``(start, end)`` and preserving
+    chronological order. Used to fold TF-IDF retrieval hits, keyword/theme
+    matches, and vector-anchored augmentations into one excerpt pool with
+    no duplicates.
+    """
+    seen = set()
+    merged = []
+    for lst in lists:
+        for p in (lst or []):
+            if not isinstance(p, dict):
+                continue
+            key = (p.get('start'), p.get('end'))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(p)
+    merged.sort(key=lambda p: float(p.get('start', 0) or 0))
+    return merged
+
+
+def _augment_with_high_score_vectors(matched_paragraphs, segments, segment_vectors, theme_phrases):
+    """Add segments overlapping high-score / theme-matching vectors to the relevance pool.
+
+    The literal-keyword match in :func:`_find_relevant_paragraphs` is anchored
+    to the transcript text. Vectors carry an *editorial* signal — a segment
+    flagged ``narrative_score=high`` plus matching ``theme_tags`` is a
+    pre-curated highlight, even when its surface text doesn't contain the
+    user's exact words. Folding those into the relevant excerpts means
+    abstract queries ("what's the emotional spine?") still surface the
+    moments the editor already labeled as the spine.
+
+    Returns a deduped paragraph list that preserves chronological order.
+    Falls back to ``matched_paragraphs`` unchanged when vectors are absent
+    or have no high-score / theme-matching entries.
+    """
+    if not segment_vectors:
+        return list(matched_paragraphs or [])
+    if not segments:
+        return list(matched_paragraphs or [])
+
+    theme_set = {t for t in (theme_phrases or [])}
+
+    # Pick vectors that either (a) literally tag-match the query or (b) are
+    # high-narrative-score. Cap so we don't flood the prompt — the relevance
+    # pool is meant to surface the strongest few, not the whole transcript.
+    selected_ranges = []
+    for v in segment_vectors:
+        if not isinstance(v, dict):
+            continue
+        score = str(v.get('narrative_score', 'medium')).lower()
+        tags = {str(t).strip().lower() for t in (v.get('theme_tags') or []) if isinstance(t, str)}
+        is_match = bool(theme_set & tags) or score == 'high'
+        if not is_match:
+            continue
+        try:
+            start = _tc_to_seconds(v.get('timecode_in'))
+            end = _tc_to_seconds(v.get('timecode_out'))
+        except Exception:
+            continue
+        if end <= start:
+            continue
+        selected_ranges.append((start, end, score, bool(theme_set & tags)))
+        if len(selected_ranges) >= 12:
+            break
+    if not selected_ranges:
+        return list(matched_paragraphs or [])
+
+    # Map vector ranges to overlapping transcript segments.
+    augmented = list(matched_paragraphs or [])
+    seen_keys = {(s.get('start'), s.get('end')) for s in augmented}
+    for vstart, vend, _score, _theme in selected_ranges:
+        for seg in segments:
+            seg_start = float(seg.get('start', 0) or 0)
+            seg_end = float(seg.get('end', seg_start) or seg_start)
+            if seg_end <= vstart or seg_start >= vend:
+                continue
+            key = (seg.get('start'), seg.get('end'))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            augmented.append(seg)
+    augmented.sort(key=lambda p: float(p.get('start', 0) or 0))
+    return augmented
 
 
 def _build_relevant_excerpts_block(paragraphs):
@@ -757,6 +1200,14 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180):
     Uses a smaller num_ctx than chat because each chunk fits comfortably
     under 10k tokens. Lower temperature than the main chat (0.1 vs 0.4) to
     keep the JSON shape stable — creativity hurts here.
+
+    ``format: 'json'`` instructs Ollama to constrain decoding to a valid
+    JSON token tree. Without it, Gemma 4 e4b wraps the JSON in markdown
+    fences or prose ~5–10% of the time on long interviews and
+    ``_parse_chunk_response`` falls back to its low-confidence regex
+    salvage path. The salvage path tags candidates with score=3, so a few
+    bad chunks can poison the cross-chunk aggregation. Format-locked
+    decoding eliminates the failure mode at zero parsing cost.
     """
     try:
         response = requests.post(
@@ -766,6 +1217,7 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180):
                 'prompt': user_prompt,
                 'system': system_prompt,
                 'stream': False,
+                'format': 'json',
                 'options': {
                     'temperature': 0.1,
                     'num_predict': 768,
@@ -1015,8 +1467,199 @@ def _find_keyword_chunk_indices(chunks, phrases, words):
     return word_hits
 
 
+def _find_vector_anchored_chunk_indices(chunks, segment_vectors, score_filter='high',
+                                        theme_phrases=None, limit=None):
+    """Pick chunks whose paragraphs overlap selected segment_vectors.
+
+    ``score_filter`` controls which vectors qualify:
+      - ``'high'``: only ``narrative_score == 'high'`` vectors. Used to cap
+        chunk fan-out on multi-hour synthesis queries — the right answer
+        nearly always lives in chunks the editor already flagged as
+        narratively strong.
+      - ``'match'``: vectors whose ``theme_tags`` overlap ``theme_phrases``.
+        Used to anchor abstract topical queries onto the chunks the editor
+        already labeled with that theme.
+
+    Returns chunk indices in chronological order. ``limit`` (when set)
+    truncates the list, with chunks ranked by total qualifying-vector
+    overlap so we keep the densest matches.
+    """
+    if not chunks or not segment_vectors:
+        return []
+
+    theme_set = {str(t).strip().lower() for t in (theme_phrases or [])}
+
+    qualifying_ranges = []
+    for v in segment_vectors:
+        if not isinstance(v, dict):
+            continue
+        score = str(v.get('narrative_score', 'medium')).lower()
+        tags = {str(t).strip().lower() for t in (v.get('theme_tags') or []) if isinstance(t, str)}
+        if score_filter == 'high' and score != 'high':
+            continue
+        if score_filter == 'match' and not (theme_set & tags):
+            continue
+        try:
+            v_start = _tc_to_seconds(v.get('timecode_in'))
+            v_end = _tc_to_seconds(v.get('timecode_out'))
+        except Exception:
+            continue
+        if v_end <= v_start:
+            continue
+        qualifying_ranges.append((v_start, v_end))
+    if not qualifying_ranges:
+        return []
+
+    # For each chunk, sum overlap seconds with qualifying vectors.
+    chunk_scores = []
+    for idx, chunk in enumerate(chunks):
+        if not chunk:
+            continue
+        chunk_start = chunk[0].get('start', 0)
+        chunk_end = chunk[-1].get('end', chunk[-1].get('start', 0))
+        if chunk_end <= chunk_start:
+            continue
+        total = 0.0
+        for vs, ve in qualifying_ranges:
+            total += max(0.0, min(chunk_end, ve) - max(chunk_start, vs))
+        if total > 0:
+            chunk_scores.append((idx, total))
+
+    if not chunk_scores:
+        return []
+
+    if limit is not None and len(chunk_scores) > limit:
+        chunk_scores.sort(key=lambda x: -x[1])
+        chunk_scores = chunk_scores[:limit]
+
+    chunk_scores.sort(key=lambda x: x[0])
+    return [idx for idx, _ in chunk_scores]
+
+
+def _rerank_candidates_globally(candidates, message, top_k=5):
+    """Final low-temp rerank pass over Layer 2 candidates.
+
+    Per-chunk scores are local — a chunk full of strong moments produces
+    candidates with similar scores to a chunk where everything was
+    mediocre. Aggregating by raw score therefore over-weights whichever
+    chunks happened to score generously. This pass sends the model a
+    short menu of titles + timecodes + ``why`` blurbs (no transcript) and
+    asks for the best ``top_k`` for the user's question.
+
+    Falls back to the input list (truncated to ``top_k``) when the rerank
+    call fails or returns nothing parseable, so a transient AI error never
+    drops Layer 2 to zero clips.
+    """
+    if not candidates or len(candidates) <= top_k:
+        return list(candidates or [])[:top_k]
+
+    menu_lines = []
+    indexed = list(enumerate(candidates))
+    for i, c in indexed:
+        title = (c.get('title') or 'Moment').strip().replace('\n', ' ')
+        why = (c.get('why') or '').strip().replace('\n', ' ')
+        start = _seconds_to_tc(c.get('start_sec', 0))
+        end = _seconds_to_tc(c.get('end_sec', 0))
+        menu_lines.append(f"  [{i}] [{start}-{end}] {title} :: {why}")
+    menu = '\n'.join(menu_lines)
+
+    system_prompt = (
+        "You are an editorial consultant choosing the BEST moments from a "
+        "shortlist of pre-scored candidates. The candidates were scored "
+        "independently in different transcript chunks, so their scores "
+        "aren't directly comparable — your job is to choose globally. "
+        "Respond in JSON only, no markdown, no prose."
+    )
+    user_prompt = (
+        f"User's question: {message}\n\n"
+        f"Candidates (numbered):\n{menu}\n\n"
+        f"Pick the {top_k} best for the user's question. Diversify across "
+        "the timeline — don't return five clips from the same chunk if "
+        "stronger options exist elsewhere. Return JSON in this shape:\n"
+        '{"picks": [<numeric index>, ...]} \n'
+        "Only return indices that appear in the menu above."
+    )
+    try:
+        response = _call_ai_json(system_prompt, user_prompt, timeout=90)
+    except Exception:
+        response = ''
+    if not response:
+        return _aggregate_chunk_candidates(candidates, top_k=top_k)
+
+    import re
+    import json as _json
+    parsed = None
+    fence = re.search(r'\{.*\}', response, re.DOTALL)
+    if fence:
+        try:
+            parsed = _json.loads(fence.group(0))
+        except (ValueError, _json.JSONDecodeError):
+            parsed = None
+    if not isinstance(parsed, dict):
+        return _aggregate_chunk_candidates(candidates, top_k=top_k)
+
+    raw_picks = parsed.get('picks') or parsed.get('best') or []
+    if not isinstance(raw_picks, list):
+        return _aggregate_chunk_candidates(candidates, top_k=top_k)
+
+    selected = []
+    seen = set()
+    for entry in raw_picks:
+        try:
+            idx = int(entry)
+        except (TypeError, ValueError):
+            continue
+        if idx in seen or idx < 0 or idx >= len(candidates):
+            continue
+        seen.add(idx)
+        selected.append(candidates[idx])
+        if len(selected) >= top_k:
+            break
+
+    if not selected:
+        return _aggregate_chunk_candidates(candidates, top_k=top_k)
+
+    selected.sort(key=lambda c: c.get('start_sec', 0))
+    return selected
+
+
+def _chunks_overlapping_paragraphs(chunks, target_paragraphs):
+    """Indices of chunks whose timespan overlaps any of ``target_paragraphs``.
+
+    Used to anchor Layer 2 search onto the chunks containing TF-IDF top hits,
+    so a multi-hour synthesis query whose answer is in chunk 12 doesn't get
+    starved by chunk-fan-out caps that picked chunks 1-6.
+    """
+    if not chunks or not target_paragraphs:
+        return []
+    target_ranges = []
+    for p in target_paragraphs:
+        try:
+            t_start = float(p.get('start', 0) or 0)
+            t_end = float(p.get('end', t_start) or t_start)
+        except (TypeError, ValueError):
+            continue
+        if t_end > t_start:
+            target_ranges.append((t_start, t_end))
+    if not target_ranges:
+        return []
+    indices = []
+    for idx, chunk in enumerate(chunks):
+        if not chunk:
+            continue
+        chunk_start = chunk[0].get('start', 0)
+        chunk_end = chunk[-1].get('end', chunk[-1].get('start', 0))
+        for t_start, t_end in target_ranges:
+            if t_end > chunk_start and t_start < chunk_end:
+                indices.append(idx)
+                break
+    return indices
+
+
 def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
-                                phrases, words, profile_id, analysis):
+                                phrases, words, profile_id, analysis,
+                                segment_vectors=None, theme_phrases=None,
+                                tfidf_hits=None):
     """Orchestrate the Layer 2 path: chunk → concurrent per-chunk search →
     aggregate → render clip cards. No LLM sees the full transcript; the
     model's ranking job is scoped to a single ~10-minute window at a time.
@@ -1025,6 +1668,12 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
     restrict the search to keyword-anchored chunks and switch the prompt to
     strict mode. This prevents the small model from scoring abstract matches
     in other chunks above the actual keyword hits.
+
+    When ``segment_vectors`` are provided AND no literal keyword anchors hit,
+    we narrow the search to chunks that overlap high-narrative-score / theme-
+    matching vectors. On a 3-hour interview that turns 18 chunks × 4 calls
+    into ~6 chunks × 4 calls — the right answer is overwhelmingly likely to
+    sit in a chunk the editor already flagged as a highlight.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1033,12 +1682,41 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
         return _format_clip_cards_from_candidates([])
 
     anchored = _find_keyword_chunk_indices(chunks, phrases, words)
+    # Theme-tag anchoring: if vectors flagged theme_tags that match the user's
+    # query, treat the chunks overlapping those vectors as keyword-anchored
+    # too. This is the "abstract query but the editor already labeled the
+    # right thread" case ("show me resilience moments" with no literal hit).
+    if not anchored and theme_phrases and segment_vectors:
+        anchored = _find_vector_anchored_chunk_indices(
+            chunks, segment_vectors,
+            score_filter='match',
+            theme_phrases=theme_phrases,
+        )
+    # TF-IDF anchoring: if the paragraph index found high-similarity matches
+    # for the query, anchor onto chunks containing those paragraphs. This
+    # handles abstract synthesis queries with no literal keyword hit AND no
+    # theme-tag overlap — the kind of question where neither indexer alone
+    # would find anything but cosine similarity would.
+    if not anchored and tfidf_hits:
+        anchored = sorted(set(_chunks_overlapping_paragraphs(chunks, tfidf_hits)))
+
     if anchored:
         search_targets = [(i, chunks[i]) for i in anchored]
         strict_keyword = True
     else:
         search_targets = list(enumerate(chunks))
         strict_keyword = False
+        # Cap chunk fan-out on multi-hour synthesis queries: the model's job
+        # is to pick the BEST 5 across the whole interview, and abstract
+        # queries are overwhelmingly answered in high-narrative-score
+        # regions. Without this cap a 3-hour project does ~5 sequential
+        # rounds of 4 parallel calls; with it we run ~2 rounds.
+        if len(search_targets) > 6 and segment_vectors:
+            top_indices = _find_vector_anchored_chunk_indices(
+                chunks, segment_vectors, score_filter='high', limit=6,
+            )
+            if top_indices:
+                search_targets = [(i, chunks[i]) for i in top_indices]
 
     all_candidates = []
 
@@ -1059,7 +1737,13 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
             except Exception as e:
                 print(f"Layer 2 chunk error: {e}")
 
-    top = _aggregate_chunk_candidates(all_candidates)
+    top = _aggregate_chunk_candidates(all_candidates, top_k=_CHAT_TOP_K_CLIPS * 3)
+    # Cross-chunk synthesis pass: per-chunk scores aren't comparable across
+    # chunks (each model call sees only its own window), so a final low-temp
+    # rerank decides the global best. Falls back to the local-score top-K
+    # if the synthesis call fails — better to ship the original aggregator's
+    # answer than to drop everything.
+    top = _rerank_candidates_globally(top, message, top_k=_CHAT_TOP_K_CLIPS)
     return _format_clip_cards_from_candidates(top)
 
 
@@ -1227,7 +1911,14 @@ Return ONLY valid JSON."""
     }
 
 
-def analyze_transcript(transcript, project_name="Interview", analysis_type="all"):
+# Hard upper bound on items returned per analysis category. The user only
+# wants the BEST 7 of each kind — more candidates dilute the cards in the UI
+# and give the user busywork triaging duplicates.
+ANALYSIS_PER_CATEGORY_CAP = 7
+
+
+def analyze_transcript(transcript, project_name="Interview", analysis_type="all",
+                       segment_vectors=None, progress_callback=None):
     """
     Analyze a transcript for story structure and social media clips.
 
@@ -1241,19 +1932,45 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         transcript: dict with 'segments' list from transcribe.py
         project_name: str
         analysis_type: 'story', 'social', or 'all'
+        segment_vectors: optional list of pre-classified segment vectors (from
+            a prior /analyze run). When supplied, used to rank candidates by
+            ``narrative_score`` during the post-merge cap pass — so the BEST 7
+            of each category come back, not the first 7. ``None`` is fine on
+            first-ever analysis; ranking falls back to length/recency.
+        progress_callback: optional ``callable(step, total, current)`` that
+            the analyzer pings at every meaningful milestone (per-chunk LLM
+            call, summary synthesis, cap+rerank). The Flask /analyze route
+            forwards these to a per-project ``analyze_status.json`` so the
+            UI can render an honest progress bar with elapsed/ETA. Pass
+            ``None`` and the analyzer runs silently.
 
     Returns:
         dict canonicalized through :func:`normalize_analysis` so downstream
         renderers see stable keys even when a small model drifted on the
         requested JSON schema.
     """
+    import math
+
+    def _emit(step, total, current):
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(step=step, total=total, current=current)
+        except Exception:
+            # Progress writes are advisory — never let a bad callback break
+            # the actual analysis.
+            pass
+
     segments = (transcript or {}).get('segments', [])
     total_duration = segments[-1].get('end', 0) if segments else 0
 
     # Short path: one AI call, original behavior.
     if total_duration < _LONG_INTERVIEW_SECONDS or not segments:
         formatted = _format_transcript_for_ai(transcript)
-        return _analyze_transcript_single(formatted, project_name, analysis_type)
+        return _analyze_transcript_single(
+            formatted, project_name, analysis_type, segment_vectors=segment_vectors,
+            progress_emit=_emit,
+        )
 
     # Chunked path: walk 15-minute slices and merge.
     chunks = list(_iter_transcript_chunks(segments))
@@ -1268,21 +1985,57 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         '_chunk_summaries': [],
         '_chunk_titles': [],
     }
+    # Per-chunk targets sized so the post-merge total lands near the cap with
+    # a little margin for the rerank pass to choose from. With 4 chunks and a
+    # cap of 7 we ask for 2 per chunk → 8 candidates → trim to 7. Floor at 2
+    # so single-chunk-per-category drift doesn't starve the merger.
+    chunk_count = max(1, len(chunks))
+    per_chunk_target = max(2, math.ceil(ANALYSIS_PER_CATEGORY_CAP / chunk_count))
+
+    # Total step count: each chunk runs (story?, social?) calls, plus the
+    # overall summary synthesis pass and the cap+rerank pass. The /analyze
+    # route adds another step for paragraph index build outside this scope.
+    types_per_chunk = (1 if analysis_type in ('story', 'all') else 0) + \
+                      (1 if analysis_type in ('social', 'all') else 0)
+    total_steps = chunk_count * types_per_chunk + 2  # +1 summary, +1 cap
+    step = 0
+    _emit(step, total_steps, "starting")
+
     for i, chunk in enumerate(chunks):
         chunk_text = _format_segments_for_ai(chunk['segments'])
         range_label = f"{_seconds_to_tc(chunk['start_seconds'])}-{_seconds_to_tc(chunk['end_seconds'])}"
         chunk_label = f"{project_name} · part {i+1}/{len(chunks)} ({range_label})"
         if analysis_type in ('story', 'all'):
+            step += 1
+            _emit(step, total_steps, f"chunk {i+1}/{chunk_count}: story beats")
             try:
-                _merge_story_chunk(accum, _analyze_story(chunk_text, chunk_label), is_first_chunk=(i == 0))
+                _merge_story_chunk(
+                    accum,
+                    _analyze_story(
+                        chunk_text, chunk_label,
+                        beats_target=per_chunk_target,
+                        soundbites_target=per_chunk_target,
+                    ),
+                    is_first_chunk=(i == 0),
+                )
             except Exception as e:
                 print(f"[analyze] story chunk {i+1}/{len(chunks)} failed: {e}")
         if analysis_type in ('social', 'all'):
+            step += 1
+            _emit(step, total_steps, f"chunk {i+1}/{chunk_count}: social clips")
             try:
-                _merge_social_chunk(accum, _analyze_social(chunk_text, chunk_label))
+                _merge_social_chunk(
+                    accum,
+                    _analyze_social(
+                        chunk_text, chunk_label,
+                        clips_target=per_chunk_target,
+                    ),
+                )
             except Exception as e:
                 print(f"[analyze] social chunk {i+1}/{len(chunks)} failed: {e}")
 
+    step += 1
+    _emit(step, total_steps, "synthesizing summary")
     overall = _synthesize_overall_summary(
         accum.pop('_chunk_summaries', []),
         accum.pop('_chunk_titles', []),
@@ -1291,14 +2044,40 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
     accum['summary'] = overall['summary']
     accum['suggested_title'] = overall['suggested_title']
 
-    return normalize_analysis(accum)
+    step += 1
+    _emit(step, total_steps, "ranking and capping")
+    # Normalize first so the cap+rerank sees canonical field names (a model
+    # that emitted ``start_time`` shouldn't be filtered out of the cap pass
+    # just because the dedup looked for ``start``).
+    normalized = normalize_analysis(accum)
+    return _cap_and_rank_analysis(
+        normalized, segment_vectors=segment_vectors, cap=ANALYSIS_PER_CATEGORY_CAP,
+    )
 
 
-def _analyze_transcript_single(formatted_text, project_name, analysis_type):
+def _analyze_transcript_single(formatted_text, project_name, analysis_type,
+                                segment_vectors=None, progress_emit=None):
     """One-shot analysis path for short interviews."""
+    types_count = (1 if analysis_type in ('story', 'all') else 0) + \
+                  (1 if analysis_type in ('social', 'all') else 0)
+    total_steps = types_count + 1  # +1 cap+rerank
+    step = 0
+
+    def _emit(current):
+        if progress_emit is not None:
+            progress_emit(step, total_steps, current)
+
+    _emit("starting")
+
     result = {}
     if analysis_type in ('story', 'all'):
-        story_data = _analyze_story(formatted_text, project_name)
+        step += 1
+        _emit("story beats and soundbites")
+        story_data = _analyze_story(
+            formatted_text, project_name,
+            beats_target=ANALYSIS_PER_CATEGORY_CAP,
+            soundbites_target=ANALYSIS_PER_CATEGORY_CAP,
+        )
         if isinstance(story_data, dict):
             result['summary'] = _first_present(story_data, 'summary', 'overview', 'synopsis')
             result['suggested_title'] = _first_present(
@@ -1316,7 +2095,12 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type):
             )
 
     if analysis_type in ('social', 'all'):
-        social_data = _analyze_social(formatted_text, project_name)
+        step += 1
+        _emit("social clips")
+        social_data = _analyze_social(
+            formatted_text, project_name,
+            clips_target=ANALYSIS_PER_CATEGORY_CAP,
+        )
         if isinstance(social_data, dict):
             result['social_clips'] = _first_present_list(
                 social_data, 'social_clips', 'clips', 'social', 'reels'
@@ -1324,7 +2108,12 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type):
         elif isinstance(social_data, list):
             result['social_clips'] = social_data
 
-    return normalize_analysis(result)
+    step += 1
+    _emit("ranking and capping")
+    normalized = normalize_analysis(result)
+    return _cap_and_rank_analysis(
+        normalized, segment_vectors=segment_vectors, cap=ANALYSIS_PER_CATEGORY_CAP,
+    )
 
 
 # ---- Schema-drift tolerance ----
@@ -1425,6 +2214,170 @@ def _normalize_soundbite(sb: dict) -> dict:
     out['start'] = _first_present(sb, 'start', 'start_time', 'start_tc', 'begin')
     out['end'] = _first_present(sb, 'end', 'end_time', 'end_tc')
     out['why'] = _first_present(sb, 'why', 'reason', 'rationale', 'note')
+    return out
+
+
+def _cap_and_rank_analysis(accum, segment_vectors=None, cap=7):
+    """Trim each analysis list to ``cap`` items, preferring strong candidates.
+
+    Three passes per clip-bearing list:
+
+    1. **Dedupe** items whose ``[start, end]`` ranges overlap by more than
+       half of the shorter span — handles the case where a chunk-spanning
+       moment is picked up twice across the merge boundary.
+    2. **Rank** survivors. ``segment_vectors`` (when present) provides a
+       ``narrative_score`` signal: items overlapping a "high" vector
+       outrank items overlapping a "medium" or "low" one. Length is the
+       tiebreaker — longer well-grounded clips usually mean more substance.
+    3. **Cap** at the configured limit and re-sort chronologically so the UI
+       reads in timeline order.
+
+    For ``story_beats`` the rank phase also diversifies by ``beat_type``
+    (hook / context / pressure / turn / resolution) so we don't keep seven
+    hooks and zero resolutions when the model overproduces in one bucket.
+
+    ``themes`` and ``broll_suggestions`` are deduped case-insensitively and
+    capped — they don't carry timecodes so the overlap pass is a no-op.
+
+    Idempotent: calling twice with the same input yields the same output.
+    """
+    if not isinstance(accum, dict):
+        return accum or {}
+
+    out = dict(accum)
+
+    def _ts(val):
+        try:
+            return _tc_to_seconds(val)
+        except Exception:
+            return 0.0
+
+    score_weight = {'high': 3, 'medium': 1, 'low': 0}
+    vectors = segment_vectors if isinstance(segment_vectors, list) else []
+
+    def _vector_score(start_sec, end_sec):
+        if not vectors or end_sec <= start_sec:
+            return 0
+        best = 0
+        for v in vectors:
+            if not isinstance(v, dict):
+                continue
+            v_start = _ts(v.get('timecode_in'))
+            v_end = _ts(v.get('timecode_out'))
+            if v_end <= v_start:
+                continue
+            overlap = max(0.0, min(end_sec, v_end) - max(start_sec, v_start))
+            if overlap <= 0:
+                continue
+            w = score_weight.get(str(v.get('narrative_score', 'medium')).lower(), 1)
+            if w > best:
+                best = w
+        return best
+
+    def _item_score(item):
+        s = _ts(item.get('start'))
+        e = _ts(item.get('end', s))
+        if e <= s:
+            e = s + 1.0
+        return (_vector_score(s, e), e - s)
+
+    def _dedupe_overlap(items, threshold=0.5):
+        # Sort highest-scored first so the better candidate wins on overlap.
+        ranked = sorted(items, key=lambda x: _item_score(x), reverse=True)
+        kept = []
+        for cand in ranked:
+            cs = _ts(cand.get('start'))
+            ce = _ts(cand.get('end', cs))
+            # Synthesize an end when the model omits it (common for
+            # soundbite schemas that only request {text, start, why}).
+            # 20s is a typical soundbite length and is only used for
+            # overlap math here — the rendered card uses what the model
+            # actually returned.
+            if ce <= cs:
+                ce = cs + 20.0
+            c_len = max(1.0, ce - cs)
+            duplicate = False
+            for ex in kept:
+                es = _ts(ex.get('start'))
+                ee = _ts(ex.get('end', es))
+                if ee <= es:
+                    continue
+                overlap = max(0.0, min(ce, ee) - max(cs, es))
+                shorter = min(c_len, max(1.0, ee - es))
+                if shorter > 0 and overlap / shorter > threshold:
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append(cand)
+        return kept
+
+    def _trim_clip_list(items, prefer_diversity=False, diversity_key='beat_type'):
+        if not isinstance(items, list) or not items:
+            return [] if isinstance(items, list) else items
+        viable = [i for i in items if isinstance(i, dict) and i.get('start')]
+        deduped = _dedupe_overlap(viable)
+        if prefer_diversity and deduped:
+            # First pass: pick one of each beat_type bucket (top scorer per bucket).
+            # Second pass: fill remaining slots from the leftover pool by score.
+            buckets = {}
+            for item in deduped:
+                key = str(item.get(diversity_key) or item.get('label') or '').strip().lower()
+                key = key.split()[0][:12] if key else '__unknown__'
+                buckets.setdefault(key, []).append(item)
+            for k in buckets:
+                buckets[k].sort(key=_item_score, reverse=True)
+            spread = []
+            leftover = []
+            for k in sorted(buckets.keys()):
+                bucket = buckets[k]
+                if bucket:
+                    spread.append(bucket[0])
+                    leftover.extend(bucket[1:])
+            spread.sort(key=_item_score, reverse=True)
+            leftover.sort(key=_item_score, reverse=True)
+            picked = (spread + leftover)[:cap]
+        else:
+            picked = sorted(deduped, key=_item_score, reverse=True)[:cap]
+        picked.sort(key=lambda x: _ts(x.get('start')))
+        return picked
+
+    if isinstance(out.get('story_beats'), list):
+        out['story_beats'] = _trim_clip_list(out['story_beats'], prefer_diversity=True)
+    if isinstance(out.get('strongest_soundbites'), list):
+        out['strongest_soundbites'] = _trim_clip_list(out['strongest_soundbites'])
+    if isinstance(out.get('social_clips'), list):
+        out['social_clips'] = _trim_clip_list(out['social_clips'])
+
+    if isinstance(out.get('themes'), list):
+        seen = set()
+        deduped = []
+        for t in out['themes']:
+            if not isinstance(t, str):
+                continue
+            stripped = t.strip()
+            if not stripped:
+                continue
+            key = stripped.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(stripped)
+        out['themes'] = deduped[:cap]
+
+    if isinstance(out.get('broll_suggestions'), list):
+        seen = set()
+        deduped = []
+        for b in out['broll_suggestions']:
+            if isinstance(b, dict):
+                key = json.dumps({k: b.get(k) for k in sorted(b.keys())}, sort_keys=True)
+            else:
+                key = str(b).strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(b)
+        out['broll_suggestions'] = deduped[:cap]
+
     return out
 
 
@@ -1767,7 +2720,25 @@ def _generate_vectors_single_chunk(transcript_text: str, project_name: str):
     return _extract_segment_list(_parse_json_response(response))
 
 
-def generate_segment_vectors(transcript, project_name="Interview"):
+def expected_vector_chunks(transcript):
+    """Return the number of chunks ``generate_segment_vectors`` will run.
+
+    Mirrors the chunked-vs-single decision in ``generate_segment_vectors``
+    so the /analyze route can size the progress total correctly *before*
+    actually running vector generation. Returns ``1`` for short transcripts
+    (single-call path) or for any case the iterator yields zero chunks.
+    """
+    segments = (transcript or {}).get('segments', []) if transcript else []
+    if not segments:
+        return 1
+    duration = segments[-1].get('end', 0) if segments else 0
+    if duration < _LONG_INTERVIEW_SECONDS:
+        return 1
+    chunks = list(_iter_transcript_chunks(segments))
+    return max(1, len(chunks))
+
+
+def generate_segment_vectors(transcript, project_name="Interview", progress_callback=None):
     """
     Generate structured segment vectors from a transcript.
 
@@ -1776,6 +2747,13 @@ def generate_segment_vectors(transcript, project_name="Interview"):
     segments for the opening and silently give up on the rest of the interview,
     which is the failure mode that was blocking Story Builder on 100-minute
     projects.
+
+    ``progress_callback`` (optional) is invoked as
+    ``progress_callback(chunk_idx, total_chunks, label)`` *before* each chunk
+    runs. The /analyze route uses this to advance its global progress bar in
+    proportion to the actual number of LLM calls (one per chunk) — without
+    this signal the bar misreports the segment-vector phase as a single step
+    and races ahead of the actual work.
 
     Returns a list of dicts each shaped like:
       {
@@ -1791,12 +2769,21 @@ def generate_segment_vectors(transcript, project_name="Interview"):
         "frozen": true
       }
     """
+    def _emit(idx, total, label):
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(chunk_idx=idx, total_chunks=total, label=label)
+        except Exception:
+            pass
+
     segments = (transcript or {}).get('segments', [])
     if not segments:
         return []
     duration = segments[-1].get('end', 0) if segments else 0
 
     if duration < _LONG_INTERVIEW_SECONDS:
+        _emit(1, 1, "segment vectors")
         raw = _generate_vectors_single_chunk(
             _format_transcript_for_ai(transcript), project_name,
         )
@@ -1811,6 +2798,7 @@ def generate_segment_vectors(transcript, project_name="Interview"):
         chunk_text = _format_segments_for_ai(chunk['segments'])
         range_label = f"{_seconds_to_tc(chunk['start_seconds'])}-{_seconds_to_tc(chunk['end_seconds'])}"
         chunk_label = f"{project_name} · part {i+1}/{len(chunks)} ({range_label})"
+        _emit(i + 1, len(chunks), f"vectors {i+1}/{len(chunks)}")
         try:
             all_raw.extend(_generate_vectors_single_chunk(chunk_text, chunk_label))
         except Exception as e:
@@ -2059,8 +3047,17 @@ Return ONLY valid JSON in this shape:
     }
 
 
-def _analyze_story(transcript_text, project_name):
-    """Analyze transcript for documentary story structure."""
+def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_target=7):
+    """Analyze transcript for documentary story structure.
+
+    ``beats_target`` and ``soundbites_target`` set the upper bound the model
+    is asked to return. The chunked-analysis path passes smaller per-chunk
+    values so the merged total lands near the global cap; the single-chunk
+    path uses the global default. Post-merge ranking trims further if the
+    model overshoots.
+    """
+    beats_target = max(1, int(beats_target))
+    soundbites_target = max(1, int(soundbites_target))
     system_prompt = """You are an expert documentary film editor.
 Analyze transcripts for story structure and narrative beats.
 Always respond in valid JSON only. No markdown fences, no extra text."""
@@ -2089,13 +3086,14 @@ Return a JSON object with:
     {{
       "text": "The actual quote",
       "start": "00:02:00",
+      "end": "00:02:18",
       "why": "Why this is powerful"
     }}
   ]
 }}
 
-Find 4-6 story beats following a documentary arc: hook, context, rising action, emotional peak, resolution, closing.
-Find 3-5 strongest soundbites.
+Pick the {beats_target} BEST story beats following a documentary arc: hook, context, rising action, emotional peak, resolution, closing. Diversify across beat types — don't stack three hooks.
+Pick the {soundbites_target} BEST soundbites. Be ruthless; return fewer if the transcript only has fewer standouts.
 CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end. Use string format like "00:02:45".
 Return ONLY valid JSON."""
 
@@ -2103,9 +3101,16 @@ Return ONLY valid JSON."""
     return _parse_json_response(response)
 
 
-def _analyze_social(transcript_text, project_name):
-    """Find social media clip opportunities in the transcript."""
-    system_prompt = """You are a social media content strategist who specializes in 
+def _analyze_social(transcript_text, project_name, clips_target=7):
+    """Find social media clip opportunities in the transcript.
+
+    ``clips_target`` sets the upper bound the model is asked to return.
+    The chunked-analysis path passes a smaller per-chunk value so the
+    merged total lands near the global cap; post-merge ranking trims
+    further if needed.
+    """
+    clips_target = max(1, int(clips_target))
+    system_prompt = """You are a social media content strategist who specializes in
 repurposing long-form documentary interview content into viral short-form clips.
 You know what performs well on Instagram Reels, TikTok, LinkedIn, and YouTube Shorts.
 Always respond in valid JSON format only. No other text."""
@@ -2139,7 +3144,7 @@ Rules:
 - Each clip should be 15-60 seconds and work as a standalone moment
 - Look for: emotional peaks, surprising statements, humor, strong opinions, quotable moments
 - Platform suggestions: instagram_reels, tiktok, linkedin, youtube_shorts
-- Find at least 5 clips if the transcript is long enough
+- Pick the {clips_target} BEST clips. Return fewer if the transcript only has fewer standouts — quality over volume.
 - Rank by predicted engagement (1 = highest)
 
 CRITICAL: The "start" and "end" values MUST be copied exactly from the [HH:MM:SS] timecodes in the transcript.

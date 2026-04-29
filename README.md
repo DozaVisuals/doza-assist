@@ -94,6 +94,12 @@ The dashboard has a **Refine my style** box. Type the things the analyzer might 
 - Checkbox select for batch export
 - Add clips from transcript, AI analysis, or AI chat
 
+**Storytelling Foundation** *(operational reference for the AI features below)*
+- A built-in operating manual loaded into every local-LLM prompt — decision rules, anti-patterns, and self-check questions that govern clip selection, sequencing, and format adaptation
+- Document lives at [`docs/storytelling-foundation-oss.md`](docs/storytelling-foundation-oss.md) so you can read what the model is told, edit it, or swap in your own copy via the `DOZA_STORYTELLING_PATH` environment variable
+- Disable entirely with `DOZA_STORYTELLING_DISABLED=1` if you want a clean baseline for comparison
+- AI Analysis, AI Chat, and Story Builder all consult the same operational layer so their reasoning stays consistent across sessions
+
 **AI Analysis** (powered by Ollama — free, local)
 - Story structure with beats (hook, context, rising action, climax, resolution)
 - Social media clip suggestions with platform recommendations

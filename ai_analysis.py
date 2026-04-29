@@ -8,6 +8,7 @@ import json
 import requests
 
 from editorial_dna.injector import inject_my_style
+from editorial_dna.storytelling import inject_storytelling_foundation
 
 
 def chat_about_transcript(transcript, message, history=None, project_name="Interview",
@@ -90,11 +91,16 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
 ═══════════════════════════════════════════════════════════════
 HARD OUTPUT CONTRACT — THIS IS THE ONLY FORMAT THAT WORKS:
 
-Every response MUST cite 2-5 specific moments from the transcript using this EXACT marker:
+Every response MUST cite specific moments from the transcript using this EXACT marker:
 
   [CLIP: start=HH:MM:SS end=HH:MM:SS title="short descriptive title"]
 
 The frontend renders these markers as playable clip cards with Play and Add Clip buttons. If you don't emit them, the user sees nothing but plain text and the task has failed.
+
+CLIP COUNT — HONOR THE USER:
+- If the user states an explicit count ("1 clip", "give me one", "find me 3", "pull 2 clips", "the best one"), return EXACTLY that many [CLIP:] markers. No more, no less.
+- If the user does not specify a count, default to 2-5 markers.
+- Synthesis questions ("what's the arc", "what's most revealing", "find moments about X") default to 2-5 unless the user specified a number.
 
 GROUNDING RULE — NO EXCEPTIONS:
 - Every timecode in a [CLIP:] marker MUST come from the TRANSCRIPT segment markers below (lines like [00:05:12-00:05:28] Speaker: text) or from the PRE-ANALYZED MOMENTS list (if present).
@@ -102,12 +108,10 @@ GROUNDING RULE — NO EXCEPTIONS:
 - Do NOT include "> " blockquotes, quoted speaker text, or paraphrased lines in your reply. The clip card already shows the exact words; duplicating them in prose is wasted output.
 
 HOW TO RESPOND:
-1. Pick 2-5 moments from the data that best answer the user's question.
+1. Determine the right number of moments per the CLIP COUNT rule above.
 2. For each, emit a [CLIP:] marker with start, end, and a 2-6 word title.
 3. Add ONE short sentence before or after each marker saying WHY it answers the question.
 4. That's the whole reply. No preamble, no "here are some suggestions", no numbered headers.
-
-This applies to every question — "what's the emotional arc", "pull the best clip", "find moments about X", anything. If the user asks about the arc, pick 3-4 clips that trace that arc. If they ask for the best clip, pick 1-3 [CLIP:] markers.
 ═══════════════════════════════════════════════════════════════
 
 Personality: seasoned doc editor leaning over the desk, warm, opinionated, short. Use contractions. No filler, no hedging.
@@ -133,7 +137,7 @@ TRANSCRIPT:
 ═══════════════════════════════════════════════════════════════
 FINAL REMINDER — DO NOT SKIP:
 
-Your reply MUST contain 2-5 [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers using real timecodes copied from the transcript segment markers above (and from the PRE-ANALYZED MOMENTS list if present). Without these markers the user sees nothing but plain text and the task has failed. Do NOT write a prose summary in place of clip markers — cite specific moments with [CLIP:] markers. This applies to every question, including synthesis questions like "what's the most revealing thing" or "what did they say about X" — answer those with 2-5 cited moments, not a paragraph.
+Your reply MUST contain [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers using real timecodes copied from the transcript segment markers above (and from the PRE-ANALYZED MOMENTS list if present). Honor the CLIP COUNT rule: exactly the number the user asked for if they specified one (e.g. "1 clip" → exactly 1 marker), otherwise 2-5 markers. Without these markers the user sees nothing but plain text and the task has failed. Do NOT write a prose summary in place of clip markers — cite specific moments with [CLIP:] markers.
 ═══════════════════════════════════════════════════════════════"""
 
     # Flatten conversation history (Ollama generate takes single prompt)
@@ -165,6 +169,7 @@ def _call_ai_chat_stream(prompt, system_prompt=""):
     parse). Yields nothing on hard backend failure; the caller should treat
     that the same as a non-streaming empty reply.
     """
+    system_prompt = inject_storytelling_foundation(system_prompt)
     try:
         with requests.post(
             'http://localhost:11434/api/generate',
@@ -292,9 +297,13 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
 ═══════════════════════════════════════════════════════════════
 HARD OUTPUT CONTRACT — THIS IS THE ONLY FORMAT THAT WORKS:
 
-Every response MUST cite 2-5 specific moments from the transcript using this EXACT marker:
+Every response MUST cite specific moments from the transcript using this EXACT marker:
 
   [CLIP: start=HH:MM:SS end=HH:MM:SS title="short descriptive title"]
+
+CLIP COUNT — HONOR THE USER:
+- If the user states an explicit count ("1 clip", "give me one", "find 3", "the best one"), return EXACTLY that many markers. No more, no less.
+- If the user does not specify a count, default to 2-5 markers.
 
 The frontend renders these markers as playable clip cards. Pure prose without markers fails the user.
 
@@ -306,7 +315,7 @@ TRANSCRIPT:
 {formatted}{analysis_block}{relevant_excerpts_block}
 
 ═══════════════════════════════════════════════════════════════
-FINAL REMINDER: Your reply MUST contain 2-5 [CLIP: ...] markers using real timecodes from the transcript above.
+FINAL REMINDER: Your reply MUST contain [CLIP: ...] markers using real timecodes from the transcript above. Honor the CLIP COUNT rule: exactly the number the user asked for if they specified one, otherwise 2-5.
 ═══════════════════════════════════════════════════════════════"""
 
     conversation = ""
@@ -337,6 +346,7 @@ FINAL REMINDER: Your reply MUST contain 2-5 [CLIP: ...] markers using real timec
 
 def _call_ai_chat(prompt, system_prompt=""):
     """Call AI for chat — uses lower token limit for faster responses."""
+    system_prompt = inject_storytelling_foundation(system_prompt)
     try:
         response = requests.post(
             'http://localhost:11434/api/generate',
@@ -761,6 +771,79 @@ _CHAT_CHUNK_TOKENS = 7000
 _CHAT_CHUNK_OVERLAP_PARAGRAPHS = 3
 _CHAT_CHUNK_CONCURRENCY = 4
 _CHAT_TOP_K_CLIPS = 5
+
+
+# Words → digits, for parsing user requests like "give me one clip".
+# Capped at 10 because requesting more than that in one chat is unusual
+# and the rest of the prompt machinery isn't tuned for very large outputs.
+_NUMBER_WORDS = {
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+    'a': 1, 'an': 1, 'single': 1,
+}
+
+_BEST_PHRASES = (
+    'the best one',
+    'the strongest one',
+    'the single best',
+    'the best clip',
+    'the strongest clip',
+    'the most powerful one',
+)
+
+
+def _parse_user_clip_count(message):
+    """Extract an explicit clip count from a user message.
+
+    Returns an int 1-10 if the user clearly asked for that many clips,
+    or None if no count was specified. Used by the long-transcript
+    chunked-search path to override the default top-K so that
+    "find me 1 clip about X" actually returns 1.
+
+    Examples that return ``1``:
+        "find me 1 great clip"
+        "give me one clip"
+        "the best clip"
+        "pull a single clip about resilience"
+
+    Examples that return ``None`` (use default 2-5):
+        "what's the emotional arc?"
+        "find moments about resilience"
+        "show me clips about the bakery"
+    """
+    if not message:
+        return None
+    msg = message.lower()
+
+    # Phrases that imply exactly 1 — handle before the digit/word match
+    # so "the best clip" doesn't fail to match because "clip" is not
+    # preceded by a number.
+    for phrase in _BEST_PHRASES:
+        if phrase in msg:
+            return 1
+
+    import re as _re
+    # Digits followed by clip(s)/moment(s)/soundbite(s)/quote(s)
+    m = _re.search(r'\b(\d{1,2})\s+(?:great\s+|strong\s+|best\s+)?(?:clip|moment|soundbite|quote|excerpt)s?\b', msg)
+    if m:
+        try:
+            n = int(m.group(1))
+            if 1 <= n <= 10:
+                return n
+        except ValueError:
+            pass
+
+    # Number-words (one, two, three, ..., a, an, single)
+    m = _re.search(
+        r'\b(one|two|three|four|five|six|seven|eight|nine|ten|a|an|single)\s+'
+        r'(?:great\s+|strong\s+|best\s+)?'
+        r'(?:clip|moment|soundbite|quote|excerpt)s?\b',
+        msg,
+    )
+    if m:
+        return _NUMBER_WORDS.get(m.group(1))
+
+    return None
 
 
 # English-only stopwords for Layer 1 keyword extraction. Kept short on purpose:
@@ -1209,6 +1292,7 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180):
     bad chunks can poison the cross-chunk aggregation. Format-locked
     decoding eliminates the failure mode at zero parsing cost.
     """
+    system_prompt = inject_storytelling_foundation(system_prompt)
     try:
         response = requests.post(
             'http://localhost:11434/api/generate',
@@ -1737,13 +1821,22 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
             except Exception as e:
                 print(f"Layer 2 chunk error: {e}")
 
-    top = _aggregate_chunk_candidates(all_candidates, top_k=_CHAT_TOP_K_CLIPS * 3)
+    # Honor an explicit user-stated clip count ("find me 1", "the best one",
+    # "give me 3"). Falls back to _CHAT_TOP_K_CLIPS when the user didn't
+    # specify a number. The pre-rerank candidate pool is kept generous so
+    # the global rerank still has range to pick from, even when the final
+    # output is just one clip.
+    user_count = _parse_user_clip_count(message)
+    final_top_k = user_count if user_count is not None else _CHAT_TOP_K_CLIPS
+    pool_top_k = max(final_top_k * 3, _CHAT_TOP_K_CLIPS * 3)
+
+    top = _aggregate_chunk_candidates(all_candidates, top_k=pool_top_k)
     # Cross-chunk synthesis pass: per-chunk scores aren't comparable across
     # chunks (each model call sees only its own window), so a final low-temp
     # rerank decides the global best. Falls back to the local-score top-K
     # if the synthesis call fails — better to ship the original aggregator's
     # answer than to drop everything.
-    top = _rerank_candidates_globally(top, message, top_k=_CHAT_TOP_K_CLIPS)
+    top = _rerank_candidates_globally(top, message, top_k=final_top_k)
     return _format_clip_cards_from_candidates(top)
 
 
@@ -2500,6 +2593,7 @@ def _call_ai(prompt, system_prompt=""):
     Call an AI model. Tries Ollama first (local), then Claude API.
     Returns the response text.
     """
+    system_prompt = inject_storytelling_foundation(system_prompt)
     # Try Ollama first (local, free)
     try:
         response = requests.post(

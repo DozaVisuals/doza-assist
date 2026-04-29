@@ -1,4 +1,4 @@
-> 🚀 **Live on Product Hunt today (April 28, 2026)** — [upvote and share feedback here](https://www.producthunt.com/posts/doza-assist)
+> 🚀 **Live on Product Hunt today (April 29, 2026)** — [upvote and share feedback here](https://www.producthunt.com/posts/doza-assist)
 
 # Doza Assist
 

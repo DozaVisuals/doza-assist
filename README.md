@@ -1,5 +1,3 @@
-> 🚀 **Live on Product Hunt today (April 29, 2026)** — [upvote and share feedback here](https://www.producthunt.com/posts/doza-assist)
-
 # Doza Assist
 
 <a href="https://www.producthunt.com/products/doza-assist?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-doza-assist" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1133645&theme=light" alt="Doza Assist - Open-source local AI that learns how you edit video | Product Hunt" width="250" height="54" /></a>

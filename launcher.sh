@@ -6,8 +6,11 @@
 #
 
 # ── Resolve paths ──
+# Honor DOZA_APP_DIR if set (Pro wrapper passes this so it can install
+# launcher.sh at Contents/Resources/app/ instead of Contents/MacOS/launch).
+# Defaults preserve the OSS .app's existing layout.
 BUNDLE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-APP_SRC="${BUNDLE_DIR}/Contents/Resources/app"
+APP_SRC="${DOZA_APP_DIR:-${BUNDLE_DIR}/Contents/Resources/app}"
 SUPPORT_DIR="$HOME/Library/Application Support/DozaAssist"
 VENV_DIR="$SUPPORT_DIR/venv"
 SETUP_JSON="$SUPPORT_DIR/setup.json"

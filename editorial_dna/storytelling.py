@@ -61,6 +61,8 @@ _DEFAULT_DOC_PATH = _REPO_ROOT / "docs" / "storytelling-foundation-oss.md"
 # in the foundation document. Empty list = skip the foundation entirely.
 _TASK_SECTIONS: dict[str, list[str]] = {
     "ai_chat": [
+        "Anatomy of a Great Clip",
+        "Format-Specific Clip Logic",
         "Decision Rules and Heuristics",
         "Anti-Patterns and Failure Modes",
         "Self-Check Questions",
@@ -80,6 +82,18 @@ _TASK_SECTIONS: dict[str, list[str]] = {
         "Narrative Reordering Principles",
         "Decision Rules and Heuristics",
     ],
+    # Long-transcript chunked search runs many times per query. We can't
+    # afford the full ai_chat section set on each call, but we DO need
+    # format-aware reasoning so platform hints in the user's query
+    # ("instagram reels", "linkedin", "podcast", "broadcast") are
+    # interpreted as format requests rather than literal keyword
+    # searches against the transcript.
+    "chunked_search": [
+        "Anatomy of a Great Clip",
+        "Format-Specific Clip Logic",
+    ],
+    # Mechanical classifier subroutine (segment vectors). No storytelling
+    # reasoning needed.
     "internal_skip": [],
 }
 
@@ -94,15 +108,16 @@ def _detect_task(system_prompt: str) -> str:
     """
     head = (system_prompt or "")[:1500].lower()
 
-    # Internal subroutines run many times per long transcript. Skip
-    # the foundation entirely on these — their job is mechanical, not
-    # storytelling reasoning.
+    # Long-transcript chunked search: many calls per query, but they
+    # need format awareness to interpret platform hints in the user's
+    # question. Lightweight section subset (Anatomy + Format Logic).
     if "scanning excerpt" in head:
-        return "internal_skip"
+        return "chunked_search"
+
+    # Mechanical classifier subroutines — skip foundation entirely.
     if "documentary story analyst" in head and "segment vectors" in head:
         return "internal_skip"
     if "documentary story analyst" in head:
-        # Other segment-classifier variants
         return "internal_skip"
 
     # Story Builder paths

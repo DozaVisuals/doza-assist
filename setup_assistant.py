@@ -1119,8 +1119,12 @@ def main():
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
 
-    # Open browser to setup page
-    subprocess.Popen(["open", f"http://127.0.0.1:{SETUP_PORT}"])
+    # Open browser to setup page. Embedders (e.g. wrappers with their own
+    # webview) can set DOZA_NO_BROWSER=1 to suppress this — the setup
+    # server itself is still reachable at the same URL for the embedder
+    # webview to navigate to.
+    if not os.environ.get("DOZA_NO_BROWSER"):
+        subprocess.Popen(["open", f"http://127.0.0.1:{SETUP_PORT}"])
 
     # Run setup in foreground
     setup_loop()

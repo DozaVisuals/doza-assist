@@ -199,6 +199,121 @@ class TestStoryBuildMenuPruning:
             assert f'SEG{i:03d}' in captured['prompt']
 
 
+class TestStoryBuildOrdering:
+    """The story builder must rearrange clips into narrative-arc order, not
+    chronological recording order. Two levers carry that:
+      (a) the segment menu shown to the model is sorted by narrative weight
+          (score then beat), so the model can't just pick top-to-bottom and
+          end up chronological;
+      (b) the system prompt mandates an arc and explicitly forbids
+          monotonically-increasing timecodes as a default.
+    """
+
+    def _diverse_vectors(self):
+        # SEG001 is earliest in time but only medium / context.
+        # SEG002 is mid-time, high / turn.
+        # SEG003 is latest in time, high / hook (the spine — should sort first).
+        return [
+            {'seg_id': 'SEG001', 'timecode_in': '00:00:00', 'timecode_out': '00:00:30',
+             'narrative_score': 'medium', 'beat_type': 'context',
+             'memory_type': 'semantic', 'thread_title': 'a',
+             'theme_tags': [], 'transcript_excerpt': 'first'},
+            {'seg_id': 'SEG002', 'timecode_in': '00:01:00', 'timecode_out': '00:01:30',
+             'narrative_score': 'high', 'beat_type': 'turn',
+             'memory_type': 'episodic', 'thread_title': 'b',
+             'theme_tags': [], 'transcript_excerpt': 'mid'},
+            {'seg_id': 'SEG003', 'timecode_in': '00:02:00', 'timecode_out': '00:02:30',
+             'narrative_score': 'high', 'beat_type': 'hook',
+             'memory_type': 'episodic', 'thread_title': 'c',
+             'theme_tags': [], 'transcript_excerpt': 'late'},
+        ]
+
+    def test_menu_groups_by_score_not_timecode(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            ai_analysis, '_call_ai',
+            lambda p, s="": (captured.update(prompt=p, system=s), '{"clips": []}')[1],
+        )
+        monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
+
+        ai_analysis._build_story_from_vectors(
+            self._diverse_vectors(), message="build", project_name="T",
+        )
+        prompt = captured['prompt']
+        positions = {sid: prompt.index(sid) for sid in ('SEG001', 'SEG002', 'SEG003')}
+        # high+hook (SEG003) must come before high+turn (SEG002) before medium (SEG001).
+        # That is the OPPOSITE of chronological order.
+        assert positions['SEG003'] < positions['SEG002'] < positions['SEG001'], (
+            f"menu still in chronological order: {positions}"
+        )
+        assert 'BY NARRATIVE WEIGHT' in prompt
+
+    def test_prompt_contains_mandatory_reorder_directive(self, monkeypatch):
+        captured = {}
+
+        def _stub(prompt, system_prompt=""):
+            captured['prompt'] = prompt
+            captured['system'] = system_prompt
+            return '{"clips": []}'
+
+        monkeypatch.setattr(ai_analysis, '_call_ai', _stub)
+        monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
+
+        ai_analysis._build_story_from_vectors(
+            self._diverse_vectors(), message="build", project_name="T",
+        )
+        sys = captured['system']
+        # Directive language and the five arc slots are present.
+        assert 'MANDATORY ARC' in sys
+        assert 'NON-CHRONOLOGICAL BY DEFAULT' in sys
+        assert 'monotonically increasing' in sys
+        for slot in ('hook', 'context', 'pressure', 'turn', 'resolution'):
+            assert slot in sys, f"missing arc slot {slot!r} from prompt"
+        # Old permissive language must be gone — it was ignored by small models.
+        assert 'not necessarily chronological' not in sys
+
+    def test_non_chronological_order_preserved_through_hydration(self, monkeypatch):
+        vectors = [
+            {'seg_id': 'SEG_A', 'timecode_in': '00:00:00', 'timecode_out': '00:00:30',
+             'narrative_score': 'high', 'beat_type': 'context',
+             'memory_type': 'semantic', 'thread_title': 'a',
+             'theme_tags': [], 'transcript_excerpt': 'a'},
+            {'seg_id': 'SEG_B', 'timecode_in': '00:05:00', 'timecode_out': '00:05:30',
+             'narrative_score': 'high', 'beat_type': 'hook',
+             'memory_type': 'episodic', 'thread_title': 'b',
+             'theme_tags': [], 'transcript_excerpt': 'b'},
+            {'seg_id': 'SEG_C', 'timecode_in': '00:10:00', 'timecode_out': '00:10:30',
+             'narrative_score': 'high', 'beat_type': 'turn',
+             'memory_type': 'episodic', 'thread_title': 'c',
+             'theme_tags': [], 'transcript_excerpt': 'c'},
+        ]
+        # Model picks B (later) first as the hook, then A as context, then C as turn —
+        # an arc that runs against chronology.
+        fake_response = json.dumps({
+            'story_title': 'X', 'target_duration': '1m', 'reasoning': 'r',
+            'clips': [
+                {'order': 1, 'seg_id': 'SEG_B', 'editorial_note': 'ROLE: hook'},
+                {'order': 2, 'seg_id': 'SEG_A', 'editorial_note': 'ROLE: context'},
+                {'order': 3, 'seg_id': 'SEG_C', 'editorial_note': 'ROLE: turn'},
+            ],
+        })
+        monkeypatch.setattr(ai_analysis, '_call_ai', lambda p, s="": fake_response)
+        monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
+
+        out = ai_analysis._build_story_from_vectors(
+            vectors, message="x", project_name="T",
+        )
+        seg_ids = [c['seg_id'] for c in out['clips']]
+        assert seg_ids == ['SEG_B', 'SEG_A', 'SEG_C']  # NOT chronological
+        # Hydration filled timecodes from the segment vector by seg_id, not from
+        # the (stripped) model echo.
+        assert out['clips'][0]['start_time'] == '00:05:00'
+        assert out['clips'][1]['start_time'] == '00:00:00'
+        assert out['clips'][2]['start_time'] == '00:10:00'
+        # order field reflects the arc, not the timecode.
+        assert [c['order'] for c in out['clips']] == [1, 2, 3]
+
+
 class TestStoryBuildEndpoint:
     def test_auto_generates_vectors_when_missing(self, client, transcribed_project, monkeypatch):
         # No segment_vectors.json on disk. The endpoint should call

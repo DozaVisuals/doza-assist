@@ -2702,7 +2702,9 @@ def build_story(transcript, message, project_name="Interview", segment_vectors=N
 
 Rules:
 - Select clips that build a clear narrative arc: hook, rising action, emotional peak, resolution
-- Order them for maximum story impact, not chronological order unless that serves the story
+- MANDATORY ARC: every selected clip fills exactly one role in this five-slot arc — hook, context, pressure, turn, resolution. Tag the role in editorial_note (e.g. "ROLE: turn — ..."). The "order" field reflects the arc, NOT the timecode.
+- NON-CHRONOLOGICAL BY DEFAULT: the transcript below is presented in recording order; your output MUST NOT preserve that order unless the user explicitly requested chronological OR a clip's meaning depends on temporal sequence (cause→effect chain).
+- ANTI-PATTERN CHECK: if your selected clips' start_time values are monotonically increasing in your chosen order, you have likely defaulted to chronological — re-examine and re-sequence.
 - Each clip should be 5-30 seconds long unless the moment requires more breathing room
 - DURATION IS CRITICAL: If the user requests a specific duration (e.g. "4 minute story"), you MUST hit that target. Calculate the total duration of all clips you select by adding up (end_time - start_time) for each clip. Aim for roughly 3-4 clips per minute. For a 4-minute story, that means 12-16 clips totaling approximately 3:30-4:30 of content. If your first selection is too short, add more clips.
 - For each clip, provide: a short title, start timecode, end timecode, the transcript excerpt, and a one-sentence editorial note explaining why this clip is in this position
@@ -2732,7 +2734,7 @@ PROJECT: {project_name}
 
 USER REQUEST: {message}
 
-TRANSCRIPT:
+TRANSCRIPT (presented in recording order — re-sequence freely for narrative arc):
 {formatted}
 
 Return ONLY valid JSON. No markdown, no extra text."""
@@ -3043,8 +3045,33 @@ def _build_story_from_vectors(segment_vectors, message, project_name, profile_id
     if not candidates:
         candidates = list(segment_vectors)
 
-    menu_lines = []
-    for s in candidates:
+    # Re-order the menu by NARRATIVE WEIGHT before showing it to the model:
+    # high-score segments first, then within each score tier sort by beat in
+    # arc-natural order (hook → context → pressure → turn → resolution). The
+    # default chronological-by-transcript layout was anchoring the model's
+    # output to recording order — small local models pick clips top-to-bottom
+    # and the build came out chronological even though the prompt asked for
+    # narrative ordering. Hydration is seg_id-keyed, so menu order has no
+    # downstream effect.
+    _SCORE_RANK = {'high': 0, 'medium': 1, 'low': 2}
+    _BEAT_RANK = {'hook': 0, 'context': 1, 'pressure': 2, 'turn': 3, 'resolution': 4}
+
+    def _menu_sort_key(s):
+        return (
+            _SCORE_RANK.get((s.get('narrative_score') or 'medium').lower(), 1),
+            _BEAT_RANK.get((s.get('beat_type') or 'context').lower(), 1),
+            s.get('seg_id', ''),
+        )
+
+    ordered = sorted(candidates, key=_menu_sort_key)
+
+    menu_lines = [
+        "# Segments below are listed BY NARRATIVE WEIGHT (high score first, "
+        "then hook/context/pressure/turn/resolution within each tier), "
+        "NOT by recording time. Choose and order purely on story logic.",
+        "",
+    ]
+    for s in ordered:
         dur = _tc_to_sec(s.get('timecode_out', '0:0:0')) - _tc_to_sec(s.get('timecode_in', '0:0:0'))
         menu_lines.append(
             f"- {s.get('seg_id', '?')} [{s.get('timecode_in', '')}-{s.get('timecode_out', '')}] "
@@ -3063,9 +3090,10 @@ Rules:
 - Prioritize segments with narrative_score "high" — those are the spine.
 - Use "episodic" segments (specific events, sensory) for key emotional moments.
 - Use "semantic" segments (general reflection) for context and transitions between episodic beats.
-- Build a clear arc: hook, context, pressure, turn, resolution.
+- MANDATORY ARC: every selected clip fills exactly one role in this five-slot arc — hook, context, pressure, turn, resolution. Tag each clip's role in its editorial_note (e.g. "ROLE: turn — ..."). The "order" field reflects the arc, NOT the timecode.
+- NON-CHRONOLOGICAL BY DEFAULT: the menu is listed by narrative weight, not by recording time. Your output ordering is independent of timecode_in. Re-sequence ruthlessly. Use chronological order only when the user's brief explicitly asks for it OR when a clip's meaning depends on a prior clip's information (cause→effect chain).
+- ANTI-PATTERN CHECK: before you finalize, scan your selected clips' timecode_in values in your chosen order. If they are monotonically increasing (each clip's timecode_in is later than the previous), you have likely failed to reorder for narrative arc — re-examine and re-sequence unless the story genuinely requires the temporal sequence.
 - DURATION IS CRITICAL: If the user requests a specific duration (e.g. "4 minute story"), you MUST hit that target. Calculate the total duration of all clips you select by adding up (end_time - start_time) for each clip. Each segment in the menu shows its timecode range — use that to calculate duration. Aim for roughly 3-4 clips per minute of requested duration. For a 4-minute story, select enough clips to total approximately 3:30-4:30 of content. If your first selection is too short, add more clips. If too long, trim or remove clips.
-- Ordered for story impact (not necessarily chronological).
 - ALWAYS include a "reasoning" field: 2-3 conversational sentences in plain language explaining what this story is really about underneath the surface, why this arc works, and what the emotional spine is. Talk like a doc editor, not a corporate brief. No bullet points.
 - Always respond in valid JSON only. No markdown, no prose outside the JSON."""
 

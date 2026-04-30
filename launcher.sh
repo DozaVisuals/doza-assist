@@ -92,8 +92,10 @@ fi
 # it's a conflict — fail fast with the offending PID instead of letting
 # Flask silently fail to bind and then timing out 30 seconds later.
 if /usr/bin/curl -sf --max-time 2 "${FLASK_URL}" > /dev/null 2>&1; then
-    log "Server already running on ${FLASK_PORT}, opening browser."
-    /usr/bin/open "${FLASK_URL}"
+    log "Server already running on ${FLASK_PORT}."
+    if [ -z "${DOZA_NO_BROWSER:-}" ]; then
+        /usr/bin/open "${FLASK_URL}"
+    fi
     exit 0
 fi
 
@@ -151,7 +153,9 @@ if [ -z "$MISSING" ]; then
     for _ in {1..60}; do
         if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
             log "Server ready."
-            /usr/bin/open "${FLASK_URL}"
+            if [ -z "${DOZA_NO_BROWSER:-}" ]; then
+                /usr/bin/open "${FLASK_URL}"
+            fi
             exit 0
         fi
         sleep 0.5

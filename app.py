@@ -460,6 +460,26 @@ def set_ai_model():
         info = model_config.set_variant_manually(tier)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+
+    # Evict any other models from VRAM. Ollama's default keep_alive=30m
+    # keeps the previous variant resident, so on lower-RAM Macs you end
+    # up with two Gemma weights in unified memory at once → Metal
+    # compaction stalls.
+    new_variant = info['variant']
+    try:
+        import requests as _req
+        ps = _req.get('http://127.0.0.1:11434/api/ps', timeout=2).json()
+        for m in ps.get('models', []):
+            name = m.get('name')
+            if name and name != new_variant:
+                _req.post(
+                    'http://127.0.0.1:11434/api/generate',
+                    json={'model': name, 'keep_alive': 0, 'prompt': ''},
+                    timeout=2,
+                )
+    except Exception as e:
+        print(f"[ai-model] eviction failed: {e}")
+
     return jsonify({
         'tier': info['tier'],
         'variant': info['variant'],
@@ -3162,4 +3182,4 @@ def my_style_import():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '5050'))
-    app.run(host='127.0.0.1', port=port, debug=True)
+    app.run(host='127.0.0.1', port=port, debug=False, threaded=True)

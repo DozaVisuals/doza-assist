@@ -1820,11 +1820,12 @@ async function streamChatReply({ message, typing, progressTimer }) {
     }
 
     if (progressTimer) clearTimeout(progressTimer);
-    // Replace the typing dots with an empty bubble we'll stream into. This
-    // way the user sees the first token within ~500ms instead of waiting
-    // for the whole reply to land.
+    // Keep the typing indicator visible throughout streaming. We accumulate
+    // tokens silently and only swap to the rendered clip cards + prose when
+    // the `done` event lands. Showing raw token stream led to model thoughts
+    // and "[No answer]" placeholders flashing visibly before being replaced.
     const bubble = typing;
-    bubble.innerHTML = '';
+    bubble.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> Thinking…';
     bubble.classList.add('chat-streaming');
 
     const reader = res.body.getReader();
@@ -1851,8 +1852,12 @@ async function streamChatReply({ message, typing, progressTimer }) {
                 catch (_) { continue; }
                 const ev = payload.event;
                 if (ev === 'token') {
+                    // Accumulate silently — the bubble keeps the "Thinking…"
+                    // indicator visible until the `done` event delivers the
+                    // cleaned final reply, which renderChatReply then renders
+                    // as clip cards + prose. streamedText is preserved as a
+                    // fallback in case the stream cuts off before `done`.
                     streamedText += String(payload.data || '');
-                    bubble.textContent = streamedText;
                 } else if (ev === 'progress') {
                     // Progress events come from Layer 2 chunked search
                     // ("Searching across the full interview…"). Show them
@@ -2217,6 +2222,12 @@ function renderChatReply(text) {
             return `\uE000CCCARD${idx}\uE001`;
         }
     );
+
+    // Markdown pass on narration only (cards are stashed). escapeHtml has
+    // already neutralized real HTML, so these regexes operate on inert text.
+    // Bold first so its `**` are consumed before single-asterisk italic runs.
+    html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s.,!?:;)]|$)/g, '$1<em>$2</em>');
 
     // Convert FREE-TEXT timecodes (outside cards) to clickable links with + button.
     // Cards are already stashed above, so this only touches narration text

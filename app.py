@@ -1089,13 +1089,22 @@ def serve_media(project_id):
     # Always serve the original source file for video playback
     source_path = project.get('source_path', project.get('filepath', ''))
     if source_path and os.path.exists(source_path):
-        return send_file(source_path)
+        resp = send_file(source_path)
+        # Encourage the browser to reuse range responses across reloads/seeks.
+        # Without this, every range comes back as a fresh 206 and the same file
+        # streams thousands of times during a single playback session.
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        resp.headers['Accept-Ranges'] = 'bytes'
+        return resp
 
     # Fall back to extracted audio
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     audio_wav = os.path.join(project_dir, 'audio.wav')
     if os.path.exists(audio_wav):
-        return send_file(audio_wav, mimetype='audio/wav')
+        resp = send_file(audio_wav, mimetype='audio/wav')
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        resp.headers['Accept-Ranges'] = 'bytes'
+        return resp
 
     return jsonify({'error': 'Source file not found'}), 404
 

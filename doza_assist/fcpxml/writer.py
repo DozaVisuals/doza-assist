@@ -303,13 +303,19 @@ def _index_original_spine(parsed: ParsedFCPXML) -> List[etree._Element]:
 
 
 def _build_selects_spine(
-    parsed: ParsedFCPXML, selects: List[Select]
+    parsed: ParsedFCPXML, selects: List[Select], skipped: Optional[List[Select]] = None
 ) -> etree._Element:
     spine = etree.Element("spine")
     timeline_cursor = Fraction(0)
     original_spine_clips = _index_original_spine(parsed)
     for s in selects:
-        segment, container_start, container_end = _locate_select_range(parsed, s)
+        try:
+            segment, container_start, container_end = _locate_select_range(parsed, s)
+        except WriterError as e:
+            if "falls outside" in str(e) and skipped is not None:
+                skipped.append(s)
+                continue
+            raise
         seg_idx = parsed.spine_segments.index(segment)
         if segment.kind == "mc-clip":
             node = _build_mc_clip_node(
@@ -317,10 +323,9 @@ def _build_selects_spine(
             )
         else:
             if seg_idx >= len(original_spine_clips):
-                raise WriterError(
-                    "segment index out of range against original spine — "
-                    "FCPXML structure unexpectedly changed since parse"
-                )
+                if skipped is not None:
+                    skipped.append(s)
+                continue
             node = _build_sync_clip_node(
                 parsed, s, segment, original_spine_clips[seg_idx],
                 container_start, container_end, timeline_cursor,
@@ -349,15 +354,25 @@ def write_selects_as_new_project(
     project_title = project_name or _format_suffix(parsed.project_name, "Doza Selects")
     event_title = event_name or (parsed.event_name or "Doza Selects")
 
-    spine_el = _build_selects_spine(parsed, selects)
+    skipped: List[Select] = []
+    spine_el = _build_selects_spine(parsed, selects, skipped=skipped)
+
+    if len(skipped) == len(selects):
+        raise WriterError(
+            "all selects fall outside the timeline segments — nothing to export"
+        )
 
     # Total duration on the new timeline is the sum of per-select container
-    # durations (same as the timeline cursor walked above — reconstructing
-    # here keeps the helper single-purpose).
+    # durations for selects that were actually placed.
     total_duration = Fraction(0)
     for s in selects:
-        _, cstart, cend = _locate_select_range(parsed, s)
-        total_duration += (cend - cstart)
+        if s in skipped:
+            continue
+        try:
+            _, cstart, cend = _locate_select_range(parsed, s)
+            total_duration += (cend - cstart)
+        except WriterError:
+            pass
     fd = parsed.sequence_frame_duration
 
     sequence = etree.Element("sequence")

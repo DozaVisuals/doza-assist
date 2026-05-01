@@ -434,7 +434,7 @@ class TestMixedSpineWriter:
 
     def test_mode_a_select_in_gap_raises(self, parsed):
         # Past the end of the sequence (> 150s) — no covering segment.
-        with pytest.raises(WriterError, match="outside any spine segment"):
+        with pytest.raises(WriterError, match="outside"):
             write_selects_as_new_project(parsed, [
                 Select(start_seconds=200.0, end_seconds=210.0, label="bad"),
             ])

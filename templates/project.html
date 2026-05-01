@@ -196,6 +196,9 @@
                 </div>
                 <span class="player-time" id="playerDuration">00:00</span>
                 <button class="player-speed-btn" id="speedBtn" onclick="cycleSpeed()" title="Playback speed">1x</button>
+                {% if is_video %}
+                <button class="player-speed-btn" id="audioOnlyBtn" onclick="toggleAudioOnly()" title="Audio-only mode (lighter playback for heavy footage)">🔊</button>
+                {% endif %}
             </div>
             {% if is_multi %}
             <div style="text-align: center; padding: 0.25rem 0; font-size: 0.75rem; color: var(--text-muted);">
@@ -1019,6 +1022,37 @@ function togglePlay() {
     if (!audio) return;
     if (audio.paused) audio.play();
     else audio.pause();
+}
+
+let audioOnlyMode = false;
+function toggleAudioOnly() {
+    const btn = document.getElementById('audioOnlyBtn');
+    if (!btn) return;
+    audioOnlyMode = !audioOnlyMode;
+    const currentTime = audio ? audio.currentTime : 0;
+    const wasPlaying = audio && !audio.paused;
+    if (audio) audio.pause();
+
+    if (audioOnlyMode) {
+        btn.style.background = 'var(--accent)';
+        btn.style.color = '#fff';
+        btn.title = 'Switch back to video playback';
+        videoPlayerBox.style.display = 'none';
+        audioEl.src = `/project/{{ project.id }}/media/audio`;
+        audio = audioEl;
+        currentPlayerIsVideo = false;
+    } else {
+        btn.style.background = '';
+        btn.style.color = '';
+        btn.title = 'Audio-only mode (lighter playback for heavy footage)';
+        videoPlayerBox.style.display = '';
+        audioEl.src = '';
+        audio = videoEl;
+        currentPlayerIsVideo = true;
+    }
+    bindPlayerEvents();
+    audio.currentTime = currentTime;
+    if (wasPlaying) audio.play();
 }
 
 function seekPlayer(e) {

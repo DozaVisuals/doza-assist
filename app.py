@@ -1080,6 +1080,43 @@ def serve_media(project_id):
     return jsonify({'error': 'Source file not found'}), 404
 
 
+@app.route('/project/<project_id>/media/audio')
+def serve_media_audio(project_id):
+    """Serve audio-only for lightweight playback (avoids decoding heavy video).
+
+    Returns the extracted 16kHz mono WAV already produced during transcription,
+    or the timeline_audio.wav for multi-source FCPXML projects. Falls back to
+    extracting audio on the fly if needed.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+
+    # Prefer timeline WAV for FCPXML projects (already composed)
+    timeline_wav = os.path.join(project_dir, 'timeline_audio.wav')
+    if os.path.exists(timeline_wav):
+        return send_file(timeline_wav, mimetype='audio/wav')
+
+    # Standard extracted audio from transcription
+    audio_wav = os.path.join(project_dir, 'audio.wav')
+    if os.path.exists(audio_wav):
+        return send_file(audio_wav, mimetype='audio/wav')
+
+    # Extract on the fly if transcription hasn't run yet
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if source_path and os.path.exists(source_path):
+        from transcribe import extract_audio
+        try:
+            wav_path = extract_audio(source_path, project_dir=project_dir)
+            return send_file(wav_path, mimetype='audio/wav')
+        except Exception:
+            pass
+
+    return jsonify({'error': 'Audio not available'}), 404
+
+
 # ── Optional non-English (Whisper) engine, installed on demand ─────────────
 # Default install ships only Parakeet MLX (English). Whisper is the gateway
 # to 99-language support but adds ~200MB of PyTorch+cmake to setup, so it's
@@ -1706,6 +1743,20 @@ def export_fcpxml(project_id):
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
+
+    # FCPXML-sourced projects: the standard export references the raw audio
+    # source file which FCP can't import as a proper timeline. Warn the user
+    # and point them to the Round-Trip export which preserves the multicam
+    # structure.
+    if project.get('fcpxml_source'):
+        platform = get_project_platform(project)
+        if platform == 'fcpx':
+            return jsonify({
+                'error': 'This project was imported from an FCPXML. '
+                         'Use the "FCPXML Round-Trip" section below for '
+                         'exports that preserve your multicam/sync-clip structure in FCP.',
+                'use_roundtrip': True,
+            }), 400
 
     # Accept either a list (``types``) or the legacy single ``type`` string.
     # The new checkbox UI sends ``types=['labels', 'social', ...]``; callers

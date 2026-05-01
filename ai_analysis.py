@@ -155,6 +155,7 @@ Your reply MUST contain [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers 
 
     system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
     response = _call_ai_chat(prompt, system_prompt)
+    response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)
     return _validate_clip_markers_in_text(cleaned, segments)
 
@@ -181,6 +182,8 @@ def _call_ai_chat_stream(prompt, system_prompt=""):
                     'temperature': 0.4,
                     'num_predict': 4096,
                     'num_ctx': 32768,
+                    'repeat_penalty': 1.3,
+                    'repeat_last_n': 128,
                 }
             },
             timeout=300,
@@ -346,13 +349,54 @@ Your reply MUST contain [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers 
     system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
 
     pieces = []
+    _think_buf = ''
+    _in_thinking = False
+    _THINK_OPENERS = ('<think>', '<thinking>', '[Thoughts]', '[Thought Process]', '[Reasoning]')
+    _THINK_CLOSERS = ('</think>', '</thinking>', '[/Thoughts]', '[/Thought Process]', '[/Reasoning]')
+
+    _rep_tail = ''
+    _REP_WINDOW = 200
+    _REP_MIN_PATTERN = 4
+    _REP_THRESHOLD = 6
+
+    def _is_stuck(tail):
+        if len(tail) < _REP_MIN_PATTERN * _REP_THRESHOLD:
+            return False
+        for plen in range(_REP_MIN_PATTERN, len(tail) // _REP_THRESHOLD + 1):
+            pat = tail[-plen:]
+            count = 0
+            pos = len(tail) - plen
+            while pos >= 0 and tail[pos:pos + plen] == pat:
+                count += 1
+                pos -= plen
+            if count >= _REP_THRESHOLD:
+                return True
+        return False
+
     for piece in _call_ai_chat_stream(prompt, system_prompt):
         pieces.append(piece)
-        yield ('token', piece)
+        _think_buf += piece
+        if not _in_thinking:
+            if any(op in _think_buf for op in _THINK_OPENERS):
+                _in_thinking = True
+                _think_buf = ''
+            else:
+                for tag in _THINK_OPENERS:
+                    if any(_think_buf.endswith(tag[:i]) for i in range(1, len(tag))):
+                        break
+                else:
+                    yield ('token', piece)
+                    _think_buf = _think_buf[-30:] if len(_think_buf) > 30 else _think_buf
+                    _rep_tail = (_rep_tail + piece)[-_REP_WINDOW:]
+                    if _is_stuck(_rep_tail):
+                        break
+        else:
+            if any(cl in _think_buf for cl in _THINK_CLOSERS):
+                _in_thinking = False
+                _think_buf = ''
 
-    # Run the same post-processing the non-streaming path runs so the final
-    # text is identical regardless of which endpoint the client used.
     full = ''.join(pieces)
+    full = _strip_trailing_repetition(full)
     cleaned = _clean_chat_response(full)
     cleaned = _validate_clip_markers_in_text(cleaned, segments)
     yield ('done', cleaned)
@@ -372,6 +416,8 @@ def _call_ai_chat(prompt, system_prompt=""):
                     'temperature': 0.4,
                     'num_predict': 4096,
                     'num_ctx': 32768,
+                    'repeat_penalty': 1.3,
+                    'repeat_last_n': 128,
                 }
             },
             timeout=300
@@ -486,6 +532,23 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
     # Collapse blank-line runs the dropped markers might have left behind.
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
     return cleaned
+
+
+def _strip_trailing_repetition(text):
+    """Remove degenerate trailing repetition from model output."""
+    if len(text) < 30:
+        return text
+    for plen in range(4, 60):
+        pat = text[-plen:]
+        count = 0
+        pos = len(text) - plen
+        while pos >= 0 and text[pos:pos + plen] == pat:
+            count += 1
+            pos -= plen
+        if count >= 4:
+            cut = len(text) - (count * plen)
+            return text[:cut].rstrip()
+    return text
 
 
 def _clean_chat_response(text):

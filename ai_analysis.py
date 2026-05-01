@@ -137,7 +137,7 @@ TRANSCRIPT:
 ═══════════════════════════════════════════════════════════════
 FINAL REMINDER — DO NOT SKIP:
 
-Your reply MUST contain [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers using real timecodes copied from the transcript segment markers above (and from the PRE-ANALYZED MOMENTS list if present). Honor the CLIP COUNT rule: exactly the number the user asked for if they specified one (e.g. "1 clip" → exactly 1 marker), otherwise 2-5 markers. Without these markers the user sees nothing but plain text and the task has failed. Do NOT write a prose summary in place of clip markers — cite specific moments with [CLIP:] markers.
+Your reply MUST contain [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers using real timecodes copied from the transcript segment markers above (and from the PRE-ANALYZED MOMENTS list if present). Honor the CLIP COUNT rule: exactly the number the user asked for if they specified one (e.g. "1 clip" → exactly 1 marker), otherwise 2-5 markers. Without these markers the user sees nothing but plain text and the task has failed. Do NOT write a prose summary in place of clip markers — cite specific moments with [CLIP:] markers. This applies to every question type including synthesis questions ("what's the most revealing thing", "best moment", "strongest clip") — those still require [CLIP:] markers, not free-form paragraphs.
 ═══════════════════════════════════════════════════════════════"""
 
     # Flatten conversation history (Ollama generate takes single prompt)
@@ -169,7 +169,6 @@ def _call_ai_chat_stream(prompt, system_prompt=""):
     parse). Yields nothing on hard backend failure; the caller should treat
     that the same as a non-streaming empty reply.
     """
-    system_prompt = inject_storytelling_foundation(system_prompt)
     try:
         with requests.post(
             'http://localhost:11434/api/generate',
@@ -301,21 +300,36 @@ Every response MUST cite specific moments from the transcript using this EXACT m
 
   [CLIP: start=HH:MM:SS end=HH:MM:SS title="short descriptive title"]
 
+The frontend renders these markers as playable clip cards with Play and Add Clip buttons. If you don't emit them, the user sees nothing but plain text and the task has failed.
+
 CLIP COUNT — HONOR THE USER:
-- If the user states an explicit count ("1 clip", "give me one", "find 3", "the best one"), return EXACTLY that many markers. No more, no less.
+- If the user states an explicit count ("1 clip", "give me one", "find me 3", "pull 2 clips", "the best one"), return EXACTLY that many [CLIP:] markers. No more, no less.
 - If the user does not specify a count, default to 2-5 markers.
 
-The frontend renders these markers as playable clip cards. Pure prose without markers fails the user.
+GROUNDING RULE — NO EXCEPTIONS:
+- Every timecode in a [CLIP:] marker MUST come from the TRANSCRIPT segment markers below (lines like [00:05:12-00:05:28] Speaker: text) or from the PRE-ANALYZED MOMENTS list (if present).
+- NEVER invent timecodes. NEVER fabricate quotes. If you can't find a relevant moment in the data, say "I don't see that in the transcript" — do not make something up.
+- Do NOT include "> " blockquotes, quoted speaker text, or paraphrased lines in your reply. The clip card already shows the exact words; duplicating them in prose is wasted output.
 
-GROUNDING RULE: every timecode MUST come from the transcript segment markers below. Never invent timecodes.
+Personality: seasoned doc editor leaning over the desk, warm, opinionated, short. Use contractions. No filler, no hedging.
 
-Personality: seasoned doc editor leaning over the desk, warm, opinionated, short. No filler.
+Clip constraints:
+- Minimum 5 seconds, typical 10-60 seconds.
+- Span multiple transcript segments if needed to capture a complete thought.
+- Title under 8 words, no quotes around it.
+
+Other rules:
+- Keep prose between markers to 1 sentence max. Never explain things without a marker.
+- No emojis, markdown headers, bullet lists, or blockquotes.
+- If you truly can't ground an answer, say so in one sentence — don't pad.
 
 TRANSCRIPT:
 {formatted}{analysis_block}{relevant_excerpts_block}
 
 ═══════════════════════════════════════════════════════════════
-FINAL REMINDER: Your reply MUST contain [CLIP: ...] markers using real timecodes from the transcript above. Honor the CLIP COUNT rule: exactly the number the user asked for if they specified one, otherwise 2-5.
+FINAL REMINDER — DO NOT SKIP:
+
+Your reply MUST contain [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers using real timecodes copied from the transcript segment markers above (and from the PRE-ANALYZED MOMENTS list if present). Honor the CLIP COUNT rule: exactly the number the user asked for if they specified one (e.g. "1 clip" → exactly 1 marker), otherwise 2-5 markers. Without these markers the user sees nothing but plain text and the task has failed. Do NOT write a prose summary in place of clip markers — cite specific moments with [CLIP:] markers.
 ═══════════════════════════════════════════════════════════════"""
 
     conversation = ""
@@ -346,7 +360,6 @@ FINAL REMINDER: Your reply MUST contain [CLIP: ...] markers using real timecodes
 
 def _call_ai_chat(prompt, system_prompt=""):
     """Call AI for chat — uses lower token limit for faster responses."""
-    system_prompt = inject_storytelling_foundation(system_prompt)
     try:
         response = requests.post(
             'http://localhost:11434/api/generate',
@@ -873,6 +886,9 @@ _CHAT_STOPWORDS = frozenset({
     "where's", 'which', 'while', 'who', "who's", 'whom', 'why', "why's",
     'with', "won't", 'would', "wouldn't", 'you', "you'd", "you'll", "you're",
     "you've", 'your', 'yours', 'yourself', 'yourselves',
+    # Apostrophe-free contractions (users skip punctuation in chat).
+    'whats', 'hes', 'shes', 'theyre', 'dont', 'doesnt', 'didnt', 'isnt',
+    'cant', 'wont', 'wouldnt', 'couldnt', 'shouldnt', 'thats', 'hows',
     # Question/meta words that show up constantly but aren't search terms.
     'find', 'show', 'give', 'tell', 'say', 'said', 'talk', 'talks', 'talked',
     'talking', 'mention', 'mentions', 'mentioned', 'discuss', 'discusses',
@@ -887,6 +903,13 @@ _CHAT_STOPWORDS = frozenset({
     'feel', 'feels', 'felt', 'feeling', 'look', 'looks', 'looking', 'looked',
     'see', 'sees', 'seeing', 'seen', 'seem', 'seems', 'seemed', 'seeming',
     'sounds', 'sounded',
+    # Format, genre, platform, and scope words. Synthesis queries like "best
+    # social media clip in this whole interview" should produce zero search
+    # terms so the model reasons editorially instead of keyword-anchoring on
+    # every paragraph containing "social" or "interview".
+    'social', 'media', 'tiktok', 'instagram', 'reel', 'reels', 'shorts',
+    'youtube', 'podcast', 'interview', 'whole', 'entire', 'highlight',
+    'highlights', 'shareable', 'viral', 'quotable', 'strongest', 'powerful',
 })
 
 
@@ -932,6 +955,91 @@ def _extract_query_keywords(message):
         return out
 
     return _dedupe(phrases), _dedupe(words)
+
+
+_SYNTHESIS_SIGNALS = frozenset({
+    'best', 'strongest', 'powerful', 'highlight', 'highlights', 'top',
+    'quotable', 'shareable', 'viral', 'hook', 'hooks',
+    'social', 'tiktok', 'instagram', 'reel', 'reels', 'shorts', 'youtube',
+    'podcast', 'soundbite', 'soundbites',
+})
+
+
+def _is_synthesis_query(message):
+    """Return True when the query asks for editorial judgment, not a lookup.
+
+    Synthesis queries ("best social media clip", "pull a reel", "top 3
+    highlights") should skip strict keyword anchoring and let the model
+    reason editorially across the full transcript. Lookup queries ("what
+    did she say about Moose Hill", "when does he mention his father") need
+    keyword anchoring to find the right passage.
+    """
+    if not message:
+        return False
+    import re
+    tokens = set(re.findall(r"[a-z0-9']+", message.lower()))
+    return bool(tokens & _SYNTHESIS_SIGNALS)
+
+
+_WORD_NUMBERS = {
+    'one': 1, 'single': 1,
+    'two': 2, 'couple': 2,
+    'three': 3, 'few': 3,
+    'four': 4, 'five': 5,
+}
+
+_BIGRAM_NUMBERS = {
+    ('a', 'single'): 1,
+    ('a', 'few'): 3,
+    ('a', 'couple'): 2,
+}
+
+_CLIP_NOUNS = frozenset({
+    'clip', 'clips', 'moment', 'moments', 'highlight', 'highlights',
+    'soundbite', 'soundbites', 'quote', 'quotes', 'reel', 'reels',
+    'short', 'shorts', 'beat', 'beats',
+})
+
+
+def _extract_quantity_hint(message):
+    """Extract an explicit clip count from the user's query, or None.
+
+    Returns an int (1-10) when the user specifies a count adjacent to a
+    clip noun ("best 1 clip", "top 3 highlights", "a single soundbite").
+    Returns None when no count is present, the number isn't near a clip
+    noun, or the count is out of range (0, 50, etc.).
+    """
+    if not message:
+        return None
+    import re
+    tokens = re.findall(r"[a-z0-9']+", message.lower())
+    if not tokens:
+        return None
+
+    has_clip_noun = bool(set(tokens) & _CLIP_NOUNS)
+    if not has_clip_noun:
+        return None
+
+    for i in range(len(tokens) - 1):
+        bigram = (tokens[i], tokens[i + 1])
+        if bigram in _BIGRAM_NUMBERS:
+            return _BIGRAM_NUMBERS[bigram]
+
+    for tok in tokens:
+        if tok in _WORD_NUMBERS:
+            return _WORD_NUMBERS[tok]
+
+    digits = re.findall(r'\b(\d{1,2})\b', message)
+    for d in digits:
+        n = int(d)
+        if 1 <= n <= 10:
+            tc_pattern = re.compile(r'(?:\d{1,2}:\d{2}|\d{4})')
+            if not tc_pattern.match(d) and not any(
+                message[max(0, message.find(d)-1):message.find(d)] == ':'
+                for _ in [None]
+            ):
+                return n
+    return None
 
 
 def _collect_theme_phrases_from_vectors(segment_vectors, message):

@@ -84,7 +84,13 @@ rsync -a \
     --exclude='tests' \
     --exclude='projects' \
     --exclude='exports' \
-    --exclude='docs' \
+    --include='docs/' \
+    --include='docs/storytelling-foundation-oss.md' \
+    --exclude='docs/*' \
+    --exclude='.pytest_cache' \
+    --exclude='test_hardware_tier.py' \
+    --exclude='.github' \
+    --exclude='scripts' \
     --exclude='icon_build' \
     --exclude='build_launcher.sh' \
     --exclude='install.sh' \

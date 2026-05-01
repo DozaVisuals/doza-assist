@@ -75,6 +75,22 @@ if [ -d "$SUPPORT_DIR" ] && [ -z "$(ls -A "$SUPPORT_DIR" 2>/dev/null)" ]; then
     rmdir "$SUPPORT_DIR"
 fi
 
+# ── Remove preferences (separate location with space in name) ──
+PREFS_DIR="$HOME/Library/Application Support/Doza Assist"
+if [ -d "$PREFS_DIR" ]; then
+    echo -e "  Removing preferences..."
+    rm -rf "$PREFS_DIR"
+    REMOVED+=("Preferences (Doza Assist)")
+fi
+
+# ── Remove editorial DNA profiles (legacy location) ──
+EDITORIAL_DIR="$HOME/.doza-assist"
+if [ -d "$EDITORIAL_DIR" ]; then
+    echo -e "  Removing editorial DNA profiles..."
+    rm -rf "$EDITORIAL_DIR"
+    REMOVED+=("Editorial DNA profiles (~/.doza-assist)")
+fi
+
 # ── Remove local install log ──
 if [ -f "install_log.txt" ]; then
     echo -e "  Removing install log..."

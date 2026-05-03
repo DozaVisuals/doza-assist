@@ -477,6 +477,132 @@ def ai_model_status():
     })
 
 
+# ── BYO API key: error handler ──────────────────────────────────────
+# Any AI feature endpoint that hits a missing-key, invalid-key, or
+# rate-limit condition raises ``ProviderError`` from inside the provider
+# layer. The errorhandler catches uncaught ones; routes with their own
+# ``except Exception`` blocks should call ``_provider_error_response``
+# from a more specific ``except ProviderError`` first.
+
+def _provider_error_response(e):
+    """Standardized JSON 400 for any ``ProviderError``.
+
+    Includes ``settings_url`` so the frontend can render a clickable link
+    (or button) that opens /settings — the user can fix the key without
+    leaving the AI feature they were using.
+    """
+    return jsonify({
+        'error': str(e),
+        'code': getattr(e, 'code', '') or 'provider_error',
+        'settings_url': '/settings',
+    }), 400
+
+
+@app.errorhandler(Exception)
+def _handle_provider_error(e):
+    from ai_providers import ProviderError
+    if not isinstance(e, ProviderError):
+        raise e
+    return _provider_error_response(e)
+
+
+# ── BYO API key: provider settings ──────────────────────────────────
+# All AI calls route through ``ai_providers.get_active_provider()`` which
+# reads ``provider_config.json`` from $DOZA_DATA_DIR. These three routes
+# let the user select Local / Anthropic / OpenAI, paste an API key, and
+# verify it before relying on it for analysis or chat.
+
+@app.route('/settings/provider', methods=['GET'])
+def get_provider_settings():
+    """Return the current provider config with API keys masked for display."""
+    from ai_providers import load_provider_config, masked_config
+    cfg = load_provider_config()
+    out = masked_config(cfg)
+    out['has_anthropic_key'] = bool((cfg.get('anthropic') or {}).get('api_key'))
+    out['has_openai_key'] = bool((cfg.get('openai') or {}).get('api_key'))
+    return jsonify(out)
+
+
+@app.route('/settings/provider', methods=['POST'])
+def save_provider_settings():
+    """Save provider selection and/or API keys.
+
+    Body fields are all optional; whichever ones are present get updated.
+    An empty string clears that key. Returns the updated masked config.
+    """
+    from ai_providers import load_provider_config, save_provider_config, masked_config
+    body = request.json or {}
+    cfg = load_provider_config()
+
+    active = body.get('active_provider')
+    if active in ('ollama', 'anthropic', 'openai'):
+        cfg['active_provider'] = active
+
+    # ``api_key`` is provider-scoped via the body's ``provider`` field, OR
+    # the saved active provider if the caller omits it. This keeps the
+    # frontend simple — it just sends {provider, api_key} when the user
+    # pastes a key into one of the provider panels.
+    target = body.get('provider') or cfg.get('active_provider')
+    if 'api_key' in body and target in ('anthropic', 'openai'):
+        cfg.setdefault(target, {})['api_key'] = (body.get('api_key') or '').strip()
+
+    if 'base_url' in body:
+        cfg.setdefault('ollama', {})['base_url'] = body['base_url'] or 'http://localhost:11434'
+
+    try:
+        save_provider_config(cfg)
+    except Exception as e:
+        return jsonify({'error': f'Save failed: {e}'}), 500
+    return jsonify(masked_config(cfg))
+
+
+@app.route('/settings/provider/test', methods=['POST'])
+def test_provider_connection():
+    """Test a provider with the supplied (or saved) credentials.
+
+    Body: ``{"provider": "anthropic"|"openai"|"ollama", "api_key": "..."}``.
+    If ``api_key`` is omitted, falls back to the saved key. Sends a tiny
+    prompt and reports back ``{"success": bool, "error"|"response": "..."}``.
+    """
+    from ai_providers import get_provider, load_provider_config
+    body = request.json or {}
+    name = (body.get('provider') or '').strip().lower()
+    if name not in ('ollama', 'anthropic', 'openai'):
+        return jsonify({'success': False, 'error': f'Unknown provider: {name!r}'}), 400
+
+    api_key = body.get('api_key') or ''
+    if name in ('anthropic', 'openai') and not api_key:
+        # Fall back to saved key.
+        cfg = load_provider_config()
+        api_key = (cfg.get(name) or {}).get('api_key') or ''
+    if name in ('anthropic', 'openai') and not api_key:
+        return jsonify({'success': False, 'error': 'No API key provided'}), 400
+
+    try:
+        if name == 'ollama':
+            provider = get_provider('ollama', model_resolver=_get_active_ollama_model)
+        else:
+            provider = get_provider(name, api_key=api_key)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+    try:
+        result = provider.test_connection()
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    return jsonify(result)
+
+
+def _get_active_ollama_model():
+    """Resolve the currently selected Ollama model tag.
+
+    Wrapped in app.py (rather than imported at module scope) so the
+    provider package stays decoupled from the OSS model_config helpers.
+    """
+    from ai_analysis import _get_ollama_model
+    return _get_ollama_model()
+
+
 @app.route('/api/ai-model', methods=['PATCH'])
 def set_ai_model():
     """Switch the active Gemma 4 variant. Persists to model_config.json.
@@ -1549,6 +1675,9 @@ def analyze(project_id):
 
     except Exception as e:
         _clear_analyze_status(project_id)
+        from ai_providers import ProviderError
+        if isinstance(e, ProviderError):
+            return _provider_error_response(e)
         return jsonify({'error': str(e)}), 500
 
 
@@ -1661,6 +1790,9 @@ def chat(project_id):
 
         return jsonify({'reply': reply})
     except Exception as e:
+        from ai_providers import ProviderError
+        if isinstance(e, ProviderError):
+            return _provider_error_response(e)
         return jsonify({'error': str(e)}), 500
 
 
@@ -1722,12 +1854,20 @@ def chat_stream(project_id):
         single_pid = None
 
     def _generate():
+        from ai_providers import ProviderError
         final_reply = ''
         try:
             for event_type, payload in chat_about_transcript_stream(**stream_kwargs):
                 if event_type == 'done':
                     final_reply = payload or ''
                 yield f"data: {json.dumps({'event': event_type, 'data': payload})}\n\n"
+        except ProviderError as e:
+            # Surface as a clean assistant reply rather than a generic
+            # error so the conversation flow stays intact + the user sees
+            # the message with a Settings link.
+            final_reply = str(e)
+            yield f"data: {json.dumps({'event': 'done', 'data': final_reply, 'provider_error': True, 'code': e.code, 'settings_url': '/settings'})}\n\n"
+            return
         except Exception as e:
             yield f"data: {json.dumps({'event': 'error', 'data': str(e)})}\n\n"
             return
@@ -2689,6 +2829,9 @@ def story_build(project_id):
         )
         return jsonify({'status': 'built', 'build': build_entry})
     except Exception as e:
+        from ai_providers import ProviderError
+        if isinstance(e, ProviderError):
+            return _provider_error_response(e)
         return jsonify({'error': str(e)}), 500
 
 

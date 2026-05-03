@@ -393,7 +393,7 @@ def _call_llm_for_full_profile(corpus_text, single_pass=True):
     """One-shot extraction for corpora that fit in the budget."""
     prompt = _FULL_PROFILE_PROMPT.format(corpus=corpus_text)
     try:
-        raw = _call_ai(prompt)
+        raw = _call_ai(prompt, task_type="profile_creation")
     except Exception as e:
         print(f"[edna] full-profile LLM call failed: {e}")
         return None
@@ -406,7 +406,7 @@ def _call_llm_for_full_profile(corpus_text, single_pass=True):
             "no explanation. Start with { and end with }."
         )
         try:
-            raw = _call_ai(retry_prompt)
+            raw = _call_ai(retry_prompt, task_type="profile_creation")
         except Exception as e:
             print(f"[edna] full-profile LLM retry failed: {e}")
             return None

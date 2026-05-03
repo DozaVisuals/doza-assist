@@ -3759,6 +3759,80 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 }
 .ai-modal-close:hover { color: var(--text-primary); background: var(--bg-hover); }
 
+/* Provider section — three tabs at the top of the AI Settings modal,
+   one pane per provider. Local (Ollama) uses the existing hardware /
+   variant cards below; Anthropic and OpenAI show an API-key pane. */
+.ai-provider-section {
+    margin-bottom: 1.25rem;
+}
+.ai-provider-tabs {
+    display: inline-flex;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px;
+    margin-bottom: 1rem;
+}
+.ai-provider-tab {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 0.4rem 0.95rem;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.ai-provider-tab:hover { color: var(--text-primary); }
+.ai-provider-tab.is-active {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.ai-provider-pane {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+}
+.ai-provider-label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-bottom: 0.4rem;
+}
+.ai-provider-key-row {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+}
+.ai-provider-key-input {
+    flex: 1;
+    font-family: var(--mono, monospace);
+}
+.ai-provider-status {
+    font-size: 0.8rem;
+    margin: 0.4rem 0 0.6rem;
+    min-height: 1.2em;
+    color: var(--text-secondary);
+}
+.ai-provider-status.is-success { color: #16a34a; }
+.ai-provider-status.is-error   { color: #dc2626; }
+.ai-provider-status.is-info    { color: var(--text-secondary); }
+.ai-provider-help {
+    font-size: 0.78rem;
+    color: var(--text-muted, var(--text-secondary));
+    line-height: 1.5;
+    margin: 0.4rem 0 0;
+}
+.ai-provider-help a { color: inherit; text-decoration: underline; }
+
 .ai-modal-hw {
     font-size: 0.85rem;
     color: var(--text-secondary);

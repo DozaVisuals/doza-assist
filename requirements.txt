@@ -5,5 +5,8 @@ requests
 certifi
 lxml
 
-# AI Chat & Analysis (uses Ollama locally — no package needed)
-# Install Ollama separately: https://ollama.com
+# AI providers
+# - Ollama is local; no package needed (install separately: https://ollama.com)
+# - BYO API key support: official SDKs for Anthropic and OpenAI
+anthropic>=0.42.0
+openai>=1.60.0

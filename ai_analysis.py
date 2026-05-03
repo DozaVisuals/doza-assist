@@ -303,91 +303,23 @@ _OLLAMA_STOP_TOKENS = [
 
 
 def _call_ai_chat_stream(system_message, messages, num_ctx=32768):
-    """Stream chat tokens from Ollama ``/api/chat`` with Claude fallback.
+    """Stream chat tokens through the active AI provider.
 
     ``system_message`` is the master system prompt (chat-system-prompt.md
     plus storytelling foundation). ``messages`` is the user/assistant
     array — STYLE CONTEXT (optional), TRANSCRIPT, history, current message.
 
-    On Ollama, the system message is sent as ``messages[0]`` with role
-    ``system`` per Ollama's ``/api/chat`` contract. On Claude fallback,
-    it's sent as the top-level ``system`` field with the rest as the
-    ``messages`` array. Both providers stream via ``stream: True`` for
-    Ollama; Claude's API call is non-streaming and yields the full reply
-    as a single chunk so the SSE consumer logic stays uniform.
-
-    Yields ``str`` pieces as they arrive. Yields nothing on hard backend
-    failure; the caller should treat that the same as an empty reply.
+    Yields ``str`` pieces as they arrive. On provider error, raises
+    ``RuntimeError`` with a user-facing message so the SSE layer can
+    surface it. The previous silent fall-back from Ollama to Anthropic via
+    ``ANTHROPIC_API_KEY`` was removed — the user picks a provider and
+    failures must be visible.
     """
-    ollama_messages = [{'role': 'system', 'content': system_message}] + messages
-    try:
-        with requests.post(
-            'http://localhost:11434/api/chat',
-            json={
-                'model': _get_ollama_model(),
-                'messages': ollama_messages,
-                'stream': True,
-                'keep_alive': _OLLAMA_KEEP_ALIVE,
-                'options': {
-                    'temperature': 0.4,
-                    'num_predict': 4096,
-                    'num_ctx': num_ctx,
-                    'repeat_penalty': 1.3,
-                    'repeat_last_n': 128,
-                    'stop': _OLLAMA_STOP_TOKENS,
-                }
-            },
-            timeout=300,
-            stream=True,
-        ) as response:
-            if response.status_code == 200:
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except (ValueError, json.JSONDecodeError):
-                        continue
-                    # /api/chat streams {message: {role, content}, done}.
-                    # The content is the incremental piece for this chunk.
-                    msg = chunk.get('message') or {}
-                    piece = msg.get('content', '')
-                    if piece:
-                        yield piece
-                    if chunk.get('done'):
-                        break
-                return
-    except requests.exceptions.ConnectionError:
-        pass
-    except Exception as e:
-        print(f"Ollama streaming error: {e}")
-
-    # Claude fallback — non-streaming HTTP, but we yield the result as a
-    # single chunk so the SSE client logic still flows.
-    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    if not api_key:
-        return
-    try:
-        response = requests.post(
-            'https://api.anthropic.com/v1/messages',
-            headers={
-                'Content-Type': 'application/json',
-                'x-api-key': api_key,
-                'anthropic-version': '2023-06-01',
-            },
-            json={
-                'model': 'claude-sonnet-4-20250514',
-                'max_tokens': 2048,
-                'system': system_message,
-                'messages': messages,
-            },
-            timeout=60,
-        )
-        if response.status_code == 200:
-            data = response.json()
-            yield data['content'][0]['text']
-    except Exception as e:
-        print(f"Claude API streaming-fallback error: {e}")
+    from ai_providers import get_active_provider
+    provider = get_active_provider(model_resolver=_get_ollama_model)
+    yield from provider.generate_stream(
+        system_message, messages, task_type="chat", num_ctx=num_ctx,
+    )
 
 
 def chat_about_transcript_stream(transcript, message, history=None, project_name="Interview",
@@ -525,67 +457,16 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
 
 
 def _call_ai_chat(system_message, messages, num_ctx=32768):
-    """Non-streaming chat call. Same shape as :func:`_call_ai_chat_stream`
-    — takes a system message string and a messages array — but blocks
-    until the full reply is ready and returns it as a single string.
+    """Non-streaming chat call through the active provider.
 
-    Used by :func:`chat_about_transcript` (the non-streaming endpoint) and
-    by salvage / one-shot callers that wrap their input in a single
-    user-role message.
-
-    Raises ``RuntimeError`` if no backend is reachable.
+    Same input shape as :func:`_call_ai_chat_stream` — a system string plus
+    a messages array. Returns the full reply as a single string.
     """
-    ollama_messages = [{'role': 'system', 'content': system_message}] + messages
-    try:
-        response = requests.post(
-            'http://localhost:11434/api/chat',
-            json={
-                'model': _get_ollama_model(),
-                'messages': ollama_messages,
-                'stream': False,
-                'keep_alive': _OLLAMA_KEEP_ALIVE,
-                'options': {
-                    'temperature': 0.4,
-                    'num_predict': 4096,
-                    'num_ctx': num_ctx,
-                    'repeat_penalty': 1.3,
-                    'repeat_last_n': 128,
-                    'stop': _OLLAMA_STOP_TOKENS,
-                }
-            },
-            timeout=300,
-        )
-        if response.status_code == 200:
-            data = response.json()
-            return (data.get('message') or {}).get('content', '')
-    except requests.exceptions.ConnectionError:
-        pass
-
-    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    if api_key:
-        try:
-            response = requests.post(
-                'https://api.anthropic.com/v1/messages',
-                headers={
-                    'Content-Type': 'application/json',
-                    'x-api-key': api_key,
-                    'anthropic-version': '2023-06-01',
-                },
-                json={
-                    'model': 'claude-sonnet-4-20250514',
-                    'max_tokens': 2048,
-                    'system': system_message,
-                    'messages': messages,
-                },
-                timeout=60,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data['content'][0]['text']
-        except Exception as e:
-            print(f"Claude API error: {e}")
-
-    raise RuntimeError("No AI backend available.")
+    from ai_providers import get_active_provider
+    provider = get_active_provider(model_resolver=_get_ollama_model)
+    return provider.generate(
+        system_message, messages, task_type="chat", num_ctx=num_ctx,
+    )
 
 
 def _count_clip_markers(text):
@@ -2413,73 +2294,46 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180, model_override=None):
     drop on per-chunk scoring is mitigated by the global rerank pass
     which still runs on the bigger model.
 
-    Responses are cached by sha1((system_prompt, user_prompt, model))
-    so a re-asked query against an unchanged transcript hits the cache
-    on every chunk instead of re-billing the LLM. Cache busts naturally
-    when chunk text changes (re-analysis produces different sha1s).
+    Responses are cached by sha1((system_prompt, user_prompt, model, provider))
+    so a re-asked query against an unchanged transcript hits the cache on
+    every chunk instead of re-billing the LLM. The provider name is part of
+    the key so switching from Ollama to Anthropic doesn't return a cached
+    Ollama response for the same prompt. Cache busts naturally when chunk
+    text changes (re-analysis produces different sha1s).
     """
+    from ai_providers import get_active_provider
     system_prompt = inject_storytelling_foundation(system_prompt)
-    model_name = model_override or _get_ollama_model()
+    provider = get_active_provider(model_resolver=_get_ollama_model)
+    model_name = model_override or (
+        _get_ollama_model() if provider.name == "ollama" else provider.name
+    )
     cache_key = (
         hashlib.sha1(system_prompt.encode('utf-8', 'replace')).hexdigest(),
         hashlib.sha1(user_prompt.encode('utf-8', 'replace')).hexdigest(),
         model_name,
+        provider.name,
     )
     cached = _chunk_cache_get(cache_key)
     if cached is not None:
         return cached
     try:
-        response = requests.post(
-            'http://localhost:11434/api/generate',
-            json={
-                'model': model_name,
-                'prompt': user_prompt,
-                'system': system_prompt,
-                'stream': False,
-                'format': 'json',
-                'keep_alive': _OLLAMA_KEEP_ALIVE,
-                'options': {
-                    'temperature': 0.1,
-                    'num_predict': 768,
-                    'num_ctx': 12288,
-                }
-            },
-            timeout=timeout,
+        result = provider.generate(
+            system_prompt, user_prompt, task_type="analysis",
+            timeout=timeout, model_override=model_override,
         )
-        if response.status_code == 200:
-            result = response.json().get('response', '')
-            _chunk_cache_put(cache_key, result)
-            return result
-    except requests.exceptions.ConnectionError:
-        pass
-    except requests.exceptions.Timeout:
+    except RuntimeError as e:
+        # Permanent provider problems (no key, bad key) must abort the
+        # whole analysis — silently returning '' on every chunk would
+        # leave the user with empty results and no explanation. Transient
+        # errors (rate limit, generic API hiccup) drop this single chunk
+        # so the chunked-search loop can keep going.
+        from ai_providers import ProviderError
+        if isinstance(e, ProviderError) and e.code in ('missing_key', 'invalid_key'):
+            raise
         return ''
-
-    # Claude fallback mirrors _call_ai_chat — same env var, same shape.
-    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    if api_key:
-        try:
-            response = requests.post(
-                'https://api.anthropic.com/v1/messages',
-                headers={
-                    'Content-Type': 'application/json',
-                    'x-api-key': api_key,
-                    'anthropic-version': '2023-06-01',
-                },
-                json={
-                    'model': 'claude-sonnet-4-20250514',
-                    'max_tokens': 1024,
-                    'system': system_prompt,
-                    'messages': [{'role': 'user', 'content': user_prompt}],
-                },
-                timeout=60,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data['content'][0]['text']
-        except Exception:
-            pass
-    return ''
+    if result:
+        _chunk_cache_put(cache_key, result)
+    return result or ''
 
 
 def _parse_chunk_response(response_text, chunk):
@@ -3335,6 +3189,12 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
                     is_first_chunk=(i == 0),
                 )
             except Exception as e:
+                # Missing/invalid API key is permanent — re-raise so the
+                # whole analysis aborts with the clear message instead of
+                # silently producing empty results across every chunk.
+                from ai_providers import ProviderError
+                if isinstance(e, ProviderError) and e.code in ('missing_key', 'invalid_key'):
+                    raise
                 print(f"[analyze] story chunk {i+1}/{len(chunks)} failed: {e}")
         if analysis_type in ('social', 'all'):
             step += 1
@@ -3348,6 +3208,9 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
                     ),
                 )
             except Exception as e:
+                from ai_providers import ProviderError
+                if isinstance(e, ProviderError) and e.code in ('missing_key', 'invalid_key'):
+                    raise
                 print(f"[analyze] social chunk {i+1}/{len(chunks)} failed: {e}")
 
     step += 1
@@ -3811,67 +3674,35 @@ def _format_transcript_paragraphs_for_ai(transcript, max_paragraph_seconds=60):
     return _format_paragraphs_as_lines(paragraphs)
 
 
-def _call_ai(prompt, system_prompt=""):
+def _call_ai(prompt, system_prompt="", task_type="analysis"):
+    """Single-prompt generation through the active provider.
+
+    ``task_type`` selects the model when the provider tiers (Anthropic uses
+    Opus for ``profile_creation``, Sonnet otherwise; Ollama ignores it).
+    Editorial DNA's classifier passes ``"analysis"``; My Style synthesis
+    passes ``"profile_creation"``.
+
+    Raises ``RuntimeError`` on provider error so the caller can surface a
+    clear message to the user instead of silently falling back.
     """
-    Call an AI model. Tries Ollama first (local), then Claude API.
-    Returns the response text.
-    """
+    from ai_providers import get_active_provider
     system_prompt = inject_storytelling_foundation(system_prompt)
-    # Try Ollama first (local, free)
-    try:
-        response = requests.post(
-            'http://localhost:11434/api/generate',
-            json={
-                'model': _get_ollama_model(),
-                'prompt': prompt,
-                'system': system_prompt,
-                'stream': False,
-                'options': {
-                    'temperature': 0.3,
-                    'num_predict': 16384,
-                    'num_ctx': 32768,
-                }
-            },
-            # 15 min — Story Builder on long transcripts with an 8B model
-            # (gemma4:latest resolves to 8B on several setups) can push past
-            # the old 10-min cap while still succeeding on the second try.
-            timeout=900,
-        )
-        if response.status_code == 200:
-            return response.json().get('response', '')
-    except requests.exceptions.ConnectionError:
-        pass
-
-    # Try Claude API
-    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    if api_key:
-        try:
-            response = requests.post(
-                'https://api.anthropic.com/v1/messages',
-                headers={
-                    'Content-Type': 'application/json',
-                    'x-api-key': api_key,
-                    'anthropic-version': '2023-06-01',
-                },
-                json={
-                    'model': 'claude-sonnet-4-20250514',
-                    'max_tokens': 4096,
-                    'system': system_prompt,
-                    'messages': [{'role': 'user', 'content': prompt}],
-                },
-                timeout=120,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data['content'][0]['text']
-        except Exception as e:
-            print(f"Claude API error: {e}")
-
-    raise RuntimeError(
-        "No AI backend available. Either:\n"
-        "  1. Start Ollama: ollama serve (then pull a model like gemma4:e4b)\n"
-        "  2. Set ANTHROPIC_API_KEY environment variable for Claude API"
+    provider = get_active_provider(model_resolver=_get_ollama_model)
+    return provider.generate(
+        system_prompt, prompt, task_type=task_type,
     )
+
+
+def _ollama_is_active():
+    """True iff the saved active provider is local Ollama. Cached at the
+    call-site level so failures degrade to ``True`` (the historical default)
+    rather than blocking the AI flow on a missing config file.
+    """
+    try:
+        from ai_providers import load_provider_config
+        return (load_provider_config().get('active_provider') or 'ollama') == 'ollama'
+    except Exception:
+        return True
 
 
 def get_effective_ollama_model():
@@ -3888,7 +3719,13 @@ def get_effective_ollama_model():
     on a laptop with only ``gemma4:e2b`` installed got e2b without any
     indication. The UI now surfaces ``fallback_used`` so the user can
     download what they actually picked.
+
+    Short-circuits to ``('', '', False)`` when the active provider isn't
+    Ollama — no point burning an HTTP roundtrip to localhost:11434 when the
+    user is running through Anthropic or OpenAI.
     """
+    if not _ollama_is_active():
+        return '', '', False
     try:
         import model_config
         selected_variant = model_config.get_gemma4_variant()['variant']
@@ -3972,7 +3809,13 @@ def _get_fast_chunk_model():
 
     Falls back to the user's main model if e2b isn't pulled or the
     env var isn't set, so default behavior matches the v3.1.x path.
+
+    Returns ``None`` when the active provider isn't Ollama — API providers
+    don't accept per-call model overrides (the model is task_type-driven),
+    and skipping the localhost:11434 probe saves a roundtrip per chunk.
     """
+    if not _ollama_is_active():
+        return None
     global _FAST_CHUNK_MODEL_CACHE
     main_model = _get_ollama_model()
     if not os.environ.get('DOZA_FAST_CHUNK_MODEL'):
@@ -4033,10 +3876,16 @@ def warmup_ollama():
     the user's first chat message after launching the app starts with
     the model already resident — no 4-12s cold-load.
 
+    No-op when the active provider isn't Ollama — there's nothing to warm
+    up if the user is routing through Anthropic or OpenAI, and pinging
+    localhost:11434 just to fail noisily defeats the purpose.
+
     Errors are swallowed: the warm-up is best-effort and Ollama may
     not be running yet at app start. Subsequent real chat calls
     re-attempt the load via the normal _call_ai_chat path.
     """
+    if not _ollama_is_active():
+        return
     try:
         requests.post(
             'http://localhost:11434/api/generate',

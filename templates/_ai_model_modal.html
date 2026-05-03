@@ -14,15 +14,62 @@
     <div class="ai-modal">
         <div class="ai-modal-header">
             <div>
-                <h2 class="ai-modal-title">AI Analysis Model</h2>
-                <p class="ai-modal-subtitle">Choose the Gemma 4 variant that runs story analysis, social clips, and chat on this Mac.</p>
+                <h2 class="ai-modal-title">AI Settings</h2>
+                <p class="ai-modal-subtitle" id="aiModalSubtitle">Choose where AI runs. Local uses Ollama on this Mac; Anthropic and OpenAI route through their cloud APIs using your key.</p>
             </div>
             <button class="ai-modal-close" onclick="closeAIModelModal()" aria-label="Close">×</button>
         </div>
-        <div class="ai-modal-hw" id="aiModalHardware">Detecting hardware…</div>
-        <div class="ai-modal-variants" id="aiModalVariants"></div>
-        <div class="ai-modal-footnote" id="aiModalFootnote">
-            Times are rough estimates on this machine. Bigger models give slightly better phrasing and tighter structured output; smaller models let you iterate faster.
+
+        <div class="ai-provider-section">
+            <div class="ai-provider-tabs" role="radiogroup" aria-label="AI provider">
+                <button type="button" class="ai-provider-tab" data-provider="ollama"    onclick="selectProvider('ollama')"    role="radio">Local (Ollama)</button>
+                <button type="button" class="ai-provider-tab" data-provider="anthropic" onclick="selectProvider('anthropic')" role="radio">Anthropic (Claude)</button>
+                <button type="button" class="ai-provider-tab" data-provider="openai"    onclick="selectProvider('openai')"    role="radio">OpenAI (ChatGPT)</button>
+            </div>
+
+            <div class="ai-provider-pane" id="aiProviderPaneAnthropic" style="display:none;">
+                <label class="ai-provider-label" for="aiProviderKeyAnthropic">API key</label>
+                <div class="ai-provider-key-row">
+                    <input type="password" class="form-input ai-provider-key-input" id="aiProviderKeyAnthropic" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+                    <button type="button" class="btn btn-sm" onclick="toggleProviderKeyVisibility('Anthropic')" id="aiProviderKeyToggleAnthropic" title="Show/hide">Show</button>
+                    <button type="button" class="btn btn-sm" onclick="saveProviderKey('anthropic')">Save</button>
+                    <button type="button" class="btn btn-sm" onclick="testProviderKey('anthropic')">Test</button>
+                </div>
+                <div class="ai-provider-status" id="aiProviderStatusAnthropic"></div>
+                <p class="ai-provider-help">
+                    Paste your API key from <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
+                    This key is stored locally on your machine and is never sent to Doza Assist servers.
+                </p>
+                <p class="ai-provider-help">
+                    Typical cost: a few cents per interview. API billing is separate from a Claude Pro subscription.
+                </p>
+            </div>
+
+            <div class="ai-provider-pane" id="aiProviderPaneOpenai" style="display:none;">
+                <label class="ai-provider-label" for="aiProviderKeyOpenai">API key</label>
+                <div class="ai-provider-key-row">
+                    <input type="password" class="form-input ai-provider-key-input" id="aiProviderKeyOpenai" placeholder="sk-..." autocomplete="off" spellcheck="false">
+                    <button type="button" class="btn btn-sm" onclick="toggleProviderKeyVisibility('Openai')" id="aiProviderKeyToggleOpenai" title="Show/hide">Show</button>
+                    <button type="button" class="btn btn-sm" onclick="saveProviderKey('openai')">Save</button>
+                    <button type="button" class="btn btn-sm" onclick="testProviderKey('openai')">Test</button>
+                </div>
+                <div class="ai-provider-status" id="aiProviderStatusOpenai"></div>
+                <p class="ai-provider-help">
+                    Paste your API key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>.
+                    This key is stored locally on your machine and is never sent to Doza Assist servers.
+                </p>
+                <p class="ai-provider-help">
+                    Typical cost: a few cents per interview. API billing is separate from a ChatGPT Plus subscription.
+                </p>
+            </div>
+        </div>
+
+        <div id="aiOllamaSection">
+            <div class="ai-modal-hw" id="aiModalHardware">Detecting hardware…</div>
+            <div class="ai-modal-variants" id="aiModalVariants"></div>
+            <div class="ai-modal-footnote" id="aiModalFootnote">
+                Times are rough estimates on this machine. Bigger models give slightly better phrasing and tighter structured output; smaller models let you iterate faster.
+            </div>
         </div>
     </div>
 </div>
@@ -31,6 +78,11 @@
 // Remembered across open/close so button-refresh after a model switch knows
 // which project's estimates to request and which buttons to repaint.
 let _aiModalProjectId = null;
+
+// Provider selection lives in this modal alongside the Ollama variant
+// picker. Switching providers swaps which sub-pane is visible: Local shows
+// the existing variant cards; Anthropic / OpenAI show an API-key field.
+let _activeProvider = 'ollama';
 
 async function openAIModelModal(projectId) {
     // Argument takes priority; otherwise fall back to any PROJECT_ID the host
@@ -42,6 +94,36 @@ async function openAIModelModal(projectId) {
 
     const modal = document.getElementById('aiModelModal');
     modal.style.display = 'flex';
+
+    // Load provider config first so the right pane is visible while the
+    // Ollama status fetch runs. The two are independent — provider config
+    // is local-only and never blocks on the backend's hardware probe.
+    try {
+        const cfg = await fetch('/settings/provider').then(r => r.json());
+        _activeProvider = cfg.active_provider || 'ollama';
+        // Keys are returned masked; show as placeholder so the user knows
+        // a key is saved without exposing it.
+        const ak = document.getElementById('aiProviderKeyAnthropic');
+        const ok = document.getElementById('aiProviderKeyOpenai');
+        if (ak) {
+            ak.value = '';
+            ak.placeholder = cfg.has_anthropic_key
+                ? `Saved: ${(cfg.anthropic && cfg.anthropic.api_key) || '****'} — paste a new key to replace`
+                : 'sk-ant-...';
+        }
+        if (ok) {
+            ok.value = '';
+            ok.placeholder = cfg.has_openai_key
+                ? `Saved: ${(cfg.openai && cfg.openai.api_key) || '****'} — paste a new key to replace`
+                : 'sk-...';
+        }
+        _renderProviderTabs(_activeProvider);
+    } catch (e) {
+        // Non-fatal — show Local pane, the user can still switch.
+        _renderProviderTabs('ollama');
+    }
+
+    // Local-only pane: render the existing Ollama variant picker.
     document.getElementById('aiModalHardware').textContent = 'Detecting hardware…';
     document.getElementById('aiModalVariants').innerHTML = '';
     try {
@@ -67,6 +149,113 @@ async function openAIModelModal(projectId) {
             ? 'Timed out talking to the local backend. Is Ollama running?'
             : 'Could not load model status: ' + (e.message || e);
         document.getElementById('aiModalHardware').textContent = msg;
+    }
+}
+
+function _renderProviderTabs(active) {
+    document.querySelectorAll('.ai-provider-tab').forEach(t => {
+        t.classList.toggle('is-active', t.getAttribute('data-provider') === active);
+    });
+    // Show the matching pane; Local shows the Ollama variant section instead.
+    const a = document.getElementById('aiProviderPaneAnthropic');
+    const o = document.getElementById('aiProviderPaneOpenai');
+    const localSection = document.getElementById('aiOllamaSection');
+    if (a) a.style.display = active === 'anthropic' ? '' : 'none';
+    if (o) o.style.display = active === 'openai' ? '' : 'none';
+    if (localSection) localSection.style.display = active === 'ollama' ? '' : 'none';
+}
+
+async function selectProvider(name) {
+    if (name !== 'ollama' && name !== 'anthropic' && name !== 'openai') return;
+    if (name === _activeProvider) return;
+    const previous = _activeProvider;
+    _activeProvider = name;
+    _renderProviderTabs(name);
+    try {
+        const r = await fetch('/settings/provider', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ active_provider: name }),
+        });
+        if (!r.ok) throw new Error('save failed');
+        _showProviderStatus(name, 'success', `Active provider: ${_providerLabel(name)}`);
+    } catch (e) {
+        _activeProvider = previous;
+        _renderProviderTabs(previous);
+        _showProviderStatus(name, 'error', 'Could not save provider choice');
+    }
+}
+
+function _providerLabel(name) {
+    return { ollama: 'Local (Ollama)', anthropic: 'Anthropic (Claude)', openai: 'OpenAI (ChatGPT)' }[name] || name;
+}
+
+function _showProviderStatus(provider, kind, msg) {
+    if (provider === 'ollama') return;  // Ollama uses its own hardware status line
+    const id = provider === 'anthropic' ? 'aiProviderStatusAnthropic' : 'aiProviderStatusOpenai';
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'ai-provider-status is-' + kind;
+    el.textContent = msg;
+}
+
+function toggleProviderKeyVisibility(suffix) {
+    const input = document.getElementById('aiProviderKey' + suffix);
+    const btn = document.getElementById('aiProviderKeyToggle' + suffix);
+    if (!input || !btn) return;
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    btn.textContent = showing ? 'Show' : 'Hide';
+}
+
+async function saveProviderKey(provider) {
+    const input = document.getElementById('aiProviderKey' + (provider === 'anthropic' ? 'Anthropic' : 'Openai'));
+    const key = (input && input.value || '').trim();
+    if (!key) {
+        _showProviderStatus(provider, 'error', 'Paste an API key first.');
+        return;
+    }
+    _showProviderStatus(provider, 'info', 'Saving…');
+    try {
+        const r = await fetch('/settings/provider', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, api_key: key }),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+            _showProviderStatus(provider, 'error', data.error || 'Save failed');
+            return;
+        }
+        const masked = (data[provider] || {}).api_key || '****';
+        _showProviderStatus(provider, 'success', `Saved (${masked}). Click Test to verify.`);
+        input.value = '';
+        input.placeholder = `Saved: ${masked} — paste a new key to replace`;
+    } catch (e) {
+        _showProviderStatus(provider, 'error', 'Save error: ' + (e.message || e));
+    }
+}
+
+async function testProviderKey(provider) {
+    const input = document.getElementById('aiProviderKey' + (provider === 'anthropic' ? 'Anthropic' : 'Openai'));
+    const typed = (input && input.value || '').trim();
+    _showProviderStatus(provider, 'info', 'Testing connection…');
+    try {
+        const body = { provider };
+        if (typed) body.api_key = typed;  // test the unsaved key first if present
+        const r = await fetch('/settings/provider/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (data.success) {
+            _showProviderStatus(provider, 'success', `Connected. Reply: "${(data.response || '').slice(0, 40)}"`);
+        } else {
+            _showProviderStatus(provider, 'error', data.error || 'Test failed');
+        }
+    } catch (e) {
+        _showProviderStatus(provider, 'error', 'Test error: ' + (e.message || e));
     }
 }
 

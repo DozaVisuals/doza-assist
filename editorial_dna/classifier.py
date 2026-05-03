@@ -31,7 +31,7 @@ Categories:
 
 Respond with ONLY the category name, nothing else."""
 
-    response = _call_ai(prompt).strip().lower().replace('"', '').replace("'", '')
+    response = _call_ai(prompt, task_type="analysis").strip().lower().replace('"', '').replace("'", '')
     valid = {'cold_quote', 'narration', 'scene_setting', 'question', 'other'}
     # Extract valid category from response
     for cat in valid:
@@ -60,7 +60,7 @@ Categories:
 
 Respond with ONLY the category name, nothing else."""
 
-    response = _call_ai(prompt).strip().lower().replace('"', '').replace("'", '')
+    response = _call_ai(prompt, task_type="analysis").strip().lower().replace('"', '').replace("'", '')
     valid = {'callback', 'statement', 'question', 'button', 'other'}
     for cat in valid:
         if cat in response:
@@ -84,7 +84,7 @@ Examples of good descriptors: "measured and deliberate", "rapid-fire and punchy"
 
 Respond with ONLY the descriptor phrase (2-4 words), nothing else."""
 
-    response = _call_ai(prompt).strip().strip('"').strip("'").lower()
+    response = _call_ai(prompt, task_type="analysis").strip().strip('"').strip("'").lower()
     # Sanity check: should be short
     if len(response.split()) > 8:
         return 'conversational'
@@ -106,7 +106,7 @@ Examples: "builds to the end", "front-loaded energy", "steady throughout", "dips
 
 Respond with ONLY the descriptor phrase (2-5 words), nothing else."""
 
-    response = _call_ai(prompt).strip().strip('"').strip("'").lower()
+    response = _call_ai(prompt, task_type="analysis").strip().strip('"').strip("'").lower()
     if len(response.split()) > 8:
         return 'balanced'
     return response
@@ -142,7 +142,7 @@ CLOSING (final third):
 
 Respond with ONLY "yes" or "no"."""
 
-    response = _call_ai(prompt).strip().lower()
+    response = _call_ai(prompt, task_type="analysis").strip().lower()
     return 'yes' in response
 
 
@@ -158,7 +158,7 @@ TRANSCRIPT (excerpt):
 
 Respond with ONLY a number (e.g. "3"), nothing else."""
 
-    response = _call_ai(prompt).strip()
+    response = _call_ai(prompt, task_type="analysis").strip()
     # Extract first number from response
     import re
     match = re.search(r'\d+', response)

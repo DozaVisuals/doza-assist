@@ -3792,6 +3792,68 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     color: var(--text-primary);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
+/* "Active" pill rendered into whichever tab is the saved active provider.
+   Sits next to the tab label so the active state is unmistakable -- the
+   subtle background swap on .is-active alone reads as too quiet. */
+.ai-provider-active-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.45rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #fff;
+    background: var(--accent, #6366f1);
+    border-radius: 999px;
+    vertical-align: 1px;
+}
+/* Status banner at the top of the active pane: pulsing green dot +
+   "Currently active" + the specific model in use. Inactive panes are
+   hidden anyway, but explicit on the active one removes the
+   "wait, am I really on Anthropic?" question. */
+.ai-provider-active-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+    padding: 0.6rem 0.8rem;
+    margin-bottom: 0.85rem;
+    background: rgba(22, 163, 74, 0.08);
+    border: 1px solid rgba(22, 163, 74, 0.32);
+    border-radius: 8px;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+}
+.ai-provider-active-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #16a34a;
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.55);
+    animation: ai-provider-active-pulse 2s ease-in-out infinite;
+    flex: 0 0 auto;
+}
+@keyframes ai-provider-active-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.45); }
+    70%  { box-shadow: 0 0 0 8px rgba(22, 163, 74, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0); }
+}
+.ai-provider-active-label {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+.ai-provider-active-model {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+}
+.ai-provider-active-model code {
+    font-size: 0.78rem;
+    padding: 0.05rem 0.3rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+}
 /* Subtle "Free" pill on the Local tab. The API tabs intentionally have
    no counterpart "Paid" badge — a positive signal on Local is welcoming;
    a negative signal on the others would create switching friction. */

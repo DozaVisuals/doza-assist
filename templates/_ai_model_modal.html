@@ -31,12 +31,22 @@
             </div>
 
             <div class="ai-provider-pane" id="aiProviderPaneOllama">
+                <div class="ai-provider-active-banner" data-provider="ollama">
+                    <span class="ai-provider-active-dot"></span>
+                    <span class="ai-provider-active-label">Currently active</span>
+                    <span class="ai-provider-active-model">Using the Gemma 4 variant marked Active below</span>
+                </div>
                 <p class="ai-provider-desc">
                     Runs on your Mac using your own hardware. No account needed, no usage fees, works offline.
                 </p>
             </div>
 
             <div class="ai-provider-pane" id="aiProviderPaneAnthropic" style="display:none;">
+                <div class="ai-provider-active-banner" data-provider="anthropic">
+                    <span class="ai-provider-active-dot"></span>
+                    <span class="ai-provider-active-label">Currently active</span>
+                    <span class="ai-provider-active-model">Using <code>claude-sonnet-4-20250514</code> for analysis &amp; chat · <code>claude-opus-4-20250514</code> for My Style profile creation</span>
+                </div>
                 <p class="ai-provider-desc">
                     Routes AI through Anthropic's cloud API using your own key. Faster and more accurate than local
                     models. You pay Anthropic directly — typical cost is a few cents per interview. Billing is separate
@@ -60,6 +70,11 @@
             </div>
 
             <div class="ai-provider-pane" id="aiProviderPaneOpenai" style="display:none;">
+                <div class="ai-provider-active-banner" data-provider="openai">
+                    <span class="ai-provider-active-dot"></span>
+                    <span class="ai-provider-active-label">Currently active</span>
+                    <span class="ai-provider-active-model">Using <code>gpt-4o</code> for everything</span>
+                </div>
                 <p class="ai-provider-desc">
                     Routes AI through OpenAI's cloud API using your own key. Faster and more accurate than local
                     models. You pay OpenAI directly — typical cost is a few cents per interview. Billing is separate
@@ -173,11 +188,22 @@ async function openAIModelModal(projectId) {
 
 function _renderProviderTabs(active) {
     document.querySelectorAll('.ai-provider-tab').forEach(t => {
-        t.classList.toggle('is-active', t.getAttribute('data-provider') === active);
+        const isActive = t.getAttribute('data-provider') === active;
+        t.classList.toggle('is-active', isActive);
+        // Drop any pre-existing badge so we re-render exactly once.
+        const old = t.querySelector('.ai-provider-active-badge');
+        if (old) old.remove();
+        if (isActive) {
+            const badge = document.createElement('span');
+            badge.className = 'ai-provider-active-badge';
+            badge.textContent = 'Active';
+            t.appendChild(badge);
+        }
     });
-    // Show the matching pane. Local shows the Ollama description pane plus
-    // the existing variant cards below it; Anthropic / OpenAI show their
-    // description + key field instead.
+    // Show the active provider's pane. Each pane carries an
+    // ai-provider-active-banner that surfaces the model in use; we only
+    // render that banner on the pane that's currently active so the
+    // copy reads as a status, not a description of all options.
     const lo = document.getElementById('aiProviderPaneOllama');
     const a = document.getElementById('aiProviderPaneAnthropic');
     const o = document.getElementById('aiProviderPaneOpenai');
@@ -186,6 +212,12 @@ function _renderProviderTabs(active) {
     if (a) a.style.display = active === 'anthropic' ? '' : 'none';
     if (o) o.style.display = active === 'openai' ? '' : 'none';
     if (localSection) localSection.style.display = active === 'ollama' ? '' : 'none';
+    // Banner only shows on the active provider's pane (a non-active pane is
+    // hidden anyway, but this keeps the markup honest if anything ever
+    // forces them visible side-by-side).
+    document.querySelectorAll('.ai-provider-active-banner').forEach(b => {
+        b.style.display = b.getAttribute('data-provider') === active ? '' : 'none';
+    });
 }
 
 async function selectProvider(name) {

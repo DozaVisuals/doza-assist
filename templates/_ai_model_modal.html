@@ -22,12 +22,26 @@
 
         <div class="ai-provider-section">
             <div class="ai-provider-tabs" role="radiogroup" aria-label="AI provider">
-                <button type="button" class="ai-provider-tab" data-provider="ollama"    onclick="selectProvider('ollama')"    role="radio">Local (Ollama)</button>
+                <button type="button" class="ai-provider-tab" data-provider="ollama"    onclick="selectProvider('ollama')"    role="radio">
+                    Local (Ollama)
+                    <span class="ai-provider-free-badge">Free</span>
+                </button>
                 <button type="button" class="ai-provider-tab" data-provider="anthropic" onclick="selectProvider('anthropic')" role="radio">Anthropic (Claude)</button>
                 <button type="button" class="ai-provider-tab" data-provider="openai"    onclick="selectProvider('openai')"    role="radio">OpenAI (ChatGPT)</button>
             </div>
 
+            <div class="ai-provider-pane" id="aiProviderPaneOllama">
+                <p class="ai-provider-desc">
+                    Runs on your Mac using your own hardware. No account needed, no usage fees, works offline.
+                </p>
+            </div>
+
             <div class="ai-provider-pane" id="aiProviderPaneAnthropic" style="display:none;">
+                <p class="ai-provider-desc">
+                    Routes AI through Anthropic's cloud API using your own key. Faster and more accurate than local
+                    models. You pay Anthropic directly — typical cost is a few cents per interview. Billing is separate
+                    from a Claude Pro subscription.
+                </p>
                 <label class="ai-provider-label" for="aiProviderKeyAnthropic">API key</label>
                 <div class="ai-provider-key-row">
                     <input type="password" class="form-input ai-provider-key-input" id="aiProviderKeyAnthropic" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
@@ -46,6 +60,11 @@
             </div>
 
             <div class="ai-provider-pane" id="aiProviderPaneOpenai" style="display:none;">
+                <p class="ai-provider-desc">
+                    Routes AI through OpenAI's cloud API using your own key. Faster and more accurate than local
+                    models. You pay OpenAI directly — typical cost is a few cents per interview. Billing is separate
+                    from a ChatGPT Plus subscription.
+                </p>
                 <label class="ai-provider-label" for="aiProviderKeyOpenai">API key</label>
                 <div class="ai-provider-key-row">
                     <input type="password" class="form-input ai-provider-key-input" id="aiProviderKeyOpenai" placeholder="sk-..." autocomplete="off" spellcheck="false">
@@ -156,10 +175,14 @@ function _renderProviderTabs(active) {
     document.querySelectorAll('.ai-provider-tab').forEach(t => {
         t.classList.toggle('is-active', t.getAttribute('data-provider') === active);
     });
-    // Show the matching pane; Local shows the Ollama variant section instead.
+    // Show the matching pane. Local shows the Ollama description pane plus
+    // the existing variant cards below it; Anthropic / OpenAI show their
+    // description + key field instead.
+    const lo = document.getElementById('aiProviderPaneOllama');
     const a = document.getElementById('aiProviderPaneAnthropic');
     const o = document.getElementById('aiProviderPaneOpenai');
     const localSection = document.getElementById('aiOllamaSection');
+    if (lo) lo.style.display = active === 'ollama' ? '' : 'none';
     if (a) a.style.display = active === 'anthropic' ? '' : 'none';
     if (o) o.style.display = active === 'openai' ? '' : 'none';
     if (localSection) localSection.style.display = active === 'ollama' ? '' : 'none';

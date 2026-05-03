@@ -3792,6 +3792,29 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     color: var(--text-primary);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
+/* Subtle "Free" pill on the Local tab. The API tabs intentionally have
+   no counterpart "Paid" badge — a positive signal on Local is welcoming;
+   a negative signal on the others would create switching friction. */
+.ai-provider-free-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.45rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #15803d;
+    background: rgba(22, 163, 74, 0.12);
+    border: 1px solid rgba(22, 163, 74, 0.35);
+    border-radius: 999px;
+    vertical-align: 1px;
+}
+.ai-provider-desc {
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    margin: 0 0 0.85rem 0;
+}
 .ai-provider-pane {
     background: var(--bg-secondary);
     border: 1px solid var(--border);

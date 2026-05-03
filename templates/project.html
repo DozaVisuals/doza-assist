@@ -357,6 +357,7 @@
                             <input type="checkbox" id="clipSelectAll" onchange="toggleAllClipChecks(this.checked)"> All
                         </label>
                         <button class="btn btn-sm" onclick="exportClips()">Export</button>
+                        <button class="btn btn-sm btn-primary" data-send-to-nle onclick="sendClipsToNLE()"><span data-send-to-nle-text>Send to Final Cut Pro</span></button>
                     </div>
                 </div>
                 <div class="clips-grid" id="clipsGrid">
@@ -389,11 +390,18 @@
         {% if project.analysis.get('story_beats', []) %}
         <div class="analysis-section-header">
             <span>Story Beats</span>
-            <button class="analysis-section-export" onclick="exportFCPXML('story')"
-                    data-export-label-key="section" data-export-label-tooltip="story">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                <span data-export-label-text>FCPX</span>
-            </button>
+            <div class="analysis-section-actions">
+                <button class="analysis-section-export" data-send-to-nle
+                        onclick="sendToNLE('selects', {type:'story'})">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    <span data-send-to-nle-text>Send to Final Cut Pro</span>
+                </button>
+                <button class="analysis-section-export" onclick="exportFCPXML('story')"
+                        data-export-label-key="section" data-export-label-tooltip="story">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <span data-export-label-text>FCPX</span>
+                </button>
+            </div>
         </div>
         <div class="analysis-list">
             {% for beat in project.analysis.story_beats %}
@@ -426,11 +434,18 @@
         {% if project.analysis.get('social_clips', []) %}
         <div class="analysis-section-header">
             <span>Social Clips</span>
-            <button class="analysis-section-export" onclick="exportFCPXML('social')"
-                    data-export-label-key="section" data-export-label-tooltip="social">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                <span data-export-label-text>FCPX</span>
-            </button>
+            <div class="analysis-section-actions">
+                <button class="analysis-section-export" data-send-to-nle
+                        onclick="sendToNLE('selects', {type:'social'})">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    <span data-send-to-nle-text>Send to Final Cut Pro</span>
+                </button>
+                <button class="analysis-section-export" onclick="exportFCPXML('social')"
+                        data-export-label-key="section" data-export-label-tooltip="social">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <span data-export-label-text>FCPX</span>
+                </button>
+            </div>
         </div>
         <div class="analysis-list">
             {% for clip in project.analysis.social_clips %}
@@ -464,11 +479,18 @@
         {% if project.analysis.get('strongest_soundbites', []) %}
         <div class="analysis-section-header">
             <span>Soundbites</span>
-            <button class="analysis-section-export" onclick="exportFCPXML('soundbites')"
-                    data-export-label-key="section" data-export-label-tooltip="soundbites">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                <span data-export-label-text>FCPX</span>
-            </button>
+            <div class="analysis-section-actions">
+                <button class="analysis-section-export" data-send-to-nle
+                        onclick="sendToNLE('selects', {type:'soundbites'})">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    <span data-send-to-nle-text>Send to Final Cut Pro</span>
+                </button>
+                <button class="analysis-section-export" onclick="exportFCPXML('soundbites')"
+                        data-export-label-key="section" data-export-label-tooltip="soundbites">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <span data-export-label-text>FCPX</span>
+                </button>
+            </div>
         </div>
         <div class="analysis-list">
             {% for sb in project.analysis.strongest_soundbites %}
@@ -606,6 +628,7 @@
                     <span id="storyPlayAllLabel">Play All</span>
                 </button>
                 <button class="btn btn-primary" onclick="exportStoryFCPXML()" data-export-label-key="story-seq">Export to FCPX</button>
+                <button class="btn btn-primary" data-send-to-nle onclick="sendStoryToNLE()"><span data-send-to-nle-text>Send to Final Cut Pro</span></button>
                 <button class="btn btn-green" onclick="addAllStoryClips()">Add All to Clips</button>
                 <button class="btn" onclick="rebuildStory()">Rebuild</button>
             </div>
@@ -674,9 +697,14 @@
                         </select>
                     </div>
                 </div>
-                <button class="btn btn-primary" id="exportFCPXMLBtn" onclick="exportFCPXML()" data-export-label-key="unified" style="width:100%;">
-                    Export to FCPX
-                </button>
+                <div style="display:flex; gap:0.5rem;">
+                    <button class="btn btn-primary" id="exportFCPXMLBtn" onclick="exportFCPXML()" data-export-label-key="unified" style="flex:1;">
+                        Export to FCPX
+                    </button>
+                    <button class="btn btn-primary" id="sendToNleBtn" data-send-to-nle onclick="sendSelectsToNLE()" style="flex:1;">
+                        <span data-send-to-nle-text>Send to Final Cut Pro</span>
+                    </button>
+                </div>
                 {% if project.fcpxml_source %}
                 <div class="export-roundtrip">
                     <div class="card-title" style="margin-bottom: 0.5rem; font-size: 0.95rem;">FCPXML Round-Trip</div>
@@ -794,6 +822,143 @@ function refreshExportButtonLabels() {
     // Update the active pill on the platform selector
     const sel = document.getElementById('platformSelector');
     if (sel) sel.setAttribute('data-platform', EDITING_PLATFORM);
+    // Keep the "Send to ..." buttons in sync with the current NLE.
+    refreshSendToNleLabels();
+}
+
+// "Send to <NLE>" buttons — single source of truth, driven by EDITING_PLATFORM.
+const SEND_TO_NLE_LABELS = {
+    fcp:      'Send to Final Cut Pro',
+    premiere: 'Send to Premiere Pro',
+    resolve:  'Send to DaVinci Resolve',
+};
+
+function refreshSendToNleLabels() {
+    const label = SEND_TO_NLE_LABELS[EDITING_PLATFORM] || 'Send to NLE';
+    document.querySelectorAll('[data-send-to-nle]').forEach(btn => {
+        const span = btn.querySelector('[data-send-to-nle-text]');
+        if (span) span.textContent = label;
+        else btn.textContent = label;
+    });
+}
+
+// POST to /export/send-to-nle — generates the export file and opens it
+// directly in whichever NLE is currently selected at the top of the window.
+async function sendToNLE(exportType, extra = {}) {
+    const body = {
+        project_id: PROJECT_ID,
+        nle: EDITING_PLATFORM,
+        export_type: exportType,
+        ...extra,
+    };
+    try {
+        const res = await fetch('/export/send-to-nle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+            const where = data.opened_in || PLATFORM_NAMES[EDITING_PLATFORM] || 'NLE';
+            showToast(`Sent to ${where}`);
+        } else {
+            showToast(data.error || 'Send failed', true);
+        }
+    } catch (err) {
+        showToast('Send error: ' + err.message, true);
+    }
+}
+
+// Convenience wrapper: send the categories the user has checked in the Export tab.
+async function sendSelectsToNLE() {
+    const types = _collectExportCategories();
+    if (types.length === 0) {
+        showToast('Check at least one category to send.');
+        return;
+    }
+    if (types.includes('labels')) {
+        if (!labelSections.length) {
+            showToast('No clips to send. Uncheck "My Clips" or highlight some in the transcript first.');
+            return;
+        }
+        // Persist labels first so the server sees the latest state.
+        const sections = labelSections.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
+        });
+    }
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    const mode = document.getElementById('exportMode')?.value || 'cuts';
+    sendToNLE('selects', { types, framerate, mode, total_clips: labelSections.length });
+}
+
+// Send the current Story Builder sequence directly to the selected NLE.
+async function sendStoryToNLE() {
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build || !build.clips || build.clips.length === 0) {
+        showToast('No clips to send');
+        return;
+    }
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    sendToNLE('story_builder', {
+        clips: build.clips,
+        story_title: build.story_title,
+        framerate,
+    });
+}
+
+// Send a chat-discovered story sequence to the selected NLE.
+function sendChatStoryToNLE(buildId) {
+    const build = chatStoryBuilds[buildId];
+    if (!build) { showToast('Story not found', true); return; }
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    sendToNLE('story_builder', {
+        clips: build.clips,
+        story_title: build.story_title,
+        framerate,
+    });
+}
+
+// Clips tab: mirror the "Export Selected / Export All Labels" logic.
+async function sendClipsToNLE() {
+    const checkedIds = new Set();
+    document.querySelectorAll('.clip-check:checked').forEach(cb => {
+        checkedIds.add(parseInt(cb.dataset.clipId));
+    });
+
+    const useSubset = checkedIds.size > 0;
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    const mode = document.getElementById('exportMode')?.value || 'cuts';
+
+    if (useSubset) {
+        // Persist only the selected sections, send, then restore.
+        const selected = labelSections.filter(s => checkedIds.has(s.id));
+        if (selected.length === 0) { showToast('No clips selected'); return; }
+        const sections = selected.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
+        });
+        await sendToNLE('selects', { type: 'labels', framerate, mode, total_clips: selected.length });
+        const allSections = labelSections.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: allSections }),
+        });
+    } else {
+        if (!labelSections.length) { showToast('No clips to send'); return; }
+        sendToNLE('selects', { type: 'labels', framerate, mode, total_clips: labelSections.length });
+    }
 }
 
 async function setEditingPlatform(platform) {
@@ -1974,9 +2139,11 @@ function renderChatStoryCard(build) {
         </div>`;
     });
 
+    const sendLabel = SEND_TO_NLE_LABELS[EDITING_PLATFORM] || 'Send to NLE';
     html += `<div class="chat-story-result-actions">`;
     html += `<button class="btn btn-primary btn-sm" onclick="sendChatStoryToBuilder('${bid}', this)">Send to Story Builder</button>`;
     html += `<button class="btn btn-sm" onclick="exportStoryFCPXMLFromChat('${bid}')" data-export-label-key="story-seq">Export to ${PLATFORM_NAMES[EDITING_PLATFORM] || 'FCPX'}</button>`;
+    html += `<button class="btn btn-primary btn-sm" data-send-to-nle onclick="sendChatStoryToNLE('${bid}')"><span data-send-to-nle-text>${sendLabel}</span></button>`;
     html += `</div></div>`;
 
     return html;

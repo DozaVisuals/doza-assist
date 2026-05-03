@@ -1766,32 +1766,45 @@ def save_labels(project_id):
     return jsonify({'status': 'saved', 'count': len(project['labeled_sections'])})
 
 
-@app.route('/project/<project_id>/export/fcpxml', methods=['POST'])
-def export_fcpxml(project_id):
-    """Export selections to the project's selected NLE format (FCPXML/Premiere/EDL)."""
-    project = get_project(project_id)
-    if not project:
-        return jsonify({'error': 'Project not found'}), 404
+def _seconds_from_value(val):
+    """Convert timecode string or number to float seconds."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    val = str(val or '').strip()
+    if ':' in val:
+        parts = val.split(':')
+        if len(parts) == 3:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2:
+            return float(parts[0]) * 60 + float(parts[1])
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
 
-    # FCPXML-sourced projects: the standard export references the raw audio
-    # source file which FCP can't import as a proper timeline. Warn the user
-    # and point them to the Round-Trip export which preserves the multicam
-    # structure.
+
+def _run_marker_export(project, body):
+    """Build markers from a project + request body and run the exporter.
+
+    Shared by ``/project/<id>/export/fcpxml`` and ``/export/send-to-nle``.
+    Returns ``(exporter, ExportResult)`` on success. May raise ``ValueError``
+    with an editor-friendly message (e.g. for fcpxml-sourced projects that
+    must use the round-trip flow), or any exporter exception.
+    """
+    body = body or {}
+
+    # FCPXML-sourced projects can't use the standard export when targeting FCP
+    # — point the user at the round-trip flow.
     if project.get('fcpxml_source'):
-        platform = get_project_platform(project)
-        if platform == 'fcpx':
-            return jsonify({
-                'error': 'This project was imported from an FCPXML. '
-                         'Use the "FCPXML Round-Trip" section below for '
-                         'exports that preserve your multicam/sync-clip structure in FCP.',
-                'use_roundtrip': True,
-            }), 400
+        proj_platform = get_project_platform(project)
+        if proj_platform == 'fcpx':
+            raise ValueError(
+                'This project was imported from an FCPXML. Use the '
+                '"FCPXML Round-Trip" section for exports that preserve '
+                'your multicam/sync-clip structure in FCP.'
+            )
 
     # Accept either a list (``types``) or the legacy single ``type`` string.
-    # The new checkbox UI sends ``types=['labels', 'social', ...]``; callers
-    # that still send ``type='all'`` expand to the full set so existing tests
-    # and any third-party integrations keep working.
-    body = request.json or {}
     raw_types = body.get('types')
     if isinstance(raw_types, list) and raw_types:
         requested = {str(t).strip().lower() for t in raw_types if t}
@@ -1807,28 +1820,12 @@ def export_fcpxml(project_id):
     export_type = 'all' if requested >= {'labels', 'social', 'story'} else next(iter(requested), 'labels')
     markers = []
 
-    def _to_seconds(val):
-        """Convert timecode string or number to float seconds."""
-        if isinstance(val, (int, float)):
-            return float(val)
-        val = str(val).strip()
-        if ':' in val:
-            parts = val.split(':')
-            if len(parts) == 3:
-                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-            elif len(parts) == 2:
-                return float(parts[0]) * 60 + float(parts[1])
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            return 0.0
-
     if 'social' in requested:
         analysis = project.get('analysis', {})
         for clip in analysis.get('social_clips', []):
             markers.append({
-                'start': _to_seconds(clip.get('start', 0)),
-                'end': _to_seconds(clip.get('end', 0)),
+                'start': _seconds_from_value(clip.get('start', 0)),
+                'end': _seconds_from_value(clip.get('end', 0)),
                 'text': clip.get('title', ''),
                 'note': clip.get('platform', ''),
                 'color': 'green',
@@ -1838,8 +1835,8 @@ def export_fcpxml(project_id):
     if 'story' in requested:
         analysis = project.get('analysis', {})
         for beat in analysis.get('story_beats', []):
-            start = _to_seconds(beat.get('start', 0))
-            end = _to_seconds(beat.get('end', start))
+            start = _seconds_from_value(beat.get('start', 0))
+            end = _seconds_from_value(beat.get('end', start))
             if end <= start:
                 end = start + 15
             markers.append({
@@ -1854,8 +1851,8 @@ def export_fcpxml(project_id):
     if 'soundbites' in requested:
         analysis = project.get('analysis', {})
         for sb in analysis.get('strongest_soundbites', []):
-            start = _to_seconds(sb.get('start', 0))
-            end = _to_seconds(sb.get('end', start))
+            start = _seconds_from_value(sb.get('start', 0))
+            end = _seconds_from_value(sb.get('end', start))
             if end <= start:
                 end = start + 15
             markers.append({
@@ -1872,8 +1869,8 @@ def export_fcpxml(project_id):
         for sec in project.get('labeled_sections', []):
             label_name = color_labels.get(sec.get('color', ''), sec.get('color', ''))
             markers.append({
-                'start': _to_seconds(sec.get('start', 0)),
-                'end': _to_seconds(sec.get('end', 0)),
+                'start': _seconds_from_value(sec.get('start', 0)),
+                'end': _seconds_from_value(sec.get('end', 0)),
                 'text': label_name,
                 'note': sec.get('text', '')[:80],
                 'color': sec.get('color', 'blue'),
@@ -1881,13 +1878,10 @@ def export_fcpxml(project_id):
             })
 
     if 'transcript' in requested:
-        # Emit one marker per transcript segment so editors can navigate the
-        # full interview in the NLE timeline. Kept separate from the other
-        # categories because it can be noisy — user opts in explicitly.
         transcript = project.get('transcript') or {}
         for seg in transcript.get('segments', []):
-            start = _to_seconds(seg.get('start', 0))
-            end = _to_seconds(seg.get('end', start))
+            start = _seconds_from_value(seg.get('start', 0))
+            end = _seconds_from_value(seg.get('end', start))
             if end <= start:
                 end = start + 1
             speaker = (seg.get('speaker') or '').strip()
@@ -1902,42 +1896,214 @@ def export_fcpxml(project_id):
                 'category': 'Transcript',
             })
 
-    # Source file + media metadata
     source_path = project.get('source_path', project.get('filepath', ''))
     media_duration = None
     if project.get('transcript') and project['transcript'].get('duration'):
         media_duration = project['transcript']['duration']
 
     detected_fps = get_video_framerate(source_path)
-    framerate = detected_fps or request.json.get('framerate', 23.976)
-    export_mode = request.json.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
+    framerate = detected_fps or body.get('framerate', 23.976)
+    export_mode = body.get('mode', 'cuts')
     width, height = get_video_resolution(source_path)
-    total_clips = request.json.get('total_clips', len(markers)) or len(markers)
+    total_clips = body.get('total_clips', len(markers)) or len(markers)
 
-    # Allow per-export platform override; otherwise use project's editing_platform.
-    platform_override = (request.json or {}).get('platform')
+    platform_override = body.get('platform')
     platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
 
+    exporter = get_exporter(platform)
+    result = exporter.export_markers(
+        markers,
+        project_name=project['name'],
+        source_path=source_path,
+        media_duration=media_duration,
+        framerate=framerate,
+        width=width,
+        height=height,
+        export_type=export_type,
+        exports_dir=app.config['EXPORTS_DIR'],
+        export_mode=export_mode,
+        total_clips=total_clips,
+    )
+    return exporter, result
+
+
+def _run_story_export(project, body):
+    """Run the story-builder export for a project. Shared by the regular
+    download route and the send-to-NLE route. Returns ``(exporter, ExportResult)``.
+    Raises ``ValueError('No clips in sequence')`` if clips are missing.
+    """
+    body = body or {}
+    clips = body.get('clips', [])
+    story_title = body.get('story_title', 'Story')
+
+    if not clips:
+        raise ValueError('No clips in sequence')
+
+    markers = []
+    for i, clip in enumerate(clips):
+        markers.append({
+            'start': _seconds_from_value(clip.get('start_time', 0)),
+            'end': _seconds_from_value(clip.get('end_time', 0)),
+            'text': clip.get('title', 'Clip'),
+            'note': clip.get('editorial_note', ''),
+            '_order': clip.get('order', i),
+        })
+
+    source_path = project.get('source_path', project.get('filepath', ''))
+    media_duration = None
+    if project.get('transcript') and project['transcript'].get('duration'):
+        media_duration = project['transcript']['duration']
+
+    width, height = get_video_resolution(source_path)
+    detected_fps = get_video_framerate(source_path)
+    framerate = detected_fps or body.get('framerate', 23.976)
+
+    platform_override = body.get('platform')
+    platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
+
+    exporter = get_exporter(platform)
+    result = exporter.export_story(
+        markers,
+        project_name=project['name'],
+        story_title=story_title,
+        source_path=source_path,
+        media_duration=media_duration,
+        framerate=framerate,
+        width=width,
+        height=height,
+        exports_dir=app.config['EXPORTS_DIR'],
+    )
+    return exporter, result
+
+
+@app.route('/project/<project_id>/export/fcpxml', methods=['POST'])
+def export_fcpxml(project_id):
+    """Export selections to the project's selected NLE format (FCPXML/Premiere/EDL)."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    body = request.json or {}
     try:
-        exporter = get_exporter(platform)
-        result = exporter.export_markers(
-            markers,
-            project_name=project['name'],
-            source_path=source_path,
-            media_duration=media_duration,
-            framerate=framerate,
-            width=width,
-            height=height,
-            export_type=export_type,
-            exports_dir=app.config['EXPORTS_DIR'],
-            export_mode=export_mode,
-            total_clips=total_clips,
-        )
+        exporter, result = _run_marker_export(project, body)
+    except ValueError as ve:
+        # The fcpxml-sourced project case wants a structured response.
+        msg = str(ve)
+        if 'FCPXML Round-Trip' in msg:
+            return jsonify({'error': msg, 'use_roundtrip': True}), 400
+        return jsonify({'error': msg}), 400
     except Exception as e:
-        app.logger.error('Export failed for %s: %s', platform, e)
+        app.logger.error('Export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
 
     return _exporter_response(result, project, exporter)
+
+
+# ── Send to NLE: write the export file and open it in the user's chosen NLE ──
+
+# Map editing-platform keys (the values used by the top-of-window selector)
+# to the macOS app paths. Premiere's installer uses year-versioned folders,
+# so we list the most recent first and fall back to the unversioned path.
+NLE_APP_CANDIDATES = {
+    'fcp': ['/Applications/Final Cut Pro.app'],
+    'resolve': [
+        '/Applications/DaVinci Resolve/DaVinci Resolve.app',
+        '/Applications/DaVinci Resolve.app',
+    ],
+    'premiere': [
+        '/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app',
+        '/Applications/Adobe Premiere Pro 2025/Adobe Premiere Pro 2025.app',
+        '/Applications/Adobe Premiere Pro 2024/Adobe Premiere Pro 2024.app',
+        '/Applications/Adobe Premiere Pro.app',
+    ],
+}
+
+NLE_DISPLAY_NAMES = {
+    'fcp': 'Final Cut Pro',
+    'resolve': 'DaVinci Resolve',
+    'premiere': 'Premiere Pro',
+}
+
+
+def _find_nle_app(platform: str):
+    """Return the first existing app path for the given platform, or None."""
+    for path in NLE_APP_CANDIDATES.get(platform, []):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+@app.route('/export/send-to-nle', methods=['POST'])
+def send_to_nle():
+    """Generate an export file and open it directly in the selected NLE.
+
+    Body: {project_id, nle, export_type: 'selects'|'story_builder', ...}.
+    Reuses the existing exporter logic — same file the download buttons
+    produce. For FCP and Resolve, the file is opened in the app via
+    ``open -a``. For Premiere, which doesn't reliably auto-import FCPXML
+    from the command line, the file is revealed in Finder via ``open -R``.
+    """
+    body = request.json or {}
+    project_id = body.get('project_id')
+    nle = (body.get('nle') or '').strip().lower()
+    export_type = (body.get('export_type') or 'selects').strip().lower()
+
+    if not project_id:
+        return jsonify({'error': 'Missing project_id'}), 400
+    if nle not in PLATFORMS:
+        return jsonify({'error': f'Unknown NLE: {nle!r}'}), 400
+
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    display_name = NLE_DISPLAY_NAMES.get(nle, nle)
+    app_path = _find_nle_app(nle)
+    if not app_path:
+        return jsonify({
+            'error': f'{display_name} not found at expected location'
+        }), 404
+
+    # Force the exporter to use the requested NLE regardless of the project's
+    # stored platform — this route is driven by the live UI selector.
+    body_for_export = dict(body)
+    body_for_export['platform'] = nle
+
+    try:
+        if export_type == 'story_builder':
+            exporter, result = _run_story_export(project, body_for_export)
+        else:
+            exporter, result = _run_marker_export(project, body_for_export)
+    except ValueError as ve:
+        return jsonify({'error': str(ve)}), 400
+    except Exception as e:
+        app.logger.error('send-to-nle export failed: %s', e)
+        return jsonify({'error': f'Export failed: {e}'}), 500
+
+    file_path = result.file_path
+    try:
+        if nle == 'premiere':
+            # Premiere doesn't reliably auto-import FCPXML from the CLI; reveal
+            # the file in Finder so the editor can drag it onto a project.
+            subprocess.run(['open', '-R', file_path], check=True)
+            opened_in = 'Finder'
+        else:
+            subprocess.run(['open', '-a', app_path, file_path], check=True)
+            opened_in = display_name
+    except subprocess.CalledProcessError as e:
+        app.logger.error('open command failed: %s', e)
+        return jsonify({'error': f'Could not open in {display_name}: {e}'}), 500
+    except FileNotFoundError:
+        return jsonify({'error': '`open` command not available (macOS only)'}), 500
+
+    return jsonify({
+        'ok': True,
+        'nle': nle,
+        'display_name': display_name,
+        'opened_in': opened_in,
+        'file_path': file_path,
+        'filename': result.filename,
+    })
 
 
 def _project_selects_for_fcpxml(project: dict, source: str):
@@ -2473,66 +2639,12 @@ def story_export(project_id):
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
-    data = request.json or {}
-    clips = data.get('clips', [])
-    story_title = data.get('story_title', 'Story')
-
-    if not clips:
-        return jsonify({'error': 'No clips in sequence'}), 400
-
-    def _to_seconds(val):
-        if isinstance(val, (int, float)):
-            return float(val)
-        val = str(val).strip()
-        if ':' in val:
-            parts = val.split(':')
-            if len(parts) == 3:
-                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-            elif len(parts) == 2:
-                return float(parts[0]) * 60 + float(parts[1])
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            return 0.0
-
-    # Convert clips to the marker shape every exporter consumes.
-    markers = []
-    for i, clip in enumerate(clips):
-        markers.append({
-            'start': _to_seconds(clip.get('start_time', 0)),
-            'end': _to_seconds(clip.get('end_time', 0)),
-            'text': clip.get('title', 'Clip'),
-            'note': clip.get('editorial_note', ''),
-            '_order': clip.get('order', i),
-        })
-
-    source_path = project.get('source_path', project.get('filepath', ''))
-    media_duration = None
-    if project.get('transcript') and project['transcript'].get('duration'):
-        media_duration = project['transcript']['duration']
-
-    width, height = get_video_resolution(source_path)
-    detected_fps = get_video_framerate(source_path)
-    framerate = detected_fps or data.get('framerate', 23.976)
-
-    platform_override = data.get('platform')
-    platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
-
     try:
-        exporter = get_exporter(platform)
-        result = exporter.export_story(
-            markers,
-            project_name=project['name'],
-            story_title=story_title,
-            source_path=source_path,
-            media_duration=media_duration,
-            framerate=framerate,
-            width=width,
-            height=height,
-            exports_dir=app.config['EXPORTS_DIR'],
-        )
+        exporter, result = _run_story_export(project, request.json or {})
+    except ValueError as ve:
+        return jsonify({'error': str(ve)}), 400
     except Exception as e:
-        app.logger.error('Story export failed for %s: %s', platform, e)
+        app.logger.error('Story export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
 
     return _exporter_response(result, project, exporter)

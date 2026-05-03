@@ -885,6 +885,12 @@ body {
     height: 11px;
 }
 
+.analysis-section-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
 .analysis-section-header:first-of-type {
     margin-top: 0;
 }

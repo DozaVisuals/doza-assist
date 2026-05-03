@@ -82,8 +82,7 @@ def inject_brand():
     backend) can override by setting DOZA_BRAND and/or DOZA_LOGO_URL in
     the environment before spawning python -- the shell is responsible
     for ensuring whatever URL it points at actually serves an image
-    (e.g. a Pro shell drops its own logo into static/ before launch and
-    sets DOZA_LOGO_URL=/static/logo-pro.png).
+    (drop the logo into static/ before launch).
     """
     return {
         'brand': os.environ.get('DOZA_BRAND', 'Doza Assist'),

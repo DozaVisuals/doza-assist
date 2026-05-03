@@ -10,6 +10,8 @@ An AI editor's assistant that learns *your* style from your own cuts, then does 
 
 Drop in an interview. Get back a rough cut shaped by your editorial voice, ready for **Final Cut Pro**, **Premiere Pro**, or **DaVinci Resolve**. Everything runs on your machine. Nothing uploads. Free and open source under MIT.
 
+**Local-first, free by default.** Doza Assist ships with a local Gemma 4 model that runs entirely on your Mac — no account, no usage fees, works offline, no footage leaves your machine. If you want faster or sharper analysis, you can optionally drop in your own Anthropic (Claude) or OpenAI API key in **AI Settings** and route the AI through their cloud APIs at your own per-call cost — typically a few cents per interview, billed directly by them. Nothing about your footage or transcript is sent to Doza Visuals; the only outbound traffic is between your machine and the API provider you chose.
+
 **Editorial DNA is the whole point.** Feed the app your finished work and it builds a profile of how you shape spoken stories: pacing, opening patterns, structural habits, tonal choices. Every suggestion after that gets filtered through your voice. Build multiple profiles for different kinds of work. A documentary profile. A social cuts profile. A corporate testimonial profile. It's fully in the open source version. No paywall.
 
 Built for documentary editors first, because that's where the pain is sharpest and the craft is most refined. Works just as well for anyone cutting interview-driven video: corporate case studies, podcast-to-video, branded docs, event highlights, long-form creator work. If someone's talking on camera and you need the moments that carry the story, this tool does the heavy lifting.

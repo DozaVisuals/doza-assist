@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Style - Doza Assist</title>
+    <title>My Style - {{ brand }}</title>
     <link rel="icon" type="image/jpeg" href="/static/logo.jpg">
     <link rel="apple-touch-icon" href="/static/logo.jpg">
     <link rel="stylesheet" href="/static/style.css?v={{ range(10000,99999) | random }}">
@@ -13,8 +13,8 @@
 <header class="app-header">
     <div class="app-logo-group">
         <a href="/" class="app-logo">
-            <img class="logo-img" src="/static/logo.jpg" alt="Doza Assist">
-            <span>Doza Assist</span>
+            <img class="logo-img" src="/static/logo.jpg" alt="{{ brand }}">
+            <span>{{ brand }}</span>
         </a>
         <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>
     </div>
@@ -47,8 +47,8 @@ function toggleTheme() {
 {% if not profile %}
 <!-- ==================== EMPTY STATE ==================== -->
 <div class="my-style-empty">
-    <h1>Teach Doza Assist your storytelling style</h1>
-    <p class="my-style-subhead">Drop in finished projects you've edited. Doza Assist will listen to how you shape spoken stories and learn your narrative voice. Then every AI suggestion starts to sound like you.</p>
+    <h1>Teach {{ brand }} your storytelling style</h1>
+    <p class="my-style-subhead">Drop in finished projects you've edited. {{ brand }} will listen to how you shape spoken stories and learn your narrative voice. Then every AI suggestion starts to sound like you.</p>
 
     <div class="drop-zone" id="dropZone">
         <div class="drop-zone-content">
@@ -621,7 +621,7 @@ async function startImport(fileList) {
     const n = fileList.length;
     headline.textContent = `Importing ${n} file${n === 1 ? '' : 's'}...`;
     sub.textContent = 'Extracting audio, transcribing, and learning how you shape stories. This takes a few minutes per file — please don\u2019t close this tab.';
-    status.textContent = 'Uploading files to Doza Assist...';
+    status.textContent = 'Uploading files to {{ brand }}...';
 
     for (const f of fileList) {
         const row = document.createElement('div');

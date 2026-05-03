@@ -72,6 +72,17 @@ os.makedirs(app.config['PROJECTS_DIR'], exist_ok=True)
 os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
 
 
+@app.context_processor
+def inject_brand():
+    """Make the user-visible app brand configurable from the launching shell.
+
+    Defaults to "Doza Assist". An external launcher (e.g. a downstream shell
+    that bundles this Flask backend) can override by setting DOZA_BRAND in
+    the environment before spawning python.
+    """
+    return {'brand': os.environ.get('DOZA_BRAND', 'Doza Assist')}
+
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 

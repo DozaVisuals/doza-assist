@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Doza Assist</title>
+    <title>{{ brand }}</title>
     <link rel="icon" type="image/jpeg" href="/static/logo.jpg">
     <link rel="apple-touch-icon" href="/static/logo.jpg">
     <link rel="stylesheet" href="/static/style.css?v={{ range(10000,99999) | random }}">
@@ -13,8 +13,8 @@
 <header class="app-header">
     <div class="app-logo-group">
         <a href="/" class="app-logo">
-            <img class="logo-img" src="/static/logo.jpg" alt="Doza Assist">
-            <span>Doza Assist</span>
+            <img class="logo-img" src="/static/logo.jpg" alt="{{ brand }}">
+            <span>{{ brand }}</span>
         </a>
         <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>
     </div>
@@ -89,7 +89,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
         <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
             Drag a file here, paste a path, or click Browse. Your file stays in place -- nothing gets copied.
             <br>Supported media: WAV, MP3, MP4, MOV, AAC, M4A, FLAC, AIF, AIFF, MXF.
-            <br>Or drop an <strong>FCPXML</strong> (or <code>.fcpxmld</code> bundle) from Final Cut — Doza Assist will
+            <br>Or drop an <strong>FCPXML</strong> (or <code>.fcpxmld</code> bundle) from Final Cut — {{ brand }} will
             read the multicam or sync-clip container and transcribe the active audio angle automatically.
         </p>
 

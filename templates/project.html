@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ project.name }} - Doza Assist</title>
+    <title>{{ project.name }} - {{ brand }}</title>
     <link rel="icon" type="image/jpeg" href="/static/logo.jpg">
     <link rel="apple-touch-icon" href="/static/logo.jpg">
     <link rel="stylesheet" href="/static/style.css?v={{ range(10000,99999) | random }}">
@@ -13,8 +13,8 @@
 <header class="app-header">
     <div class="app-logo-group">
         <a href="{% if is_shared %}#{% else %}/{% endif %}" class="app-logo">
-            <img class="logo-img" src="/static/logo.jpg" alt="Doza Assist">
-            <span>{% if is_shared %}Doza Visuals{% else %}Doza Assist{% endif %}</span>
+            <img class="logo-img" src="/static/logo.jpg" alt="{{ brand }}">
+            <span>{% if is_shared %}Doza Visuals{% else %}{{ brand }}{% endif %}</span>
         </a>
         <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>
     </div>
@@ -3360,7 +3360,7 @@ function showShareSettings() {
                 <label class="share-toggle-row"><input type="checkbox" id="shareToggle_story" checked><span>Story Builder</span></label>
                 <label class="share-toggle-row"><input type="checkbox" id="shareToggle_export" checked><span>Export</span></label>
             </div>
-            <p style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1rem; padding: 0.5rem 0.65rem; background: var(--bg-secondary); border-radius: var(--radius); line-height: 1.4;">Keep Doza Assist open while sharing — the link only works while the app is running on your machine.</p>
+            <p style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1rem; padding: 0.5rem 0.65rem; background: var(--bg-secondary); border-radius: var(--radius); line-height: 1.4;">Keep {{ brand }} open while sharing — the link only works while the app is running on your machine.</p>
             <div id="shareLinkArea" style="display: none; margin-bottom: 0.75rem;">
                 <div style="display: flex; gap: 0.5rem;">
                     <input type="text" class="form-input" id="shareUrlInput" readonly style="font-family: var(--mono); font-size: 0.8rem;">

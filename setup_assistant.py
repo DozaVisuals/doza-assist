@@ -376,8 +376,11 @@ def install_pip_packages():
     rc, out, err = run_cmd(f'"{pip_path}" install -r "{REQUIREMENTS_FILE}"')
     if rc != 0:
         log(f"pip install failed: {err}")
-        # Try installing packages one at a time to identify the failure
+        # Retry individually so we can report which specific packages failed.
+        # Every line in requirements.txt is required at runtime; if any fail,
+        # surface the failure rather than letting setup pretend it succeeded.
         update_step(STEP_PIP, "running", "Retrying packages individually...")
+        failed = []
         with open(REQUIREMENTS_FILE) as f:
             for line in f:
                 line = line.strip()
@@ -387,10 +390,12 @@ def install_pip_packages():
                         update_step(STEP_PIP, "running", f"Installing {pkg}...")
                         rc2, _, err2 = run_cmd(f'"{pip_path}" install {pkg}')
                         if rc2 != 0:
-                            log(f"WARNING: Failed to install {pkg}: {err2}")
-        # Verify core packages at minimum
-        rc, _, _ = run_cmd(f'"{pip_path}" show flask')
-        if rc != 0:
+                            log(f"ERROR: Failed to install {pkg}: {err2}")
+                            failed.append(pkg)
+        if failed:
+            msg = f"Failed to install required packages: {', '.join(failed)}"
+            log(f"ERROR: {msg}")
+            update_step(STEP_PIP, "error", msg)
             return False
 
     log("Pip packages installed.")
@@ -1119,8 +1124,12 @@ def main():
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
 
-    # Open browser to setup page
-    subprocess.Popen(["open", f"http://127.0.0.1:{SETUP_PORT}"])
+    # Open browser to setup page. Embedders (e.g. wrappers with their own
+    # webview) can set DOZA_NO_BROWSER=1 to suppress this — the setup
+    # server itself is still reachable at the same URL for the embedder
+    # webview to navigate to.
+    if not os.environ.get("DOZA_NO_BROWSER"):
+        subprocess.Popen(["open", f"http://127.0.0.1:{SETUP_PORT}"])
 
     # Run setup in foreground
     setup_loop()

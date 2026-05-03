@@ -19,6 +19,7 @@
         <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
+        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
         <a href="/" class="btn btn-sm" style="text-decoration:none;">Projects</a>
         <a href="/my-style" class="btn btn-sm btn-accent" style="text-decoration:none;">My Style</a>
         <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
@@ -52,10 +53,11 @@ function toggleTheme() {
     <div class="drop-zone" id="dropZone">
         <div class="drop-zone-content">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48" style="opacity:0.5;margin-bottom:12px;"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
-            <p class="drop-zone-label">Drop video files or a folder here</p>
+            <p class="drop-zone-label">Drop FCPXML exports, video files, or a folder here</p>
             <p class="drop-zone-hint">or <label for="fileInput" style="color:var(--accent);cursor:pointer;text-decoration:underline;">browse files</label></p>
+            <p class="drop-zone-hint" style="margin-top:8px;font-size:12px;opacity:0.7;">FCPXML reads only the dialogue that survived the cut. Video files are treated as the finished piece.</p>
         </div>
-        <input type="file" id="fileInput" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a" style="display:none;">
+        <input type="file" id="fileInput" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.fcpxml,.fcpxmld" style="display:none;">
         <input type="file" id="folderInput" webkitdirectory style="display:none;">
     </div>
     <p class="my-style-privacy">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
@@ -71,13 +73,14 @@ function toggleTheme() {
         <div class="profile-selector-wrap">
             <select id="profileSelector" class="profile-selector" onchange="onProfileChange(this.value)">
                 {% for p in all_profiles %}
-                <option value="{{ p.id }}" {% if p.is_active %}selected{% endif %}>
+                <option value="{{ p.id }}" {% if p.id == profile.id %}selected{% endif %}>
                     {{ p.name }}{% if p.is_active %} · active{% endif %}
                 </option>
                 {% endfor %}
             </select>
             <button class="btn btn-sm" onclick="createNewProfile()">+ New profile</button>
             <button class="btn btn-sm" onclick="renameActiveProfile()">Rename</button>
+            <button class="btn btn-sm" onclick="editActiveDescription()">Edit description</button>
         </div>
     </div>
     <div class="my-style-master-toggle">
@@ -88,6 +91,37 @@ function toggleTheme() {
         <span id="toggleLabel">My Style is currently <strong>{{ 'ON' if profile.active else 'OFF' }}</strong></span>
     </div>
 </div>
+
+{% if all_profiles|length > 1 %}
+<!-- Multi-active toggle row: editor can blend Doc Style + Social Cuts at once -->
+<div class="my-style-multi-active">
+    <div class="my-style-multi-active-label">Active in AI suggestions:</div>
+    <div class="my-style-multi-active-chips">
+        {% for p in all_profiles %}
+        <label class="multi-active-chip {% if p.is_active %}is-on{% endif %}">
+            <input type="checkbox" data-profile-id="{{ p.id }}" {% if p.is_active %}checked{% endif %} onchange="toggleInActiveSet('{{ p.id }}', this.checked)">
+            <span>{{ p.name }}</span>
+        </label>
+        {% endfor %}
+    </div>
+    <p class="edna-muted my-style-multi-active-hint">Multiple profiles can be active at once. The AI blends them, leaning toward the first listed when they conflict.</p>
+</div>
+{% endif %}
+
+{% if needs_reanalyze %}
+<div class="my-style-banner my-style-banner-stale">
+    <strong>Analyzer was upgraded since this profile was last analyzed.</strong>
+    Regenerate to pick up the new structure (exemplar passages, quote archetypes, language patterns).
+    <button class="btn btn-sm btn-accent" style="margin-left:10px;" onclick="regenerateAnalysis()">Regenerate now</button>
+</div>
+{% endif %}
+
+{% set total_runtime = profile.summary.total_runtime_seconds or 0 %}
+{% if total_runtime > 0 and total_runtime < 600 %}
+<div class="my-style-banner my-style-banner-warn">
+    Less than 10 minutes of cut content imported. Profiles read more accurately with 30+ minutes. Drop in a few more pieces if you have them.
+</div>
+{% endif %}
 
 <!-- Tabs -->
 <div class="edna-tabs">
@@ -132,7 +166,8 @@ function toggleTheme() {
 
     <!-- Narrative patterns -->
     <section class="edna-section">
-        <h3 class="edna-section-title">Narrative patterns</h3>
+        <h3 class="edna-section-title">How you shape a story</h3>
+        <p class="edna-section-desc">The recurring patterns in how you open, pace, build tension, and land your stories.</p>
         <div class="edna-field-grid">
             <div class="edna-field">
                 <div class="edna-field-label">Opening style</div>
@@ -164,7 +199,8 @@ function toggleTheme() {
 
     <!-- Thematic patterns -->
     <section class="edna-section">
-        <h3 class="edna-section-title">Thematic patterns</h3>
+        <h3 class="edna-section-title">What your stories are about</h3>
+        <p class="edna-section-desc">The subjects and themes you gravitate toward and how you draw out your subjects.</p>
         {% if profile.summary.thematic_patterns.common_themes %}
         <div class="edna-chip-row">
             {% for t in profile.summary.thematic_patterns.common_themes %}
@@ -188,7 +224,8 @@ function toggleTheme() {
 
     <!-- Structural preferences -->
     <section class="edna-section">
-        <h3 class="edna-section-title">Structural preferences</h3>
+        <h3 class="edna-section-title">How you build the edit</h3>
+        <p class="edna-section-desc">Your structural choices — where the peak lands, how you open and close, and whether you cut linearly or intercut.</p>
         <div class="edna-peak-bar-wrap">
             <div class="edna-peak-bar-label">Where you tend to place the emotional peak</div>
             <div class="edna-peak-bar">
@@ -219,7 +256,8 @@ function toggleTheme() {
 
     <!-- Voice characteristics -->
     <section class="edna-section">
-        <h3 class="edna-section-title">Voice characteristics</h3>
+        <h3 class="edna-section-title">The voice of your work</h3>
+        <p class="edna-section-desc">The tone and register your finished pieces carry — how formal, how narrated, how the story sounds.</p>
         <div class="edna-field-grid">
             <div class="edna-field">
                 <div class="edna-field-label">Tone</div>
@@ -236,10 +274,65 @@ function toggleTheme() {
         </div>
     </section>
 
+    <!-- Language patterns -->
+    {% set lp = profile.summary.language_patterns or {} %}
+    {% if lp.favored_phrasing or lp.filtered_out %}
+    <section class="edna-section">
+        <h3 class="edna-section-title">Language you keep and cut</h3>
+        <p class="edna-section-desc">The kinds of phrasing you tend to preserve in the final cut — and what consistently hits the floor.</p>
+        <div class="edna-field-grid">
+            <div class="edna-field">
+                <div class="edna-field-label">Favored phrasing</div>
+                <div class="edna-field-value">{{ lp.favored_phrasing }}</div>
+            </div>
+            <div class="edna-field">
+                <div class="edna-field-label">Cuts around</div>
+                <div class="edna-field-value">{{ lp.filtered_out }}</div>
+            </div>
+        </div>
+    </section>
+    {% endif %}
+
+    <!-- Quote archetypes -->
+    {% if profile.summary.quote_archetypes %}
+    <section class="edna-section">
+        <h3 class="edna-section-title">Moments you reach for</h3>
+        <p class="edna-section-desc">The types of quotes and soundbites that consistently make your final cut.</p>
+        <div class="edna-archetypes">
+            {% for arc in profile.summary.quote_archetypes %}
+            <div class="edna-archetype">
+                <div class="edna-archetype-type">{{ arc.type }}</div>
+                {% if arc.description %}<div class="edna-archetype-desc">{{ arc.description }}</div>{% endif %}
+                {% if arc.example_from_corpus %}
+                <blockquote class="edna-archetype-quote">{{ arc.example_from_corpus }}</blockquote>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    <!-- Exemplar passages (the few-shot moat) -->
+    {% if profile.summary.exemplar_passages %}
+    <section class="edna-section">
+        <h3 class="edna-section-title">Signature passages</h3>
+        <p class="edna-section-desc">Verbatim moments from your finished work that define your storytelling voice. The AI uses these as its north star.</p>
+        <div class="edna-exemplars">
+            {% for ex in profile.summary.exemplar_passages %}
+            <div class="edna-exemplar">
+                <div class="edna-exemplar-source">from {{ ex.source_filename or 'your portfolio' }}</div>
+                <blockquote class="edna-exemplar-passage">{{ ex.passage }}</blockquote>
+                {% if ex.why_this_passage %}<div class="edna-exemplar-why">Why: {{ ex.why_this_passage }}</div>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
     <!-- Refine my style -->
     <section class="edna-section">
-        <h3 class="edna-section-title">Refine my style</h3>
-        <p class="edna-muted">Add notes that describe preferences the analyzer might have missed. These get woven into every AI suggestion.</p>
+        <h3 class="edna-section-title">Tell the AI what it missed</h3>
+        <p class="edna-section-desc">Add notes about preferences the analyzer didn't catch. These get woven into every AI suggestion.</p>
         <textarea id="refinementsBox" class="edna-refine-box" rows="4" placeholder="e.g. I prefer cold opens. I avoid voiceover narration. I always end on the subject's face.">{{ profile.summary.user_refinements or '' }}</textarea>
         <div style="display:flex;gap:10px;margin-top:10px;">
             <button class="btn btn-accent" onclick="saveRefinements()">Save refinements</button>
@@ -250,7 +343,7 @@ function toggleTheme() {
     <!-- Actions -->
     <div class="my-style-actions">
         <button type="button" class="btn btn-accent" onclick="document.getElementById('fileInputMore').click()">Import more</button>
-        <input type="file" id="fileInputMore" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a" style="display:none;">
+        <input type="file" id="fileInputMore" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.fcpxml,.fcpxmld" style="display:none;">
         <button class="btn" onclick="regenerateAnalysis()">Regenerate analysis</button>
     </div>
 
@@ -262,11 +355,21 @@ function toggleTheme() {
         <div class="source-files-list">
             {% for sf in profile.source_files %}
             <div class="source-file-row">
-                <span class="source-file-name">{{ sf.filename }}</span>
-                <span class="source-file-dur">{{ "%.0f"|format(sf.duration_seconds) }}s</span>
-                <span class="source-file-date">{{ sf.imported_at[:10] }}</span>
+                <span class="source-file-name">
+                    {{ sf.filename }}
+                    {% if sf.source_type == 'fcpxml' %}<span class="source-file-tag">FCPXML</span>{% endif %}
+                    {% if sf.missing_media %}
+                    <span class="source-file-tag source-file-tag-warn" title="{{ sf.missing_media|length }} clip(s) referenced media not found at import time">{{ sf.missing_media|length }} missing media</span>
+                    {% endif %}
+                </span>
+                <span class="source-file-dur">{{ "%.0f"|format(sf.duration_seconds or 0) }}s</span>
+                <span class="source-file-date">{{ (sf.imported_at or '')[:10] }}</span>
+                <button class="btn btn-sm btn-danger" title="Remove this source from the profile" onclick="deleteSource('{{ sf.filename|e }}')">Remove</button>
             </div>
             {% endfor %}
+            {% if not profile.source_files %}
+            <p class="edna-muted">No sources imported yet. Drop FCPXML or video files anywhere on this page to add some.</p>
+            {% endif %}
         </div>
     </div>
 </div>
@@ -330,6 +433,23 @@ function toggleTheme() {
 </div>
 {% endif %}
 
+<!-- ==================== MODAL (replaces window.prompt / window.confirm) ====================
+     Tauri's WKWebView silently blocks the native prompt()/confirm() dialogs, so any
+     button that called those did nothing in the desktop app. This single shared modal
+     covers both flows: text input (prompt) and yes/no (confirm). Promise-based API
+     keeps call sites readable. -->
+<div class="doza-modal-overlay" id="dozaModal" style="display:none;" role="dialog" aria-modal="true">
+    <div class="doza-modal-card">
+        <h3 class="doza-modal-title" id="dozaModalTitle"></h3>
+        <p class="doza-modal-message" id="dozaModalMessage"></p>
+        <input type="text" class="doza-modal-input" id="dozaModalInput" style="display:none;">
+        <div class="doza-modal-actions">
+            <button class="btn" id="dozaModalCancel">Cancel</button>
+            <button class="btn btn-accent" id="dozaModalOk">OK</button>
+        </div>
+    </div>
+</div>
+
 <!-- ==================== PROGRESS OVERLAY ==================== -->
 <div class="import-progress-overlay" id="progressOverlay" style="display:none;">
     <div class="import-progress-card">
@@ -348,6 +468,76 @@ function toggleTheme() {
 
 <script>
 const ACTIVE_PROFILE_ID = {{ (profile.id if profile else '')|tojson }};
+
+// ===== Header active-style pill =====
+window.addEventListener('DOMContentLoaded', () => { refreshActivePill(); });
+
+// ===== Custom prompt/confirm (Tauri WKWebView blocks native dialogs) =====
+// Returns a Promise that resolves with the entered string (prompt) or boolean
+// (confirm). Cancel/ESC always resolves null/false. Enter submits.
+function _dozaModalShow({title, message, defaultValue, withInput, okLabel, cancelLabel}) {
+    return new Promise((resolve) => {
+        const overlay = document.getElementById('dozaModal');
+        const titleEl = document.getElementById('dozaModalTitle');
+        const msgEl = document.getElementById('dozaModalMessage');
+        const inputEl = document.getElementById('dozaModalInput');
+        const okBtn = document.getElementById('dozaModalOk');
+        const cancelBtn = document.getElementById('dozaModalCancel');
+
+        titleEl.textContent = title || '';
+        titleEl.style.display = title ? '' : 'none';
+        msgEl.textContent = message || '';
+        msgEl.style.display = message ? '' : 'none';
+        inputEl.style.display = withInput ? '' : 'none';
+        inputEl.value = defaultValue || '';
+        okBtn.textContent = okLabel || 'OK';
+        cancelBtn.textContent = cancelLabel || 'Cancel';
+
+        overlay.style.display = 'flex';
+        if (withInput) setTimeout(() => { inputEl.focus(); inputEl.select(); }, 0);
+        else setTimeout(() => okBtn.focus(), 0);
+
+        function cleanup() {
+            overlay.style.display = 'none';
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
+            overlay.removeEventListener('click', onOverlayClick);
+            inputEl.removeEventListener('keydown', onKey);
+            document.removeEventListener('keydown', onEsc);
+        }
+        function onOk() {
+            const v = withInput ? inputEl.value : true;
+            cleanup();
+            resolve(v);
+        }
+        function onCancel() {
+            cleanup();
+            resolve(withInput ? null : false);
+        }
+        function onOverlayClick(e) {
+            if (e.target === overlay) onCancel();
+        }
+        function onKey(e) {
+            if (e.key === 'Enter') { e.preventDefault(); onOk(); }
+        }
+        function onEsc(e) {
+            if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+        }
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+        overlay.addEventListener('click', onOverlayClick);
+        inputEl.addEventListener('keydown', onKey);
+        document.addEventListener('keydown', onEsc);
+    });
+}
+
+function dozaPrompt(title, message, defaultValue) {
+    return _dozaModalShow({title, message, defaultValue, withInput: true});
+}
+
+function dozaConfirm(title, message, okLabel) {
+    return _dozaModalShow({title, message, withInput: false, okLabel: okLabel || 'OK'});
+}
 
 // ===== Tabs =====
 function switchTab(name) {
@@ -422,7 +612,7 @@ async function startImport(fileList) {
     const headline = document.getElementById('progressHeadline');
     const sub = document.getElementById('progressSub');
 
-    if (!overlay) { alert('Progress overlay missing — please refresh the page.'); return; }
+    if (!overlay) { await dozaConfirm('Page error', 'Progress overlay missing. Please refresh the page.', 'Refresh'); return; }
 
     // Show overlay IMMEDIATELY so user gets instant feedback
     overlay.style.display = 'flex';
@@ -517,14 +707,20 @@ function toggleMyStyle(active) {
 }
 
 // ===== Profile management =====
-async function onProfileChange(profileId) {
+function onProfileChange(profileId) {
+    // Dropdown is navigation only — flipping a profile into the active set
+    // is a separate decision (multi-active chips above). This keeps the
+    // editor's blend intact when they just want to inspect another profile.
     if (!profileId || profileId === ACTIVE_PROFILE_ID) return;
-    await fetch(`/api/editorial_dna/profiles/${profileId}/activate`, { method: 'POST' });
-    window.location.reload();
+    window.location.href = `/my-style?profile_id=${encodeURIComponent(profileId)}`;
 }
 
 async function createNewProfile() {
-    const name = prompt('Name this new style profile (e.g. "My Doc Style", "My Social Cuts"):');
+    const name = await dozaPrompt(
+        'New style profile',
+        'Name this new style profile (e.g. "My Doc Style", "My Social Cuts"):',
+        ''
+    );
     if (!name || !name.trim()) return;
     const res = await fetch('/api/editorial_dna/profiles', {
         method: 'POST',
@@ -540,7 +736,8 @@ async function createNewProfile() {
 
 async function renameActiveProfile() {
     if (!ACTIVE_PROFILE_ID) return;
-    const newName = prompt('Rename this profile to:');
+    const cur = {{ (profile.name if profile and profile.name else '') | tojson }};
+    const newName = await dozaPrompt('Rename profile', 'Rename this profile to:', cur || '');
     if (!newName || !newName.trim()) return;
     await fetch(`/api/editorial_dna/profiles/${ACTIVE_PROFILE_ID}`, {
         method: 'PATCH',
@@ -550,9 +747,76 @@ async function renameActiveProfile() {
     window.location.reload();
 }
 
+async function editActiveDescription() {
+    if (!ACTIVE_PROFILE_ID) return;
+    const cur = {{ (profile.description if profile and profile.description else '') | tojson }};
+    const next = await dozaPrompt(
+        'Edit description',
+        'Description for this profile (helps you remember what kind of work it represents):',
+        cur || ''
+    );
+    if (next === null) return; // cancel
+    await fetch(`/api/editorial_dna/profiles/${ACTIVE_PROFILE_ID}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({description: next.trim().slice(0, 500)}),
+    });
+    window.location.reload();
+}
+
+async function toggleInActiveSet(profileId, isActive) {
+    await fetch(`/api/editorial_dna/profiles/${profileId}/active-toggle`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({active: isActive}),
+    });
+    // Update the visual state without reloading — the chip toggles immediately.
+    const chip = document.querySelector(`.multi-active-chip input[data-profile-id="${profileId}"]`);
+    if (chip) chip.closest('.multi-active-chip').classList.toggle('is-on', isActive);
+    refreshActivePill();
+}
+
+async function refreshActivePill() {
+    try {
+        const res = await fetch('/api/editorial_dna/active-summary');
+        const data = await res.json();
+        const pill = document.getElementById('headerActivePill');
+        if (!pill) return;
+        if (data.count === 0) {
+            pill.textContent = 'No active style';
+            pill.classList.remove('is-on');
+        } else {
+            pill.textContent = 'Active: ' + (data.names || []).join(', ');
+            pill.classList.add('is-on');
+        }
+    } catch (e) { /* non-blocking */ }
+}
+
+async function deleteSource(filename) {
+    if (!ACTIVE_PROFILE_ID) return;
+    const ok = await dozaConfirm(
+        'Remove source?',
+        `Remove "${filename}" from this profile? Regenerate the analysis afterward to refresh the fingerprint.`,
+        'Remove'
+    );
+    if (!ok) return;
+    const url = `/api/editorial_dna/profiles/${ACTIVE_PROFILE_ID}/sources/${encodeURIComponent(filename)}`;
+    const res = await fetch(url, { method: 'DELETE' });
+    if (res.ok) {
+        window.location.reload();
+    } else {
+        await dozaConfirm('Error', 'Could not remove that source.', 'Close');
+    }
+}
+
 async function deleteActiveProfile() {
     if (!ACTIVE_PROFILE_ID) return;
-    if (!confirm('Permanently delete this profile and all its data? This cannot be undone.')) return;
+    const ok = await dozaConfirm(
+        'Delete profile?',
+        'Permanently delete this profile and all its data? This cannot be undone.',
+        'Delete'
+    );
+    if (!ok) return;
     await fetch(`/api/editorial_dna/profiles/${ACTIVE_PROFILE_ID}`, { method: 'DELETE' });
     window.location.reload();
 }
@@ -574,7 +838,12 @@ async function saveRefinements() {
 
 async function regenerateAnalysis() {
     if (!ACTIVE_PROFILE_ID) return;
-    if (!confirm('Re-run the style analysis on the current portfolio? This may take a minute.')) return;
+    const ok = await dozaConfirm(
+        'Regenerate analysis?',
+        'Re-run the style analysis on the current portfolio? This may take a minute.',
+        'Regenerate'
+    );
+    if (!ok) return;
     const overlay = document.getElementById('progressOverlay');
     const status = document.getElementById('progressStatus');
     const bar = document.getElementById('progressBar');
@@ -606,10 +875,10 @@ async function importBundle(file) {
     const res = await fetch('/api/editorial_dna/import', { method: 'POST', body: formData });
     const data = await res.json();
     if (data.imported_profile_ids) {
-        alert(`Imported ${data.imported_profile_ids.length} profile(s).`);
+        await dozaConfirm('Import complete', `Imported ${data.imported_profile_ids.length} profile(s).`, 'OK');
         window.location.reload();
     } else {
-        alert('Import failed: ' + (data.error || 'unknown'));
+        await dozaConfirm('Import failed', data.error || 'unknown', 'Close');
     }
 }
 </script>

@@ -529,15 +529,14 @@ body {
 }
 
 .video-player-box {
-    border-radius: var(--radius-lg);
-    overflow: hidden;
+    position: relative;
     background: #000;
 }
+
 
 .video-preview-main {
     width: 100%;
     display: block;
-    border-radius: var(--radius-lg);
     background: #000;
 }
 
@@ -3081,16 +3080,17 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     background: var(--bg-secondary);
     border-left: 3px solid var(--accent);
     border-radius: 8px;
-    padding: 1.25rem 1.5rem;
-    margin-bottom: 1.5rem;
+    padding: 1.5rem 1.75rem;
+    margin-bottom: 2rem;
 }
 
 .style-summary-text {
     font-size: 1.05rem;
-    line-height: 1.7;
+    line-height: 1.8;
     color: var(--text-primary);
     margin: 0;
     font-style: italic;
+    opacity: 0.9;
 }
 
 /* Stat cards grid */
@@ -3492,11 +3492,18 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 .edna-section:last-child { border-bottom: none; }
 
 .edna-section-title {
-    font-size: 15px;
+    font-size: 17px;
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.01em;
     color: var(--text-primary);
-    margin: 0 0 14px;
+    margin: 0 0 6px;
+}
+
+.edna-section-desc {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    margin: 0 0 16px;
 }
 
 .edna-field-grid {
@@ -3506,7 +3513,7 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 }
 
 .edna-field {
-    padding: 14px 16px;
+    padding: 16px 18px;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -3517,13 +3524,14 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-secondary);
-    margin-bottom: 6px;
+    margin-bottom: 8px;
 }
 
 .edna-field-value {
-    font-size: 15px;
+    font-size: 16px;
     color: var(--text-primary);
-    line-height: 1.4;
+    line-height: 1.5;
+    font-weight: 500;
 }
 
 .edna-field-hint {
@@ -3918,4 +3926,288 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     border: 1px dashed var(--border);
     border-radius: 8px;
     background: var(--bg-secondary);
+}
+
+/* ===================================================================
+   My Style v2.2 — header active pill, multi-active toggles,
+   exemplar passages, quote archetypes, banners, source-row tags
+   =================================================================== */
+
+.header-active-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    line-height: 1;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    border: 1px solid rgba(239, 68, 68, 0.5);
+    background: rgba(239, 68, 68, 0.10);
+    color: #dc2626;
+    white-space: nowrap;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.25);
+}
+[data-theme="dark"] .header-active-pill {
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.12);
+    border-color: rgba(248, 113, 113, 0.4);
+    box-shadow: 0 0 8px rgba(248, 113, 113, 0.3);
+}
+.header-active-pill.is-on {
+    background: rgba(40, 180, 99, 0.12);
+    border-color: rgba(40, 180, 99, 0.5);
+    color: #1f8a4d;
+    font-weight: 600;
+    box-shadow: 0 0 6px rgba(40, 180, 99, 0.25);
+}
+[data-theme="dark"] .header-active-pill.is-on {
+    color: #4ade80;
+    background: rgba(74, 222, 128, 0.15);
+    border-color: rgba(74, 222, 128, 0.4);
+    box-shadow: 0 0 8px rgba(74, 222, 128, 0.3);
+}
+
+.my-style-multi-active {
+    margin: 0 0 16px 0;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+}
+.my-style-multi-active-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary, #888);
+    margin-bottom: 8px;
+}
+.my-style-multi-active-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.multi-active-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    cursor: pointer;
+    font-size: 13px;
+    user-select: none;
+    transition: all 0.12s;
+}
+.multi-active-chip input { accent-color: var(--accent); }
+.multi-active-chip.is-on {
+    background: rgba(40, 180, 99, 0.10);
+    border-color: rgba(40, 180, 99, 0.45);
+    color: #1f8a4d;
+    font-weight: 600;
+}
+[data-theme="dark"] .multi-active-chip.is-on {
+    color: #4ade80;
+    background: rgba(74, 222, 128, 0.12);
+}
+.my-style-multi-active-hint { margin-top: 8px; font-size: 12px; }
+
+.my-style-banner {
+    margin: 0 0 16px 0;
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 14px;
+    line-height: 1.5;
+}
+.my-style-banner-stale {
+    background: rgba(40, 120, 220, 0.08);
+    border: 1px solid rgba(40, 120, 220, 0.4);
+    color: var(--text);
+}
+.my-style-banner-warn {
+    background: rgba(220, 160, 40, 0.10);
+    border: 1px solid rgba(220, 160, 40, 0.45);
+    color: var(--text);
+}
+
+/* Quote archetypes block */
+.edna-archetypes { display: flex; flex-direction: column; gap: 14px; }
+.edna-archetype {
+    padding: 16px 18px;
+    border-left: 3px solid var(--accent);
+    background: var(--bg-secondary);
+    border-radius: 0 10px 10px 0;
+}
+.edna-archetype-type {
+    font-size: 15px;
+    font-weight: 600;
+    text-transform: capitalize;
+    margin-bottom: 4px;
+}
+.edna-archetype-desc {
+    font-size: 13px;
+    color: var(--text-secondary, #888);
+    margin-bottom: 10px;
+    line-height: 1.4;
+}
+.edna-archetype-quote {
+    margin: 0;
+    font-style: italic;
+    color: var(--text);
+    line-height: 1.6;
+    opacity: 0.85;
+}
+
+/* Exemplar passages — the verbatim few-shot anchors */
+.edna-exemplars { display: flex; flex-direction: column; gap: 16px; margin-top: 12px; }
+.edna-exemplar {
+    padding: 18px 20px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+}
+.edna-exemplar-source {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary, #888);
+    margin-bottom: 10px;
+}
+.edna-exemplar-passage {
+    margin: 0 0 10px 0;
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--text);
+}
+.edna-exemplar-why {
+    font-size: 12px;
+    color: var(--accent);
+    font-style: italic;
+    opacity: 0.9;
+}
+
+/* Source row tags (FCPXML / missing media) */
+.source-file-tag {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: rgba(40, 120, 220, 0.12);
+    color: #2563eb;
+}
+.source-file-tag-warn {
+    background: rgba(220, 100, 40, 0.15);
+    color: #c2410c;
+}
+[data-theme="dark"] .source-file-tag { color: #60a5fa; }
+[data-theme="dark"] .source-file-tag-warn { color: #fb923c; }
+
+/* ===================================================================
+   Doza modal (replaces window.prompt / window.confirm)
+   Tauri's WKWebView silently blocks native dialogs, so any UI that
+   relied on them (rename profile, new profile, delete, etc) needed
+   a styled in-page replacement.
+   =================================================================== */
+.doza-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+.doza-modal-card {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+    width: 460px;
+    max-width: calc(100vw - 40px);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+.doza-modal-title {
+    margin: 0 0 8px 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.doza-modal-message {
+    margin: 0 0 14px 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+.doza-modal-input {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 14px;
+    box-sizing: border-box;
+    margin-bottom: 16px;
+}
+.doza-modal-input::placeholder {
+    color: var(--text-muted);
+}
+.doza-modal-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.doza-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+/* ===================================================================
+   Model modal: "currently loaded" line + selected-vs-effective mismatch
+   warning. Surfaces when the user picked a model that isn't downloaded
+   and Ollama silently fell back to a smaller variant — previously the
+   user saw no speed change and assumed switching was broken.
+   =================================================================== */
+.ai-modal-current-model {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--text-secondary, #888);
+}
+.ai-modal-current-model code {
+    background: var(--bg-input);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--text-primary);
+}
+.ai-modal-mismatch {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border: 1px solid rgba(220, 100, 40, 0.5);
+    background: rgba(220, 100, 40, 0.10);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+.ai-modal-mismatch strong { color: #c2410c; }
+[data-theme="dark"] .ai-modal-mismatch strong { color: #fb923c; }
+.ai-modal-mismatch code {
+    background: var(--bg-input);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--text-primary);
 }

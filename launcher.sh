@@ -6,8 +6,11 @@
 #
 
 # ── Resolve paths ──
+# Honor DOZA_APP_DIR if set so an external launcher can point this script
+# at a different code root (e.g. Contents/Resources/app/) without changing
+# the on-disk layout. Defaults preserve the .app's standard layout.
 BUNDLE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-APP_SRC="${BUNDLE_DIR}/Contents/Resources/app"
+APP_SRC="${DOZA_APP_DIR:-${BUNDLE_DIR}/Contents/Resources/app}"
 SUPPORT_DIR="$HOME/Library/Application Support/DozaAssist"
 VENV_DIR="$SUPPORT_DIR/venv"
 SETUP_JSON="$SUPPORT_DIR/setup.json"
@@ -71,9 +74,18 @@ pid_name() {
 }
 
 # ── Ensure Homebrew on PATH ──
+# Add BOTH /opt/homebrew/bin (Apple Silicon Homebrew) and /usr/local/bin
+# (Intel Homebrew + python.org framework Python). The previous IF/ELIF
+# only added the first match, so on Apple Silicon machines that have a
+# python.org install at /usr/local/bin/python3.11, find_python below would
+# silently fail and trigger Phase 1 first-launch bootstrap on every launch.
+# Phase 1 then finds Python via setup_runner.sh's broader search and exits
+# quickly — harmless, but it pops a Terminal window every time the user
+# launches the app. Adding both directories prevents that.
 if [ -d "/opt/homebrew/bin" ]; then
     export PATH="/opt/homebrew/bin:$PATH"
-elif [ -d "/usr/local/bin" ]; then
+fi
+if [ -d "/usr/local/bin" ]; then
     export PATH="/usr/local/bin:$PATH"
 fi
 
@@ -89,8 +101,10 @@ fi
 # it's a conflict — fail fast with the offending PID instead of letting
 # Flask silently fail to bind and then timing out 30 seconds later.
 if /usr/bin/curl -sf --max-time 2 "${FLASK_URL}" > /dev/null 2>&1; then
-    log "Server already running on ${FLASK_PORT}, opening browser."
-    /usr/bin/open "${FLASK_URL}"
+    log "Server already running on ${FLASK_PORT}."
+    if [ -z "${DOZA_NO_BROWSER:-}" ]; then
+        /usr/bin/open "${FLASK_URL}"
+    fi
     exit 0
 fi
 
@@ -148,7 +162,9 @@ if [ -z "$MISSING" ]; then
     for _ in {1..60}; do
         if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
             log "Server ready."
-            /usr/bin/open "${FLASK_URL}"
+            if [ -z "${DOZA_NO_BROWSER:-}" ]; then
+                /usr/bin/open "${FLASK_URL}"
+            fi
             exit 0
         fi
         sleep 0.5
@@ -174,7 +190,10 @@ find_python() {
                 local major minor
                 major=$(echo "$ver" | cut -d. -f1)
                 minor=$(echo "$ver" | cut -d. -f2)
-                if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
+                # Upper bound matches setup_runner.sh: only accept versions
+                # we ship wheels for (3.11–3.13). Without this, `python3` may
+                # resolve to a too-new interpreter and produce a broken venv.
+                if [ "$major" -eq 3 ] && [ "$minor" -ge 11 ] && [ "$minor" -le 13 ]; then
                     echo "$py"
                     return 0
                 fi

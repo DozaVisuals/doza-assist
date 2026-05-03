@@ -429,6 +429,20 @@ def ai_model_status():
                 }
 
     variants = model_config.get_variant_estimates(hw, total_seconds=total_seconds)
+
+    # Resolve which model Ollama will ACTUALLY use on the next chat call.
+    # When the selected variant isn't downloaded, _get_ollama_model silently
+    # falls back to whatever IS downloaded — the UI uses this to warn the
+    # user that "Use this" didn't actually change anything.
+    try:
+        from ai_analysis import get_effective_ollama_model
+        effective_model, selected_variant, fallback_used = get_effective_ollama_model()
+    except Exception as e:
+        print(f"[ai-model/status] effective-model probe failed: {e}")
+        effective_model, selected_variant, fallback_used = (
+            current['variant'], current['variant'], False
+        )
+
     return jsonify({
         'hardware': {
             'ram_gb': round(hw['ram_gb'], 1),
@@ -441,6 +455,11 @@ def ai_model_status():
             'variant': current['variant'],
             'source': current['source'],
             'reason': current.get('reason', ''),
+        },
+        'effective': {
+            'model': effective_model,
+            'selected_variant': selected_variant,
+            'fallback_used': fallback_used,
         },
         'variants': variants,
         'project_context': project_context,
@@ -460,6 +479,26 @@ def set_ai_model():
         info = model_config.set_variant_manually(tier)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+
+    # Evict any other models from VRAM. Ollama's default keep_alive=30m
+    # keeps the previous variant resident, so on lower-RAM Macs you end
+    # up with two Gemma weights in unified memory at once → Metal
+    # compaction stalls.
+    new_variant = info['variant']
+    try:
+        import requests as _req
+        ps = _req.get('http://127.0.0.1:11434/api/ps', timeout=2).json()
+        for m in ps.get('models', []):
+            name = m.get('name')
+            if name and name != new_variant:
+                _req.post(
+                    'http://127.0.0.1:11434/api/generate',
+                    json={'model': name, 'keep_alive': 0, 'prompt': ''},
+                    timeout=2,
+                )
+    except Exception as e:
+        print(f"[ai-model] eviction failed: {e}")
+
     return jsonify({
         'tier': info['tier'],
         'variant': info['variant'],
@@ -944,6 +983,14 @@ def group_into_paragraphs(segments):
 @app.route('/project/<project_id>')
 def project_view(project_id):
     """View one or more projects. Accepts comma-separated IDs for multi-project workspace."""
+    # Pre-warm the Ollama model on project open so the user's first chat
+    # message starts with weights resident. Combined with the 30m
+    # keep_alive on every generate call, repeat questions never pay
+    # cold-load. Daemon thread so the page render isn't blocked.
+    import threading
+    from ai_analysis import warmup_ollama
+    threading.Thread(target=warmup_ollama, daemon=True).start()
+
     project_ids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
 
     # Load all requested projects
@@ -1061,21 +1108,41 @@ def project_view(project_id):
 
 @app.route('/project/<project_id>/media')
 def serve_media(project_id):
-    """Stream the project's source media file (video or audio)."""
+    """Stream the project's source media file (video or audio).
+
+    Returns the file with HTTP Range support so the <video>/<audio>
+    element can seek without re-downloading. Chromium handles decode and
+    hardware-accel where available.
+    """
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
-    # Always serve the original source file for video playback
     source_path = project.get('source_path', project.get('filepath', ''))
     if source_path and os.path.exists(source_path):
-        return send_file(source_path)
+        ext = os.path.splitext(source_path)[1].lower()
+        mime = {
+            '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+            '.m4v': 'video/x-m4v', '.webm': 'video/webm',
+            '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
+            '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4',
+            '.wav': 'audio/wav', '.aac': 'audio/aac',
+        }.get(ext)
+        resp = send_file(source_path, mimetype=mime, conditional=True)
+        # Encourage the browser to reuse range responses across reloads/seeks.
+        # Without this, every range comes back as a fresh 206 and the same file
+        # streams thousands of times during a single playback session.
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        resp.headers['Accept-Ranges'] = 'bytes'
+        return resp
 
-    # Fall back to extracted audio
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     audio_wav = os.path.join(project_dir, 'audio.wav')
     if os.path.exists(audio_wav):
-        return send_file(audio_wav, mimetype='audio/wav')
+        resp = send_file(audio_wav, mimetype='audio/wav', conditional=True)
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        resp.headers['Accept-Ranges'] = 'bytes'
+        return resp
 
     return jsonify({'error': 'Source file not found'}), 404
 
@@ -1248,6 +1315,29 @@ def transcribe(project_id):
         seg_count = len((result or {}).get('segments', []))
         log_activity(project_id, 'transcribed',
                      f"{project.get('name', 'Project')} transcribed · {seg_count} segments")
+
+        # Auto-build the TF-IDF paragraph index so chat retrieval immediately
+        # works against semantic ranking instead of substring matching only.
+        # This is a pure-Python pass (no LLM call), runs in seconds, and
+        # transforms chat output quality on a fresh project — without it the
+        # chat falls back to literal-keyword matching and produces vague or
+        # un-clip-cited responses (this was the laptop bug).
+        # Idempotent: skip if already on disk so re-transcription doesn't
+        # rebuild needlessly. The full /analyze endpoint still rebuilds it
+        # alongside segment_vectors when the user runs AI Analysis.
+        try:
+            idx_path = _paragraph_index_path(project_id)
+            if not os.path.exists(idx_path):
+                from doza_assist.retrieval import build_paragraph_index, save_index
+                idx = build_paragraph_index(result)
+                save_index(idx, idx_path)
+                print(f"[transcribe] auto-built paragraph_index for {project_id}")
+        except Exception as e:
+            # Non-fatal — chat will fall back to substring matching. Log and
+            # let the response succeed; a missing index never breaks chat,
+            # just degrades retrieval.
+            print(f"[transcribe] paragraph_index auto-build failed for {project_id}: {e}")
+
         return jsonify({'status': 'transcribed', 'transcript': result})
 
     except Exception as e:
@@ -1700,18 +1790,13 @@ def save_labels(project_id):
     return jsonify({'status': 'saved', 'count': len(project['labeled_sections'])})
 
 
-@app.route('/project/<project_id>/export/fcpxml', methods=['POST'])
-def export_fcpxml(project_id):
-    """Export selections to the project's selected NLE format (FCPXML/Premiere/EDL)."""
-    project = get_project(project_id)
-    if not project:
-        return jsonify({'error': 'Project not found'}), 404
+def _build_nle_export(project: dict, body: dict, force_platform: str | None = None):
+    """Run the configured exporter for ``project`` against the selections in ``body``.
 
-    # Accept either a list (``types``) or the legacy single ``type`` string.
-    # The new checkbox UI sends ``types=['labels', 'social', ...]``; callers
-    # that still send ``type='all'`` expand to the full set so existing tests
-    # and any third-party integrations keep working.
-    body = request.json or {}
+    Shared by ``/export/fcpxml`` (which streams the file back) and
+    ``/export/send-to-nle`` (which writes the file then launches the NLE).
+    Returns ``(result, exporter)``.
+    """
     raw_types = body.get('types')
     if isinstance(raw_types, list) and raw_types:
         requested = {str(t).strip().lower() for t in raw_types if t}
@@ -1829,35 +1914,180 @@ def export_fcpxml(project_id):
         media_duration = project['transcript']['duration']
 
     detected_fps = get_video_framerate(source_path)
-    framerate = detected_fps or request.json.get('framerate', 23.976)
-    export_mode = request.json.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
+    framerate = detected_fps or body.get('framerate', 23.976)
+    export_mode = body.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
     width, height = get_video_resolution(source_path)
-    total_clips = request.json.get('total_clips', len(markers)) or len(markers)
+    total_clips = body.get('total_clips', len(markers)) or len(markers)
 
-    # Allow per-export platform override; otherwise use project's editing_platform.
-    platform_override = (request.json or {}).get('platform')
-    platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
+    if force_platform and force_platform in PLATFORMS:
+        platform = force_platform
+    else:
+        # Allow per-export platform override; otherwise use project's editing_platform.
+        platform_override = body.get('platform')
+        platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
 
+    exporter = get_exporter(platform)
+    result = exporter.export_markers(
+        markers,
+        project_name=project['name'],
+        source_path=source_path,
+        media_duration=media_duration,
+        framerate=framerate,
+        width=width,
+        height=height,
+        export_type=export_type,
+        exports_dir=app.config['EXPORTS_DIR'],
+        export_mode=export_mode,
+        total_clips=total_clips,
+    )
+    return result, exporter
+
+
+@app.route('/project/<project_id>/export/fcpxml', methods=['POST'])
+def export_fcpxml(project_id):
+    """Export selections to the project's selected NLE format (FCPXML/Premiere/EDL)."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    # Accept either a list (``types``) or the legacy single ``type`` string.
+    # The new checkbox UI sends ``types=['labels', 'social', ...]``; callers
+    # that still send ``type='all'`` expand to the full set so existing tests
+    # and any third-party integrations keep working.
+    body = request.json or {}
     try:
-        exporter = get_exporter(platform)
-        result = exporter.export_markers(
-            markers,
-            project_name=project['name'],
-            source_path=source_path,
-            media_duration=media_duration,
-            framerate=framerate,
-            width=width,
-            height=height,
-            export_type=export_type,
-            exports_dir=app.config['EXPORTS_DIR'],
-            export_mode=export_mode,
-            total_clips=total_clips,
-        )
+        result, exporter = _build_nle_export(project, body)
     except Exception as e:
-        app.logger.error('Export failed for %s: %s', platform, e)
+        app.logger.error('Export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
 
     return _exporter_response(result, project, exporter)
+
+
+# Display names paired with the platform keys used everywhere else
+# (``fcp`` / ``premiere`` / ``resolve``). The user-visible toast and any
+# "not installed" error draw from this map.
+NLE_DISPLAY_NAMES = {
+    'fcp': 'Final Cut Pro',
+    'premiere': 'Premiere Pro',
+    'resolve': 'DaVinci Resolve',
+}
+
+
+def _find_nle_app_path(nle: str):
+    """Return the on-disk .app path for the chosen NLE, or ``None`` if not installed.
+
+    Premiere ships under a year-suffixed directory (``Adobe Premiere Pro 2026/``,
+    ``2025/``, etc.) so we probe the recent versions in newest-first order and
+    fall back to the unversioned bundle.
+    """
+    if nle == 'fcp':
+        path = '/Applications/Final Cut Pro.app'
+        return path if os.path.isdir(path) else None
+    if nle == 'resolve':
+        path = '/Applications/DaVinci Resolve/DaVinci Resolve.app'
+        return path if os.path.isdir(path) else None
+    if nle == 'premiere':
+        for candidate in (
+            '/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app',
+            '/Applications/Adobe Premiere Pro 2025/Adobe Premiere Pro 2025.app',
+            '/Applications/Adobe Premiere Pro 2024/Adobe Premiere Pro 2024.app',
+            '/Applications/Adobe Premiere Pro.app',
+        ):
+            if os.path.isdir(candidate):
+                return candidate
+        return None
+    return None
+
+
+@app.route('/export/send-to-nle', methods=['POST'])
+def send_to_nle():
+    """Generate the export for ``project_id`` and hand it to the chosen NLE.
+
+    Body: ``{"project_id": "...", "nle": "fcp"|"premiere"|"resolve",
+              "export_type": "selects"|"story_builder", ...}``.
+
+    For ``selects`` the remaining keys (``types``, ``framerate``, ``mode``, ...)
+    are forwarded to the same pipeline ``/export/fcpxml`` uses, so the Export
+    tab's current settings carry over. For ``story_builder`` the body must
+    include ``clips`` and ``story_title``.
+
+    The export format always matches ``nle`` (FCPXML for fcp, Premiere XML for
+    premiere, EDL for resolve) — the user-selected NLE in the UI is the source
+    of truth, not whatever the project is configured for.
+    """
+    body = request.json or {}
+    project_id = body.get('project_id')
+    export_type = str(body.get('export_type') or 'selects').strip().lower()
+
+    # Multicam round-trip is FCP-specific (it preserves FCP's multicam /
+    # sync-clip container) — force the target NLE to fcp regardless of what
+    # the selector says, so the file lands in the only editor that can use it.
+    if export_type == 'multicam':
+        nle = 'fcp'
+    else:
+        nle = str(body.get('nle') or '').strip().lower()
+
+    if nle not in NLE_DISPLAY_NAMES:
+        return jsonify({'error': f'Unknown NLE: {nle!r}'}), 400
+
+    project = get_project(project_id) if project_id else None
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    app_path = _find_nle_app_path(nle)
+    if not app_path:
+        return jsonify({
+            'error': f'{NLE_DISPLAY_NAMES[nle]} not found at expected location'
+        }), 404
+
+    file_path = None
+    filename = None
+    format_name = None
+    try:
+        if export_type == 'story_builder':
+            if not body.get('clips'):
+                return jsonify({'error': 'No clips in story builder'}), 400
+            result, _ = _build_nle_story_export(project, body, force_platform=nle)
+            file_path, filename, format_name = result.file_path, result.filename, result.format_name
+        elif export_type == 'multicam':
+            file_path, filename, _mode = _build_nle_multicam_export(project, body)
+            format_name = 'FCPXML'
+        else:
+            result, _ = _build_nle_export(project, body, force_platform=nle)
+            file_path, filename, format_name = result.file_path, result.filename, result.format_name
+    except MulticamExportError as e:
+        return jsonify({'error': str(e)}), e.status
+    except Exception as e:
+        app.logger.error('Send-to-NLE export failed: %s', e)
+        return jsonify({'error': f'Export failed: {e}'}), 500
+
+    # FCP and Resolve auto-import when launched with the file; Premiere's CLI
+    # auto-import is unreliable, so we just reveal the file in Finder and let
+    # the editor drag it into an open project.
+    try:
+        if nle == 'premiere':
+            subprocess.Popen(['open', '-R', file_path])
+            opened_in = 'finder'
+        else:
+            subprocess.Popen(['open', '-a', app_path, file_path])
+            opened_in = 'app'
+    except Exception as e:
+        app.logger.error('Launching %s failed: %s', NLE_DISPLAY_NAMES[nle], e)
+        return jsonify({
+            'error': f'Could not launch {NLE_DISPLAY_NAMES[nle]}: {e}',
+            'file': file_path,
+        }), 500
+
+    return jsonify({
+        'status': 'ok',
+        'nle': nle,
+        'nle_name': NLE_DISPLAY_NAMES[nle],
+        'opened_in': opened_in,
+        'file': file_path,
+        'filename': filename,
+        'format_name': format_name,
+    })
 
 
 def _project_selects_for_fcpxml(project: dict, source: str):
@@ -1953,6 +2183,70 @@ def _project_selects_for_fcpxml(project: dict, source: str):
     return selects
 
 
+class MulticamExportError(Exception):
+    """Raised by ``_build_nle_multicam_export`` with an HTTP-status hint."""
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def _build_nle_multicam_export(project, body):
+    """Round-trip selects back into FCP-importable FCPXML.
+
+    Returns ``(out_path, filename, mode)``. Always FCPXML — multicam round-trip
+    is FCP-specific by design (it reuses the original multicam / sync-clip
+    container), so there's no platform branch.
+    """
+    body = body or {}
+    fcpxml_source = project.get('fcpxml_source')
+    if not fcpxml_source:
+        raise MulticamExportError(
+            'This project was not imported from an FCPXML. '
+            'Use the standard FCPX export instead.'
+        )
+
+    stored_path = fcpxml_source.get('stored_fcpxml_path')
+    if not stored_path or not os.path.isfile(stored_path):
+        raise MulticamExportError(
+            'The original FCPXML file is no longer available in the project directory.'
+        )
+
+    mode = body.get('mode', 'selects_project')
+    source = body.get('source', 'client_selects')
+
+    try:
+        parsed = parse_fcpxml(stored_path)
+    except ParseError as e:
+        raise MulticamExportError(f'Could not re-read stored FCPXML: {e}', status=500)
+
+    selects = _project_selects_for_fcpxml(project, source)
+    if not selects:
+        raise MulticamExportError(
+            f'No selects available for source={source!r}. '
+            'Pick a source with content, or add clip labels first.'
+        )
+
+    try:
+        if mode == 'markers_timeline':
+            output = write_markers_on_timeline(parsed, selects)
+            suffix = 'Doza Notes'
+        else:
+            output = write_selects_as_new_project(parsed, selects)
+            suffix = 'Doza Selects'
+    except WriterError as e:
+        raise MulticamExportError(f'Export failed: {e}')
+
+    base = (project.get('name') or 'Project').strip().replace('/', '-')
+    filename = f"{base} - {suffix}.fcpxml"
+    exports_dir = app.config['EXPORTS_DIR']
+    os.makedirs(exports_dir, exist_ok=True)
+    out_path = os.path.join(exports_dir, filename)
+    with open(out_path, 'wb') as fh:
+        fh.write(output)
+
+    return out_path, filename, mode
+
+
 @app.route('/project/<project_id>/export/fcpxml-multicam', methods=['POST'])
 def export_fcpxml_multicam(project_id):
     """Round-trip selects back into FCP-importable FCPXML via the multicam writer.
@@ -1969,52 +2263,10 @@ def export_fcpxml_multicam(project_id):
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
-    fcpxml_source = project.get('fcpxml_source')
-    if not fcpxml_source:
-        return jsonify({
-            'error': 'This project was not imported from an FCPXML. '
-                     'Use the standard FCPX export instead.'
-        }), 400
-
-    stored_path = fcpxml_source.get('stored_fcpxml_path')
-    if not stored_path or not os.path.isfile(stored_path):
-        return jsonify({
-            'error': 'The original FCPXML file is no longer available in the project directory.'
-        }), 400
-
-    data = request.json or {}
-    mode = data.get('mode', 'selects_project')
-    source = data.get('source', 'client_selects')
-
     try:
-        parsed = parse_fcpxml(stored_path)
-    except ParseError as e:
-        return jsonify({'error': f'Could not re-read stored FCPXML: {e}'}), 500
-
-    selects = _project_selects_for_fcpxml(project, source)
-    if not selects:
-        return jsonify({
-            'error': f'No selects available for source={source!r}. '
-                     'Pick a source with content, or add clip labels first.'
-        }), 400
-
-    try:
-        if mode == 'markers_timeline':
-            output = write_markers_on_timeline(parsed, selects)
-            suffix = 'Doza Notes'
-        else:
-            output = write_selects_as_new_project(parsed, selects)
-            suffix = 'Doza Selects'
-    except WriterError as e:
-        return jsonify({'error': f'Export failed: {e}'}), 400
-
-    base = (project.get('name') or 'Project').strip().replace('/', '-')
-    filename = f"{base} - {suffix}.fcpxml"
-    exports_dir = app.config['EXPORTS_DIR']
-    os.makedirs(exports_dir, exist_ok=True)
-    out_path = os.path.join(exports_dir, filename)
-    with open(out_path, 'wb') as fh:
-        fh.write(output)
+        out_path, filename, mode = _build_nle_multicam_export(project, request.json or {})
+    except MulticamExportError as e:
+        return jsonify({'error': str(e)}), e.status
 
     response = send_file(out_path, as_attachment=True, download_name=filename)
     response.headers['X-Export-Format'] = 'FCPXML'
@@ -2144,6 +2396,18 @@ def retranscribe(project_id):
     audio_wav = os.path.join(project_dir, 'audio.wav')
     if os.path.exists(audio_wav):
         os.remove(audio_wav)
+
+    # Drop the cached paragraph_index + segment_vectors — they reference the
+    # OLD transcript text. Letting them survive a retranscribe means the
+    # /transcribe handler's idempotent skip would keep serving stale TF-IDF
+    # results and the chat would look at the wrong paragraphs forever.
+    for cache_name in ('paragraph_index.json', 'segment_vectors.json'):
+        p = os.path.join(project_dir, cache_name)
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
     return jsonify({'status': 'cleared', 'language': language})
 
@@ -2386,19 +2650,16 @@ def story_delete(project_id, build_id):
     return jsonify({'status': 'deleted'})
 
 
-@app.route('/project/<project_id>/story/export', methods=['POST'])
-def story_export(project_id):
-    """Export a story build as a timeline in the project's selected NLE format."""
-    project = get_project(project_id)
-    if not project:
-        return jsonify({'error': 'Project not found'}), 404
+def _build_nle_story_export(project, body, force_platform=None):
+    """Build a story-timeline export for ``project`` from a request body.
 
-    data = request.json or {}
-    clips = data.get('clips', [])
-    story_title = data.get('story_title', 'Story')
-
-    if not clips:
-        return jsonify({'error': 'No clips in sequence'}), 400
+    Mirrors :func:`_build_nle_export` for assembled story sequences: the
+    ``/story/export`` route streams the file back, ``/export/send-to-nle``
+    hands it to the chosen NLE. Returns ``(result, exporter)``.
+    """
+    body = body or {}
+    clips = body.get('clips') or []
+    story_title = body.get('story_title', 'Story')
 
     def _to_seconds(val):
         if isinstance(val, (int, float)):
@@ -2415,7 +2676,6 @@ def story_export(project_id):
         except (ValueError, TypeError):
             return 0.0
 
-    # Convert clips to the marker shape every exporter consumes.
     markers = []
     for i, clip in enumerate(clips):
         markers.append({
@@ -2433,26 +2693,44 @@ def story_export(project_id):
 
     width, height = get_video_resolution(source_path)
     detected_fps = get_video_framerate(source_path)
-    framerate = detected_fps or data.get('framerate', 23.976)
+    framerate = detected_fps or body.get('framerate', 23.976)
 
-    platform_override = data.get('platform')
-    platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
+    if force_platform and force_platform in PLATFORMS:
+        platform = force_platform
+    else:
+        platform_override = body.get('platform')
+        platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
+
+    exporter = get_exporter(platform)
+    result = exporter.export_story(
+        markers,
+        project_name=project['name'],
+        story_title=story_title,
+        source_path=source_path,
+        media_duration=media_duration,
+        framerate=framerate,
+        width=width,
+        height=height,
+        exports_dir=app.config['EXPORTS_DIR'],
+    )
+    return result, exporter
+
+
+@app.route('/project/<project_id>/story/export', methods=['POST'])
+def story_export(project_id):
+    """Export a story build as a timeline in the project's selected NLE format."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    data = request.json or {}
+    if not data.get('clips'):
+        return jsonify({'error': 'No clips in sequence'}), 400
 
     try:
-        exporter = get_exporter(platform)
-        result = exporter.export_story(
-            markers,
-            project_name=project['name'],
-            story_title=story_title,
-            source_path=source_path,
-            media_duration=media_duration,
-            framerate=framerate,
-            width=width,
-            height=height,
-            exports_dir=app.config['EXPORTS_DIR'],
-        )
+        result, exporter = _build_nle_story_export(project, data)
     except Exception as e:
-        app.logger.error('Story export failed for %s: %s', platform, e)
+        app.logger.error('Story export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
 
     return _exporter_response(result, project, exporter)
@@ -2635,14 +2913,43 @@ def _active_profile_for_page():
 
 @app.route('/my-style')
 def my_style_page():
-    profile = _active_profile_for_page()
+    # Allow ?profile_id=... to render any profile without changing the active
+    # set — the dropdown uses this so picking a different profile to inspect
+    # doesn't blow away a user's multi-active blend.
+    requested = request.args.get('profile_id')
+    profile = None
+    if requested:
+        profile = edna_profiles.get_profile(requested)
+    if profile is None:
+        profile = _active_profile_for_page()
+    if profile is None:
+        # Last-resort fallback to any profile that exists, so the page renders
+        # something rather than the empty state when only inactive profiles
+        # exist.
+        all_profs = edna_profiles.list_profiles()
+        if all_profs:
+            profile = edna_profiles.get_profile(all_profs[0]['id'])
     all_profiles = edna_profiles.list_profiles()
+    active_ids = edna_profiles.get_active_profile_ids()
     snapshots = edna_snapshots.list_snapshots(profile['id']) if profile else []
+    # Surface a "regenerate this profile, the analyzer has been upgraded since
+    # it was last analyzed" banner for stored summaries below ANALYSIS_VERSION.
+    from editorial_dna.models import ANALYSIS_VERSION as CURRENT_ANALYSIS_VERSION
+    needs_reanalyze = False
+    if profile is not None:
+        stored_v = (profile.get('summary') or {}).get('analysis_version') or 0
+        try:
+            needs_reanalyze = int(stored_v) < CURRENT_ANALYSIS_VERSION
+        except (TypeError, ValueError):
+            needs_reanalyze = True
     return render_template(
         'my_style.html',
         profile=profile,
         all_profiles=all_profiles,
+        active_ids=active_ids,
         snapshots=snapshots,
+        needs_reanalyze=needs_reanalyze,
+        current_analysis_version=CURRENT_ANALYSIS_VERSION,
     )
 
 
@@ -2653,7 +2960,27 @@ def edna_list_profiles():
     return jsonify({
         'profiles': edna_profiles.list_profiles(),
         'active_profile_id': edna_profiles.get_active_profile_id(),
+        'active_profile_ids': edna_profiles.get_active_profile_ids(),
     })
+
+
+@app.route('/api/editorial_dna/active-summary')
+def edna_active_summary():
+    """Lightweight endpoint for the global header pill. Returns just the names
+    of currently-active profiles plus a count, so every page can render
+    "Active: Doc Style, Social Cuts" without loading full summary blobs.
+    """
+    active_ids = set(edna_profiles.get_active_profile_ids() or [])
+    names = []
+    for entry in edna_profiles.list_profiles():
+        if entry['id'] in active_ids:
+            # Skip profiles whose master toggle is off — header should reflect
+            # what's actually shaping AI suggestions, not what's merely selected.
+            full = edna_profiles.get_profile(entry['id'])
+            if full is None or not full.get('active', True):
+                continue
+            names.append(entry['name'])
+    return jsonify({'count': len(names), 'names': names})
 
 
 @app.route('/api/editorial_dna/profiles', methods=['POST'])
@@ -2678,6 +3005,15 @@ def edna_patch_profile(profile_id):
     data = request.get_json(force=True) or {}
     if 'name' in data:
         edna_profiles.rename_profile(profile_id, data['name'])
+    if 'description' in data:
+        prof = edna_profiles.get_profile(profile_id)
+        if prof is not None:
+            metrics = {k: prof.get(k, {}) for k in (
+                'speech_pacing', 'structural_rhythm', 'soundbite_craft',
+                'story_shape', 'content_patterns', 'natural_language_summary'
+            )}
+            metrics['description'] = (data.get('description') or '').strip()[:500]
+            edna_profiles.save_profile(profile_id, metrics)
     if 'active' in data:
         edna_profiles.set_profile_active_toggle(profile_id, bool(data['active']))
     if 'user_refinements' in data:
@@ -2709,10 +3045,75 @@ def edna_delete_profile(profile_id):
 
 @app.route('/api/editorial_dna/profiles/<profile_id>/activate', methods=['POST'])
 def edna_activate_profile(profile_id):
+    """Single-select activation: replaces the active set with this one profile.
+
+    The dropdown in the dashboard uses this — it preserves single-active
+    behaviour for users who don't care about blending. For multi-active see
+    the /active-set endpoint below.
+    """
     ok = edna_profiles.set_active(profile_id)
     if not ok:
         return jsonify({'error': 'Profile not found'}), 404
-    return jsonify({'active_profile_id': profile_id})
+    return jsonify({
+        'active_profile_id': profile_id,
+        'active_profile_ids': edna_profiles.get_active_profile_ids(),
+    })
+
+
+@app.route('/api/editorial_dna/profiles/<profile_id>/active-toggle', methods=['POST'])
+def edna_toggle_in_active_set(profile_id):
+    """Add or remove a profile from the multi-active set.
+
+    Body: ``{"active": true}`` adds, ``{"active": false}`` removes. Used by the
+    multi-toggle UI on the My Style page so the editor can blend Doc Style and
+    Social Cuts without losing one when they pick the other.
+    """
+    data = request.get_json(force=True) or {}
+    want = bool(data.get('active'))
+    if want:
+        ok = edna_profiles.add_active(profile_id)
+    else:
+        ok = edna_profiles.remove_active(profile_id)
+    if not ok and want:
+        return jsonify({'error': 'Profile not found'}), 404
+    return jsonify({'active_profile_ids': edna_profiles.get_active_profile_ids()})
+
+
+@app.route('/api/editorial_dna/active-set', methods=['POST'])
+def edna_set_active_set():
+    """Replace the entire active set in one call. Body: ``{"ids": [...]}``."""
+    data = request.get_json(force=True) or {}
+    ids = data.get('ids') or []
+    edna_profiles.set_active_ids(ids)
+    return jsonify({'active_profile_ids': edna_profiles.get_active_profile_ids()})
+
+
+@app.route('/api/editorial_dna/profiles/<profile_id>/sources/<path:source_filename>',
+           methods=['DELETE'])
+def edna_delete_source(profile_id, source_filename):
+    """Remove a single source from a profile (no auto-regenerate).
+
+    The UI prompts the user to regenerate after the delete completes — we don't
+    auto-regen because that's a long-running call and the user may want to
+    delete several sources first.
+    """
+    ok = edna_profiles.delete_source(profile_id, source_filename)
+    if not ok:
+        return jsonify({'error': 'Source not found'}), 404
+    return jsonify({'status': 'deleted'})
+
+
+@app.route('/api/editorial_dna/profiles/<profile_id>/sources/<path:source_filename>/retry',
+           methods=['POST'])
+def edna_retry_source(profile_id, source_filename):
+    """Retry a failed source by removing the failed entry; the UI then re-uploads.
+
+    We don't keep the original upload around (it lives in tempfile-land during
+    import), so retry from the server side just clears the failed entry. The
+    front-end re-prompts the user to drop the file again.
+    """
+    ok = edna_profiles.delete_source(profile_id, source_filename)
+    return jsonify({'status': 'cleared' if ok else 'not_found'})
 
 
 # ── Regenerate / refine ─────────────────────────────────────────────────────
@@ -2879,6 +3280,7 @@ def my_style_import():
         classify_energy_arc, detect_callbacks, estimate_topic_count,
     )
     from editorial_dna.summarizer import generate_summary
+    from editorial_dna import fcpxml_ingest as edna_fcpxml
 
     files = request.files.getlist('files')
     if not files:
@@ -2890,15 +3292,22 @@ def my_style_import():
     target_profile_id = request.form.get('profile_id') or edna_profiles.get_active_profile_id()
     if not target_profile_id:
         target_profile_id = edna_profiles.create_profile('My Style')
-    # Make sure the target is active so the import page re-renders with it
-    edna_profiles.set_active(target_profile_id)
+    # Make sure the target is in the active set so the page re-renders with it
+    if target_profile_id not in (edna_profiles.get_active_profile_ids() or []):
+        edna_profiles.add_active(target_profile_id)
 
-    # Supported extensions for My Style import
+    # Supported extensions for My Style import — video/audio go through the
+    # standard transcription pipeline, .fcpxml/.fcpxmld go through the FCPXML
+    # ingestion module which renders the dialogue timeline first.
     style_extensions = {'mp4', 'mov', 'm4v', 'mkv', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'aif', 'aiff'}
+    fcpxml_extensions = {'fcpxml', 'fcpxmld'}
 
     # IMPORTANT: Flask's request.files stream closes as soon as the response
     # generator starts yielding — so we must save every upload to disk BEFORE
     # entering the streaming generator. Otherwise we get "read of closed file".
+    # FCPXML bundles (.fcpxmld) arrive as either a single .fcpxml drop or as
+    # one or more files within the bundle — we accept both shapes here and let
+    # the parser handle it downstream.
     staged = []  # list of (original_filename, tmp_path, tmp_dir)
     for i, f in enumerate(files):
         fname = f.filename or f'file_{i}'
@@ -2930,8 +3339,9 @@ def my_style_import():
 
         for i, (fname, tmp_path, tmp_dir) in enumerate(staged):
             ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
+            is_fcpxml = ext in fcpxml_extensions
 
-            if ext not in style_extensions:
+            if ext not in style_extensions and not is_fcpxml:
                 yield json.dumps({'file': fname, 'status': 'skipped', 'reason': 'unsupported format', 'progress': i + 1, 'total': total_files}) + '\n'
                 continue
 
@@ -2942,43 +3352,71 @@ def my_style_import():
             yield json.dumps({'file': fname, 'status': 'processing', 'step': 'saving', 'progress': i + 1, 'total': total_files}) + '\n'
 
             try:
-                # Extract audio
-                yield json.dumps({'file': fname, 'status': 'processing', 'step': 'extracting audio'}) + '\n'
-                audio_path = extract_audio(tmp_path, project_dir=tmp_dir)
+                fcpxml_metadata = None
+                missing_media = []
 
-                # Transcribe
+                if is_fcpxml:
+                    # FCPXML path: parse, render dialogue-timeline WAV, then
+                    # transcribe the WAV. Missing media in the FCPXML is
+                    # surfaced to the UI but doesn't block the rest.
+                    yield json.dumps({'file': fname, 'status': 'processing', 'step': 'parsing FCPXML'}) + '\n'
+                    ingest = edna_fcpxml.stage_fcpxml(tmp_path, tmp_dir)
+                    audio_path = ingest.audio_path
+                    fcpxml_metadata = ingest.fcpxml_metadata
+                    missing_media = ingest.missing_media
+                    file_duration_hint = ingest.duration_seconds
+                    if missing_media:
+                        yield json.dumps({
+                            'file': fname,
+                            'status': 'warning',
+                            'reason': f'{len(missing_media)} clip(s) reference media not on disk; continuing with what was found',
+                            'missing_media': missing_media[:10],
+                        }) + '\n'
+                else:
+                    # Raw video/audio path: extract audio with ffmpeg, then
+                    # transcribe. file_duration comes from the transcriber.
+                    yield json.dumps({'file': fname, 'status': 'processing', 'step': 'extracting audio'}) + '\n'
+                    audio_path = extract_audio(tmp_path, project_dir=tmp_dir)
+                    file_duration_hint = None
+
+                # Transcribe (same path for both source types)
                 yield json.dumps({'file': fname, 'status': 'processing', 'step': 'transcribing'}) + '\n'
                 transcript = transcribe_file(audio_path, project_dir=tmp_dir)
 
                 # Analyze
                 yield json.dumps({'file': fname, 'status': 'processing', 'step': 'analyzing'}) + '\n'
                 metrics = edna_analyze(transcript)
-                file_duration = transcript.get('duration', 0)
+                file_duration = transcript.get('duration') or file_duration_hint or 0
 
-                # Merge with existing
+                # Merge with existing profile metrics
                 if merged and 'speech_pacing' in merged:
                     merged_metrics = merge_metrics(merged, metrics, file_duration)
                 else:
                     merged_metrics = {k: v for k, v in metrics.items() if not k.startswith('_')}
 
-                # Keep _raw from latest for classifier (will re-classify on merged)
                 merged_metrics['_raw'] = metrics.get('_raw', {})
                 merged = merged_metrics
 
-                # Capture the raw transcript text so the v2.1 structured
-                # analysis pass can run later. We keep this local to the
-                # profile folder — it never leaves the machine.
+                # Capture the raw transcript text so the structured analysis
+                # pass can run later. Stays local to the profile folder.
                 transcript_text = ' '.join(
                     seg.get('text', '') for seg in transcript.get('segments', [])
                 ).strip()
 
-                source_files.append({
+                source_entry = {
                     'filename': fname,
+                    'source_type': 'fcpxml' if is_fcpxml else 'video',
                     'imported_at': datetime.now().isoformat(),
-                    'duration_seconds': round(file_duration, 2),
+                    'duration_seconds': round(float(file_duration or 0), 2),
                     'transcribed_at': datetime.now().isoformat(),
                     'transcript_text': transcript_text,
-                })
+                }
+                if fcpxml_metadata is not None:
+                    source_entry['fcpxml_metadata'] = fcpxml_metadata
+                if missing_media:
+                    source_entry['missing_media'] = missing_media
+
+                source_files.append(source_entry)
 
                 processed_count += 1
                 yield json.dumps({'file': fname, 'status': 'done', 'progress': i + 1, 'total': total_files}) + '\n'
@@ -3111,4 +3549,11 @@ def my_style_import():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '5050'))
-    app.run(host='127.0.0.1', port=port, debug=True)
+    # Background pre-warm: load the configured Ollama model into RAM so
+    # the first chat call doesn't pay the 4-12s cold-start. Fire-and-
+    # forget thread; warmup_ollama swallows errors so a missing Ollama
+    # daemon doesn't block Flask startup.
+    import threading
+    from ai_analysis import warmup_ollama
+    threading.Thread(target=warmup_ollama, daemon=True).start()
+    app.run(host='127.0.0.1', port=port, debug=False, threaded=True)

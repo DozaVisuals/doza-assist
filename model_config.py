@@ -479,7 +479,7 @@ def get_variant_estimates(hw_info: dict = None, total_seconds: float = None) -> 
         variant, download_size, description = GEMMA4_VARIANTS[tier]
         tps = speeds.get(tier, 0.0)
         is_downloaded = variant in installed
-        if tier == 'medium' and 'gemma4:latest' in installed:
+        if not is_downloaded and 'gemma4:latest' in installed and tier == 'medium':
             is_downloaded = True
 
         if has_project_context:

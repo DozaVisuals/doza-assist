@@ -84,7 +84,13 @@ rsync -a \
     --exclude='tests' \
     --exclude='projects' \
     --exclude='exports' \
-    --exclude='docs' \
+    --include='docs/' \
+    --include='docs/storytelling-master.md' \
+    --exclude='docs/*' \
+    --exclude='.pytest_cache' \
+    --exclude='test_hardware_tier.py' \
+    --exclude='.github' \
+    --exclude='scripts' \
     --exclude='icon_build' \
     --exclude='build_launcher.sh' \
     --exclude='install.sh' \
@@ -122,9 +128,9 @@ cat > "${CONTENTS_DIR}/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.dozavisuals.transcribe</string>
     <key>CFBundleVersion</key>
-    <string>3.1.1</string>
+    <string>3.2.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.1.1</string>
+    <string>3.2.1</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

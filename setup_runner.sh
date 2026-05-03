@@ -50,7 +50,12 @@ find_python() {
                 local major minor
                 major=$(echo "$ver" | cut -d. -f1)
                 minor=$(echo "$ver" | cut -d. -f2)
-                if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
+                # Upper bound: lxml ships wheels for 3.11–3.13. Python 3.14
+                # has no lxml wheel as of 2026-04, and the source build fails
+                # on Macs without libxml2/libxslt headers. Reject untested
+                # versions so install_python falls through to a known-good
+                # Homebrew install instead of producing a broken venv.
+                if [ "$major" -eq 3 ] && [ "$minor" -ge 11 ] && [ "$minor" -le 13 ]; then
                     echo "$py"
                     return 0
                 fi

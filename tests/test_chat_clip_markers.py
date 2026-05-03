@@ -19,7 +19,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from ai_analysis import (  # noqa: E402
     _auto_wrap_timecode_ranges,
     _clean_chat_response,
+    _format_clip_title,
     _normalize_clip_markers,
+    _strip_raw_json_blobs,
 )
 
 
@@ -208,3 +210,83 @@ class TestAutoWrapTimecodeRanges:
         )
         out = _clean_chat_response(src)
         assert '[CLIP: start=00:31:31 end=00:32:19 title="Moment at 00:31:31"]' in out
+
+
+class TestFormatClipTitle:
+    def test_lowercase_title_is_capitalized(self):
+        assert _format_clip_title('papermaking artist process details') == 'Papermaking artist process details'
+
+    def test_already_capitalized_title_is_unchanged(self):
+        assert _format_clip_title('The turning point') == 'The turning point'
+
+    def test_proper_nouns_preserve_internal_capitals(self):
+        # Don't lowercase Chris/Crane after we capitalize the leading word.
+        assert _format_clip_title('chris on the Crane Estate hilltop') == 'Chris on the Crane Estate hilltop'
+
+    def test_extra_whitespace_is_collapsed(self):
+        assert _format_clip_title('  working   with   place  ') == 'Working with place'
+
+    def test_empty_title_passes_through(self):
+        assert _format_clip_title('') == ''
+
+    def test_normalizer_applies_sentence_case(self):
+        # The full normalizer pipeline should produce a sentence-case title
+        # in the rewritten marker even when the model emitted lowercase.
+        src = '[CLIP: start=00:12:00 end=00:13:00 title="papermaking artist process details"]'
+        out = _normalize_clip_markers(src)
+        assert '[CLIP: start=00:12:00 end=00:13:00 title="Papermaking artist process details"]' in out
+
+
+class TestStripRawJsonBlobs:
+    def test_screenshot_shape_is_stripped(self):
+        # The exact JSON dump shape from the user-reported broken chat.
+        src = (
+            'The overall feeling moves from technical process to deep '
+            'connection with the land and community.\n'
+            '{\n'
+            '"type": "highlight",\n'
+            '"content": "The initial part focuses on the process.",\n'
+            '"context": "The early discussion about making the art."\n'
+            '},\n'
+            '{\n'
+            '"type": "highlight",\n'
+            '"content": "The middle section shifts to history and community.",\n'
+            '"context": "When discussing local ecology."\n'
+            '}\n'
+            '[CLIP: start=00:12:00 end=00:00:35 title="Process details"]'
+        )
+        out = _strip_raw_json_blobs(src)
+        assert '"type"' not in out
+        assert '"highlight"' not in out
+        assert '"content"' not in out
+        assert '"context"' not in out
+        # Both the prose summary and the CLIP marker must survive intact.
+        assert 'The overall feeling moves from technical process' in out
+        assert '[CLIP: start=00:12:00 end=00:00:35 title="Process details"]' in out
+
+    def test_clean_chat_response_strips_json_in_full_pipeline(self):
+        src = (
+            'Short summary line.\n'
+            '{"type": "highlight", "content": "x", "context": "y"}\n'
+            '[CLIP: start=00:00:10 end=00:00:25 title="Picked moment"]'
+        )
+        out = _clean_chat_response(src)
+        assert '"type"' not in out
+        assert '"highlight"' not in out
+        assert 'Short summary line.' in out
+        assert '[CLIP: start=00:00:10 end=00:00:25 title="Picked moment"]' in out
+
+    def test_legitimate_braces_in_prose_are_preserved(self):
+        # We should only strip blobs that look like the model's JSON leak
+        # shape. A literal `{...}` in narration with no recognized keys
+        # should pass through.
+        src = 'Footage from {camera A} ran long.'
+        out = _strip_raw_json_blobs(src)
+        assert out == src
+
+    def test_clip_markers_with_braces_in_prose_are_preserved(self):
+        # The `[CLIP:]` marker has no curly braces, so it survives. Verify
+        # the stripper doesn't accidentally chew through bracket content.
+        src = '[CLIP: start=00:01:00 end=00:01:30 title="Opening shot"]'
+        out = _strip_raw_json_blobs(src)
+        assert out == src

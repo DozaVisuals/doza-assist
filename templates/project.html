@@ -20,6 +20,7 @@
     </div>
     <div class="btn-group">
         {% if not is_shared %}
+        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
         <a href="/" class="btn btn-sm">Projects</a>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="copyShareLink()" title="Copy shareable link">Share</button>
@@ -180,9 +181,14 @@
     <!-- Left Column: Player (persists across all tabs) -->
     <div class="player-col" id="playerCol">
         <div class="video-player-box" id="videoPlayerBox" style="{% if not is_video %}display:none{% endif %}">
-            <video id="videoPreview" preload="metadata" {% if is_video %}src="/project/{{ project.id }}/media"{% endif %} class="video-preview-main"></video>
+            <video id="videoPreview" preload="metadata" playsinline webkit-playsinline class="video-preview-main"></video>
         </div>
+        {# Audio element only when at least one project in scope is audio-only. #}
+        {# For video projects we never need it, and a stray <audio> in the DOM #}
+        {# can issue a metadata probe in some browsers even without src. #}
+        {% if not is_video or projects_meta|selectattr('is_video', 'equalto', false)|list %}
         <audio id="audioPlayer" preload="metadata" {% if not is_video %}src="/project/{{ project.id }}/media"{% endif %} style="display:none"></audio>
+        {% endif %}
 
         <div class="player-controls-box">
             <div class="player-inner">
@@ -354,6 +360,7 @@
                             <input type="checkbox" id="clipSelectAll" onchange="toggleAllClipChecks(this.checked)"> All
                         </label>
                         <button class="btn btn-sm" onclick="exportClips()">Export</button>
+                        <button class="btn btn-sm" onclick="sendToNle()" data-export-label-key="send-to-nle">Send to Final Cut Pro</button>
                     </div>
                 </div>
                 <div class="clips-grid" id="clipsGrid">
@@ -390,6 +397,11 @@
                     data-export-label-key="section" data-export-label-tooltip="story">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 <span data-export-label-text>FCPX</span>
+            </button>
+            <button class="analysis-section-export" onclick="sendToNle()"
+                    data-send-tooltip title="Send to selected NLE">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                <span>Send</span>
             </button>
         </div>
         <div class="analysis-list">
@@ -428,6 +440,11 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 <span data-export-label-text>FCPX</span>
             </button>
+            <button class="analysis-section-export" onclick="sendToNle()"
+                    data-send-tooltip title="Send to selected NLE">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                <span>Send</span>
+            </button>
         </div>
         <div class="analysis-list">
             {% for clip in project.analysis.social_clips %}
@@ -465,6 +482,11 @@
                     data-export-label-key="section" data-export-label-tooltip="soundbites">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 <span data-export-label-text>FCPX</span>
+            </button>
+            <button class="analysis-section-export" onclick="sendToNle()"
+                    data-send-tooltip title="Send to selected NLE">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                <span>Send</span>
             </button>
         </div>
         <div class="analysis-list">
@@ -603,6 +625,7 @@
                     <span id="storyPlayAllLabel">Play All</span>
                 </button>
                 <button class="btn btn-primary" onclick="exportStoryFCPXML()" data-export-label-key="story-seq">Export to FCPX</button>
+                <button class="btn" onclick="sendStoryToNle()" data-export-label-key="send-to-nle">Send to Final Cut Pro</button>
                 <button class="btn btn-green" onclick="addAllStoryClips()">Add All to Clips</button>
                 <button class="btn" onclick="rebuildStory()">Rebuild</button>
             </div>
@@ -674,6 +697,9 @@
                 <button class="btn btn-primary" id="exportFCPXMLBtn" onclick="exportFCPXML()" data-export-label-key="unified" style="width:100%;">
                     Export to FCPX
                 </button>
+                <button class="btn" id="sendToNleBtn" onclick="sendToNle()" data-export-label-key="send-to-nle" style="width:100%; margin-top: 0.5rem;">
+                    Send to Final Cut Pro
+                </button>
                 {% if project.fcpxml_source %}
                 <div class="export-roundtrip">
                     <div class="card-title" style="margin-bottom: 0.5rem; font-size: 0.95rem;">FCPXML Round-Trip</div>
@@ -695,8 +721,16 @@
                         <button class="btn btn-primary" onclick="exportFCPXMLMulticam('selects_project')">
                             Export FCPXML — Selects as new project
                         </button>
+                        <button class="btn" onclick="sendMulticamToNle('selects_project')"
+                                title="Send round-trip FCPXML straight to Final Cut Pro">
+                            Send to Final Cut Pro — Selects as new project
+                        </button>
                         <button class="btn" onclick="exportFCPXMLMulticam('markers_timeline')">
                             Export FCPXML — Markers on existing timeline
+                        </button>
+                        <button class="btn" onclick="sendMulticamToNle('markers_timeline')"
+                                title="Send round-trip FCPXML straight to Final Cut Pro">
+                            Send to Final Cut Pro — Markers on existing timeline
                         </button>
                     </div>
                 </div>
@@ -742,6 +776,23 @@ function toggleTheme() {
     document.documentElement.setAttribute('data-theme', saved || 'light');
 })();
 
+async function refreshActivePill() {
+    try {
+        const res = await fetch('/api/editorial_dna/active-summary');
+        const data = await res.json();
+        const pill = document.getElementById('headerActivePill');
+        if (!pill) return;
+        if (!data.count) {
+            pill.textContent = 'No active style';
+            pill.classList.remove('is-on');
+        } else {
+            pill.textContent = 'Active: ' + (data.names || []).join(', ');
+            pill.classList.add('is-on');
+        }
+    } catch (e) { /* non-blocking */ }
+}
+window.addEventListener('DOMContentLoaded', refreshActivePill);
+
 const PROJECT_ID = '{{ project.id }}';
 const PROJECT = {{ project | tojson }};
 const PROJECT_IDS = {{ active_ids | tojson }};
@@ -759,6 +810,7 @@ const SHORT_NAMES    = { fcp: 'FCPX',          premiere: 'PrPro',        resolve
 
 const EXPORT_LABELS = {
     'unified':    p => `Export to ${SHORT_NAMES[p]}`,
+    'send-to-nle':p => `Send to ${PLATFORM_NAMES[p]}`,
     'story-seq':  p => `Export to ${PLATFORM_NAMES[p]}`,
     'section':    p => SHORT_NAMES[p],
     'card-title': p => `${FORMAT_NAMES[p]} Export`,
@@ -943,6 +995,12 @@ let currentPlayerIsVideo = {{ 'true' if is_video else 'false' }};
 
 function switchPlayerElement(useVideo) {
     if (useVideo === currentPlayerIsVideo) return;
+    // audioEl is null when this view contains no audio-only projects.
+    // Refuse to switch to an element that doesn't exist.
+    if (!useVideo && !audioEl) {
+        console.warn('[player] switch to audio refused: no audio element in DOM');
+        return;
+    }
     const oldPlayer = audio;
     const wasPlaying = oldPlayer && !oldPlayer.paused;
     if (oldPlayer) oldPlayer.pause();
@@ -1005,6 +1063,10 @@ function registerTimeUpdateHandler(fn) {
 }
 
 bindPlayerEvents();
+
+{% if is_video %}
+videoEl.src = "/project/{{ project.id }}/media";
+{% endif %}
 
 // Detect manual scrolling to pause auto-scroll
 if (transcriptContainer) {
@@ -1786,11 +1848,12 @@ async function streamChatReply({ message, typing, progressTimer }) {
     }
 
     if (progressTimer) clearTimeout(progressTimer);
-    // Replace the typing dots with an empty bubble we'll stream into. This
-    // way the user sees the first token within ~500ms instead of waiting
-    // for the whole reply to land.
+    // Keep the typing indicator visible throughout streaming. We accumulate
+    // tokens silently and only swap to the rendered clip cards + prose when
+    // the `done` event lands. Showing raw token stream led to model thoughts
+    // and "[No answer]" placeholders flashing visibly before being replaced.
     const bubble = typing;
-    bubble.innerHTML = '';
+    bubble.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> Thinking…';
     bubble.classList.add('chat-streaming');
 
     const reader = res.body.getReader();
@@ -1817,8 +1880,12 @@ async function streamChatReply({ message, typing, progressTimer }) {
                 catch (_) { continue; }
                 const ev = payload.event;
                 if (ev === 'token') {
+                    // Accumulate silently — the bubble keeps the "Thinking…"
+                    // indicator visible until the `done` event delivers the
+                    // cleaned final reply, which renderChatReply then renders
+                    // as clip cards + prose. streamedText is preserved as a
+                    // fallback in case the stream cuts off before `done`.
                     streamedText += String(payload.data || '');
-                    bubble.textContent = streamedText;
                 } else if (ev === 'progress') {
                     // Progress events come from Layer 2 chunked search
                     // ("Searching across the full interview…"). Show them
@@ -1938,6 +2005,7 @@ function renderChatStoryCard(build) {
     html += `<div class="chat-story-result-actions">`;
     html += `<button class="btn btn-primary btn-sm" onclick="sendChatStoryToBuilder('${bid}', this)">Send to Story Builder</button>`;
     html += `<button class="btn btn-sm" onclick="exportStoryFCPXMLFromChat('${bid}')" data-export-label-key="story-seq">Export to ${PLATFORM_NAMES[EDITING_PLATFORM] || 'FCPX'}</button>`;
+    html += `<button class="btn btn-sm" onclick="sendStoryToNleFromChat('${bid}')" data-export-label-key="send-to-nle">Send to ${PLATFORM_NAMES[EDITING_PLATFORM] || 'NLE'}</button>`;
     html += `</div></div>`;
 
     return html;
@@ -2184,6 +2252,12 @@ function renderChatReply(text) {
         }
     );
 
+    // Markdown pass on narration only (cards are stashed). escapeHtml has
+    // already neutralized real HTML, so these regexes operate on inert text.
+    // Bold first so its `**` are consumed before single-asterisk italic runs.
+    html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s.,!?:;)]|$)/g, '$1<em>$2</em>');
+
     // Convert FREE-TEXT timecodes (outside cards) to clickable links with + button.
     // Cards are already stashed above, so this only touches narration text
     // and doesn't mangle timecodes rendered inside the card HTML.
@@ -2297,16 +2371,39 @@ function _onChatClipTimeUpdate() {
     const start = parseFloat(el.dataset.start);
     const end = parseFloat(el.dataset.end);
     const fill = document.getElementById('ccfill_' + activeChatClip);
+    const ct = audio.currentTime;
 
-    if (audio.currentTime >= end) {
+    // Seek-transition guard. When playChatClip sets `audio.currentTime = start`,
+    // WKWebView keeps firing `timeupdate` with the PRIOR position for a brief
+    // window before the seek actually lands — observed reliably on large MP4s
+    // (4K H.264 200+ Mbps, 40+ GB). Without this guard, clicking a clip whose
+    // `end` is BEFORE the current playhead (e.g. clicked clip 1 at 0:25 right
+    // after finishing clip 3 at 12:20) would see `ct = 740 >= end = 25` on the
+    // first timeupdate and auto-pause instantly, ~0.5s into decoded playback.
+    //
+    // Discriminate real end-of-clip from stale state by overshoot magnitude:
+    //   - ct < start              → seek not landed yet, ignore.
+    //   - end <= ct <= end + 2    → natural end of clip, pause.
+    //   - ct > end + 2            → stale prior position OR user scrubbed past
+    //                               the clip; release the active state without
+    //                               touching playback.
+    if (ct < start) {
+        return;
+    }
+    if (ct >= end && ct <= end + 2.0) {
         audio.pause();
         if (fill) fill.style.width = '100%';
         el.classList.remove('cc-playing');
         activeChatClip = null;
         _updateChatClipIcons();
         setTimeout(() => { if (fill) fill.style.width = '0%'; }, 400);
-    } else if (audio.currentTime >= start && fill) {
-        const pct = ((audio.currentTime - start) / (end - start)) * 100;
+    } else if (ct > end + 2.0) {
+        el.classList.remove('cc-playing');
+        if (fill) fill.style.width = '0%';
+        activeChatClip = null;
+        _updateChatClipIcons();
+    } else if (fill) {
+        const pct = ((ct - start) / (end - start)) * 100;
         fill.style.width = pct + '%';
     }
 }
@@ -2997,6 +3094,150 @@ async function exportFCPXML() {
         }
     } catch (err) {
         showToast('Export error: ' + err.message, true);
+    }
+}
+
+// ── Send to NLE (one-click: export + open in the chosen editor) ──
+// Most callers (Export tab + section buttons) hit this function. The
+// chosen NLE always comes from EDITING_PLATFORM at the top of the window
+// so a single button reflects the user's current selection. The Story
+// Builder uses sendStoryToNle() because its export path is different.
+async function sendToNle() {
+    const types = _collectExportCategories();
+    if (types.length === 0) {
+        showToast('Check at least one category to send.');
+        return;
+    }
+    if (types.includes('labels')) {
+        if (labelSections.length === 0) {
+            showToast('No clips to send. Uncheck "My Clips" or highlight some in the transcript first.');
+            return;
+        }
+        // Persist labels first so the server sees the latest state.
+        const sections = labelSections.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
+        });
+    }
+
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    const mode = document.getElementById('exportMode')?.value || 'cuts';
+    const platName = PLATFORM_NAMES[EDITING_PLATFORM] || 'NLE';
+
+    try {
+        const res = await fetch('/export/send-to-nle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: PROJECT_ID,
+                nle: EDITING_PLATFORM,
+                export_type: 'selects',
+                types, framerate, mode,
+                total_clips: labelSections.length,
+            }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+            const name = data.nle_name || platName;
+            const tail = data.opened_in === 'finder' ? ' — revealed in Finder' : '';
+            showToast(`Sent to ${name}${tail}`);
+        } else {
+            showToast((data && data.error) || `Could not send to ${platName}`, true);
+        }
+    } catch (err) {
+        showToast('Send failed: ' + err.message, true);
+    }
+}
+
+// Send the currently-loaded story build to the chosen NLE. Mirrors
+// exportStoryFCPXML() but routes through /export/send-to-nle so the
+// generated timeline opens directly in the editor.
+async function sendStoryToNle() {
+    const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build || !build.clips || build.clips.length === 0) {
+        showToast('No clips to send');
+        return;
+    }
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    const platName = PLATFORM_NAMES[EDITING_PLATFORM] || 'NLE';
+
+    try {
+        const res = await fetch('/export/send-to-nle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: PROJECT_ID,
+                nle: EDITING_PLATFORM,
+                export_type: 'story_builder',
+                clips: build.clips,
+                story_title: build.story_title,
+                framerate,
+            }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+            const name = data.nle_name || platName;
+            const tail = data.opened_in === 'finder' ? ' — revealed in Finder' : '';
+            showToast(`Sent to ${name}${tail}`);
+        } else {
+            showToast((data && data.error) || `Could not send to ${platName}`, true);
+        }
+    } catch (err) {
+        showToast('Send failed: ' + err.message, true);
+    }
+}
+
+// Chat-spawned story builds aren't yet "loaded" in the Story Builder pane;
+// switch context first (mirroring exportStoryFCPXMLFromChat) before sending.
+function sendStoryToNleFromChat(buildId) {
+    const build = storyBuilds.find(b => b.id === buildId);
+    if (!build) { showToast('Story not found', true); return; }
+    currentBuildId = buildId;
+    sendStoryToNle();
+}
+
+// Hand the round-trip FCPXML straight to Final Cut Pro. The multicam writer
+// reuses FCP's multicam / sync-clip container, so the output is FCP-only —
+// we ignore EDITING_PLATFORM here and always target FCP. The backend
+// enforces the same on its side.
+async function sendMulticamToNle(mode) {
+    if (typeof labelSections !== 'undefined' && labelSections.length) {
+        const sections = labelSections.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
+        });
+    }
+
+    const source = document.getElementById('fcpxmlMulticamSource')?.value || 'client_selects';
+
+    try {
+        const res = await fetch('/export/send-to-nle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project_id: PROJECT_ID,
+                nle: 'fcp',
+                export_type: 'multicam',
+                mode, source,
+            }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+            const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
+            showToast(`Sent to Final Cut Pro — ${modeLabel}`);
+        } else {
+            showToast((data && data.error) || 'Could not send to Final Cut Pro', true);
+        }
+    } catch (err) {
+        showToast('Send failed: ' + err.message, true);
     }
 }
 

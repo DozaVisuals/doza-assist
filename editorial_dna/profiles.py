@@ -60,16 +60,43 @@ def _ensure_dirs(profile_id=None):
 
 def _load_index():
     if not os.path.isfile(INDEX_PATH):
-        return {'active_profile_id': None, 'profiles': []}
+        return _normalize_index({'active_profile_ids': [], 'profiles': []})
     try:
         with open(INDEX_PATH, 'r') as f:
-            return json.load(f)
+            return _normalize_index(json.load(f))
     except (json.JSONDecodeError, IOError):
-        return {'active_profile_id': None, 'profiles': []}
+        return _normalize_index({'active_profile_ids': [], 'profiles': []})
+
+
+def _normalize_index(index):
+    """Make sure the index has both ``active_profile_id`` (legacy single) and
+    ``active_profile_ids`` (current multi). Older indexes only have the singular
+    field; newer code reads/writes the plural and we mirror them on save.
+    """
+    if not isinstance(index, dict):
+        return {'active_profile_ids': [], 'active_profile_id': None, 'profiles': []}
+    profiles = index.get('profiles') or []
+    valid_ids = {p['id'] for p in profiles if isinstance(p, dict) and p.get('id')}
+
+    plural = index.get('active_profile_ids')
+    singular = index.get('active_profile_id')
+
+    if isinstance(plural, list):
+        ids = [pid for pid in plural if isinstance(pid, str) and pid in valid_ids]
+    elif isinstance(singular, str) and singular in valid_ids:
+        ids = [singular]
+    else:
+        ids = []
+
+    index['active_profile_ids'] = ids
+    index['active_profile_id'] = ids[0] if ids else None
+    index['profiles'] = profiles
+    return index
 
 
 def _save_index(index):
     _ensure_dirs()
+    index = _normalize_index(index)
     with open(INDEX_PATH, 'w') as f:
         json.dump(index, f, indent=2)
 
@@ -119,17 +146,17 @@ def _read_text(path, default=''):
 # ---------------------------------------------------------------------------
 
 def list_profiles():
-    """Return the index list with active flag resolved per entry."""
+    """Return the index list with the multi-active flag resolved per entry."""
     _maybe_migrate_legacy()
     index = _load_index()
-    active_id = index.get('active_profile_id')
+    active_ids = set(index.get('active_profile_ids') or [])
     out = []
     for entry in index.get('profiles', []):
         out.append({
             'id': entry['id'],
             'name': entry['name'],
             'created_at': entry.get('created_at'),
-            'is_active': entry['id'] == active_id,
+            'is_active': entry['id'] in active_ids,
         })
     return out
 
@@ -153,36 +180,93 @@ def get_profile(profile_id):
 
 
 def get_active_profile():
-    """Return the currently active profile dict or None.
+    """Return the FIRST active profile dict or None.
 
-    Respects the legacy `active` boolean — if the active profile is explicitly
-    toggled off, this returns None so the injector skips it (matches v1
-    semantics of the master toggle).
+    Kept for legacy callers that assume single-active semantics. New code
+    should use ``get_active_profiles()`` instead and let the injector handle
+    blending.
+    """
+    profiles = get_active_profiles()
+    return profiles[0] if profiles else None
+
+
+def get_active_profiles():
+    """Return every active profile, in the order they were activated.
+
+    Respects each profile's within-profile ``active`` toggle — if the user
+    flipped a profile off via the master switch, it's omitted here even if
+    its id is still in ``active_profile_ids``. That keeps the toggle and the
+    multi-active set independent.
     """
     _maybe_migrate_legacy()
     index = _load_index()
-    active_id = index.get('active_profile_id')
-    if not active_id:
-        return None
-    profile = get_profile(active_id)
-    if profile is None:
-        return None
-    if not profile.get('active', True):
-        return None
-    return profile
+    out = []
+    for pid in (index.get('active_profile_ids') or []):
+        profile = get_profile(pid)
+        if profile is None:
+            continue
+        if not profile.get('active', True):
+            continue
+        out.append(profile)
+    return out
 
 
 def get_active_profile_id():
+    """Legacy: return the first active profile id. New code: use
+    ``get_active_profile_ids()``.
+    """
     _maybe_migrate_legacy()
-    return _load_index().get('active_profile_id')
+    ids = _load_index().get('active_profile_ids') or []
+    return ids[0] if ids else None
+
+
+def get_active_profile_ids():
+    _maybe_migrate_legacy()
+    return list(_load_index().get('active_profile_ids') or [])
 
 
 def set_active(profile_id):
-    """Make profile_id the active one."""
+    """Make ``profile_id`` the ONLY active profile.
+
+    Single-select semantics — clears any other active ids first. The
+    multi-toggle UI uses ``add_active`` / ``remove_active`` instead.
+    """
     index = _load_index()
     if profile_id is not None and not any(e['id'] == profile_id for e in index.get('profiles', [])):
         return False
-    index['active_profile_id'] = profile_id
+    index['active_profile_ids'] = [profile_id] if profile_id else []
+    _save_index(index)
+    return True
+
+
+def add_active(profile_id):
+    """Add ``profile_id`` to the active set (idempotent)."""
+    index = _load_index()
+    if not any(e['id'] == profile_id for e in index.get('profiles', [])):
+        return False
+    ids = list(index.get('active_profile_ids') or [])
+    if profile_id not in ids:
+        ids.append(profile_id)
+    index['active_profile_ids'] = ids
+    _save_index(index)
+    return True
+
+
+def remove_active(profile_id):
+    """Remove ``profile_id`` from the active set (idempotent)."""
+    index = _load_index()
+    ids = [pid for pid in (index.get('active_profile_ids') or []) if pid != profile_id]
+    index['active_profile_ids'] = ids
+    _save_index(index)
+    return True
+
+
+def set_active_ids(profile_ids):
+    """Replace the active set with ``profile_ids`` (drops unknown ids)."""
+    index = _load_index()
+    valid = {e['id'] for e in index.get('profiles', [])}
+    cleaned = [pid for pid in (profile_ids or []) if pid in valid]
+    index['active_profile_ids'] = cleaned
     _save_index(index)
     return True
 
@@ -218,8 +302,8 @@ def create_profile(name, description=''):
 
     index = _load_index()
     index.setdefault('profiles', []).append(_index_entry(profile_id, name, now))
-    if not index.get('active_profile_id'):
-        index['active_profile_id'] = profile_id
+    if not (index.get('active_profile_ids') or []):
+        index['active_profile_ids'] = [profile_id]
     _save_index(index)
     return profile_id
 
@@ -305,16 +389,36 @@ def set_profile_active_toggle(profile_id, active):
 
 
 def delete_profile(profile_id):
-    """Remove a profile folder + index entry. If it was active, clear active."""
+    """Remove a profile folder + index entry. Drop it from the active set if
+    present.
+    """
     pd = _profile_dir(profile_id)
     if os.path.isdir(pd):
         shutil.rmtree(pd, ignore_errors=True)
     index = _load_index()
     index['profiles'] = [e for e in index.get('profiles', []) if e['id'] != profile_id]
-    if index.get('active_profile_id') == profile_id:
-        index['active_profile_id'] = (index['profiles'][0]['id']
-                                      if index['profiles'] else None)
+    index['active_profile_ids'] = [
+        pid for pid in (index.get('active_profile_ids') or []) if pid != profile_id
+    ]
     _save_index(index)
+    return True
+
+
+def delete_source(profile_id, source_filename):
+    """Remove a single source file entry from a profile by filename match.
+
+    Returns True if a row was removed. Subsequent regenerate() calls will
+    re-derive metrics and the structured summary from what's left.
+    """
+    pd = _profile_dir(profile_id)
+    if not os.path.isdir(pd):
+        return False
+    sources = _read_json(os.path.join(pd, 'source_files.json'), default=[]) or []
+    before = len(sources)
+    remaining = [s for s in sources if s.get('filename') != source_filename]
+    if len(remaining) == before:
+        return False
+    _write_json(os.path.join(pd, 'source_files.json'), remaining)
     return True
 
 
@@ -384,8 +488,10 @@ def import_bundle(bundle, overwrite=False):
                              entry.get('profile', {}).get('created_at')
                              or datetime.now().isoformat())
             )
-        if not index.get('active_profile_id'):
-            index['active_profile_id'] = pid
+        # If nothing is active yet, activate the first imported profile so the
+        # user has something selected immediately.
+        if not (index.get('active_profile_ids') or []):
+            index['active_profile_ids'] = [pid]
         _save_index(index)
         imported.append(pid)
     return imported
@@ -405,14 +511,14 @@ def _maybe_migrate_legacy():
         return  # already migrated
     if not os.path.isfile(LEGACY_PROFILE_PATH):
         # First-time user: just write an empty index so we don't re-check every call
-        _save_index({'active_profile_id': None, 'profiles': []})
+        _save_index({'active_profile_ids': [], 'profiles': []})
         return
 
     try:
         with open(LEGACY_PROFILE_PATH, 'r') as f:
             legacy = json.load(f)
     except (json.JSONDecodeError, IOError):
-        _save_index({'active_profile_id': None, 'profiles': []})
+        _save_index({'active_profile_ids': [], 'profiles': []})
         return
 
     # Promote the legacy profile into a v2.1 folder called "My Style"
@@ -481,7 +587,7 @@ def _maybe_migrate_legacy():
                 legacy.get('source_files', []))
 
     index = {
-        'active_profile_id': profile_id,
+        'active_profile_ids': [profile_id],
         'profiles': [_index_entry(profile_id, name, v2_profile['created_at'])],
     }
     _save_index(index)

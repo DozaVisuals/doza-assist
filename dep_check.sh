@@ -55,7 +55,7 @@ fi
 # only when the user tried to transcribe. Check the full set used at
 # app.py import time.
 if [ -x "$VENV_DIR/bin/python3" ]; then
-    if ! "$VENV_DIR/bin/python3" -c "import flask, werkzeug, requests, certifi" 2>/dev/null; then
+    if ! "$VENV_DIR/bin/python3" -c "import flask, werkzeug, requests, certifi, lxml.etree" 2>/dev/null; then
         echo "pip_packages"
         missing=1
     fi

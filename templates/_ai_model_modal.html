@@ -48,12 +48,25 @@ async function openAIModelModal(projectId) {
         const url = _aiModalProjectId
             ? `/api/ai-model/status?project_id=${encodeURIComponent(_aiModalProjectId)}`
             : '/api/ai-model/status';
-        const resp = await fetch(url);
+        // Hard timeout so a hung Ollama daemon (or unreachable backend) can't
+        // leave the modal stuck in "Detecting hardware…" with no clickable
+        // exit. Tauri WKWebView won't auto-cancel a stalled fetch.
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 12000);
+        let resp;
+        try {
+            resp = await fetch(url, { signal: ctrl.signal });
+        } finally {
+            clearTimeout(timer);
+        }
         if (!resp.ok) throw new Error(await resp.text());
         const data = await resp.json();
         renderAIModelModal(data);
     } catch (e) {
-        document.getElementById('aiModalHardware').textContent = 'Could not load model status: ' + e.message;
+        const msg = e.name === 'AbortError'
+            ? 'Timed out talking to the local backend. Is Ollama running?'
+            : 'Could not load model status: ' + (e.message || e);
+        document.getElementById('aiModalHardware').textContent = msg;
     }
 }
 
@@ -66,8 +79,27 @@ function renderAIModelModal(data) {
     const projectNote = data.project_context
         ? `Estimates are for a full analysis of <strong>${data.project_context.project_name}</strong> (${_formatMinutes(data.project_context.duration_seconds)}).`
         : 'Estimates below are per call. Full analysis time scales with transcript length.';
-    document.getElementById('aiModalHardware').innerHTML =
-        `Your Mac: <strong>${hw.arch_label}</strong> · <strong>${hw.ram_gb} GB RAM</strong> · ${hw.disk_gb} GB free. ` + projectNote;
+
+    // Surface a mismatch warning when the selected variant isn't actually
+    // installed and Ollama is silently using a different model. Without this,
+    // users see no speed/quality changes after picking a "larger" tier
+    // because nothing actually swapped — the picker just wrote a config
+    // file pointing at a model that isn't on disk.
+    let mismatchNote = '';
+    const eff = data.effective || {};
+    if (eff.fallback_used && eff.model && eff.selected_variant && eff.model !== eff.selected_variant) {
+        mismatchNote = `<div class="ai-modal-mismatch">
+            <strong>Heads up:</strong> you selected <code>${eff.selected_variant}</code>
+            but it isn't downloaded. Ollama is actually running <code>${eff.model}</code>.
+            Click <em>Download</em> on your selection below to fix this.
+        </div>`;
+    }
+
+    const hardwareLine = `Your Mac: <strong>${hw.arch_label}</strong> · <strong>${hw.ram_gb} GB RAM</strong> · ${hw.disk_gb} GB free. ` + projectNote;
+    const currentLine = eff.model
+        ? `<div class="ai-modal-current-model">Currently loaded: <code>${eff.model}</code></div>`
+        : '';
+    document.getElementById('aiModalHardware').innerHTML = hardwareLine + currentLine + mismatchNote;
 
     const container = document.getElementById('aiModalVariants');
     container.innerHTML = '';
@@ -127,21 +159,44 @@ function _formatMinutes(seconds) {
     return `${h}h ${String(mm).padStart(2, '0')}m`;
 }
 
+// Inline status banner used instead of native alert() — Tauri WKWebView
+// silently drops alert/confirm/prompt, which previously left the modal
+// stuck in a half-disabled state with no error visible to the user.
+function _setAIModalError(msg) {
+    const hw = document.getElementById('aiModalHardware');
+    if (!hw) return;
+    if (msg) {
+        hw.textContent = msg;
+        hw.style.color = 'var(--accent)';
+    } else {
+        hw.style.color = '';
+    }
+}
+
 async function _useAIVariant(tier, btn) {
     btn.disabled = true;
     btn.textContent = 'Saving…';
+    _setAIModalError('');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
     try {
         const resp = await fetch('/api/ai-model', {
             method: 'PATCH',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({tier}),
+            signal: ctrl.signal,
         });
         if (!resp.ok) throw new Error((await resp.json()).error || resp.status);
         await openAIModelModal(_aiModalProjectId);
     } catch (e) {
-        alert('Could not set model: ' + e.message);
+        const msg = e.name === 'AbortError'
+            ? 'Timed out setting model. Is the backend reachable?'
+            : 'Could not set model: ' + (e.message || e);
+        _setAIModalError(msg);
         btn.disabled = false;
         btn.textContent = 'Use this';
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -211,7 +266,7 @@ async function _downloadAIVariant(tier, btn) {
     }
 
     if (!succeeded) {
-        alert('Download failed: ' + (errorMsg || 'unknown error'));
+        _setAIModalError('Download failed: ' + (errorMsg || 'unknown error'));
         btn.disabled = false;
         btn.textContent = btn.dataset.originalText || 'Download';
         progress.style.display = 'none';

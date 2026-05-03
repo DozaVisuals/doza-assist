@@ -3,12 +3,194 @@ AI Analysis for Doza Assist.
 Uses Ollama (local) or Claude API for story structure and social clip suggestions.
 """
 
+import hashlib
 import os
 import json
+import threading
+from collections import OrderedDict
+
 import requests
 
-from editorial_dna.injector import inject_my_style
+from editorial_dna.injector import get_active_style_block, inject_my_style
 from editorial_dna.storytelling import inject_storytelling_foundation
+
+# Keep the Ollama model resident in memory between requests. Default is
+# 5 minutes — too short for an editor reading a reply before typing the
+# next question. 30 minutes covers normal session rhythm. Set on every
+# generate call in this module so a single tweak propagates everywhere.
+_OLLAMA_KEEP_ALIVE = '30m'
+
+
+def _load_chat_system_prompt():
+    """Load the master chat system prompt from prompts/chat-system-prompt.md.
+
+    Runs once at module import. Extracts the content between the first pair
+    of triple-backtick fences in the markdown file (so the surrounding
+    document metadata — purpose, implementation notes — doesn't leak into
+    the LLM context). Returns ``None`` if the file is missing; callers
+    must surface the error visibly rather than silently degrading.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, 'prompts', 'chat-system-prompt.md')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except FileNotFoundError:
+        return None
+    parts = content.split('```')
+    # Markdown ```...``` fenced block: parts[1] is the content between the
+    # first opening and closing fence. Lower-index parts are the prose
+    # before the fence; higher-index parts are everything after.
+    if len(parts) >= 3:
+        return parts[1].strip()
+    # No fence found — return the whole document so the prompt is at least
+    # present, even if surrounding prose leaks. Prefer this over silently
+    # using nothing.
+    return content.strip()
+
+
+CHAT_SYSTEM_PROMPT = _load_chat_system_prompt()
+
+
+def _format_duration_seconds(secs):
+    """Format a float duration as H:MM:SS or M:SS — for the transcript header."""
+    if not secs or secs <= 0:
+        return '0:00'
+    s = int(secs)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f'{h}:{m:02d}:{sec:02d}'
+    return f'{m}:{sec:02d}'
+
+
+def _extract_speaker_names(segments):
+    """Pull a deduplicated, ordered list of speaker labels from a segment list."""
+    seen = set()
+    out = []
+    for seg in segments or []:
+        spk = (seg.get('speaker') or '').strip()
+        if spk and spk not in seen:
+            seen.add(spk)
+            out.append(spk)
+    return out
+
+
+def _build_transcript_message(project_name, segments, formatted,
+                              analysis_block, relevant_excerpts_block):
+    """The user-role transcript message: opening declarative line so the
+    LLM treats this as loaded data (not a request to provide a transcript),
+    then the project header, then the word-level transcript and any
+    analysis / relevant-excerpts blocks.
+
+    The declarative opener matters for Gemma 4B's instruction-following:
+    without it, the model sometimes reads the message as "user is about
+    to paste a transcript" and replies asking the user to do so.
+    """
+    duration_sec = segments[-1].get('end', 0) if segments else 0
+    parts = [
+        "Here is the loaded project. Use this transcript to answer "
+        "everything I ask after this message.",
+        '',
+        f'PROJECT: {project_name}',
+        f'DURATION: {_format_duration_seconds(duration_sec)}',
+    ]
+    speakers = _extract_speaker_names(segments)
+    if speakers:
+        parts.append(f"SPEAKERS: {', '.join(speakers)}")
+    parts.append('')
+    parts.append('TRANSCRIPT:')
+    parts.append(formatted)
+    if analysis_block:
+        parts.append(analysis_block)
+    if relevant_excerpts_block:
+        parts.append(relevant_excerpts_block)
+    return '\n'.join(parts)
+
+
+def _build_transcript_ack(project_name):
+    """The fake assistant acknowledgement that follows the transcript
+    message. Anchors the model in 'transcript already received' mode so
+    the next user turn is treated as a question against the loaded data,
+    not as the user pasting source material. Brief on purpose — anything
+    longer becomes its own context drag."""
+    return f"Transcript loaded for '{project_name}'. What would you like to find?"
+
+
+def _build_chat_messages(message, history, project_name, segments,
+                        formatted, analysis_block, relevant_excerpts_block,
+                        profile_id):
+    """Construct the (system_message, messages_array) pair for an Ollama
+    /api/chat call.
+
+    Layout:
+      system        : CHAT_SYSTEM_PROMPT + storytelling foundation
+      user (opt.)   : STYLE CONTEXT — only when a My Style profile is active
+      user          : PROJECT/DURATION/SPEAKERS/TRANSCRIPT block
+      ...history... : prior user/assistant turns (capped at last 6)
+      user          : the current user message
+
+    History cap: 6 entries (3 round-trips). Long transcripts already eat
+    most of the context window; older turns rarely contribute editorial
+    value beyond what's already in the system + transcript.
+    """
+    if CHAT_SYSTEM_PROMPT is None:
+        raise RuntimeError(
+            'Chat system prompt missing. Expected at '
+            'core/prompts/chat-system-prompt.md.'
+        )
+    # Use the master chat prompt as the system message verbatim. The
+    # storytelling foundation (master.md, ~76 KB) is intentionally NOT
+    # appended here: the new chat prompt is self-contained for chat use,
+    # and prepending the foundation pushes the system message past
+    # Gemma 4B's effective context budget. Foundation continues to be
+    # available to Story Builder and AI Analysis via inject_storytelling_foundation
+    # in those separate code paths.
+    system_message = CHAT_SYSTEM_PROMPT
+
+    messages = []
+    style_block = get_active_style_block(profile_id=profile_id)
+    if style_block:
+        messages.append({
+            'role': 'user',
+            'content': f'STYLE CONTEXT (active My Style profile):\n\n{style_block}',
+        })
+
+    transcript_msg = _build_transcript_message(
+        project_name, segments, formatted, analysis_block, relevant_excerpts_block,
+    )
+    messages.append({'role': 'user', 'content': transcript_msg})
+    # Fake assistant acknowledgement — anchors the model in "transcript
+    # already received" mode. Without it Gemma 4B sometimes replies to the
+    # next user turn with "I'd love to help, paste the transcript first."
+    messages.append({
+        'role': 'assistant',
+        'content': _build_transcript_ack(project_name),
+    })
+
+    if history:
+        for turn in history[-6:]:
+            role = turn.get('role', 'user')
+            content = (turn.get('content') or '').strip()
+            if not content:
+                continue
+            if role not in ('user', 'assistant'):
+                role = 'user'
+            messages.append({'role': role, 'content': content})
+
+    messages.append({'role': 'user', 'content': message})
+    return system_message, messages
+
+# Bounded LRU for Layer 2 chunked-search responses. Layer 2 fires
+# many _call_ai_json requests per chat query; if the user re-asks the
+# same question against an unchanged transcript, every chunk hits the
+# cache instead of re-billing the LLM. Keying on sha1 of each prompt
+# plus the model variant means re-analysis (which produces fresh chunk
+# text) busts the relevant entries automatically without explicit
+# invalidation. 512 × ~3KB ≈ 1.5MB ceiling.
+_CHUNK_CACHE_MAX = 512
+_CHUNK_CACHE: "OrderedDict[tuple, str]" = OrderedDict()
+_CHUNK_CACHE_LOCK = threading.Lock()
 
 
 def chat_about_transcript(transcript, message, history=None, project_name="Interview",
@@ -69,6 +251,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
 
     formatted = _format_transcript_for_ai(transcript)
     relevant_excerpts_block = ''
+    matched = []
     if phrases or words or theme_phrases or tfidf_hits:
         # Layer 1 on short interviews: segments have the same shape the
         # paragraph helpers expect, so the matcher runs against segments
@@ -86,102 +269,72 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         relevant_excerpts_block = _build_relevant_excerpts_block(matched)
     analysis_block = _build_chat_analysis_index(analysis)
 
-    system_prompt = f"""You are an expert editorial consultant embedded in a documentary and interview editing tool called Doza Assist. You have the full transcript of the project "{project_name}" loaded in context.
-
-═══════════════════════════════════════════════════════════════
-HARD OUTPUT CONTRACT — THIS IS THE ONLY FORMAT THAT WORKS:
-
-Every response MUST cite specific moments from the transcript using this EXACT marker:
-
-  [CLIP: start=HH:MM:SS end=HH:MM:SS title="short descriptive title"]
-
-The frontend renders these markers as playable clip cards with Play and Add Clip buttons. If you don't emit them, the user sees nothing but plain text and the task has failed.
-
-CLIP COUNT — HONOR THE USER:
-- If the user states an explicit count ("1 clip", "give me one", "find me 3", "pull 2 clips", "the best one"), return EXACTLY that many [CLIP:] markers. No more, no less.
-- If the user does not specify a count, default to 2-5 markers.
-- Synthesis questions ("what's the arc", "what's most revealing", "find moments about X") default to 2-5 unless the user specified a number.
-
-GROUNDING RULE — NO EXCEPTIONS:
-- Every timecode in a [CLIP:] marker MUST come from the TRANSCRIPT segment markers below (lines like [00:05:12-00:05:28] Speaker: text) or from the PRE-ANALYZED MOMENTS list (if present).
-- NEVER invent timecodes. NEVER fabricate quotes. If you can't find a relevant moment in the data, say "I don't see that in the transcript" — do not make something up.
-- Do NOT include "> " blockquotes, quoted speaker text, or paraphrased lines in your reply. The clip card already shows the exact words; duplicating them in prose is wasted output.
-
-HOW TO RESPOND:
-1. Determine the right number of moments per the CLIP COUNT rule above.
-2. For each, emit a [CLIP:] marker with start, end, and a 2-6 word title.
-3. Add ONE short sentence before or after each marker saying WHY it answers the question.
-4. That's the whole reply. No preamble, no "here are some suggestions", no numbered headers.
-═══════════════════════════════════════════════════════════════
-
-Personality: seasoned doc editor leaning over the desk, warm, opinionated, short. Use contractions. No filler, no hedging.
-
-Modes (which kinds of clips to prioritize):
-1. CLIP DISCOVERY — user asks for moments, clips, soundbites, quotes. Pick the strongest standalone moments.
-2. STORY CONSULTING — user asks about arc, theme, structure, character. Pick moments that anchor each beat you describe.
-3. SOCIAL — user asks about reels/shorts/social. Pick 15-60s moments with strong hooks.
-
-Clip constraints:
-- Minimum 5 seconds, typical 10-60 seconds.
-- Span multiple transcript segments if needed to capture a complete thought.
-- Title under 8 words, no quotes around it.
-
-Other rules:
-- Keep prose between markers to 1 sentence max. Never explain things without a marker.
-- No emojis, markdown headers, bullet lists, or blockquotes.
-- If you truly can't ground an answer, say so in one sentence — don't pad.
-
-TRANSCRIPT:
-{formatted}{analysis_block}{relevant_excerpts_block}
-
-═══════════════════════════════════════════════════════════════
-FINAL REMINDER — DO NOT SKIP:
-
-Your reply MUST contain [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers using real timecodes copied from the transcript segment markers above (and from the PRE-ANALYZED MOMENTS list if present). Honor the CLIP COUNT rule: exactly the number the user asked for if they specified one (e.g. "1 clip" → exactly 1 marker), otherwise 2-5 markers. Without these markers the user sees nothing but plain text and the task has failed. Do NOT write a prose summary in place of clip markers — cite specific moments with [CLIP:] markers.
-═══════════════════════════════════════════════════════════════"""
-
-    # Flatten conversation history (Ollama generate takes single prompt)
-    conversation = ""
-    if history:
-        for msg in history[-6:]:  # Last 6 for speed
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            if role == 'user':
-                conversation += f"\nUser: {content}"
-            else:
-                conversation += f"\nAssistant: {content}"
-
-    prompt = f"{conversation}\nUser: {message}\nAssistant:"
-
-    system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
-    response = _call_ai_chat(prompt, system_prompt)
+    system_message, messages = _build_chat_messages(
+        message, history, project_name, segments,
+        formatted, analysis_block, relevant_excerpts_block, profile_id,
+    )
+    num_ctx = _estimate_layer1_num_ctx(formatted)
+    response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
+    response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)
-    return _validate_clip_markers_in_text(cleaned, segments)
+    cleaned = _validate_clip_markers_in_text(cleaned, segments)
+    cleaned = _salvage_clips_if_missing(
+        cleaned, formatted, segments, num_ctx=num_ctx,
+        matched_paragraphs=matched, user_message=message,
+    )
+    # Enforce explicit clip count from the user message. Gemma 4B
+    # routinely ignores "1 clip" / "one more" / "another" and emits 2-3.
+    # Trim server-side so the user sees what they asked for.
+    cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
+    return cleaned
 
 
-def _call_ai_chat_stream(prompt, system_prompt=""):
-    """Streaming variant of :func:`_call_ai_chat` that yields token chunks.
+_OLLAMA_STOP_TOKENS = [
+    '\n[Thoughts]',
+    '\n[Thought Process]',
+    '\n[Reasoning]',
+    '\n<think>',
+    '\n<thinking>',
+    '[/Response]\n[Thoughts]',
+    '[/Response]\n[Thought',
+    '[No specific answer',
+    '[No answer',
+]
 
-    Yields ``str`` pieces as they arrive from Ollama. On Claude fallback the
-    HTTP API returns the whole reply at once (we don't use the SSE variant
-    on that path), so the entire reply is yielded as a single chunk — the
-    UX win there is bounded but still real (no buffer waiting for the full
-    parse). Yields nothing on hard backend failure; the caller should treat
-    that the same as a non-streaming empty reply.
+
+def _call_ai_chat_stream(system_message, messages, num_ctx=32768):
+    """Stream chat tokens from Ollama ``/api/chat`` with Claude fallback.
+
+    ``system_message`` is the master system prompt (chat-system-prompt.md
+    plus storytelling foundation). ``messages`` is the user/assistant
+    array — STYLE CONTEXT (optional), TRANSCRIPT, history, current message.
+
+    On Ollama, the system message is sent as ``messages[0]`` with role
+    ``system`` per Ollama's ``/api/chat`` contract. On Claude fallback,
+    it's sent as the top-level ``system`` field with the rest as the
+    ``messages`` array. Both providers stream via ``stream: True`` for
+    Ollama; Claude's API call is non-streaming and yields the full reply
+    as a single chunk so the SSE consumer logic stays uniform.
+
+    Yields ``str`` pieces as they arrive. Yields nothing on hard backend
+    failure; the caller should treat that the same as an empty reply.
     """
-    system_prompt = inject_storytelling_foundation(system_prompt)
+    ollama_messages = [{'role': 'system', 'content': system_message}] + messages
     try:
         with requests.post(
-            'http://localhost:11434/api/generate',
+            'http://localhost:11434/api/chat',
             json={
                 'model': _get_ollama_model(),
-                'prompt': prompt,
-                'system': system_prompt,
+                'messages': ollama_messages,
                 'stream': True,
+                'keep_alive': _OLLAMA_KEEP_ALIVE,
                 'options': {
                     'temperature': 0.4,
                     'num_predict': 4096,
-                    'num_ctx': 32768,
+                    'num_ctx': num_ctx,
+                    'repeat_penalty': 1.3,
+                    'repeat_last_n': 128,
+                    'stop': _OLLAMA_STOP_TOKENS,
                 }
             },
             timeout=300,
@@ -195,7 +348,10 @@ def _call_ai_chat_stream(prompt, system_prompt=""):
                         chunk = json.loads(line)
                     except (ValueError, json.JSONDecodeError):
                         continue
-                    piece = chunk.get('response', '')
+                    # /api/chat streams {message: {role, content}, done}.
+                    # The content is the incremental piece for this chunk.
+                    msg = chunk.get('message') or {}
+                    piece = msg.get('content', '')
                     if piece:
                         yield piece
                     if chunk.get('done'):
@@ -222,8 +378,8 @@ def _call_ai_chat_stream(prompt, system_prompt=""):
             json={
                 'model': 'claude-sonnet-4-20250514',
                 'max_tokens': 2048,
-                'system': system_prompt,
-                'messages': [{'role': 'user', 'content': prompt}],
+                'system': system_message,
+                'messages': messages,
             },
             timeout=60,
         )
@@ -263,26 +419,27 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             tfidf_hits = []
 
     if duration > _LONG_CHAT_SECONDS:
-        # Layer 2 is parallel by chunk; no streaming token feed is meaningful.
-        # Emit a progress hint, then deliver the final reply as one chunk.
-        yield ('progress', 'Searching across the full interview…')
+        # Layer 2 is parallel by chunk. Token-stream isn't meaningful, but
+        # per-chunk progress is — yield a counter as each chunk completes
+        # so the UI can show "3/8 chunks searched…" instead of a frozen
+        # spinner for 30 seconds. Final reply is the same as the
+        # non-streaming variant.
         paragraphs = _build_paragraphs(transcript)
-        reply = _chat_layer2_chunked_search(
+        for event in _chat_layer2_chunked_search_stream(
             paragraphs, message, history, project_name,
             phrases, words, profile_id, analysis,
             segment_vectors=segment_vectors, theme_phrases=theme_phrases,
             tfidf_hits=tfidf_hits,
-        )
-        yield ('done', reply)
+        ):
+            yield event
         return
 
-    # Layer 1: build the same prompt the non-streaming path builds, then
-    # stream the model's tokens. Mirrors `chat_about_transcript` so prompt
-    # construction stays in one place — a shared `_build_layer1_prompt`
-    # helper would be cleaner, but the inline block keeps the streaming
-    # path self-contained for now.
+    # Layer 1: build messages, stream tokens. Single source of truth for
+    # prompt construction is _build_chat_messages above; the streaming
+    # variant just wraps the same call with token-level filtering.
     formatted = _format_transcript_for_ai(transcript)
     relevant_excerpts_block = ''
+    matched = []
     if phrases or words or theme_phrases or tfidf_hits:
         matched = _find_relevant_paragraphs(
             segments, phrases, words, context=2, theme_phrases=theme_phrases,
@@ -292,83 +449,118 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         relevant_excerpts_block = _build_relevant_excerpts_block(matched)
     analysis_block = _build_chat_analysis_index(analysis)
 
-    system_prompt = f"""You are an expert editorial consultant embedded in a documentary and interview editing tool called Doza Assist. You have the full transcript of the project "{project_name}" loaded in context.
-
-═══════════════════════════════════════════════════════════════
-HARD OUTPUT CONTRACT — THIS IS THE ONLY FORMAT THAT WORKS:
-
-Every response MUST cite specific moments from the transcript using this EXACT marker:
-
-  [CLIP: start=HH:MM:SS end=HH:MM:SS title="short descriptive title"]
-
-CLIP COUNT — HONOR THE USER:
-- If the user states an explicit count ("1 clip", "give me one", "find 3", "the best one"), return EXACTLY that many markers. No more, no less.
-- If the user does not specify a count, default to 2-5 markers.
-
-The frontend renders these markers as playable clip cards. Pure prose without markers fails the user.
-
-GROUNDING RULE: every timecode MUST come from the transcript segment markers below. Never invent timecodes.
-
-Personality: seasoned doc editor leaning over the desk, warm, opinionated, short. No filler.
-
-TRANSCRIPT:
-{formatted}{analysis_block}{relevant_excerpts_block}
-
-═══════════════════════════════════════════════════════════════
-FINAL REMINDER: Your reply MUST contain [CLIP: ...] markers using real timecodes from the transcript above. Honor the CLIP COUNT rule: exactly the number the user asked for if they specified one, otherwise 2-5.
-═══════════════════════════════════════════════════════════════"""
-
-    conversation = ""
-    if history:
-        for msg in history[-6:]:
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            if role == 'user':
-                conversation += f"\nUser: {content}"
-            else:
-                conversation += f"\nAssistant: {content}"
-    prompt = f"{conversation}\nUser: {message}\nAssistant:"
-
-    system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
+    system_message, messages = _build_chat_messages(
+        message, history, project_name, segments,
+        formatted, analysis_block, relevant_excerpts_block, profile_id,
+    )
 
     pieces = []
-    for piece in _call_ai_chat_stream(prompt, system_prompt):
-        pieces.append(piece)
-        yield ('token', piece)
+    num_ctx = _estimate_layer1_num_ctx(formatted)
+    _think_buf = ''
+    _in_thinking = False
+    _THINK_OPENERS = ('<think>', '<thinking>', '[Thoughts]', '[Thought Process]', '[Reasoning]')
+    _THINK_CLOSERS = ('</think>', '</thinking>', '[/Thoughts]', '[/Thought Process]', '[/Reasoning]')
 
-    # Run the same post-processing the non-streaming path runs so the final
-    # text is identical regardless of which endpoint the client used.
+    # Repetition-loop detector: if the last N tokens of visible output
+    # repeat the same short phrase, the model has degenerated — stop early.
+    _rep_tail = ''
+    _REP_WINDOW = 200  # chars to keep
+    _REP_MIN_PATTERN = 4  # shortest repeating unit (chars)
+    _REP_THRESHOLD = 6   # must repeat this many times to trigger
+
+    def _is_stuck(tail):
+        """Return True if *tail* ends with the same short phrase repeated."""
+        if len(tail) < _REP_MIN_PATTERN * _REP_THRESHOLD:
+            return False
+        for plen in range(_REP_MIN_PATTERN, len(tail) // _REP_THRESHOLD + 1):
+            pat = tail[-plen:]
+            count = 0
+            pos = len(tail) - plen
+            while pos >= 0 and tail[pos:pos + plen] == pat:
+                count += 1
+                pos -= plen
+            if count >= _REP_THRESHOLD:
+                return True
+        return False
+
+    for piece in _call_ai_chat_stream(system_message, messages, num_ctx=num_ctx):
+        pieces.append(piece)
+        _think_buf += piece
+        if not _in_thinking:
+            if any(op in _think_buf for op in _THINK_OPENERS):
+                _in_thinking = True
+                _think_buf = ''
+            else:
+                for tag in _THINK_OPENERS:
+                    if any(_think_buf.endswith(tag[:i]) for i in range(1, len(tag))):
+                        break
+                else:
+                    yield ('token', piece)
+                    _think_buf = _think_buf[-30:] if len(_think_buf) > 30 else _think_buf
+                    _rep_tail = (_rep_tail + piece)[-_REP_WINDOW:]
+                    if _is_stuck(_rep_tail):
+                        break
+        else:
+            if any(cl in _think_buf for cl in _THINK_CLOSERS):
+                _in_thinking = False
+                _think_buf = ''
+
+    # Strip any trailing repetition the model produced before we cut it off.
     full = ''.join(pieces)
+    full = _strip_trailing_repetition(full)
     cleaned = _clean_chat_response(full)
     cleaned = _validate_clip_markers_in_text(cleaned, segments)
+    # Salvage pass mirrors the non-streaming path. Adds latency only when
+    # the model's first attempt produced zero markers — most calls return
+    # immediately. Streamed clients see a brief pause after the prose
+    # finishes, then the marker block lands as part of the final message.
+    cleaned = _salvage_clips_if_missing(
+        cleaned, formatted, segments, num_ctx=num_ctx,
+        matched_paragraphs=matched, user_message=message,
+    )
+    # Enforce explicit clip count from the user message — same defense
+    # the non-streaming path applies. See _enforce_clip_count.
+    cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
     yield ('done', cleaned)
 
 
-def _call_ai_chat(prompt, system_prompt=""):
-    """Call AI for chat — uses lower token limit for faster responses."""
-    system_prompt = inject_storytelling_foundation(system_prompt)
+def _call_ai_chat(system_message, messages, num_ctx=32768):
+    """Non-streaming chat call. Same shape as :func:`_call_ai_chat_stream`
+    — takes a system message string and a messages array — but blocks
+    until the full reply is ready and returns it as a single string.
+
+    Used by :func:`chat_about_transcript` (the non-streaming endpoint) and
+    by salvage / one-shot callers that wrap their input in a single
+    user-role message.
+
+    Raises ``RuntimeError`` if no backend is reachable.
+    """
+    ollama_messages = [{'role': 'system', 'content': system_message}] + messages
     try:
         response = requests.post(
-            'http://localhost:11434/api/generate',
+            'http://localhost:11434/api/chat',
             json={
                 'model': _get_ollama_model(),
-                'prompt': prompt,
-                'system': system_prompt,
+                'messages': ollama_messages,
                 'stream': False,
+                'keep_alive': _OLLAMA_KEEP_ALIVE,
                 'options': {
                     'temperature': 0.4,
                     'num_predict': 4096,
-                    'num_ctx': 32768,
+                    'num_ctx': num_ctx,
+                    'repeat_penalty': 1.3,
+                    'repeat_last_n': 128,
+                    'stop': _OLLAMA_STOP_TOKENS,
                 }
             },
-            timeout=300
+            timeout=300,
         )
         if response.status_code == 200:
-            return response.json().get('response', '')
+            data = response.json()
+            return (data.get('message') or {}).get('content', '')
     except requests.exceptions.ConnectionError:
         pass
 
-    # Try Claude API
     api_key = os.environ.get('ANTHROPIC_API_KEY', '')
     if api_key:
         try:
@@ -382,8 +574,8 @@ def _call_ai_chat(prompt, system_prompt=""):
                 json={
                     'model': 'claude-sonnet-4-20250514',
                     'max_tokens': 2048,
-                    'system': system_prompt,
-                    'messages': [{'role': 'user', 'content': prompt}],
+                    'system': system_message,
+                    'messages': messages,
                 },
                 timeout=60,
             )
@@ -394,6 +586,766 @@ def _call_ai_chat(prompt, system_prompt=""):
             print(f"Claude API error: {e}")
 
     raise RuntimeError("No AI backend available.")
+
+
+def _count_clip_markers(text):
+    """How many ``[CLIP:]`` markers (with at least the ``start=`` field set)
+    does the text contain? Empty placeholders like ``[CLIP]`` do NOT count —
+    those are model-emitted junk that need to be stripped, not preserved.
+    """
+    if not text:
+        return 0
+    import re
+    return len(re.findall(r'\[CLIP:[^\]]*?start=', text))
+
+
+def _detect_explicit_clip_count(message):
+    """Parse an explicit clip count from a user message, or return ``None``.
+
+    Pattern coverage matches the prompt's CLIP COUNT rules:
+    - "1 clip", "2 clips", "3 clips" (digits)
+    - "one clip", "two clips" through "five clips" (words)
+    - "give me one", "the best one", "just one" → 1
+    - "one more", "another (clip|one)" → 1
+    - "a few more", "some more" → 3 (upper bound of "a few")
+
+    Returns ``None`` if no explicit count is detectable — the model uses
+    its judgment in that case (1-4 typical per the prompt).
+    """
+    if not message:
+        return None
+    import re
+    msg = message.lower().strip()
+
+    # "1 clip" / "2 clips" / etc.
+    m = re.search(r'\b(\d+)\s+clips?\b', msg)
+    if m:
+        return max(1, int(m.group(1)))
+
+    # "1 more" / "2 more" / "3 more" — digit + "more" (with optional "clip"
+    # after). The user means N additional clips. Same parse as "1 clip"
+    # but with "more" as the noun.
+    m = re.search(r'\b(\d+)\s+more(?:\s+clips?)?\b', msg)
+    if m:
+        return max(1, int(m.group(1)))
+
+    # "find me 3" / "give me 2" / "pull 4" — bare digit after a request verb.
+    m = re.search(
+        r'\b(?:find|give|pull|show|get|make)\s+(?:me\s+)?(\d+)\b',
+        msg,
+    )
+    if m:
+        return max(1, int(m.group(1)))
+
+    word_to_num = {'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5}
+    m = re.search(r'\b(one|two|three|four|five)\s+clips?\b', msg)
+    if m:
+        return word_to_num[m.group(1)]
+
+    # Word-form + "more": "two more", "three more clips", etc.
+    m = re.search(r'\b(one|two|three|four|five)\s+more(?:\s+clips?)?\b', msg)
+    if m:
+        return word_to_num[m.group(1)]
+
+    # Single-clip phrases. "another" alone (without "clip") still implies 1
+    # in this domain — every chat turn is about clips. "Strongest"/"best"
+    # require a singular noun after to avoid hitting "strongest moments"
+    # (plural) which means several.
+    if re.search(
+        r'\b(?:one\s+more(?:\s+clip)?'
+        r'|another(?:\s+(?:clip|one))?'
+        r'|just\s+one(?:\s+clip)?'
+        r'|give\s+me\s+one(?:\s+clip)?'
+        r'|find\s+me\s+one(?:\s+clip)?'
+        r'|the\s+single\s+(?:best|strongest)'
+        r'|the\s+(?:best|strongest)\s+(?:one|clip|moment|single))\b',
+        msg,
+    ):
+        return 1
+
+    # "A few more" / "some more" — cap at 3.
+    if re.search(r'\b(?:a\s+few(?:\s+more)?|some\s+more|several)\b', msg):
+        return 3
+
+    return None
+
+
+def _enforce_clip_count(text, target):
+    """Trim ``text`` so it contains at most ``target`` [CLIP:] markers.
+
+    Strips excess markers and any prose that immediately precedes them
+    (single-line "preamble" prose introducing each excess clip), but
+    preserves the through-line opener and the first ``target`` clips.
+    Used to defend against Gemma 4 ignoring the explicit count rule in
+    the prompt — the prompt asks for "EXACTLY 1" but the model emits
+    2-3 anyway, so we enforce server-side.
+    """
+    if target is None or target < 1 or not text:
+        return text
+    import re
+    clips = list(re.finditer(r'\[CLIP:[^\]]*\]', text))
+    if len(clips) <= target:
+        return text
+    # Cut at the end of the target-th marker. Anything after gets the
+    # CLIP markers stripped (so any salvageable prose stays, but no
+    # excess clip cards render). In practice the tail is almost always
+    # just more markers + their preamble lines, so the trim is clean.
+    cut = clips[target - 1].end()
+    head = text[:cut]
+    tail = text[cut:]
+    tail = re.sub(r'\[CLIP:[^\]]*\]', '', tail)
+    # Drop any leftover "Here's another:" / "Plus:" connector lines that
+    # introduced the excess clips. A connector is a short line ending in
+    # a colon with nothing meaningful on either side.
+    tail = re.sub(r'\n\s*[A-Z][^.\n]{0,40}:\s*\n', '\n', tail)
+    result = (head + tail).rstrip()
+    return result
+
+
+def _format_clip_title(title: str) -> str:
+    """Normalize a clip title to readable sentence case.
+
+    Local models often emit lowercased keyword-stuffed titles ("papermaking
+    artist process details") that read like search queries instead of card
+    headlines. We can't restructure the phrase for grammar without an LLM
+    pass, but we CAN promote the first letter to uppercase and tidy the
+    spacing so the card looks like a headline rather than a tag list.
+
+    Existing capitals (proper nouns, acronyms) are preserved — only the
+    leading character is forced uppercase.
+    """
+    if not title:
+        return title
+    cleaned = ' '.join(title.split())
+    if not cleaned:
+        return cleaned
+    if cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
+
+
+def _strip_raw_json_blobs(text):
+    """Strip JSON object literals the model leaks in place of [CLIP:] markers.
+
+    Some local models, when asked for "highlights" or "an emotional arc",
+    fall back on a training-data convention and emit shapes like::
+
+        {
+          "type": "highlight",
+          "content": "...",
+          "context": "..."
+        }
+
+    interleaved with the real ``[CLIP:]`` markers. The frontend has no
+    handler for those blobs, so they render as raw text between the prose
+    summary and the clip cards — exactly the screenshot the user reported.
+
+    This pass removes any standalone ``{...}`` block whose first key is one
+    of the recognized leak shapes (type / kind / category) and that also
+    contains a content/context/quote field. Lone CLIP markers and other
+    bracketed UI tokens are unaffected.
+    """
+    if not text:
+        return text
+    import re
+
+    leak_pattern = re.compile(
+        r'\{\s*"(?:type|kind|category)"\s*:\s*"[^"]*"\s*,'
+        r'(?:[^{}]|\{[^{}]*\})*'
+        r'"(?:content|text|quote|excerpt|summary|context)"\s*:'
+        r'(?:[^{}]|\{[^{}]*\})*\}\s*,?',
+        re.DOTALL,
+    )
+    text = leak_pattern.sub('', text)
+
+    # Drop wrapping array brackets if their items just got stripped.
+    text = re.sub(r'^\s*\[\s*\]\s*,?\s*$', '', text, flags=re.MULTILINE)
+    # Strip lone trailing commas left dangling after we removed a sibling.
+    text = re.sub(r'^\s*,\s*$', '', text, flags=re.MULTILINE)
+    # Collapse blank-line runs the removals may have created.
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text
+
+
+def _strip_placeholder_timecode_garbage(text):
+    """Strip leftover model output that gestures at clips but contains no
+    real timecodes — typically JSON-array-of-placeholders shapes like:
+
+        [
+          "00:00:00 - 00:00:00",
+          "00:00:00 - 00:00:00"
+        ]
+
+    or bare lines containing only ``00:00:00 - 00:00:00`` (zero-zero ranges).
+
+    Confused small models emit these when they understand they're supposed
+    to output something timecode-shaped but can't actually find moments in
+    the transcript. The frontend renders them as adjustable timecode chips
+    which is worse than no output at all. Strip server-side.
+
+    Filled-in valid timecodes (e.g. ``"00:12:34 - 00:13:00"``) are
+    preserved — only the all-zero/identical-range placeholders go.
+    """
+    if not text:
+        return text
+    import re
+
+    # 1. Bare-array of placeholder timecode strings — strip the whole array.
+    array_pattern = re.compile(
+        r'\[\s*(?:"00:00:00\s*[-–]\s*00:00:00"\s*,?\s*)+\s*\]',
+        re.MULTILINE,
+    )
+    text = array_pattern.sub('', text)
+
+    # 2. Lines containing only an all-zero placeholder range (with optional
+    #    quotes, commas, brackets). Drop the line.
+    line_pattern = re.compile(
+        r'^[\[\s"]*00:00:00\s*[-–]\s*00:00:00[\]\s",]*$',
+        re.MULTILINE,
+    )
+    text = line_pattern.sub('', text)
+
+    # 3. Inline ``00:00:00 - 00:00:00`` ranges embedded in prose — replace
+    #    with empty string. Keeps the surrounding text but drops the
+    #    meaningless range.
+    inline_pattern = re.compile(r'\b00:00:00\s*[-–]\s*00:00:00\b')
+    text = inline_pattern.sub('', text)
+
+    # 4. Stray opening/closing brackets left behind after we stripped the
+    #    array contents. Only drop bare-line brackets — keep [CLIP: …] etc.
+    text = re.sub(r'^\s*\[\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\]\s*$', '', text, flags=re.MULTILINE)
+
+    # 5. Trailing `[` on a labeling line (e.g. ``The Clip: [``) where the
+    #    model used brackets as a visual wrapper around a [CLIP:] marker that
+    #    follows on the next line. Strip the trailing `[` so the label reads
+    #    cleanly. Match the optional space + bracket at end of line.
+    text = re.sub(r'^([^\n\[]+):\s*\[\s*$', r'\1:', text, flags=re.MULTILINE)
+
+    return text
+
+
+def _strip_empty_clip_placeholders(text):
+    """Remove ``[CLIP]`` and ``[CLIP:]`` (and any bracketed CLIP shape that
+    lacks a ``start=`` field) from a chat response.
+
+    Small models occasionally emit literal placeholder pills (``[CLIP] [CLIP]``)
+    when they understand they're supposed to output markers but can't fill in
+    the timecode fields. The frontend renders these as empty broken pills.
+    Strip them server-side so the UI never sees the junk.
+    """
+    if not text:
+        return text
+    import re
+    # Strip any [CLIP...] that doesn't contain start= or end=
+    return re.sub(r'\[CLIP\b[^\]]*?\](?<!\bstart=\w\])',
+                  lambda m: '' if 'start=' not in m.group(0) else m.group(0),
+                  text)
+
+
+# Reasoning-mode tag pairs. Small local models (gemma4:e2b in particular)
+# wrap their answers in faux-XML "thinking" tags they learned from
+# reasoning-finetuned siblings. None of this is meant for the user — it's
+# the model talking to itself. Strip server-side before render.
+_REASONING_TAG_PAIRS = [
+    ('Thought Process', '/Thought Process'),
+    ('Thoughts', '/Thoughts'),
+    ('Reasoning', '/Reasoning'),
+    ('Reflection', '/Reflection'),
+    ('Plan', '/Plan'),
+    ('Analysis', '/Analysis'),
+    ('Response', '/Response'),
+]
+
+
+def _strip_essay_scaffolding(text):
+    """Drop essay scaffolding small models emit despite the prompt
+    forbidding it: ``> blockquoted`` (and often hallucinated) speaker
+    quotes, numbered list items with section headers like ``1. The Aha
+    Moment: explanation``, and ``(hypothetical / fabricated / illustrative
+    / paraphrased ...)`` confessions of fabrication.
+
+    Defense-in-depth — the prompt forbids all three. This catches what
+    Gemma 4B emits when it ignores the prompt anyway.
+    """
+    if not text:
+        return text
+    import re
+
+    # 1. Markdown blockquote lines starting with "> ". Drop the whole
+    # line; the clip card already shows the speaker text.
+    text = re.sub(r'^[ \t]*>\s+.*$\n?', '', text, flags=re.MULTILINE)
+
+    # 2. Numbered list items that double as section headers — the pattern
+    # is "1. Capitalized Phrase: explanation". The phrase before the colon
+    # can contain quoted titles like 'The "Aha!" Moment', so the char
+    # class is lenient (anything that's not the colon or newline).
+    text = re.sub(
+        r'^[ \t]*\d+\.\s+[A-Z][^:\n]{0,80}:\s*[^\n]*\n?',
+        '',
+        text,
+        flags=re.MULTILINE,
+    )
+
+    # 3. Parenthetical confessions of fabrication: "(A hypothetical
+    # selection ...)", "(illustrative quote)", "(paraphrased)", etc.
+    text = re.sub(
+        r'\([^)]*?(?:hypothetical|fabricated|imagined|placeholder'
+        r'|illustrative|paraphrased|made[- ]up|approximation|approximate'
+        r'|made up)[^)]*?\)',
+        '',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    return text
+
+
+def _strip_no_answer_placeholders(text):
+    """Strip apologetic placeholder lines like ``[No specific answer
+    provided for this prompt.]``, ``[No answer]``, ``[No response]``, or
+    ``[No matches found]`` that small Gemma variants emit as a leading
+    narration when they understand they should produce prose but can't
+    cleanly summarize. The clip markers that follow are usually fine —
+    drop only the apologetic preamble.
+    """
+    if not text:
+        return text
+    import re
+    pattern = re.compile(
+        r'^\s*\[?\s*No\s+(?:specific\s+|direct\s+|relevant\s+|explicit\s+|clear\s+|new\s+|additional\s+|further\s+)?'
+        r'(?:answer|response|reply|match(?:es)?|result(?:s)?|comment(?:s)?|'
+        r'content|output|request|ask|moment(?:s)?|clip(?:s)?|excerpt(?:s)?'
+        r'|quote(?:s)?|segment(?:s)?)\b'
+        r'[^\]\n]*\]?\s*$',
+        re.MULTILINE | re.IGNORECASE,
+    )
+    return pattern.sub('', text)
+
+
+def _strip_meta_preamble(text):
+    """Strip free-form reasoning narration that small models leak around
+    the actual answer.
+
+    Distinct from :func:`_strip_reasoning_tags`, which only catches blocks
+    wrapped in registered opener tags like ``[Reasoning]`` or ``<think>``.
+    Gemma 4 (4B in particular) often emits the same content shape with no
+    opener tag at all — a leading ``[The user is asking…]`` block, a
+    ``Suggested Response:`` label, and a trailing ``(Note: …)`` caveat.
+    The frontend renders all three as raw text between the user's question
+    and the clip cards.
+
+    Three patterns:
+
+    1. **Leading bracketed prose**: a ``[…]`` block at the very start
+       of the reply containing 2+ sentences and 80+ chars, that is NOT
+       a ``[CLIP:]`` marker. The size + sentence-count thresholds protect
+       legitimate short bracketed asides.
+
+    2. **Preamble labels**: lines that are nothing but
+       ``Suggested Response:`` / ``Final Answer:`` / ``Final Response:`` /
+       ``Suggested Answer:`` / ``My Response:`` / ``My Answer:``. Drop the
+       label line; whatever follows is kept. Bare ``Answer:`` or
+       ``Response:`` is intentionally not stripped — too generic, would
+       hit legitimate content.
+
+    3. **Trailing ``(Note: …)`` parentheticals**: a parenthetical at the
+       very end of the reply beginning with ``Note:``. Caveats and
+       disambiguations belong in the model's head, not the user's chat.
+    """
+    if not text:
+        return text
+    import re
+
+    # 1. Leading [...] reasoning blocks. Negative lookahead skips [CLIP...]
+    # variants. Gemma often emits 2-3 of these in a row before the actual
+    # answer, so we loop. A bracket qualifies as "reasoning prose" if it's
+    # long enough AND either contains 2+ sentence-ending punctuation OR a
+    # first-person reasoning verb ("I will/should/need", "Let me", "I'll").
+    # Single-sentence bracketed reasoning is the exact pattern the previous
+    # 2-sentence floor missed.
+    reasoning_kw = re.compile(
+        r"\b(?:I (?:will|'ll|should|need to|must|cannot|can'?t|am)"
+        r"|Let me|We (?:should|need)|My (?:goal|task)"
+        r"|(?:the\s+)?user\s+(?:is|wants|asked|specified|did(?:n'?t| not))"
+        r"|assuming|since the (?:user|prompt|context)"
+        r"|based on (?:the|this|previous|our)"
+        r"|no (?:specific|direct|explicit|clear) (?:request|ask|count|number|moment)"
+        r"|previous context|previous turn|previous reply"
+        r"|(?:will|let me) (?:select|choose|pick|find|extract))\b",
+        re.IGNORECASE,
+    )
+    while True:
+        # 30-char floor: above "[Speaker 1]" / "[music]" / "[applause]"
+        # which we want to keep, below typical Gemma reasoning leaks
+        # ("[No specific request provided, so no output is generated.]"
+        # is 56 chars). The keyword check protects against false
+        # positives at this length.
+        m = re.match(r'^\s*\[(?!\s*[Cc][Ll][Ii][Pp]\b)([^\[\]]{30,})\]\s*\n*', text)
+        if not m:
+            break
+        inner = m.group(1)
+        sentence_punct = inner.count('.') + inner.count('?') + inner.count('!')
+        # Tier 1: 2+ sentences → reasoning. Tier 2: contains a known
+        # reasoning keyword → reasoning. Tier 3: bracket is >120 chars →
+        # almost always reasoning at the start of a chat reply, no
+        # keyword check needed.
+        if sentence_punct >= 2 or reasoning_kw.search(inner) or len(inner) > 120:
+            text = text[m.end():]
+        else:
+            break
+
+    # 2. Multi-word preamble labels on their own line. Anchored to start
+    # of line so a "Final Answer:" buried mid-paragraph is left alone.
+    text = re.sub(
+        r'^\s*(?:Suggested\s+Response|Suggested\s+Answer|Final\s+Response|'
+        r'Final\s+Answer|My\s+Response|My\s+Answer)\s*:\s*\n',
+        '',
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+
+    # 3. Trailing "(Note: ...)" parenthetical at end of message.
+    text = re.sub(
+        r'\n*\(\s*Note\s*:\s*[^)]*\)\s*$',
+        '',
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # 4. Follow-up offers — "If you'd like, I can pull…" / "Let me know if…"
+    # / "Would you like me to…" / "I can also…" / "Want me to…". Gemma
+    # signals availability for further work; the user just wants the answer.
+    # Line-anchored so a whole follow-up paragraph drops cleanly. In the
+    # rare case the trigger shares a line with real content we lose the
+    # content too — acceptable, the user came for the answer not the offer.
+    text = re.sub(
+        r'^[ \t]*(?:If you(?:[’\']?d| would| want)? like'
+        r'|If you want'
+        r'|Let me know if'
+        r'|Would you like(?: me)?'
+        r'|Want me to'
+        r'|I can (?:also |further |)?(?:pull|provide|find|offer|elaborate|'
+        r'expand|dig|share|extract|analyze))[^\n]*\n?',
+        '',
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+
+    # 5. Section sub-headers between the opening sentence and the first
+    # [CLIP:] marker. Pattern: a paragraph that is one short Capitalized
+    # phrase followed by ": " and a sentence — e.g. "Natural Resilience:
+    # This is seen in…". The new prompt forbids these but Gemma still
+    # leaks them; strip the leading label-and-prose pair, keep nothing.
+    # Only applied to the prose ABOVE the first marker so legitimate
+    # post-marker prose (rare, but possible) is left alone.
+    first_clip = re.search(r'\[CLIP\s*:', text)
+    if first_clip:
+        head = text[:first_clip.start()]
+        tail = text[first_clip.start():]
+        # Match a line that starts with 1-5 Capitalized words then ":"
+        # then more text on the same line. Conservative width to avoid
+        # hitting natural prose like "But here's the thing: …".
+        sub_header_re = re.compile(
+            r'^[ \t]*[A-Z][A-Za-z]+(?:[ /\-][A-Z][A-Za-z]+){0,4}\s*:\s+[A-Z][^\n]*\n?',
+            re.MULTILINE,
+        )
+        head = sub_header_re.sub('', head)
+        text = head + tail
+
+    return text.strip()
+
+
+def _strip_reasoning_tags(text):
+    """Remove ``[Thought Process]...[/Thought Process]`` / ``[Thoughts]...
+    [/Thoughts]`` / ``<think>...</think>`` and similar reasoning-mode wrappers.
+
+    Handles three shapes:
+      1. Closed pair: ``[Tag]content[/Tag]`` → strip everything (tags + content)
+      2. Open-ended: ``[Tag]...end-of-message`` (no close) → strip from tag onward
+      3. Bare openers/closers that survived a partial match → strip just the tag
+
+    The "Response" tag is a special case: real content lives inside it, so for
+    a closed [Response]...[/Response] pair we KEEP the inner content but drop
+    the wrapping tags. Other tags (Thoughts, Thought Process, etc.) drop both
+    tags AND content because they're internal monologue.
+    """
+    if not text:
+        return text
+    import re
+
+    # 1. Closed pairs first — handle each tag pair.
+    for opener, closer in _REASONING_TAG_PAIRS:
+        opener_re = re.escape(opener)
+        closer_re = re.escape(closer)
+        if opener == 'Response':
+            # Keep the inner content of the Response tag; just unwrap.
+            pattern = re.compile(
+                rf'\[\s*{opener_re}\s*\](.*?)\[\s*{closer_re}\s*\]',
+                re.DOTALL | re.IGNORECASE,
+            )
+            text = pattern.sub(lambda m: m.group(1).strip(), text)
+        else:
+            # Drop both tags AND content — internal reasoning, not for users.
+            pattern = re.compile(
+                rf'\[\s*{opener_re}\s*\].*?\[\s*{closer_re}\s*\]',
+                re.DOTALL | re.IGNORECASE,
+            )
+            text = pattern.sub('', text)
+
+    # 2. Open-ended: tag opens but never closes (model ran out of tokens
+    #    or got cut off). Strip from the opener to the end of the message
+    #    so the UI doesn't show "[Thoughts] half a thought…" garbage.
+    for opener, _closer in _REASONING_TAG_PAIRS:
+        opener_re = re.escape(opener)
+        text = re.sub(
+            rf'\[\s*{opener_re}\s*\].*?$',
+            '',
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+    # 3. Bare leftover tags that escaped both passes (e.g. just "[Thoughts]"
+    #    on its own line). Drop the marker.
+    text = re.sub(r'\[\s*/?\s*(?:Thought Process|Thoughts|Reasoning|'
+                  r'Reflection|Plan|Analysis|Response)\s*\]',
+                  '', text, flags=re.IGNORECASE)
+
+    # 4. <think>...</think> and <thinking>...</thinking> (XML-style reasoning)
+    text = re.sub(r'<\s*think(?:ing)?\s*>.*?<\s*/\s*think(?:ing)?\s*>',
+                  '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<\s*think(?:ing)?\s*>.*?$', '', text,
+                  flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<\s*/?\s*think(?:ing)?\s*>', '', text, flags=re.IGNORECASE)
+
+    return text
+
+
+def _truncate_repetitions(text, min_block_chars=120):
+    """Detect when a small model has fallen into a generation loop and
+    truncate at the first repetition.
+
+    Splits the response into paragraphs (blank-line-delimited blocks). If any
+    paragraph longer than ``min_block_chars`` appears more than once, keep
+    only the first occurrence and drop everything from the second onward —
+    that's where the loop started, and nothing useful comes after.
+
+    A whitespace-collapsed lowercase fingerprint is used for the comparison
+    so the detector survives the model adding/removing punctuation between
+    iterations.
+    """
+    if not text or len(text) < min_block_chars * 2:
+        return text
+    import re
+    paragraphs = re.split(r'\n\s*\n', text)
+    seen = {}
+    keep_until = len(paragraphs)
+    for i, p in enumerate(paragraphs):
+        p_stripped = p.strip()
+        if len(p_stripped) < min_block_chars:
+            continue
+        fingerprint = re.sub(r'\s+', ' ', p_stripped.lower())
+        if fingerprint in seen:
+            keep_until = i
+            break
+        seen[fingerprint] = i
+    if keep_until < len(paragraphs):
+        return '\n\n'.join(paragraphs[:keep_until]).rstrip()
+    return text
+
+
+_CLIP_COUNT_PATTERNS = [
+    (r'\b(?:find|give|pull|get|show|grab)\s+(?:me\s+)?(\d+)\s+clips?\b', None),
+    (r'\b(\d+)\s+clips?\b', None),
+    (r'\bthe\s+(?:single\s+)?best\s+(?:one|clip)\b', 1),
+    (r'\bjust\s+one\b|\bgive\s+me\s+one\b|\bonly\s+one\b', 1),
+]
+
+
+def _extract_clip_count_from_message(message, default=3):
+    """Parse an explicit clip count from the user's message ("find 2 clips",
+    "the best one", etc). Returns ``default`` when no explicit number is found.
+    Caps at 8 so a fat-fingered "find 25 clips" doesn't generate a wall of
+    half-relevant moments.
+    """
+    if not message:
+        return default
+    import re
+    m = message.lower()
+    for pat, fixed in _CLIP_COUNT_PATTERNS:
+        match = re.search(pat, m)
+        if match:
+            if fixed is not None:
+                return fixed
+            try:
+                n = int(match.group(1))
+                return max(1, min(8, n))
+            except (ValueError, IndexError):
+                continue
+    return default
+
+
+_SALVAGE_PROMPT = """The previous response did not include any [CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers, but the user needs them — without markers the UI shows nothing playable.
+
+Read the previous response and the transcript. Extract {target_count} specific moment(s) from the transcript that best match what the previous response was discussing. For each, emit a single [CLIP:] marker in this EXACT shape:
+
+  [CLIP: start=HH:MM:SS end=HH:MM:SS title="2-6 word title"]
+
+Concrete example using a real timecode shape (DO NOT copy these specific times — pick yours from the transcript below):
+
+  [CLIP: start=00:01:23 end=00:01:45 title="speaker confesses doubt"]
+
+Hard rules:
+- Output ONLY [CLIP:] markers, one per line. No prose, no explanation, no headers, no bullets, no placeholder text like "[CLIP]".
+- Every timecode MUST be copied from a [HH:MM:SS-HH:MM:SS] segment marker in the transcript below. Do not invent times. Do not output an empty marker.
+- Each clip should span 5-60 seconds. Combine adjacent segments if needed for a complete thought.
+- Title: 2-6 words, no quotes around it, no markdown.
+
+PREVIOUS RESPONSE (what to find clips for):
+{prior_response}
+
+TRANSCRIPT:
+{formatted}
+
+Now output exactly {target_count} fully-filled [CLIP:] marker(s) and nothing else."""
+
+
+def _deterministic_clip_markers(matched_paragraphs, target_count):
+    """Build canonical ``[CLIP:]`` markers directly from already-retrieved
+    transcript paragraphs. Used as a non-LLM fallback when both the main
+    chat call and the LLM salvage call fail to produce valid markers.
+
+    ``matched_paragraphs`` is the list returned by
+    :func:`_find_relevant_paragraphs` (and friends) — already ranked so the
+    top entries are the most relevant to the user's query. We just take the
+    first ``target_count`` and format their ``start``/``end`` as anchored
+    markers. Title is the first 5 words of the paragraph text.
+
+    Returns a string of newline-separated markers, or ``''`` if nothing
+    formattable was found.
+    """
+    if not matched_paragraphs:
+        return ''
+    lines = []
+    seen = set()
+    for p in matched_paragraphs:
+        if len(lines) >= target_count:
+            break
+        try:
+            start_sec = float(p.get('start', 0) or 0)
+            end_sec = float(p.get('end', start_sec) or start_sec)
+        except (TypeError, ValueError):
+            continue
+        if end_sec <= start_sec:
+            continue
+        # Cap ultra-long paragraphs at 60s to keep clips usable
+        if end_sec - start_sec > 60:
+            end_sec = start_sec + 45
+        # De-duplicate near-identical timecodes from overlapping context expansions
+        key = (round(start_sec / 5), round(end_sec / 5))
+        if key in seen:
+            continue
+        seen.add(key)
+        # Title from first few words of the paragraph
+        text = (p.get('text') or '').strip()
+        words = text.split()[:5]
+        title = ' '.join(words).rstrip('.,!?;:')[:40] or 'transcript moment'
+        # Sanitize title for marker form (no quotes, no brackets)
+        title = title.replace('"', "'").replace('[', '(').replace(']', ')')
+        start_tc = _seconds_to_tc(start_sec)
+        end_tc = _seconds_to_tc(end_sec)
+        lines.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}"]')
+    return '\n'.join(lines)
+
+
+def _salvage_clips_if_missing(cleaned_text, formatted_transcript, segments,
+                                num_ctx=8192, target_count=3,
+                                matched_paragraphs=None, user_message=None):
+    """Force clips into the response when the model's first pass produced
+    none. Two-stage salvage:
+
+      1. Focused LLM extractor call with an EXAMPLE marker in the prompt.
+         Stricter than the main system prompt; usually rescues mid-tier
+         models (gemma4:e2b, e4b) that skipped the contract on attempt one.
+      2. Deterministic fallback: build canonical markers directly from
+         already-retrieved transcript paragraphs (no LLM). This is the
+         floor — even a model that emits pure garbage gets the user
+         playable clips drawn from the same paragraphs the LLM was
+         shown as RELEVANT EXCERPTS.
+
+    Disabled when ``DOZA_DISABLE_CLIP_SALVAGE`` is set so power users can
+    opt out for performance. Returns ``cleaned_text`` either unchanged
+    (markers already present) or with appended marker block.
+    """
+    if os.environ.get('DOZA_DISABLE_CLIP_SALVAGE'):
+        return cleaned_text
+    if _count_clip_markers(cleaned_text) > 0:
+        return cleaned_text
+    if not (formatted_transcript and segments):
+        return cleaned_text
+
+    # Honor user-stated count when present ("find 2 clips" → 2 markers)
+    target_count = _extract_clip_count_from_message(user_message, default=target_count)
+
+    prose_to_keep = (cleaned_text or '').strip()
+    # Cap the prior response so the salvage call doesn't burn context on
+    # rambly prose from the first pass.
+    prior = prose_to_keep
+    if len(prior) > 2000:
+        prior = prior[:2000].rstrip() + '...'
+    if not prior:
+        prior = '(the previous response was empty — extract clips that match the transcript)'
+
+    salvage_prompt = _SALVAGE_PROMPT.format(
+        target_count=target_count,
+        prior_response=prior,
+        formatted=formatted_transcript,
+    )
+
+    salvage_system = (
+        "You are a clip-marker extractor. You output ONLY filled-in "
+        '[CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] markers, one per '
+        "line, with real timecodes from the transcript. You never emit "
+        "an empty [CLIP] placeholder. No prose. No explanation."
+    )
+
+    validated = ''
+    try:
+        raw = _call_ai_chat(
+            salvage_system,
+            [{'role': 'user', 'content': salvage_prompt}],
+            num_ctx=num_ctx,
+        )
+    except Exception as e:
+        print(f"[salvage] LLM extractor call failed: {e}")
+        raw = ''
+
+    if raw and raw.strip():
+        normalized = _clean_chat_response(raw)
+        validated = _validate_clip_markers_in_text(normalized, segments)
+
+    # Deterministic fallback: if the LLM extractor produced nothing usable,
+    # build markers from the matched paragraphs directly. This guarantees
+    # the user sees playable clips even when the model is utter garbage.
+    if _count_clip_markers(validated) == 0:
+        det = _deterministic_clip_markers(matched_paragraphs, target_count)
+        if det:
+            print(f"[salvage] LLM extractor failed; using deterministic markers from "
+                  f"{len(matched_paragraphs or [])} matched paragraph(s)")
+            validated = det
+        else:
+            print("[salvage] no valid markers and no retrieval matches — "
+                  "returning prose only")
+            return prose_to_keep
+
+    if not validated.strip():
+        return prose_to_keep
+
+    # Keep the prose context AND the markers — prose explains why, markers
+    # give the UI playable cards.
+    if prose_to_keep:
+        return prose_to_keep.rstrip() + "\n\n" + validated.strip()
+    return validated.strip()
 
 
 def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
@@ -475,6 +1427,23 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
     return cleaned
 
 
+def _strip_trailing_repetition(text):
+    """Remove degenerate trailing repetition from model output."""
+    if len(text) < 30:
+        return text
+    for plen in range(4, 60):
+        pat = text[-plen:]
+        count = 0
+        pos = len(text) - plen
+        while pos >= 0 and text[pos:pos + plen] == pat:
+            count += 1
+            pos -= plen
+        if count >= 4:
+            cut = len(text) - (count * plen)
+            return text[:cut].rstrip()
+    return text
+
+
 def _clean_chat_response(text):
     """Strip markdown artifacts and emoji from chat responses."""
     import re
@@ -502,6 +1471,52 @@ def _clean_chat_response(text):
         r'\U0001F1E0-\U0001F1FF\U00002702-\U000027B0\U0001F900-\U0001F9FF'
         r'\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002600-\U000026FF'
         r'\U0000FE00-\U0000FE0F\U0000200D]+', '', text)
+    # Strip empty `[CLIP]` placeholders the model may have emitted instead of
+    # filled markers. Done AFTER auto-wrapping so legitimate prose-timecode
+    # patterns get a chance to be rescued before we sweep up junk.
+    text = _strip_empty_clip_placeholders(text)
+    # Strip JSON-array-of-zero-timecodes garbage that small models emit when
+    # they try to output markers but can't find any moments. Without this
+    # pass the frontend renders the all-zero ranges as adjustable timecode
+    # chips, which looks like the chat half-worked.
+    text = _strip_placeholder_timecode_garbage(text)
+    # Strip raw {"type": "highlight", "content": ..., "context": ...} blobs
+    # the model leaks alongside (or instead of) [CLIP:] markers. The
+    # frontend has no renderer for those, so they show as raw text between
+    # the prose summary and the clip cards.
+    text = _strip_raw_json_blobs(text)
+    # Strip reasoning-mode wrappers ([Thought Process], [Thoughts], <think>...)
+    # that small models leak into responses. None of this is meant for users.
+    text = _strip_reasoning_tags(text)
+    # Strip "[No specific answer provided...]" placeholder narration that
+    # small variants prepend to otherwise-valid clip-marker output.
+    text = _strip_no_answer_placeholders(text)
+    # Strip Gemma 4's untagged meta-narration: leading "[The user is asking…]"
+    # blocks, "Suggested Response:" preamble labels, trailing "(Note: …)"
+    # caveats. _strip_reasoning_tags only catches blocks with registered
+    # openers; this catches the rest.
+    text = _strip_meta_preamble(text)
+    # Strip essay scaffolding the prompt forbids but Gemma 4B emits anyway:
+    # `> ` blockquoted (and often hallucinated) speaker quotes, numbered
+    # section headers like "1. The Aha Moment:", "(hypothetical selection)"
+    # admissions of fabrication. Defense in depth — the prompt asks Gemma
+    # not to do these; this strips them when it does anyway.
+    text = _strip_essay_scaffolding(text)
+    # Strip "[HH:MM:SS]" single-timecode brackets the frontend would
+    # otherwise render as standalone chips above the clip cards. The model
+    # emits these as a "table of contents" preamble — they aren't useful,
+    # the clip cards already show their own timecodes. Range-form
+    # "[HH:MM:SS - HH:MM:SS]" is wrapped to a CLIP marker by
+    # _auto_wrap_timecode_ranges above; this only handles the leftover
+    # single-timecode brackets that don't form a range.
+    text = re.sub(
+        r'\[(?!\s*[Cc][Ll][Ii][Pp]\b)\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]',
+        '',
+        text,
+    )
+    # If the model fell into a generation loop, truncate at the first repeat.
+    # Common with small models when they get confused by the strict format.
+    text = _truncate_repetitions(text)
     # Collapse multiple blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
@@ -576,6 +1591,7 @@ def _normalize_clip_markers(text: str) -> str:
 
         # Titles shouldn't break our own double-quote wrapping.
         title = title.replace('"', '').strip() or 'Clip'
+        title = _format_clip_title(title)
         return f'[CLIP: start={start} end={end} title="{title}"]'
 
     return candidate_re.sub(_rewrite, text)
@@ -608,14 +1624,18 @@ def _tc_range_regex():
     if _TC_RANGE_RE is None:
         # Match a timecode range with any common separator. Timecodes are
         # MM:SS or HH:MM:SS. Separators: ASCII hyphen, en/em dash, or "to".
-        # Optional surrounding parens are consumed so the rewritten marker
-        # replaces the whole "(0:30 - 1:00)" span cleanly.
+        # Optional surrounding parens OR square brackets are consumed so the
+        # rewritten marker replaces the whole "(0:30 - 1:00)" or
+        # "[00:19:30 - 00:19:40]" span cleanly. Without bracket consumption,
+        # Gemma's "[HH:MM:SS - HH:MM:SS]" prose pattern turns into nested
+        # "[[CLIP: ...]]" markers and the outer [ ] survive as literal text
+        # next to the rendered clip card.
         _TC_RANGE_RE = re.compile(
-            r'\(?\s*'
+            r'[\(\[]?\s*'
             r'(?P<start>\d{1,2}:\d{2}(?::\d{2})?)'
             r'\s*(?:to|\u2013|\u2014|-)\s*'
             r'(?P<end>\d{1,2}:\d{2}(?::\d{2})?)'
-            r'\s*\)?',
+            r'\s*[\)\]]?',
             re.IGNORECASE,
         )
     return _TC_RANGE_RE
@@ -887,6 +1907,16 @@ _CHAT_STOPWORDS = frozenset({
     'feel', 'feels', 'felt', 'feeling', 'look', 'looks', 'looking', 'looked',
     'see', 'sees', 'seeing', 'seen', 'seem', 'seems', 'seemed', 'seeming',
     'sounds', 'sounded',
+    # Apostrophe-free contractions (users skip punctuation in chat).
+    'whats', 'hes', 'shes', 'theyre', 'dont', 'doesnt', 'didnt', 'isnt',
+    'cant', 'wont', 'wouldnt', 'couldnt', 'shouldnt', 'thats', 'hows',
+    # Format, genre, platform, and scope words. Synthesis queries like "best
+    # social media clip in this whole interview" should produce zero search
+    # terms so the model reasons editorially instead of keyword-anchoring on
+    # every paragraph containing "social" or "interview".
+    'social', 'media', 'tiktok', 'instagram', 'reel', 'reels', 'shorts',
+    'youtube', 'podcast', 'interview', 'whole', 'entire', 'highlight',
+    'highlights', 'shareable', 'viral', 'quotable', 'strongest', 'powerful',
 })
 
 
@@ -932,6 +1962,91 @@ def _extract_query_keywords(message):
         return out
 
     return _dedupe(phrases), _dedupe(words)
+
+
+_SYNTHESIS_SIGNALS = frozenset({
+    'best', 'strongest', 'powerful', 'highlight', 'highlights', 'top',
+    'quotable', 'shareable', 'viral', 'hook', 'hooks',
+    'social', 'tiktok', 'instagram', 'reel', 'reels', 'shorts', 'youtube',
+    'podcast', 'soundbite', 'soundbites',
+})
+
+
+def _is_synthesis_query(message):
+    """Return True when the query asks for editorial judgment, not a lookup.
+
+    Synthesis queries ("best social media clip", "pull a reel", "top 3
+    highlights") should skip strict keyword anchoring and let the model
+    reason editorially across the full transcript. Lookup queries ("what
+    did she say about Moose Hill", "when does he mention his father") need
+    keyword anchoring to find the right passage.
+    """
+    if not message:
+        return False
+    import re
+    tokens = set(re.findall(r"[a-z0-9']+", message.lower()))
+    return bool(tokens & _SYNTHESIS_SIGNALS)
+
+
+_WORD_NUMBERS = {
+    'one': 1, 'single': 1,
+    'two': 2, 'couple': 2,
+    'three': 3, 'few': 3,
+    'four': 4, 'five': 5,
+}
+
+_BIGRAM_NUMBERS = {
+    ('a', 'single'): 1,
+    ('a', 'few'): 3,
+    ('a', 'couple'): 2,
+}
+
+_CLIP_NOUNS = frozenset({
+    'clip', 'clips', 'moment', 'moments', 'highlight', 'highlights',
+    'soundbite', 'soundbites', 'quote', 'quotes', 'reel', 'reels',
+    'short', 'shorts', 'beat', 'beats',
+})
+
+
+def _extract_quantity_hint(message):
+    """Extract an explicit clip count from the user's query, or None.
+
+    Returns an int (1-10) when the user specifies a count adjacent to a
+    clip noun ("best 1 clip", "top 3 highlights", "a single soundbite").
+    Returns None when no count is present, the number isn't near a clip
+    noun, or the count is out of range (0, 50, etc.).
+    """
+    if not message:
+        return None
+    import re
+    tokens = re.findall(r"[a-z0-9']+", message.lower())
+    if not tokens:
+        return None
+
+    has_clip_noun = bool(set(tokens) & _CLIP_NOUNS)
+    if not has_clip_noun:
+        return None
+
+    for i in range(len(tokens) - 1):
+        bigram = (tokens[i], tokens[i + 1])
+        if bigram in _BIGRAM_NUMBERS:
+            return _BIGRAM_NUMBERS[bigram]
+
+    for tok in tokens:
+        if tok in _WORD_NUMBERS:
+            return _WORD_NUMBERS[tok]
+
+    digits = re.findall(r'\b(\d{1,2})\b', message)
+    for d in digits:
+        n = int(d)
+        if 1 <= n <= 10:
+            tc_pattern = re.compile(r'(?:\d{1,2}:\d{2}|\d{4})')
+            if not tc_pattern.match(d) and not any(
+                message[max(0, message.find(d)-1):message.find(d)] == ':'
+                for _ in [None]
+            ):
+                return n
+    return None
 
 
 def _collect_theme_phrases_from_vectors(segment_vectors, message):
@@ -1239,7 +2354,7 @@ JSON SCHEMA (copy exactly):
 {{
   "candidates": [
     {{
-      "title": "2-6 word title, no quotes",
+      "title": "2-6 word title, sentence case (start with a capital letter), reads like a card headline not a tag list",
       "start": "HH:MM:SS",
       "end": "HH:MM:SS",
       "score": <integer 1-10>,
@@ -1277,7 +2392,7 @@ EXCERPT:
     return system_prompt, user_prompt
 
 
-def _call_ai_json(system_prompt, user_prompt, timeout=180):
+def _call_ai_json(system_prompt, user_prompt, timeout=180, model_override=None):
     """Low-temperature Ollama call optimized for structured output.
 
     Uses a smaller num_ctx than chat because each chunk fits comfortably
@@ -1291,17 +2406,38 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180):
     salvage path. The salvage path tags candidates with score=3, so a few
     bad chunks can poison the cross-chunk aggregation. Format-locked
     decoding eliminates the failure mode at zero parsing cost.
+
+    ``model_override`` lets Layer 2 chunked-search workers run on the
+    smaller ``gemma4:e2b`` for 2-3× faster decode while the synthesis
+    rerank path keeps using the user's hardware-tier variant. Quality
+    drop on per-chunk scoring is mitigated by the global rerank pass
+    which still runs on the bigger model.
+
+    Responses are cached by sha1((system_prompt, user_prompt, model))
+    so a re-asked query against an unchanged transcript hits the cache
+    on every chunk instead of re-billing the LLM. Cache busts naturally
+    when chunk text changes (re-analysis produces different sha1s).
     """
     system_prompt = inject_storytelling_foundation(system_prompt)
+    model_name = model_override or _get_ollama_model()
+    cache_key = (
+        hashlib.sha1(system_prompt.encode('utf-8', 'replace')).hexdigest(),
+        hashlib.sha1(user_prompt.encode('utf-8', 'replace')).hexdigest(),
+        model_name,
+    )
+    cached = _chunk_cache_get(cache_key)
+    if cached is not None:
+        return cached
     try:
         response = requests.post(
             'http://localhost:11434/api/generate',
             json={
-                'model': _get_ollama_model(),
+                'model': model_name,
                 'prompt': user_prompt,
                 'system': system_prompt,
                 'stream': False,
                 'format': 'json',
+                'keep_alive': _OLLAMA_KEEP_ALIVE,
                 'options': {
                     'temperature': 0.1,
                     'num_predict': 768,
@@ -1311,7 +2447,9 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180):
             timeout=timeout,
         )
         if response.status_code == 200:
-            return response.json().get('response', '')
+            result = response.json().get('response', '')
+            _chunk_cache_put(cache_key, result)
+            return result
     except requests.exceptions.ConnectionError:
         pass
     except requests.exceptions.Timeout:
@@ -1503,7 +2641,7 @@ def _format_clip_cards_from_candidates(candidates):
         # it can't break our marker's own quoting.
         if len(raw_title) >= 2 and raw_title[0] == raw_title[-1] and raw_title[0] in ('"', "'"):
             raw_title = raw_title[1:-1].strip()
-        title = raw_title.replace('"', "'")
+        title = _format_clip_title(raw_title.replace('"', "'"))
         why = (cand.get('why') or '').strip().replace('"', "'")
         if why:
             parts.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}" note="{why}"]')
@@ -1803,6 +2941,7 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
                 search_targets = [(i, chunks[i]) for i in top_indices]
 
     all_candidates = []
+    fast_model = _get_fast_chunk_model()
 
     def _run_chunk(idx_chunk):
         idx, chunk = idx_chunk
@@ -1810,7 +2949,11 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
             chunk, message, phrases, words, idx, len(chunks), project_name,
             strict_keyword=strict_keyword,
         )
-        response = _call_ai_json(system_prompt, user_prompt)
+        # Per-chunk scoring runs on the smaller variant when it's
+        # available (~2-3× faster decode on Apple Silicon). Synthesis
+        # rerank below stays on the user's hardware-tier variant so
+        # the global pick remains high-quality.
+        response = _call_ai_json(system_prompt, user_prompt, model_override=fast_model)
         return _parse_chunk_response(response, chunk)
 
     with ThreadPoolExecutor(max_workers=_CHAT_CHUNK_CONCURRENCY) as pool:
@@ -1838,6 +2981,86 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
     # answer than to drop everything.
     top = _rerank_candidates_globally(top, message, top_k=final_top_k)
     return _format_clip_cards_from_candidates(top)
+
+
+def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_name,
+                                       phrases, words, profile_id, analysis,
+                                       segment_vectors=None, theme_phrases=None,
+                                       tfidf_hits=None):
+    """Streaming variant of :func:`_chat_layer2_chunked_search`.
+
+    Yields ``('progress', label)`` events as each chunk completes so the
+    UI can render forward motion instead of staring at a static spinner
+    for 20-60 seconds. The final ``('done', reply)`` event carries the
+    same formatted reply the non-streaming variant returns. Logic
+    mirrors the non-streaming path 1:1 so future tweaks in either need
+    to be mirrored — keeping them in two functions instead of folding
+    a flag in keeps each call site flat and easy to read.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    chunks = _chunk_paragraphs(paragraphs)
+    if not chunks:
+        yield ('done', _format_clip_cards_from_candidates([]))
+        return
+
+    anchored = _find_keyword_chunk_indices(chunks, phrases, words)
+    if not anchored and theme_phrases and segment_vectors:
+        anchored = _find_vector_anchored_chunk_indices(
+            chunks, segment_vectors,
+            score_filter='match',
+            theme_phrases=theme_phrases,
+        )
+    if not anchored and tfidf_hits:
+        anchored = sorted(set(_chunks_overlapping_paragraphs(chunks, tfidf_hits)))
+
+    if anchored:
+        search_targets = [(i, chunks[i]) for i in anchored]
+        strict_keyword = True
+    else:
+        search_targets = list(enumerate(chunks))
+        strict_keyword = False
+        if len(search_targets) > 6 and segment_vectors:
+            top_indices = _find_vector_anchored_chunk_indices(
+                chunks, segment_vectors, score_filter='high', limit=6,
+            )
+            if top_indices:
+                search_targets = [(i, chunks[i]) for i in top_indices]
+
+    total = len(search_targets)
+    yield ('progress', f'Searching {total} chunk{"s" if total != 1 else ""}…')
+
+    all_candidates = []
+    fast_model = _get_fast_chunk_model()
+
+    def _run_chunk(idx_chunk):
+        idx, chunk = idx_chunk
+        system_prompt, user_prompt = _build_chunk_search_prompt(
+            chunk, message, phrases, words, idx, len(chunks), project_name,
+            strict_keyword=strict_keyword,
+        )
+        response = _call_ai_json(system_prompt, user_prompt, model_override=fast_model)
+        return _parse_chunk_response(response, chunk)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=_CHAT_CHUNK_CONCURRENCY) as pool:
+        futures = [pool.submit(_run_chunk, t) for t in search_targets]
+        for fut in as_completed(futures):
+            completed += 1
+            try:
+                all_candidates.extend(fut.result() or [])
+            except Exception as e:
+                print(f"Layer 2 chunk error: {e}")
+            yield ('progress', f'{completed}/{total} chunks searched')
+
+    user_count = _parse_user_clip_count(message)
+    final_top_k = user_count if user_count is not None else _CHAT_TOP_K_CLIPS
+    pool_top_k = max(final_top_k * 3, _CHAT_TOP_K_CLIPS * 3)
+
+    yield ('progress', 'Picking the best moments…')
+    top = _aggregate_chunk_candidates(all_candidates, top_k=pool_top_k)
+    top = _rerank_candidates_globally(top, message, top_k=final_top_k)
+    yield ('done', _format_clip_cards_from_candidates(top))
 
 
 def _seconds_to_tc(sec) -> str:
@@ -2651,24 +3874,51 @@ def _call_ai(prompt, system_prompt=""):
     )
 
 
-def _get_ollama_model():
-    """Get the Ollama model to use, honoring hardware-tier config."""
+def get_effective_ollama_model():
+    """Resolve which Ollama model will actually be used for the next chat call.
+
+    Returns ``(effective_model, selected_variant, fallback_used)`` where:
+      - ``effective_model`` is the tag Ollama will actually load
+      - ``selected_variant`` is the user-selected variant from model_config
+      - ``fallback_used`` is True when the selection wasn't installed and we
+        had to fall through to something else
+
+    The previous implementation silently swapped to a smaller variant when
+    the selection wasn't downloaded, so users picking "large (gemma4:26b)"
+    on a laptop with only ``gemma4:e2b`` installed got e2b without any
+    indication. The UI now surfaces ``fallback_used`` so the user can
+    download what they actually picked.
+    """
     try:
         import model_config
         selected_variant = model_config.get_gemma4_variant()['variant']
     except Exception:
         selected_variant = 'gemma4:e4b'
 
+    # gemma4:latest is what Ollama returns when the user pulls without an
+    # explicit tag (`ollama pull gemma4`).  Map it to the medium variant
+    # so the substring match below treats them as equivalent.
+    _LATEST_ALIASES = {
+        'gemma4:latest': 'gemma4:e4b',
+    }
+
     try:
         response = requests.get('http://localhost:11434/api/tags', timeout=5)
         if response.status_code == 200:
             models = response.json().get('models', [])
             available = [m['name'] for m in models]
-            # Try the hardware-selected Gemma 4 variant first
+            # Exact-prefix match for the selected variant.
             for avail in available:
                 if selected_variant in avail:
-                    return avail
-            # Fall back through other Gemma 4 variants, then other models
+                    return avail, selected_variant, False
+            # Check if any available model is an alias of the selection
+            # (e.g. gemma4:latest == gemma4:e4b).
+            for avail in available:
+                canonical = _LATEST_ALIASES.get(avail)
+                if canonical and canonical == selected_variant:
+                    return avail, selected_variant, False
+            # Fall back through other variants — but flag it so the UI can
+            # warn the user that they're not actually using their selection.
             fallback = [
                 'gemma4:e4b', 'gemma4:latest', 'gemma4:e2b', 'gemma4:26b', 'gemma4:31b',
                 'llama3:8b', 'mistral', 'llama3:70b',
@@ -2676,12 +3926,149 @@ def _get_ollama_model():
             for pref in fallback:
                 for avail in available:
                     if pref in avail:
-                        return avail
+                        print(f"[model] FALLBACK: selected {selected_variant!r} not "
+                              f"installed; using {avail!r} (matched on {pref!r}). "
+                              "User won't see speed/quality changes from selection.")
+                        return avail, selected_variant, True
             if available:
-                return available[0]
+                print(f"[model] FALLBACK: selected {selected_variant!r} not installed "
+                      f"and no preferred fallback found; using first available {available[0]!r}.")
+                return available[0], selected_variant, True
+    except Exception as e:
+        print(f"[model] could not query Ollama tags: {e}")
+    return selected_variant, selected_variant, False
+
+
+def _get_ollama_model():
+    """Backwards-compat wrapper — returns just the effective model name."""
+    effective, _selected, _fallback = get_effective_ollama_model()
+    return effective
+
+
+# Cached availability of the small chunked-search model. None until
+# the first probe; True/False thereafter. Probe runs on demand and
+# stays cached for the process lifetime — Ollama-installed models
+# rarely change mid-session, and re-probing every chunk call would
+# add a second's overhead per call.
+_FAST_CHUNK_MODEL_CACHE = None
+
+
+def _get_fast_chunk_model():
+    """Return the model name to use for Layer 2 chunked-search workers.
+
+    Off by default — set ``DOZA_FAST_CHUNK_MODEL=1`` to opt in. When
+    enabled, uses ``gemma4:e2b`` (2B effective, 2-3× faster decode on
+    Apple Silicon) for the per-chunk scoring pass while the synthesis
+    paths (``_call_ai_chat``, the rerank pass) keep using the user's
+    hardware-tier variant.
+
+    Why opt-in: e2b is reliably faster, but its structured-JSON
+    output for the chunk-search prompt is shaky enough to drop a 100-
+    minute interview to zero candidates on some queries — the chunk
+    parser sees malformed JSON and the salvage path can't recover.
+    The hardware-tier variant produces clean JSON every time. When
+    the gap closes (bigger small variant, better-tuned prompt, or
+    Ollama format=json gets stricter), flip the default to True.
+
+    Falls back to the user's main model if e2b isn't pulled or the
+    env var isn't set, so default behavior matches the v3.1.x path.
+    """
+    global _FAST_CHUNK_MODEL_CACHE
+    main_model = _get_ollama_model()
+    if not os.environ.get('DOZA_FAST_CHUNK_MODEL'):
+        return main_model
+    if main_model.startswith('gemma4:e2b'):
+        return main_model
+    if _FAST_CHUNK_MODEL_CACHE is not None:
+        return _FAST_CHUNK_MODEL_CACHE if _FAST_CHUNK_MODEL_CACHE else main_model
+    try:
+        response = requests.get('http://localhost:11434/api/tags', timeout=2)
+        if response.status_code == 200:
+            available = [m.get('name', '') for m in (response.json() or {}).get('models', [])]
+            for name in available:
+                if 'gemma4:e2b' in name:
+                    _FAST_CHUNK_MODEL_CACHE = name
+                    return name
     except Exception:
         pass
-    return selected_variant
+    _FAST_CHUNK_MODEL_CACHE = ''
+    return main_model
+
+
+def _estimate_layer1_num_ctx(formatted_transcript, system_prompt_extra=4096):
+    """Pick a num_ctx for Layer 1 that fits the formatted transcript plus
+    a slack budget for system prompt + storytelling foundation + reply.
+
+    Apple Silicon prompt-eval scales roughly linearly with context size,
+    so a 60K-token-budgeted call against a 5-minute interview wastes
+    seconds on KV-cache zero-padding. This snaps to the smallest power
+    of two that comfortably holds the transcript and leaves room for
+    everything else, capped at the original 32K ceiling.
+
+    Token estimate is char-count / 3.8 (matching the heuristic in
+    ``_chunk_paragraphs``). Slightly pessimistic on punctuation-heavy
+    text, which is what we want — better to over-allocate than truncate.
+    """
+    text_len = len(formatted_transcript or '')
+    # 3.8 chars/token is the same divisor _chunk_paragraphs uses; keep
+    # them aligned so a "fits in chunk" estimate matches a "fits in
+    # Layer 1" estimate.
+    transcript_tokens = int(text_len / 3.8) + 100
+    needed = transcript_tokens + system_prompt_extra
+    # Round up to a power of two within 8K..32K. Below 8K is a waste of
+    # the rounding (Ollama uses pow-of-2 KV blocks anyway); above 32K
+    # was the previous hardcoded ceiling and leaving it there keeps the
+    # behavior conservative for the longest interviews.
+    for ctx in (8192, 12288, 16384, 24576, 32768):
+        if needed <= ctx:
+            return ctx
+    return 32768
+
+
+def warmup_ollama():
+    """Issue a tiny generate call to load the configured model into RAM.
+
+    Called from the Flask app during startup and from project_view as
+    a fire-and-forget background warm-up. Combined with keep_alive=30m,
+    the user's first chat message after launching the app starts with
+    the model already resident — no 4-12s cold-load.
+
+    Errors are swallowed: the warm-up is best-effort and Ollama may
+    not be running yet at app start. Subsequent real chat calls
+    re-attempt the load via the normal _call_ai_chat path.
+    """
+    try:
+        requests.post(
+            'http://localhost:11434/api/generate',
+            json={
+                'model': _get_ollama_model(),
+                'prompt': 'ok',
+                'stream': False,
+                'keep_alive': _OLLAMA_KEEP_ALIVE,
+                'options': {'num_predict': 1, 'num_ctx': 2048},
+            },
+            timeout=120,
+        )
+    except Exception:
+        pass
+
+
+def _chunk_cache_get(key):
+    with _CHUNK_CACHE_LOCK:
+        if key in _CHUNK_CACHE:
+            _CHUNK_CACHE.move_to_end(key)
+            return _CHUNK_CACHE[key]
+    return None
+
+
+def _chunk_cache_put(key, value):
+    if not value:
+        return
+    with _CHUNK_CACHE_LOCK:
+        _CHUNK_CACHE[key] = value
+        _CHUNK_CACHE.move_to_end(key)
+        while len(_CHUNK_CACHE) > _CHUNK_CACHE_MAX:
+            _CHUNK_CACHE.popitem(last=False)
 
 
 def build_story(transcript, message, project_name="Interview", segment_vectors=None, profile_id=None):

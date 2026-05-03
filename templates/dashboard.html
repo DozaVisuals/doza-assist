@@ -19,6 +19,7 @@
         <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
+        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="openAIModelModal()" title="AI model settings">AI Model</button>
         <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
@@ -41,6 +42,23 @@ function toggleTheme() {
     const saved = localStorage.getItem('doza-theme');
     document.documentElement.setAttribute('data-theme', saved || 'light');
 })();
+
+async function refreshActivePill() {
+    try {
+        const res = await fetch('/api/editorial_dna/active-summary');
+        const data = await res.json();
+        const pill = document.getElementById('headerActivePill');
+        if (!pill) return;
+        if (!data.count) {
+            pill.textContent = 'No active style';
+            pill.classList.remove('is-on');
+        } else {
+            pill.textContent = 'Active: ' + (data.names || []).join(', ');
+            pill.classList.add('is-on');
+        }
+    } catch (e) { /* non-blocking */ }
+}
+window.addEventListener('DOMContentLoaded', refreshActivePill);
 </script>
 
 <div class="container">

@@ -360,7 +360,6 @@
                             <input type="checkbox" id="clipSelectAll" onchange="toggleAllClipChecks(this.checked)"> All
                         </label>
                         <button class="btn btn-sm" onclick="exportClips()">Export</button>
-                        <button class="btn btn-sm" onclick="sendToNle()" data-export-label-key="send-to-nle">Send to Final Cut Pro</button>
                     </div>
                 </div>
                 <div class="clips-grid" id="clipsGrid">
@@ -397,11 +396,6 @@
                     data-export-label-key="section" data-export-label-tooltip="story">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 <span data-export-label-text>FCPX</span>
-            </button>
-            <button class="analysis-section-export" onclick="sendToNle()"
-                    data-send-tooltip title="Send to selected NLE">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                <span>Send</span>
             </button>
         </div>
         <div class="analysis-list">
@@ -440,11 +434,6 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 <span data-export-label-text>FCPX</span>
             </button>
-            <button class="analysis-section-export" onclick="sendToNle()"
-                    data-send-tooltip title="Send to selected NLE">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                <span>Send</span>
-            </button>
         </div>
         <div class="analysis-list">
             {% for clip in project.analysis.social_clips %}
@@ -482,11 +471,6 @@
                     data-export-label-key="section" data-export-label-tooltip="soundbites">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 <span data-export-label-text>FCPX</span>
-            </button>
-            <button class="analysis-section-export" onclick="sendToNle()"
-                    data-send-tooltip title="Send to selected NLE">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                <span>Send</span>
             </button>
         </div>
         <div class="analysis-list">
@@ -625,7 +609,6 @@
                     <span id="storyPlayAllLabel">Play All</span>
                 </button>
                 <button class="btn btn-primary" onclick="exportStoryFCPXML()" data-export-label-key="story-seq">Export to FCPX</button>
-                <button class="btn" onclick="sendStoryToNle()" data-export-label-key="send-to-nle">Send to Final Cut Pro</button>
                 <button class="btn btn-green" onclick="addAllStoryClips()">Add All to Clips</button>
                 <button class="btn" onclick="rebuildStory()">Rebuild</button>
             </div>
@@ -639,6 +622,19 @@
 
     <!-- Export Tab -->
     <div class="tab-content" id="tab-export">
+        <div class="deliver-toggle" id="deliverToggle">
+            <span class="deliver-toggle-label">Deliver to</span>
+            <div class="deliver-toggle-options" role="radiogroup" aria-label="Delivery method">
+                <button type="button" class="deliver-toggle-btn" data-delivery="file"
+                        onclick="setDelivery('file')" role="radio">
+                    Save File
+                </button>
+                <button type="button" class="deliver-toggle-btn" data-delivery="nle"
+                        onclick="setDelivery('nle')" role="radio">
+                    <span data-delivery-nle-label>Send to Final Cut Pro</span>
+                </button>
+            </div>
+        </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
             <div class="card">
                 <div class="card-title" style="margin-bottom: 1rem;" data-export-label-key="card-title">NLE Export</div>
@@ -697,9 +693,6 @@
                 <button class="btn btn-primary" id="exportFCPXMLBtn" onclick="exportFCPXML()" data-export-label-key="unified" style="width:100%;">
                     Export to FCPX
                 </button>
-                <button class="btn" id="sendToNleBtn" onclick="sendToNle()" data-export-label-key="send-to-nle" style="width:100%; margin-top: 0.5rem;">
-                    Send to Final Cut Pro
-                </button>
                 {% if project.fcpxml_source %}
                 <div class="export-roundtrip">
                     <div class="card-title" style="margin-bottom: 0.5rem; font-size: 0.95rem;">FCPXML Round-Trip</div>
@@ -719,18 +712,10 @@
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 0.5rem;">
                         <button class="btn btn-primary" onclick="exportFCPXMLMulticam('selects_project')">
-                            Export FCPXML — Selects as new project
+                            Selects as new project
                         </button>
-                        <button class="btn" onclick="sendMulticamToNle('selects_project')"
-                                title="Send round-trip FCPXML straight to Final Cut Pro">
-                            Send to Final Cut Pro — Selects as new project
-                        </button>
-                        <button class="btn" onclick="exportFCPXMLMulticam('markers_timeline')">
-                            Export FCPXML — Markers on existing timeline
-                        </button>
-                        <button class="btn" onclick="sendMulticamToNle('markers_timeline')"
-                                title="Send round-trip FCPXML straight to Final Cut Pro">
-                            Send to Final Cut Pro — Markers on existing timeline
+                        <button class="btn btn-outline" onclick="exportFCPXMLMulticam('markers_timeline')">
+                            Markers on existing timeline
                         </button>
                     </div>
                 </div>
@@ -743,9 +728,9 @@
                     <div class="form-group" style="flex: 1;">
                         <label class="form-label">Format</label>
                         <select class="form-input" id="otherFormat">
-                            <option value="json" selected>JSON</option>
+                            <option value="txt" selected>Plain Text</option>
                             <option value="srt">SRT</option>
-                            <option value="txt">Plain Text</option>
+                            <option value="json">JSON</option>
                         </select>
                     </div>
                     <button class="btn btn-primary" onclick="downloadOtherFormat()">Download</button>
@@ -845,12 +830,43 @@ function refreshExportButtonLabels() {
     if (sel) sel.setAttribute('data-platform', EDITING_PLATFORM);
 }
 
+// ── Delivery toggle ──────────────────────────────────────────────
+// Global preference: "file" reveals the export in Finder; "nle" hands the
+// file to the chosen NLE (or reveals in Finder for Premiere, whose CLI
+// auto-import is unreliable). Persists in localStorage so it survives reloads.
+const DELIVER_KEY = 'dozaDeliver';
+function getDelivery() {
+    const v = localStorage.getItem(DELIVER_KEY);
+    return v === 'file' || v === 'nle' ? v : 'nle';
+}
+function deliverNleLabel(p) {
+    // Premiere can't auto-import from the CLI, so be honest about the UX.
+    return p === 'premiere' ? `Open in Finder (${PLATFORM_NAMES.premiere})`
+                            : `Send to ${PLATFORM_NAMES[p] || 'NLE'}`;
+}
+function refreshDeliverToggle() {
+    const current = getDelivery();
+    document.querySelectorAll('#deliverToggle [data-delivery]').forEach(btn => {
+        btn.classList.toggle('is-active', btn.getAttribute('data-delivery') === current);
+        btn.setAttribute('aria-checked', btn.getAttribute('data-delivery') === current ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-delivery-nle-label]').forEach(el => {
+        el.textContent = deliverNleLabel(EDITING_PLATFORM);
+    });
+}
+function setDelivery(mode) {
+    if (mode !== 'file' && mode !== 'nle') return;
+    localStorage.setItem(DELIVER_KEY, mode);
+    refreshDeliverToggle();
+}
+
 async function setEditingPlatform(platform) {
     if (!['fcp','premiere','resolve'].includes(platform)) return;
     if (platform === EDITING_PLATFORM) return;
     const previous = EDITING_PLATFORM;
     EDITING_PLATFORM = platform;
     refreshExportButtonLabels();
+    refreshDeliverToggle();
     try {
         const res = await fetch(`/api/projects/${PROJECT_ID}/editing_platform`, {
             method: 'PATCH',
@@ -862,12 +878,14 @@ async function setEditingPlatform(platform) {
     } catch (err) {
         EDITING_PLATFORM = previous;
         refreshExportButtonLabels();
+        refreshDeliverToggle();
         showToast('Could not save platform choice', true);
     }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
     refreshExportButtonLabels();
+    refreshDeliverToggle();
     // Wire up export-category checkboxes so the single "Export to FCPX"
     // button disables when nothing is checked.
     ['exportCatLabels', 'exportCatSocial', 'exportCatStory', 'exportCatTranscript'].forEach(id => {
@@ -2005,7 +2023,6 @@ function renderChatStoryCard(build) {
     html += `<div class="chat-story-result-actions">`;
     html += `<button class="btn btn-primary btn-sm" onclick="sendChatStoryToBuilder('${bid}', this)">Send to Story Builder</button>`;
     html += `<button class="btn btn-sm" onclick="exportStoryFCPXMLFromChat('${bid}')" data-export-label-key="story-seq">Export to ${PLATFORM_NAMES[EDITING_PLATFORM] || 'FCPX'}</button>`;
-    html += `<button class="btn btn-sm" onclick="sendStoryToNleFromChat('${bid}')" data-export-label-key="send-to-nle">Send to ${PLATFORM_NAMES[EDITING_PLATFORM] || 'NLE'}</button>`;
     html += `</div></div>`;
 
     return html;
@@ -3043,8 +3060,11 @@ function _refreshExportButtonState() {
     btn.disabled = _collectExportCategories().length === 0;
 }
 
-async function exportFCPXML() {
-    const types = _collectExportCategories();
+async function exportFCPXML(category) {
+    // ``category`` is passed by the analysis-section buttons (story/social/
+    // soundbites) to export just one bucket; the Export tab calls without
+    // an arg and we read the checkboxes instead.
+    const types = category ? [category] : _collectExportCategories();
     if (types.length === 0) {
         showToast('Check at least one category to export.');
         return;
@@ -3067,181 +3087,41 @@ async function exportFCPXML() {
     }
 
     const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    const mode = document.getElementById('exportMode')?.value || 'cuts';
+    const delivery = getDelivery();
+    const nle = EDITING_PLATFORM;
+    const platName = PLATFORM_NAMES[nle] || 'NLE';
 
     try {
         const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ types, framerate, mode: document.getElementById('exportMode')?.value || 'cuts', total_clips: labelSections.length }),
+            body: JSON.stringify({
+                types, framerate, mode,
+                total_clips: labelSections.length,
+                deliver_to: delivery, nle,
+            }),
         });
-
-        if (res.ok) {
-            const fmt = res.headers.get('X-Export-Format') || FORMAT_NAMES[EDITING_PLATFORM] || 'export';
-            const platName = res.headers.get('X-Export-Platform') || PLATFORM_NAMES[EDITING_PLATFORM] || '';
-            const ext = res.headers.get('X-Export-Extension') || '.fcpxml';
-            const warnings = res.headers.get('X-Export-Warnings') || '';
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = getFilenameFromResponse(res) || ('export' + ext);
-            a.click();
-            URL.revokeObjectURL(url);
-            const tail = warnings ? ' — ' + warnings.split('|')[0].trim() : '';
-            showToast(`Exported ${fmt} for ${platName}${tail}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast((data && data.error) || 'Export failed', true);
+            return;
+        }
+        if (data.delivery === 'nle') {
+            const tail = data.opened_in === 'finder' ? ' — revealed in Finder' : '';
+            showToast(`Sent to ${data.nle_name || platName}${tail}`);
         } else {
-            showToast('Export failed', true);
+            showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
     } catch (err) {
         showToast('Export error: ' + err.message, true);
     }
 }
 
-// ── Send to NLE (one-click: export + open in the chosen editor) ──
-// Most callers (Export tab + section buttons) hit this function. The
-// chosen NLE always comes from EDITING_PLATFORM at the top of the window
-// so a single button reflects the user's current selection. The Story
-// Builder uses sendStoryToNle() because its export path is different.
-async function sendToNle() {
-    const types = _collectExportCategories();
-    if (types.length === 0) {
-        showToast('Check at least one category to send.');
-        return;
-    }
-    if (types.includes('labels')) {
-        if (labelSections.length === 0) {
-            showToast('No clips to send. Uncheck "My Clips" or highlight some in the transcript first.');
-            return;
-        }
-        // Persist labels first so the server sees the latest state.
-        const sections = labelSections.map(s => ({
-            start: s.start, end: s.end, color: s.color, text: s.text
-        }));
-        await fetch(`/project/${PROJECT_ID}/labels`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
-        });
-    }
-
-    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
-    const mode = document.getElementById('exportMode')?.value || 'cuts';
-    const platName = PLATFORM_NAMES[EDITING_PLATFORM] || 'NLE';
-
-    try {
-        const res = await fetch('/export/send-to-nle', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                project_id: PROJECT_ID,
-                nle: EDITING_PLATFORM,
-                export_type: 'selects',
-                types, framerate, mode,
-                total_clips: labelSections.length,
-            }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) {
-            const name = data.nle_name || platName;
-            const tail = data.opened_in === 'finder' ? ' — revealed in Finder' : '';
-            showToast(`Sent to ${name}${tail}`);
-        } else {
-            showToast((data && data.error) || `Could not send to ${platName}`, true);
-        }
-    } catch (err) {
-        showToast('Send failed: ' + err.message, true);
-    }
-}
-
-// Send the currently-loaded story build to the chosen NLE. Mirrors
-// exportStoryFCPXML() but routes through /export/send-to-nle so the
-// generated timeline opens directly in the editor.
-async function sendStoryToNle() {
-    const build = storyBuilds.find(b => b.id === currentBuildId);
-    if (!build || !build.clips || build.clips.length === 0) {
-        showToast('No clips to send');
-        return;
-    }
-    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
-    const platName = PLATFORM_NAMES[EDITING_PLATFORM] || 'NLE';
-
-    try {
-        const res = await fetch('/export/send-to-nle', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                project_id: PROJECT_ID,
-                nle: EDITING_PLATFORM,
-                export_type: 'story_builder',
-                clips: build.clips,
-                story_title: build.story_title,
-                framerate,
-            }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) {
-            const name = data.nle_name || platName;
-            const tail = data.opened_in === 'finder' ? ' — revealed in Finder' : '';
-            showToast(`Sent to ${name}${tail}`);
-        } else {
-            showToast((data && data.error) || `Could not send to ${platName}`, true);
-        }
-    } catch (err) {
-        showToast('Send failed: ' + err.message, true);
-    }
-}
-
-// Chat-spawned story builds aren't yet "loaded" in the Story Builder pane;
-// switch context first (mirroring exportStoryFCPXMLFromChat) before sending.
-function sendStoryToNleFromChat(buildId) {
-    const build = storyBuilds.find(b => b.id === buildId);
-    if (!build) { showToast('Story not found', true); return; }
-    currentBuildId = buildId;
-    sendStoryToNle();
-}
-
-// Hand the round-trip FCPXML straight to Final Cut Pro. The multicam writer
-// reuses FCP's multicam / sync-clip container, so the output is FCP-only —
-// we ignore EDITING_PLATFORM here and always target FCP. The backend
-// enforces the same on its side.
-async function sendMulticamToNle(mode) {
-    if (typeof labelSections !== 'undefined' && labelSections.length) {
-        const sections = labelSections.map(s => ({
-            start: s.start, end: s.end, color: s.color, text: s.text
-        }));
-        await fetch(`/project/${PROJECT_ID}/labels`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
-        });
-    }
-
-    const source = document.getElementById('fcpxmlMulticamSource')?.value || 'client_selects';
-
-    try {
-        const res = await fetch('/export/send-to-nle', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                project_id: PROJECT_ID,
-                nle: 'fcp',
-                export_type: 'multicam',
-                mode, source,
-            }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) {
-            const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
-            showToast(`Sent to Final Cut Pro — ${modeLabel}`);
-        } else {
-            showToast((data && data.error) || 'Could not send to Final Cut Pro', true);
-        }
-    } catch (err) {
-        showToast('Send failed: ' + err.message, true);
-    }
-}
-
 // ── FCPXML multicam round-trip (for projects imported from an FCPXML) ──
+// Round-trip is FCP-only by construction, so the delivery toggle picks
+// "save and reveal" vs "open in Final Cut Pro" but never targets Resolve
+// or Premiere.
 async function exportFCPXMLMulticam(mode) {
     // Persist the latest clip labels before export so "Clip labels" source is fresh.
     if (typeof labelSections !== 'undefined' && labelSections.length) {
@@ -3256,27 +3136,24 @@ async function exportFCPXMLMulticam(mode) {
     }
 
     const source = document.getElementById('fcpxmlMulticamSource')?.value || 'client_selects';
+    const delivery = getDelivery();
+    const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
 
     try {
         const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode, source }),
+            body: JSON.stringify({ mode, source, deliver_to: delivery }),
         });
-
-        if (res.ok) {
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = getFilenameFromResponse(res) || 'Doza Selects.fcpxml';
-            a.click();
-            URL.revokeObjectURL(url);
-            const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
-            showToast(`Exported FCPXML — ${modeLabel}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast((data && data.error) || 'Export failed', true);
+            return;
+        }
+        if (data.delivery === 'nle') {
+            showToast(`Sent to Final Cut Pro — ${modeLabel}`);
         } else {
-            const err = await res.json().catch(() => ({}));
-            showToast(err.error || 'Export failed', true);
+            showToast(`Exported to ${data.file || data.filename || 'disk'} — ${modeLabel}`);
         }
     } catch (err) {
         showToast('Export error: ' + err.message, true);
@@ -4129,30 +4006,31 @@ async function exportStoryFCPXML() {
     }
 
     const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    const delivery = getDelivery();
+    const nle = EDITING_PLATFORM;
+    const platName = PLATFORM_NAMES[nle] || 'NLE';
 
     try {
         const res = await fetch(`/project/${PROJECT_ID}/story/export`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ clips: build.clips, story_title: build.story_title, framerate }),
+            body: JSON.stringify({
+                clips: build.clips,
+                story_title: build.story_title,
+                framerate,
+                deliver_to: delivery, nle,
+            }),
         });
-
-        if (res.ok) {
-            const fmt = res.headers.get('X-Export-Format') || FORMAT_NAMES[EDITING_PLATFORM] || 'export';
-            const platName = res.headers.get('X-Export-Platform') || PLATFORM_NAMES[EDITING_PLATFORM] || '';
-            const ext = res.headers.get('X-Export-Extension') || '.fcpxml';
-            const warnings = res.headers.get('X-Export-Warnings') || '';
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = getFilenameFromResponse(res) || ('story' + ext);
-            a.click();
-            URL.revokeObjectURL(url);
-            const tail = warnings ? ' — ' + warnings.split('|')[0].trim() : '';
-            showToast(`Exported ${fmt} for ${platName}${tail}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast((data && data.error) || 'Export failed', true);
+            return;
+        }
+        if (data.delivery === 'nle') {
+            const tail = data.opened_in === 'finder' ? ' — revealed in Finder' : '';
+            showToast(`Sent to ${data.nle_name || platName}${tail}`);
         } else {
-            showToast('Export failed', true);
+            showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
     } catch (err) { showToast('Export error: ' + err.message, true); }
 }

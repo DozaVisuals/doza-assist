@@ -1956,7 +1956,16 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
 
 @app.route('/project/<project_id>/export/fcpxml', methods=['POST'])
 def export_fcpxml(project_id):
-    """Export selections to the project's selected NLE format (FCPXML/Premiere/EDL)."""
+    """Export selections to the project's selected NLE format (FCPXML/Premiere/EDL).
+
+    Honors an optional ``deliver_to`` field on the body:
+
+      - ``'nle'``: write the file then launch the chosen NLE (Final Cut Pro /
+        Resolve auto-import; Premiere reveals in Finder). Returns JSON.
+      - ``'file'``: write the file then reveal it in Finder. Returns JSON.
+      - omitted: legacy stream-the-file-as-an-attachment behavior, preserved
+        for any third-party integration that depends on it.
+    """
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
@@ -1966,11 +1975,39 @@ def export_fcpxml(project_id):
     # that still send ``type='all'`` expand to the full set so existing tests
     # and any third-party integrations keep working.
     body = request.json or {}
+    deliver_to = str(body.get('deliver_to') or '').strip().lower()
+    nle = str(body.get('nle') or '').strip().lower()
+    # When the caller wants NLE delivery and explicitly chose one, force the
+    # exporter to that NLE's format (so toggling Resolve in the UI sends an
+    # EDL even if the project was originally configured for FCP).
+    force_platform = nle if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES) else None
+
     try:
-        result, exporter = _build_nle_export(project, body)
+        result, exporter = _build_nle_export(project, body, force_platform=force_platform)
     except Exception as e:
         app.logger.error('Export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
+
+    if deliver_to == 'nle':
+        if nle not in NLE_DISPLAY_NAMES:
+            return jsonify({'error': f'Unknown NLE: {nle!r}'}), 400
+        opened_in, err = _hand_file_to_nle(result.file_path, nle)
+        if err:
+            return jsonify({'error': err, 'file': result.file_path}), 500
+        return jsonify({
+            'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
+            'nle': nle, 'nle_name': NLE_DISPLAY_NAMES[nle],
+            'file': result.file_path, 'filename': result.filename,
+            'format_name': result.format_name,
+        })
+
+    if deliver_to == 'file':
+        _reveal_in_finder(result.file_path)
+        return jsonify({
+            'status': 'ok', 'delivery': 'file',
+            'file': result.file_path, 'filename': result.filename,
+            'format_name': result.format_name,
+        })
 
     return _exporter_response(result, project, exporter)
 
@@ -2009,6 +2046,34 @@ def _find_nle_app_path(nle: str):
                 return candidate
         return None
     return None
+
+
+def _hand_file_to_nle(file_path: str, nle: str):
+    """Launch the chosen NLE with the export file, or reveal in Finder for Premiere.
+
+    Returns ``(opened_in, error)`` where ``opened_in`` is ``'app'`` (NLE auto-imports
+    the file), ``'finder'`` (we revealed the file in Finder for the user to drag in),
+    or ``None`` on failure.
+    """
+    app_path = _find_nle_app_path(nle)
+    if not app_path:
+        return None, f'{NLE_DISPLAY_NAMES[nle]} not found at expected location'
+    try:
+        if nle == 'premiere':
+            subprocess.Popen(['open', '-R', file_path])
+            return 'finder', None
+        subprocess.Popen(['open', '-a', app_path, file_path])
+        return 'app', None
+    except Exception as e:
+        return None, f'Could not launch {NLE_DISPLAY_NAMES[nle]}: {e}'
+
+
+def _reveal_in_finder(file_path: str):
+    """Best-effort reveal of ``file_path`` in Finder. Failures are non-fatal."""
+    try:
+        subprocess.Popen(['open', '-R', file_path])
+    except Exception as e:
+        app.logger.error('Reveal in Finder failed: %s', e)
 
 
 @app.route('/export/send-to-nle', methods=['POST'])
@@ -2269,15 +2334,44 @@ def export_fcpxml_multicam(project_id):
         laid end-to-end as mc-clips (multicam) or asset-clips (sync-clip).
       - ``markers_timeline``: emits the original timeline with markers injected
         at each select's in-point.
+
+    Honors ``deliver_to`` like ``/export/fcpxml``: ``'nle'`` always launches
+    Final Cut Pro (the round-trip writer is FCP-only by construction);
+    ``'file'`` reveals in Finder; omitted preserves the legacy attachment
+    download.
     """
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
+    body = request.json or {}
+    deliver_to = str(body.get('deliver_to') or '').strip().lower()
+
     try:
-        out_path, filename, mode = _build_nle_multicam_export(project, request.json or {})
+        out_path, filename, mode = _build_nle_multicam_export(project, body)
     except MulticamExportError as e:
         return jsonify({'error': str(e)}), e.status
+
+    if deliver_to == 'nle':
+        # Round-trip is FCP-only — ignore whatever NLE the user has selected
+        # and always hand the file to Final Cut Pro.
+        opened_in, err = _hand_file_to_nle(out_path, 'fcp')
+        if err:
+            return jsonify({'error': err, 'file': out_path}), 500
+        return jsonify({
+            'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
+            'nle': 'fcp', 'nle_name': NLE_DISPLAY_NAMES['fcp'],
+            'file': out_path, 'filename': filename,
+            'format_name': 'FCPXML', 'mode': mode,
+        })
+
+    if deliver_to == 'file':
+        _reveal_in_finder(out_path)
+        return jsonify({
+            'status': 'ok', 'delivery': 'file',
+            'file': out_path, 'filename': filename,
+            'format_name': 'FCPXML', 'mode': mode,
+        })
 
     response = send_file(out_path, as_attachment=True, download_name=filename)
     response.headers['X-Export-Format'] = 'FCPXML'
@@ -2729,7 +2823,12 @@ def _build_nle_story_export(project, body, force_platform=None):
 
 @app.route('/project/<project_id>/story/export', methods=['POST'])
 def story_export(project_id):
-    """Export a story build as a timeline in the project's selected NLE format."""
+    """Export a story build as a timeline in the project's selected NLE format.
+
+    Honors ``deliver_to`` like ``/project/<id>/export/fcpxml``: ``'nle'`` writes
+    the file then launches the chosen NLE; ``'file'`` reveals the file in
+    Finder; omitted preserves the legacy attachment-stream behavior.
+    """
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
@@ -2738,11 +2837,36 @@ def story_export(project_id):
     if not data.get('clips'):
         return jsonify({'error': 'No clips in sequence'}), 400
 
+    deliver_to = str(data.get('deliver_to') or '').strip().lower()
+    nle = str(data.get('nle') or '').strip().lower()
+    force_platform = nle if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES) else None
+
     try:
-        result, exporter = _build_nle_story_export(project, data)
+        result, exporter = _build_nle_story_export(project, data, force_platform=force_platform)
     except Exception as e:
         app.logger.error('Story export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
+
+    if deliver_to == 'nle':
+        if nle not in NLE_DISPLAY_NAMES:
+            return jsonify({'error': f'Unknown NLE: {nle!r}'}), 400
+        opened_in, err = _hand_file_to_nle(result.file_path, nle)
+        if err:
+            return jsonify({'error': err, 'file': result.file_path}), 500
+        return jsonify({
+            'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
+            'nle': nle, 'nle_name': NLE_DISPLAY_NAMES[nle],
+            'file': result.file_path, 'filename': result.filename,
+            'format_name': result.format_name,
+        })
+
+    if deliver_to == 'file':
+        _reveal_in_finder(result.file_path)
+        return jsonify({
+            'status': 'ok', 'delivery': 'file',
+            'file': result.file_path, 'filename': result.filename,
+            'format_name': result.format_name,
+        })
 
     return _exporter_response(result, project, exporter)
 

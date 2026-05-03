@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ project.name }} - {{ brand }}</title>
-    <link rel="icon" type="image/jpeg" href="/static/logo.jpg">
-    <link rel="apple-touch-icon" href="/static/logo.jpg">
+    <link rel="icon" href="{{ logo_url }}">
+    <link rel="apple-touch-icon" href="{{ logo_url }}">
     <link rel="stylesheet" href="/static/style.css?v={{ range(10000,99999) | random }}">
 </head>
 <body>
@@ -13,7 +13,7 @@
 <header class="app-header">
     <div class="app-logo-group">
         <a href="{% if is_shared %}#{% else %}/{% endif %}" class="app-logo">
-            <img class="logo-img" src="/static/logo.jpg" alt="{{ brand }}">
+            <img class="logo-img" src="{{ logo_url }}" alt="{{ brand }}">
             <span>{% if is_shared %}Doza Visuals{% else %}{{ brand }}{% endif %}</span>
         </a>
         <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>

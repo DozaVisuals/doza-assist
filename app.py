@@ -74,13 +74,21 @@ os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
 
 @app.context_processor
 def inject_brand():
-    """Make the user-visible app brand configurable from the launching shell.
+    """Make the user-visible app brand and logo configurable from the
+    launching shell.
 
-    Defaults to "Doza Assist". An external launcher (e.g. a downstream shell
-    that bundles this Flask backend) can override by setting DOZA_BRAND in
-    the environment before spawning python.
+    Defaults: brand = "Doza Assist", logo_url = "/static/logo.jpg".
+    An external launcher (a downstream shell that bundles this Flask
+    backend) can override by setting DOZA_BRAND and/or DOZA_LOGO_URL in
+    the environment before spawning python -- the shell is responsible
+    for ensuring whatever URL it points at actually serves an image
+    (e.g. a Pro shell drops its own logo into static/ before launch and
+    sets DOZA_LOGO_URL=/static/logo-pro.png).
     """
-    return {'brand': os.environ.get('DOZA_BRAND', 'Doza Assist')}
+    return {
+        'brand': os.environ.get('DOZA_BRAND', 'Doza Assist'),
+        'logo_url': os.environ.get('DOZA_LOGO_URL', '/static/logo.jpg'),
+    }
 
 
 def allowed_file(filename):

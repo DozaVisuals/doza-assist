@@ -253,8 +253,15 @@ def _resolve_multicam_audio(
     resource_by_id: dict,
     container_ref: str,
     angle_id: Optional[str],
+    segment_start: Fraction = Fraction(0),
 ) -> dict:
-    """Resolve the active audio angle within a ``<media>/<multicam>`` → asset path."""
+    """Resolve the active audio angle within a ``<media>/<multicam>`` → asset path.
+
+    When a multicam angle contains multiple asset-clips (e.g. several camera
+    files stitched into one angle), ``segment_start`` — the mc-clip's ``start``
+    attribute — is used to pick the asset-clip whose time range covers that
+    position within the multicam container.
+    """
     media_el = resource_by_id.get(container_ref)
     if media_el is None:
         raise ParseError(f"mc-clip ref {container_ref!r} not found in <resources>")
@@ -286,12 +293,23 @@ def _resolve_multicam_audio(
                 "cannot resolve audio source"
             )
 
-    asset_clip = chosen.find("asset-clip")
-    if asset_clip is None:
+    all_clips = chosen.findall("asset-clip")
+    if not all_clips:
         raise ParseError(
             f"mc-angle {chosen.get('name')!r} has no <asset-clip>; "
             "audio-only angle formats are not supported"
         )
+
+    # When an angle has multiple asset-clips, pick the one whose range covers
+    # the segment's start position within the multicam container.
+    asset_clip = all_clips[0]
+    if len(all_clips) > 1:
+        for ac in all_clips:
+            ac_offset = parse_rational(ac.get("offset"))
+            ac_duration = parse_rational(ac.get("duration"))
+            if ac_offset <= segment_start < ac_offset + ac_duration:
+                asset_clip = ac
+                break
 
     asset_ref = asset_clip.get("ref")
     asset_el = resource_by_id.get(asset_ref)
@@ -430,7 +448,11 @@ def _resolve_segment_audio(
             if "audio" in enable or enable == "all":
                 angle_id = ms.get("angleID")
                 break
-        info = _resolve_multicam_audio(resource_by_id, child.get("ref") or "", angle_id)
+        segment_start = parse_rational(child.get("start"))
+        info = _resolve_multicam_audio(
+            resource_by_id, child.get("ref") or "", angle_id,
+            segment_start=segment_start,
+        )
         return SegmentAudioSource(
             path=info["path"],
             asset_id=info["asset_id"],

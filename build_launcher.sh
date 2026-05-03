@@ -85,7 +85,7 @@ rsync -a \
     --exclude='projects' \
     --exclude='exports' \
     --include='docs/' \
-    --include='docs/storytelling-master.md' \
+    --include='docs/storytelling-foundation-oss.md' \
     --exclude='docs/*' \
     --exclude='.pytest_cache' \
     --exclude='test_hardware_tier.py' \

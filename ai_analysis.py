@@ -1774,6 +1774,9 @@ _CHAT_STOPWORDS = frozenset({
     "where's", 'which', 'while', 'who', "who's", 'whom', 'why', "why's",
     'with', "won't", 'would', "wouldn't", 'you', "you'd", "you'll", "you're",
     "you've", 'your', 'yours', 'yourself', 'yourselves',
+    # Apostrophe-free contractions (users skip punctuation in chat).
+    'whats', 'hes', 'shes', 'theyre', 'dont', 'doesnt', 'didnt', 'isnt',
+    'cant', 'wont', 'wouldnt', 'couldnt', 'shouldnt', 'thats', 'hows',
     # Question/meta words that show up constantly but aren't search terms.
     'find', 'show', 'give', 'tell', 'say', 'said', 'talk', 'talks', 'talked',
     'talking', 'mention', 'mentions', 'mentioned', 'discuss', 'discusses',

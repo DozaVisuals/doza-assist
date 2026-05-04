@@ -707,37 +707,53 @@ def pull_ai_model():
     return Response(generate(), mimetype='application/x-ndjson')
 
 
-@app.route('/create', methods=['POST'])
-def create_project():
-    """Create a new project from a local file path."""
-    data = request.json or {}
-    source_path = data.get('source_path', '').strip()
+def create_project_from_path(
+    source_path,
+    project_name=None,
+    client_name='',
+    interviewer_name='Interviewer',
+    subject_name='Subject',
+    num_speakers=2,
+    language='en',
+    project_id=None,
+):
+    """Create a new project from a file already on disk. Returns project_id.
 
-    if not source_path:
-        return jsonify({'error': 'No file path provided'}), 400
+    The source file is NOT copied or moved — meta.json points at it in
+    place. Both the path-based ``/create`` route and CLI / scripted
+    callers (e.g. batch importers) use this directly. The byte-stream
+    ``/upload`` route saves the uploaded file into the project dir
+    first, then calls this with ``project_id`` set so the same id is
+    reused for the dir + meta (rather than generating a new one and
+    leaving the saved bytes orphaned).
 
-    # Expand user home directory
+    Validation raises ``ValueError`` on a missing file, a non-file path,
+    or an unsupported extension. FCPXML inputs are auto-ingested via the
+    same ``_ingest_fcpxml`` path the routes use. Failure during ingest
+    cleans up the half-created project directory before re-raising so a
+    bad input never leaves a dangling empty project on disk.
+
+    Args:
+      source_path: absolute path to a media file or .fcpxml(d) on disk.
+      project_name: display name. Defaults to the filename stem with
+        underscores/hyphens turned into spaces.
+      client_name, interviewer_name, subject_name, num_speakers,
+        language: optional metadata fields persisted on meta.json.
+      project_id: if provided, use this id instead of generating one.
+        Lets ``/upload`` create the project dir and save bytes into it
+        before the meta is written.
+    """
     source_path = os.path.expanduser(source_path)
-
-    if not os.path.exists(source_path):
-        return jsonify({'error': f'File not found: {source_path}'}), 400
 
     is_fcpxml = _is_fcpxml_input(source_path)
     if not is_fcpxml and not os.path.isfile(source_path):
-        return jsonify({'error': 'Path is not a file'}), 400
-
+        raise ValueError(f'Path is not a file: {source_path}')
     if not is_fcpxml and not allowed_file(source_path):
         ext = source_path.rsplit('.', 1)[-1].lower() if '.' in source_path else 'unknown'
-        return jsonify({'error': f'Unsupported file type: .{ext}'}), 400
+        raise ValueError(f'Unsupported file type: .{ext}')
 
-    project_name = data.get('project_name', '').strip()
-    client_name = data.get('client_name', '').strip()
-    interviewer_name = data.get('interviewer_name', 'Interviewer').strip()
-    subject_name = data.get('subject_name', 'Subject').strip()
-    num_speakers = int(data.get('num_speakers', 2))
-    language = data.get('language', 'en').strip()
-
-    project_id = str(uuid.uuid4())[:8]
+    if project_id is None:
+        project_id = str(uuid.uuid4())[:8]
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     os.makedirs(project_dir, exist_ok=True)
 
@@ -745,9 +761,9 @@ def create_project():
     if is_fcpxml:
         try:
             ingest = _ingest_fcpxml(source_path, project_dir)
-        except ValueError as e:
+        except ValueError:
             shutil.rmtree(project_dir, ignore_errors=True)
-            return jsonify({'error': str(e)}), 400
+            raise
         audio_path = ingest['audio_path']
         fcpxml_meta = ingest['fcpxml_source']
         if not project_name:
@@ -764,10 +780,10 @@ def create_project():
         'id': project_id,
         'name': project_name,
         'client_name': client_name,
-        'interviewer_name': interviewer_name,
-        'subject_name': subject_name,
+        'interviewer_name': interviewer_name or 'Interviewer',
+        'subject_name': subject_name or 'Subject',
         'num_speakers': num_speakers,
-        'language': language,
+        'language': language or 'en',
         'filename': os.path.basename(media_source_path),
         'source_path': media_source_path,
         'filepath': media_source_path,
@@ -784,6 +800,36 @@ def create_project():
     if fcpxml_meta is not None:
         meta['fcpxml_source'] = fcpxml_meta
     save_project(project_id, meta)
+
+    return project_id
+
+
+@app.route('/create', methods=['POST'])
+def create_project():
+    """Create a new project from a local file path."""
+    data = request.json or {}
+    source_path = data.get('source_path', '').strip()
+
+    if not source_path:
+        return jsonify({'error': 'No file path provided'}), 400
+
+    # Expand user home directory before existence check so ~/foo works.
+    expanded = os.path.expanduser(source_path)
+    if not os.path.exists(expanded):
+        return jsonify({'error': f'File not found: {expanded}'}), 400
+
+    try:
+        project_id = create_project_from_path(
+            expanded,
+            project_name=data.get('project_name', '').strip() or None,
+            client_name=data.get('client_name', '').strip(),
+            interviewer_name=data.get('interviewer_name', 'Interviewer').strip(),
+            subject_name=data.get('subject_name', 'Subject').strip(),
+            num_speakers=int(data.get('num_speakers', 2)),
+            language=data.get('language', 'en').strip(),
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     return jsonify({'project_id': project_id, 'status': 'created'})
 
@@ -807,6 +853,11 @@ def upload():
     if not project_name:
         project_name = file.filename.rsplit('.', 1)[0]
 
+    # Generate the project id and dir up front so we have somewhere to
+    # land the uploaded bytes. We then hand the saved path to
+    # create_project_from_path with the same project_id, so the meta file
+    # ends up in the same dir as the file (rather than the function
+    # generating a fresh id and orphaning what we just saved).
     project_id = str(uuid.uuid4())[:8]
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     os.makedirs(project_dir, exist_ok=True)
@@ -815,45 +866,21 @@ def upload():
     filepath = os.path.join(project_dir, filename)
     file.save(filepath)
 
-    fcpxml_meta = None
-    if filename.lower().endswith('.fcpxml'):
-        try:
-            ingest = _ingest_fcpxml(filepath, project_dir)
-        except ValueError as e:
-            shutil.rmtree(project_dir, ignore_errors=True)
-            return jsonify({'error': str(e)}), 400
-        media_path = ingest['audio_path']
-        fcpxml_meta = ingest['fcpxml_source']
-        media_filename = os.path.basename(media_path)
-    else:
-        media_path = filepath
-        media_filename = filename
-
-    file_size = os.path.getsize(media_path)
-
-    meta = {
-        'id': project_id,
-        'name': project_name,
-        'client_name': client_name,
-        'interviewer_name': interviewer_name,
-        'subject_name': subject_name,
-        'language': language,
-        'filename': media_filename,
-        'source_path': media_path,
-        'filepath': media_path,
-        'file_size': file_size,
-        'file_size_formatted': format_file_size(file_size),
-        'created_at': datetime.now().isoformat(),
-        'status': 'uploaded',
-        'transcript': None,
-        'analysis': None,
-        'client_selects': [],
-        'social_clips': [],
-        'editing_platform': prefs.get_default_platform(),
-    }
-    if fcpxml_meta is not None:
-        meta['fcpxml_source'] = fcpxml_meta
-    save_project(project_id, meta)
+    try:
+        create_project_from_path(
+            filepath,
+            project_name=project_name,
+            client_name=client_name,
+            interviewer_name=interviewer_name,
+            subject_name=subject_name,
+            language=language,
+            project_id=project_id,
+        )
+    except ValueError as e:
+        # File was already saved into project_dir; clean up so a bad
+        # upload doesn't leave an orphan dir behind.
+        shutil.rmtree(project_dir, ignore_errors=True)
+        return jsonify({'error': str(e)}), 400
 
     return jsonify({'project_id': project_id, 'status': 'uploaded'})
 
@@ -3867,6 +3894,92 @@ def my_style_import():
 
     from flask import Response
     return Response(generate(), mimetype='application/x-ndjson')
+
+
+def _load_extensions(flask_app):
+    """Discover and register Flask blueprints from ``DOZA_EXTENSIONS_PATH``.
+
+    A small extension system for community plugins. When the env var is
+    set to a directory:
+
+      1. The directory is added to ``sys.path`` (so its top-level
+         subpackages are importable by name).
+      2. Each top-level subdirectory is imported as a Python package.
+      3. If the package exposes a ``blueprint`` attribute that is an
+         instance of ``flask.Blueprint``, it's registered on the app.
+
+    Failures are logged and swallowed — a misbehaving extension never
+    blocks the app from starting. Subdirectories whose names start with
+    ``.`` or ``_`` are skipped (so ``__pycache__`` and dotfiles don't
+    get imported).
+
+    Set ``DOZA_EXTENSIONS_PATH=/path/to/extensions`` to use this. The
+    path can hold any number of independent extension packages.
+    """
+    import importlib
+    import sys as _sys
+    from flask import Blueprint as _Blueprint
+
+    ext_path = os.environ.get('DOZA_EXTENSIONS_PATH')
+    if not ext_path:
+        return
+    ext_path = os.path.expanduser(ext_path)
+    if not os.path.isdir(ext_path):
+        flask_app.logger.warning(
+            'DOZA_EXTENSIONS_PATH=%s is not a directory; skipping extension load',
+            ext_path,
+        )
+        return
+
+    if ext_path not in _sys.path:
+        _sys.path.insert(0, ext_path)
+
+    try:
+        entries = sorted(os.listdir(ext_path))
+    except OSError as e:
+        flask_app.logger.warning('Could not list %s: %s', ext_path, e)
+        return
+
+    for name in entries:
+        if name.startswith('.') or name.startswith('_'):
+            continue
+        sub = os.path.join(ext_path, name)
+        if not os.path.isdir(sub):
+            continue
+        try:
+            module = importlib.import_module(name)
+        except Exception as e:
+            flask_app.logger.warning(
+                'Skipping extension %r: import failed (%s)', name, e,
+            )
+            continue
+        bp = getattr(module, 'blueprint', None)
+        if bp is None:
+            flask_app.logger.warning(
+                'Skipping extension %r: no `blueprint` attribute exposed', name,
+            )
+            continue
+        if not isinstance(bp, _Blueprint):
+            flask_app.logger.warning(
+                'Skipping extension %r: `blueprint` is not a flask.Blueprint',
+                name,
+            )
+            continue
+        try:
+            flask_app.register_blueprint(bp)
+            flask_app.logger.info('Loaded extension: %s', name)
+        except Exception as e:
+            flask_app.logger.warning(
+                'Skipping extension %r: register_blueprint failed (%s)', name, e,
+            )
+
+
+# Load extensions at module import so any WSGI host (gunicorn, uwsgi)
+# that does ``from app import app`` also picks them up — not just the
+# ``python3 app.py`` direct-run path. Idempotent: Flask's
+# register_blueprint raises on a second register, but the loader catches
+# that as a logged warning rather than crashing the import.
+_load_extensions(app)
 
 
 if __name__ == '__main__':

@@ -284,6 +284,13 @@ function saveLabels() {
  *   labeledSections: list of { start, end, color, text? } from server
  *   segmentVectors:  list of segment vectors for narrative-score
  *                    badges (optional; pass [] when absent)
+ *   preserveBrush:   bool. When true, skip the activeBrush reset and
+ *                    keep whatever color is currently selected (plus
+ *                    the painting-mode body class + active swatch).
+ *                    Used by the Pro Collections Transcript tab on
+ *                    interview swap — the editor's brush choice
+ *                    persists across interviews. Default false (first
+ *                    load behavior: brush starts on 'blue').
  *
  * Resets all in-memory state to the supplied values, restores swatch
  * label inputs, repaints highlights, refreshes the section count,
@@ -317,13 +324,17 @@ function transcriptInit(opts) {
     });
 
     // Auto-activate first swatch + painting mode (preserves the
-    // existing default-on UX from the inline implementation).
-    activeBrush = 'blue';
-    document.body.classList.add('painting-mode');
-    document.body.setAttribute('data-brush', 'blue');
-    document.querySelectorAll('.label-swatch').forEach(s => s.classList.remove('active'));
-    const firstSwatch = document.querySelector('.label-swatch[data-color="blue"]');
-    if (firstSwatch) firstSwatch.classList.add('active');
+    // existing default-on UX from the inline implementation). Skipped
+    // when the caller passes preserveBrush:true — the previously-
+    // selected brush stays active across the call.
+    if (!opts.preserveBrush) {
+        activeBrush = 'blue';
+        document.body.classList.add('painting-mode');
+        document.body.setAttribute('data-brush', 'blue');
+        document.querySelectorAll('.label-swatch').forEach(s => s.classList.remove('active'));
+        const firstSwatch = document.querySelector('.label-swatch[data-color="blue"]');
+        if (firstSwatch) firstSwatch.classList.add('active');
+    }
 
     // Repaint highlights against whatever .tw words are currently in
     // the DOM (the host page is responsible for `allWords` being

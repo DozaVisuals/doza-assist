@@ -52,7 +52,7 @@
 
 {% if not is_shared %}{% include '_ai_model_modal.html' %}{% endif %}
 
-<div class="container-wide">
+<div class="container-wide" data-project-id="{{ project.id }}" data-project-status="{{ project.status }}">
     <div class="page-title-area">
         <div>
             <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">

@@ -58,11 +58,12 @@
                     <button type="button" class="btn btn-sm" onclick="toggleProviderKeyVisibility('Anthropic')" id="aiProviderKeyToggleAnthropic" title="Show/hide">Show</button>
                     <button type="button" class="btn btn-sm" onclick="saveProviderKey('anthropic')">Save</button>
                     <button type="button" class="btn btn-sm" onclick="testProviderKey('anthropic')">Test</button>
+                    <button type="button" class="btn btn-sm ai-provider-key-remove" onclick="removeProviderKey('anthropic')" id="aiProviderKeyRemoveAnthropic" style="display:none;" title="Delete the saved key from the macOS Keychain">Remove</button>
                 </div>
                 <div class="ai-provider-status" id="aiProviderStatusAnthropic"></div>
                 <p class="ai-provider-help">
                     Paste your API key from <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
-                    This key is stored locally on your machine and is never sent to Doza Assist servers.
+                    This key is stored in your macOS Keychain and is never sent to Doza Assist servers.
                 </p>
                 <p class="ai-provider-help">
                     Typical cost: a few cents per interview. API billing is separate from a Claude Pro subscription.
@@ -86,11 +87,12 @@
                     <button type="button" class="btn btn-sm" onclick="toggleProviderKeyVisibility('Openai')" id="aiProviderKeyToggleOpenai" title="Show/hide">Show</button>
                     <button type="button" class="btn btn-sm" onclick="saveProviderKey('openai')">Save</button>
                     <button type="button" class="btn btn-sm" onclick="testProviderKey('openai')">Test</button>
+                    <button type="button" class="btn btn-sm ai-provider-key-remove" onclick="removeProviderKey('openai')" id="aiProviderKeyRemoveOpenai" style="display:none;" title="Delete the saved key from the macOS Keychain">Remove</button>
                 </div>
                 <div class="ai-provider-status" id="aiProviderStatusOpenai"></div>
                 <p class="ai-provider-help">
                     Paste your API key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>.
-                    This key is stored locally on your machine and is never sent to Doza Assist servers.
+                    This key is stored in your macOS Keychain and is never sent to Doza Assist servers.
                 </p>
                 <p class="ai-provider-help">
                     Typical cost: a few cents per interview. API billing is separate from a ChatGPT Plus subscription.
@@ -151,6 +153,10 @@ async function openAIModelModal(projectId) {
                 ? `Saved: ${(cfg.openai && cfg.openai.api_key) || '****'} — paste a new key to replace`
                 : 'sk-...';
         }
+        // Show Remove only when there's actually something to remove. Hidden
+        // for the empty-state so the row doesn't suggest a no-op action.
+        _setRemoveVisible('Anthropic', !!cfg.has_anthropic_key);
+        _setRemoveVisible('Openai', !!cfg.has_openai_key);
         _renderProviderTabs(_activeProvider);
     } catch (e) {
         // Non-fatal — show Local pane, the user can still switch.
@@ -263,6 +269,79 @@ function toggleProviderKeyVisibility(suffix) {
     btn.textContent = showing ? 'Show' : 'Hide';
 }
 
+function _setRemoveVisible(suffix, visible) {
+    const btn = document.getElementById('aiProviderKeyRemove' + suffix);
+    if (btn) btn.style.display = visible ? '' : 'none';
+}
+
+// Two-click confirmation for Remove. Native confirm() is unreliable in
+// WKWebView (see comment near _setAIModalError) so we arm the button on
+// first click and act on the second; a 5s timer reverts the armed state.
+let _pendingRemove = { provider: null, timer: null };
+
+async function removeProviderKey(provider) {
+    if (provider !== 'anthropic' && provider !== 'openai') return;
+    const suffix = provider === 'anthropic' ? 'Anthropic' : 'Openai';
+    const btn = document.getElementById('aiProviderKeyRemove' + suffix);
+
+    if (_pendingRemove.provider === provider) {
+        // Second click within window — actually delete.
+        clearTimeout(_pendingRemove.timer);
+        _pendingRemove = { provider: null, timer: null };
+        if (btn) btn.textContent = 'Remove';
+        await _doRemoveProviderKey(provider, suffix, btn);
+        return;
+    }
+
+    // First click — arm. Cancel any pending arm on the other provider.
+    if (_pendingRemove.timer) {
+        clearTimeout(_pendingRemove.timer);
+        const otherSuffix = _pendingRemove.provider === 'anthropic' ? 'Anthropic' : 'Openai';
+        const otherBtn = document.getElementById('aiProviderKeyRemove' + otherSuffix);
+        if (otherBtn) otherBtn.textContent = 'Remove';
+    }
+    _pendingRemove.provider = provider;
+    if (btn) btn.textContent = 'Click again to confirm';
+    _showProviderStatus(provider, 'info', 'Remove this API key? Click Remove again to confirm.');
+    _pendingRemove.timer = setTimeout(() => {
+        if (_pendingRemove.provider === provider) {
+            _pendingRemove = { provider: null, timer: null };
+            if (btn) btn.textContent = 'Remove';
+            _showProviderStatus(provider, 'info', '');
+        }
+    }, 5000);
+}
+
+async function _doRemoveProviderKey(provider, suffix, btn) {
+    if (btn) btn.disabled = true;
+    _showProviderStatus(provider, 'info', 'Removing…');
+    try {
+        // Empty api_key on save means "delete" — config.save_provider_config
+        // routes that through keyring.delete_password.
+        const r = await fetch('/settings/provider', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, api_key: '' }),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+            _showProviderStatus(provider, 'error', data.error || 'Remove failed');
+            return;
+        }
+        const input = document.getElementById('aiProviderKey' + suffix);
+        if (input) {
+            input.value = '';
+            input.placeholder = provider === 'anthropic' ? 'sk-ant-...' : 'sk-...';
+        }
+        _setRemoveVisible(suffix, false);
+        _showProviderStatus(provider, 'success', 'Key removed.');
+    } catch (e) {
+        _showProviderStatus(provider, 'error', 'Remove error: ' + (e.message || e));
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 async function saveProviderKey(provider) {
     const input = document.getElementById('aiProviderKey' + (provider === 'anthropic' ? 'Anthropic' : 'Openai'));
     const key = (input && input.value || '').trim();
@@ -286,6 +365,7 @@ async function saveProviderKey(provider) {
         _showProviderStatus(provider, 'success', `Saved (${masked}). Click Test to verify.`);
         input.value = '';
         input.placeholder = `Saved: ${masked} — paste a new key to replace`;
+        _setRemoveVisible(provider === 'anthropic' ? 'Anthropic' : 'Openai', true);
     } catch (e) {
         _showProviderStatus(provider, 'error', 'Save error: ' + (e.message || e));
     }

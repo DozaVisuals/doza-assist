@@ -522,11 +522,15 @@ def _handle_provider_error(e):
 @app.route('/settings/provider', methods=['GET'])
 def get_provider_settings():
     """Return the current provider config with API keys masked for display."""
-    from ai_providers import load_provider_config, masked_config
+    from ai_providers import load_provider_config, masked_config, has_api_key
     cfg = load_provider_config()
     out = masked_config(cfg)
-    out['has_anthropic_key'] = bool((cfg.get('anthropic') or {}).get('api_key'))
-    out['has_openai_key'] = bool((cfg.get('openai') or {}).get('api_key'))
+    # Source of truth is the Keychain (or the JSON fallback when Keychain is
+    # unavailable) — both are wrapped by has_api_key. The cfg dict's api_key
+    # field is hydrated the same way, so this is belt-and-braces, but it
+    # keeps the API contract explicit at the route boundary.
+    out['has_anthropic_key'] = has_api_key('anthropic')
+    out['has_openai_key'] = has_api_key('openai')
     return jsonify(out)
 
 

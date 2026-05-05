@@ -8,6 +8,7 @@ from .base import BaseProvider
 from .config import (
     load_provider_config,
     save_provider_config,
+    has_api_key,
     mask_key,
     masked_config,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "get_active_provider",
     "load_provider_config",
     "save_provider_config",
+    "has_api_key",
     "mask_key",
     "masked_config",
 ]

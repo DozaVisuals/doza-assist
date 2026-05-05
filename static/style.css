@@ -3901,6 +3901,17 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     flex: 1;
     font-family: var(--mono, monospace);
 }
+/* Muted by default — destructive action shouldn't compete with Save/Test.
+   Hover lifts to a soft red so the consequence reads clearly without a
+   loud color in the resting state. */
+.ai-provider-key-remove {
+    color: var(--text-secondary);
+}
+.ai-provider-key-remove:hover {
+    color: var(--red);
+    border-color: var(--red);
+    background: var(--red-dim);
+}
 .ai-provider-status {
     font-size: 0.8rem;
     margin: 0.4rem 0 0.6rem;

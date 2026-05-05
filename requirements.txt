@@ -10,3 +10,6 @@ lxml
 # - BYO API key support: official SDKs for Anthropic and OpenAI
 anthropic>=0.42.0
 openai>=1.60.0
+
+# API keys live in the macOS Keychain (ai_providers/config.py routes through this)
+keyring>=25,<26

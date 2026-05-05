@@ -316,29 +316,7 @@
     <!-- Transcript Tab -->
     <div class="tab-content active" id="tab-transcript">
                 <div class="transcript-container" id="transcriptContainer">
-                    {% for para in paragraphs %}
-                    <div class="para-block" data-start="{{ para.start }}" data-project="{{ para.project_id or project.id }}">
-                        <div class="para-header">
-                            <span class="para-speaker {% if para.speaker == project.interviewer_name %}speaker-1{% else %}speaker-2{% endif %}" onclick="cycleSpeaker(this)" title="Click to change speaker">{{ para.speaker }}</span>
-                            <span class="para-header-sep">|</span>
-                            <span class="para-tc" onclick="jumpTo({{ para.start }}, '{{ para.project_id or project.id }}')" title="Jump to {{ para.start_formatted }}">{{ para.start_formatted }}</span>
-                            {% if is_multi %}
-                            <span class="para-project-badge" style="color: var(--{{ para.project_color or 'accent' }});">{{ para.project_name or project.name }}</span>
-                            {% endif %}
-                        </div>
-                        <p class="para-text">
-                            {% for seg in para.segments %}
-                                {% if seg.words %}
-                                    {% for w in seg.words %}
-                                        <span class="tw" data-s="{{ w.start }}" data-e="{{ w.end }}" onclick="jumpTo({{ w.start }}, '{{ para.project_id or project.id }}')">{{ w.word }}</span>
-                                    {% endfor %}
-                                {% else %}
-                                    <span class="tw" data-s="{{ seg.start }}" data-e="{{ seg.end }}" onclick="jumpTo({{ seg.start }}, '{{ para.project_id or project.id }}')"> {{ seg.text }}</span>
-                                {% endif %}
-                            {% endfor %}
-                        </p>
-                    </div>
-                    {% endfor %}
+                    {% include '_transcript_paragraphs.html' %}
                 </div>
     </div>
 

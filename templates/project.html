@@ -355,6 +355,18 @@
     <div class="tab-content" id="tab-analysis">
         {% if project.analysis %}
 
+        {% if project.analysis.get('analysis_warnings') %}
+        <div class="analysis-warnings-note" role="status">
+            <strong>Analysis completed with warnings.</strong>
+            <ul class="analysis-warnings-list">
+                {% for w in project.analysis.analysis_warnings %}
+                <li>{{ w }}</li>
+                {% endfor %}
+            </ul>
+            <p class="analysis-warnings-hint">Re-run AI Analysis to retry the affected steps.</p>
+        </div>
+        {% endif %}
+
         <div class="btn-group" style="margin-bottom: 1.5rem;">
             <button class="btn btn-sm btn-green" onclick="addAllAnalysisClips()">Add All Clips</button>
         </div>

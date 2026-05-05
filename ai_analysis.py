@@ -3018,7 +3018,7 @@ def _merge_social_chunk(accum: dict, social_data):
         accum['social_clips'].extend(social_data)
 
 
-def _synthesize_overall_summary(summaries, titles, project_name):
+def _synthesize_overall_summary(summaries, titles, project_name, warnings=None):
     """Combine per-chunk summaries + titles into one overall summary/title.
 
     When multiple interviews are strung into a single timeline the chunked
@@ -3030,6 +3030,11 @@ def _synthesize_overall_summary(summaries, titles, project_name):
 
     Falls back to joining chunk summaries with blank lines if the model
     call fails — still beats dropping everything after chunk 1.
+
+    ``warnings``: optional list to append a one-line note to whenever we
+    fall back. The chunked-analysis caller threads its ``analysis_warnings``
+    accumulator through here so a silent fallback shows up on the AI
+    Analysis tab instead of just a stderr print.
     """
     summaries = [s for s in summaries if s]
     titles = [t for t in titles if t]
@@ -3075,8 +3080,19 @@ Return ONLY valid JSON."""
                     'summary': summary,
                     'suggested_title': title or (titles[0] if titles else ''),
                 }
+        # Synthesis call returned but didn't yield a usable summary.
+        if isinstance(warnings, list):
+            warnings.append(
+                'Overall-summary synthesis returned no summary; '
+                'falling back to concatenated per-chunk summaries.'
+            )
     except Exception as e:
         print(f"[analyze] overall summary synthesis failed: {e}")
+        if isinstance(warnings, list):
+            warnings.append(
+                f'Overall-summary synthesis failed ({type(e).__name__}); '
+                'falling back to concatenated per-chunk summaries.'
+            )
 
     return {
         'summary': '\n\n'.join(summaries),
@@ -3155,6 +3171,10 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         'strongest_soundbites': [],
         'broll_suggestions': [],
         'social_clips': [],
+        # Soft-failure log surfaced on the AI Analysis tab. Per-chunk LLM
+        # exceptions, synthesis fallbacks, and cap-pass drops all append a
+        # one-line note here instead of failing silently to stderr.
+        'analysis_warnings': [],
         '_chunk_summaries': [],
         '_chunk_titles': [],
     }
@@ -3199,6 +3219,11 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
                 if isinstance(e, ProviderError) and e.code in ('missing_key', 'invalid_key'):
                     raise
                 print(f"[analyze] story chunk {i+1}/{len(chunks)} failed: {e}")
+                accum['analysis_warnings'].append(
+                    f'Story analysis failed on chunk {i+1}/{len(chunks)} '
+                    f'({type(e).__name__}). Some beats / themes / soundbites '
+                    'may be missing for that section.'
+                )
         if analysis_type in ('social', 'all'):
             step += 1
             _emit(step, total_steps, f"chunk {i+1}/{chunk_count}: social clips")
@@ -3215,6 +3240,11 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
                 if isinstance(e, ProviderError) and e.code in ('missing_key', 'invalid_key'):
                     raise
                 print(f"[analyze] social chunk {i+1}/{len(chunks)} failed: {e}")
+                accum['analysis_warnings'].append(
+                    f'Social-clip analysis failed on chunk {i+1}/{len(chunks)} '
+                    f'({type(e).__name__}). Some clip suggestions may be '
+                    'missing for that section.'
+                )
 
     step += 1
     _emit(step, total_steps, "synthesizing summary")
@@ -3222,6 +3252,7 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         accum.pop('_chunk_summaries', []),
         accum.pop('_chunk_titles', []),
         project_name,
+        warnings=accum['analysis_warnings'],
     )
     accum['summary'] = overall['summary']
     accum['suggested_title'] = overall['suggested_title']
@@ -3292,6 +3323,11 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type,
 
     step += 1
     _emit("ranking and capping")
+    # Init the warnings list before normalize/cap so the cap pass can log
+    # any "missing timecodes" drops back to the caller. Single-file path
+    # has no per-chunk failures and no synthesis pass, so this is the only
+    # source of warnings here.
+    result.setdefault('analysis_warnings', [])
     normalized = normalize_analysis(result)
     return _cap_and_rank_analysis(
         normalized, segment_vectors=segment_vectors, cap=ANALYSIS_PER_CATEGORY_CAP,
@@ -3427,6 +3463,13 @@ def _cap_and_rank_analysis(accum, segment_vectors=None, cap=7):
         return accum or {}
 
     out = dict(accum)
+    # Defensive: caller initializes this, but if we're called on a raw
+    # analysis dict (e.g. an old persisted record being re-capped) make
+    # sure the slot exists so we can log drop counts.
+    warnings = out.get('analysis_warnings')
+    if not isinstance(warnings, list):
+        warnings = []
+        out['analysis_warnings'] = warnings
 
     def _ts(val):
         try:
@@ -3493,10 +3536,20 @@ def _cap_and_rank_analysis(accum, segment_vectors=None, cap=7):
                 kept.append(cand)
         return kept
 
-    def _trim_clip_list(items, prefer_diversity=False, diversity_key='beat_type'):
+    def _trim_clip_list(items, prefer_diversity=False, diversity_key='beat_type', label=None):
         if not isinstance(items, list) or not items:
             return [] if isinstance(items, list) else items
         viable = [i for i in items if isinstance(i, dict) and i.get('start')]
+        # Log how many items the missing-start filter discarded. Without
+        # this the editor sees an unexpectedly empty section with no clue
+        # why — typically it's a per-chunk model that emitted beats minus
+        # timecodes, which the cap pass can't render.
+        dropped = len(items) - len(viable)
+        if dropped > 0 and label:
+            warnings.append(
+                f'{dropped} {label} dropped: missing timecodes from the '
+                'model response.'
+            )
         deduped = _dedupe_overlap(viable)
         if prefer_diversity and deduped:
             # First pass: pick one of each beat_type bucket (top scorer per bucket).
@@ -3524,11 +3577,17 @@ def _cap_and_rank_analysis(accum, segment_vectors=None, cap=7):
         return picked
 
     if isinstance(out.get('story_beats'), list):
-        out['story_beats'] = _trim_clip_list(out['story_beats'], prefer_diversity=True)
+        out['story_beats'] = _trim_clip_list(
+            out['story_beats'], prefer_diversity=True, label='story beat(s)',
+        )
     if isinstance(out.get('strongest_soundbites'), list):
-        out['strongest_soundbites'] = _trim_clip_list(out['strongest_soundbites'])
+        out['strongest_soundbites'] = _trim_clip_list(
+            out['strongest_soundbites'], label='soundbite(s)',
+        )
     if isinstance(out.get('social_clips'), list):
-        out['social_clips'] = _trim_clip_list(out['social_clips'])
+        out['social_clips'] = _trim_clip_list(
+            out['social_clips'], label='social clip(s)',
+        )
 
     if isinstance(out.get('themes'), list):
         seen = set()
@@ -4443,6 +4502,10 @@ Return a JSON object with:
       "end": "00:01:02"
     }}
   ],
+  "themes": [
+    "Short noun-phrase theme the interview returns to",
+    "Another recurring theme"
+  ],
   "strongest_soundbites": [
     {{
       "text": "The actual quote",
@@ -4450,11 +4513,20 @@ Return a JSON object with:
       "end": "00:02:18",
       "why": "Why this is powerful"
     }}
+  ],
+  "broll_suggestions": [
+    {{
+      "description": "Concrete visual to cut to here",
+      "start": "00:03:10",
+      "end": "00:03:25"
+    }}
   ]
 }}
 
 Pick the {beats_target} BEST story beats following a documentary arc: hook, context, rising action, emotional peak, resolution, closing. Diversify across beat types — don't stack three hooks.
 Pick the {soundbites_target} BEST soundbites. Be ruthless; return fewer if the transcript only has fewer standouts.
+Pick 3-7 themes — short noun phrases (2-5 words) for the recurring topics, ideas, or motifs the interview keeps returning to. Skip if there aren't real recurring patterns; an empty list is fine.
+Suggest 3-7 b-roll moments. Each one should be a CONCRETE visual idea pinned to the timecode where it would land — describe what you'd specifically want to see, not generic filler like "nature shots" or "stock footage".
 CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end. Use string format like "00:02:45".
 Return ONLY valid JSON."""
 

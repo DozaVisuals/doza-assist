@@ -828,6 +828,42 @@ body {
     max-width: 700px;
 }
 
+/* Soft-failure note shown above the analysis content when the analyzer
+ * appended to project.analysis.analysis_warnings — partial chunk failures,
+ * a synthesis-fallback, or items dropped by the cap pass for missing
+ * timecodes. Stays informational (orange-tinted) rather than alarming. */
+.analysis-warnings-note {
+    margin-bottom: 1.5rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--orange, #d68a3a);
+    border-radius: var(--radius);
+    background: var(--bg-input);
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.analysis-warnings-note strong {
+    color: var(--text-primary);
+}
+
+.analysis-warnings-list {
+    margin: 0.45rem 0 0.5rem 1.1rem;
+    padding: 0;
+    list-style: disc;
+}
+
+.analysis-warnings-list li {
+    margin-bottom: 0.2rem;
+    line-height: 1.4;
+}
+
+.analysis-warnings-hint {
+    margin: 0.4rem 0 0 0;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
 .analysis-title {
     font-size: 1.3rem;
     font-weight: 600;

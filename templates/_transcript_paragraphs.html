@@ -1,0 +1,43 @@
+{# Transcript paragraphs include — used by:
+     - templates/project.html (single-project Transcript tab)
+     - Pro Collections /collection/<slug>/transcript-pane/<pid> endpoint
+     so the per-interview HTML fragment matches the OSS output exactly.
+
+   Required template context:
+     - paragraphs   list of {start, start_formatted, speaker, segments,
+                    project_id (multi-project only), project_name,
+                    project_color}
+     - project      single-project meta (used for fallback project_id
+                    when paragraphs don't carry their own); the Pro
+                    endpoint passes the active interview's meta dict
+     - is_multi     bool. Drives the per-paragraph project badge.
+                    Pass False from the Pro endpoint (one interview
+                    at a time per the Collections Transcript spec).
+
+   Behaviour preserved from the previous inline version: data-start +
+   data-project on .para-block; speaker cycle handler; per-word .tw
+   spans with data-s/data-e + jumpTo onclick. Hosts are responsible
+   for defining cycleSpeaker / jumpTo in their page scope. #}
+{% for para in paragraphs %}
+<div class="para-block" data-start="{{ para.start }}" data-project="{{ para.project_id or project.id }}">
+    <div class="para-header">
+        <span class="para-speaker {% if para.speaker == project.interviewer_name %}speaker-1{% else %}speaker-2{% endif %}" onclick="cycleSpeaker(this)" title="Click to change speaker">{{ para.speaker }}</span>
+        <span class="para-header-sep">|</span>
+        <span class="para-tc" onclick="jumpTo({{ para.start }}, '{{ para.project_id or project.id }}')" title="Jump to {{ para.start_formatted }}">{{ para.start_formatted }}</span>
+        {% if is_multi %}
+        <span class="para-project-badge" style="color: var(--{{ para.project_color or 'accent' }});">{{ para.project_name or project.name }}</span>
+        {% endif %}
+    </div>
+    <p class="para-text">
+        {% for seg in para.segments %}
+            {% if seg.words %}
+                {% for w in seg.words %}
+                    <span class="tw" data-s="{{ w.start }}" data-e="{{ w.end }}" onclick="jumpTo({{ w.start }}, '{{ para.project_id or project.id }}')">{{ w.word }}</span>
+                {% endfor %}
+            {% else %}
+                <span class="tw" data-s="{{ seg.start }}" data-e="{{ seg.end }}" onclick="jumpTo({{ seg.start }}, '{{ para.project_id or project.id }}')"> {{ seg.text }}</span>
+            {% endif %}
+        {% endfor %}
+    </p>
+</div>
+{% endfor %}

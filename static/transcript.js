@@ -343,7 +343,7 @@ function transcriptInit(opts) {
 
     // Discard any pending clear-undo from the previous interview so the
     // Pro Collections interview swap can't restore the wrong labels.
-    if (_clearUndoSnapshot || _clearUndoTimer) _invalidateClearUndo();
+    if (_clearUndoSnapshot) _invalidateClearUndo();
 
     // Reset and reload labeled sections.
     labelSections = [];

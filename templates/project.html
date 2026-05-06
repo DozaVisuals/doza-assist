@@ -2297,23 +2297,30 @@ let clipPlaying = null;
 
 function renderClipsTab() {
     const grid = document.getElementById('clipsGrid');
-    const empty = document.getElementById('clipsEmpty');
-    const total = document.getElementById('clipsTotal');
     if (!grid) return;
+    const total = document.getElementById('clipsTotal');
 
     // Sort by start time
     const sorted = [...labelSections].sort((a, b) => a.start - b.start);
 
-    total.textContent = sorted.length + ' clip' + (sorted.length !== 1 ? 's' : '');
+    if (total) total.textContent = sorted.length + ' clip' + (sorted.length !== 1 ? 's' : '');
 
     if (sorted.length === 0) {
-        grid.innerHTML = '';
-        grid.appendChild(empty);
-        empty.style.display = '';
+        // Re-render the empty state inline. The original #clipsEmpty node
+        // gets wiped by the `grid.innerHTML = sorted.map(...)` write below
+        // on the first non-empty render, so a later getElementById lookup
+        // returns null and appendChild(null) would throw — silently aborting
+        // any caller (e.g. saveLabels → clearAllLabels) and stranding their
+        // post-save state changes (like the new Undo-button enable).
+        grid.className = 'clips-grid';
+        grid.innerHTML = `
+            <div class="empty-state" id="clipsEmpty">
+                <h3>No clips yet</h3>
+                <p>Highlight sections in the Transcript tab or ask the AI in Chat to discover clips.</p>
+            </div>
+        `;
         return;
     }
-
-    if (empty) empty.style.display = 'none';
 
     const viewMode = localStorage.getItem('clips-view') || 'grid';
     grid.className = viewMode === 'list' ? 'clips-list' : 'clips-grid';

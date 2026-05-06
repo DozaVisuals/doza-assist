@@ -226,6 +226,21 @@ body {
     font-size: 0.8rem;
 }
 
+/* Transient state — Clear button morphs into an Undo button for ~10s
+   after a clearAllLabels() so an accidental clear is recoverable. The
+   orange CTA style is the visual signal that this is a time-limited
+   action, not the normal toolbar control. */
+.btn.btn-undo {
+    background: var(--orange);
+    border-color: var(--orange);
+    color: #000;
+}
+.btn.btn-undo:hover {
+    background: var(--orange);
+    border-color: var(--orange);
+    filter: brightness(1.1);
+}
+
 .btn-icon {
     padding: 0.5rem;
     border: none;

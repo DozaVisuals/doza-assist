@@ -192,6 +192,9 @@ function commitSelection(startWord, endWord, color) {
     const id = ++sectionIdCounter;
     labelSections.push({ id, start: startTime, end: endTime, color, text: text.substring(0, 200) });
 
+    // New section means the prior clear-undo snapshot is stale.
+    if (_clearUndoSnapshot) _invalidateClearUndo();
+
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
@@ -242,13 +245,63 @@ function updateSelectCount() {
     if (typeof _refreshExportButtonState === 'function') _refreshExportButtonState();
 }
 
+// ── Clear / Undo ──
+//
+// Clear snapshots the current labelSections and turns the "Clear" button
+// into an "Undo" button for 10 seconds. The snapshot is invalidated when
+// the editor adds a new section (commitSelection calls _invalidateClearUndo)
+// so a stale snapshot can never overwrite fresh work.
+
+let _clearUndoSnapshot = null;
+let _clearUndoTimer = null;
+const _CLEAR_UNDO_MS = 10000;
+
 function clearAllLabels() {
     if (!confirm('Remove all color labels?')) return;
+    _clearUndoSnapshot = labelSections.slice();
     labelSections = [];
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
-    if (typeof showToast === 'function') showToast('Labels cleared');
+    _setClearButtonUndoMode(true);
+    clearTimeout(_clearUndoTimer);
+    _clearUndoTimer = setTimeout(_invalidateClearUndo, _CLEAR_UNDO_MS);
+    if (typeof showToast === 'function') showToast('Labels cleared — click Undo to restore');
+}
+
+function undoClearLabels() {
+    if (!_clearUndoSnapshot) return;
+    labelSections = _clearUndoSnapshot.slice();
+    _clearUndoSnapshot = null;
+    clearTimeout(_clearUndoTimer);
+    renderAllHighlights();
+    updateSelectCount();
+    saveLabels();
+    _setClearButtonUndoMode(false);
+    if (typeof showToast === 'function') showToast('Labels restored');
+}
+
+function _invalidateClearUndo() {
+    _clearUndoSnapshot = null;
+    clearTimeout(_clearUndoTimer);
+    _clearUndoTimer = null;
+    _setClearButtonUndoMode(false);
+}
+
+function _setClearButtonUndoMode(isUndo) {
+    const btn = document.querySelector('.label-actions button');
+    if (!btn) return;
+    if (isUndo) {
+        btn.textContent = 'Undo';
+        btn.title = 'Restore the labels you just cleared';
+        btn.setAttribute('onclick', 'undoClearLabels()');
+        btn.classList.add('btn-undo');
+    } else {
+        btn.textContent = 'Clear';
+        btn.title = 'Remove all color labels';
+        btn.setAttribute('onclick', 'clearAllLabels()');
+        btn.classList.remove('btn-undo');
+    }
 }
 
 function saveLabels() {
@@ -301,6 +354,10 @@ function transcriptInit(opts) {
     opts = opts || {};
     colorLabels = opts.colorLabels || {};
     segmentVectors = opts.segmentVectors || [];
+
+    // Discard any pending clear-undo from the previous interview so the
+    // Pro Collections interview swap can't restore the wrong labels.
+    if (_clearUndoSnapshot || _clearUndoTimer) _invalidateClearUndo();
 
     // Reset and reload labeled sections.
     labelSections = [];

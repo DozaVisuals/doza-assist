@@ -353,6 +353,7 @@ function transcriptInit(opts) {
 
 function _wireDragHandlers() {
     transcriptContainer.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;  // Left click only — right-click is handled by contextmenu below.
         if (!activeBrush) return;
         const word = getWordFromEvent(e);
         if (!word) return;
@@ -388,6 +389,103 @@ function _wireDragHandlers() {
         dragStartWord = null;
         dragCurrentWord = null;
     });
+
+    // Right-click on a labeled word → "Remove [color] highlight" menu.
+    transcriptContainer.addEventListener('contextmenu', (e) => {
+        const labeled = e.target.closest('.tw-labeled[data-section-id]');
+        if (!labeled) return;  // Native menu on unlabeled words.
+        e.preventDefault();
+        const id = parseInt(labeled.dataset.sectionId, 10);
+        if (Number.isNaN(id)) return;
+        const colorKey = labeled.getAttribute('data-label-color') || 'blue';
+        _showLabelContextMenu(e.clientX, e.clientY, id, colorKey);
+    });
+}
+
+
+// ── Label context menu ──
+//
+// Lazy single-instance menu attached to <body>. Created on first right-click
+// and reused — survives Pro Collections interview swaps because it doesn't
+// live inside transcriptContainer.
+
+let _ctxMenu = null;
+let _ctxDismissWired = false;
+
+const _COLOR_VAR = {
+    blue:   '--accent',
+    green:  '--green',
+    purple: '--purple',
+    orange: '--orange',
+    red:    '--red',
+};
+
+function _showLabelContextMenu(x, y, sectionId, colorKey) {
+    if (!_ctxMenu) {
+        _ctxMenu = document.createElement('div');
+        _ctxMenu.className = 'transcript-context-menu';
+        _ctxMenu.id = 'transcriptContextMenu';
+        _ctxMenu.style.display = 'none';
+        _ctxMenu.innerHTML = `
+            <div class="transcript-context-menu-item" data-action="remove">
+                <span class="transcript-context-menu-dot"></span>
+                <span class="transcript-context-menu-label">Remove highlight</span>
+            </div>
+        `;
+        document.body.appendChild(_ctxMenu);
+
+        _ctxMenu.addEventListener('click', (e) => {
+            const item = e.target.closest('.transcript-context-menu-item');
+            if (!item) return;
+            const id = parseInt(_ctxMenu.dataset.sectionId, 10);
+            _hideLabelContextMenu();
+            if (!Number.isNaN(id)) removeSection(id);
+        });
+
+        // Don't let the menu's own mousedown dismiss it before click fires.
+        _ctxMenu.addEventListener('mousedown', (e) => e.stopPropagation());
+    }
+
+    if (!_ctxDismissWired) {
+        document.addEventListener('mousedown', (e) => {
+            if (!_ctxMenu || _ctxMenu.style.display === 'none') return;
+            if (_ctxMenu.contains(e.target)) return;
+            _hideLabelContextMenu();
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') _hideLabelContextMenu();
+        });
+        window.addEventListener('blur', _hideLabelContextMenu);
+        window.addEventListener('resize', _hideLabelContextMenu);
+        // Also dismiss on transcript scroll — the click target moves out
+        // from under the cursor, so the menu would be misleading.
+        if (typeof transcriptContainer !== 'undefined' && transcriptContainer) {
+            transcriptContainer.addEventListener('scroll', _hideLabelContextMenu, { passive: true });
+        }
+        _ctxDismissWired = true;
+    }
+
+    const colorVar = _COLOR_VAR[colorKey] || '--accent';
+    const labelName = (typeof colorLabels !== 'undefined' && colorLabels[colorKey])
+        ? colorLabels[colorKey]
+        : (colorKey.charAt(0).toUpperCase() + colorKey.slice(1));
+    _ctxMenu.querySelector('.transcript-context-menu-dot').style.background = `var(${colorVar})`;
+    _ctxMenu.querySelector('.transcript-context-menu-label').textContent = `Remove ${labelName} highlight`;
+    _ctxMenu.dataset.sectionId = String(sectionId);
+
+    // Show off-screen first to measure, then clamp into viewport.
+    _ctxMenu.style.display = '';
+    _ctxMenu.style.left = '-9999px';
+    _ctxMenu.style.top = '-9999px';
+    const rect = _ctxMenu.getBoundingClientRect();
+    const maxX = window.innerWidth - rect.width - 8;
+    const maxY = window.innerHeight - rect.height - 8;
+    _ctxMenu.style.left = Math.max(8, Math.min(x, maxX)) + 'px';
+    _ctxMenu.style.top  = Math.max(8, Math.min(y, maxY)) + 'px';
+}
+
+function _hideLabelContextMenu() {
+    if (_ctxMenu) _ctxMenu.style.display = 'none';
 }
 
 

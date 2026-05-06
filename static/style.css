@@ -25,6 +25,13 @@
     --red: #f87171;
     --red-dim: rgba(248, 113, 113, 0.12);
     --yellow: #fbbf24;
+    /* Highlighter-strength label colors (kept separate from --*-dim,
+       which is used for input focus/chips/etc. and shouldn't change). */
+    --label-blue:   rgba(96, 165, 250, 0.42);
+    --label-green:  rgba(110, 231, 183, 0.38);
+    --label-purple: rgba(196, 181, 253, 0.42);
+    --label-orange: rgba(253, 186, 116, 0.45);
+    --label-red:    rgba(252, 165, 165, 0.42);
     --radius: 8px;
     --radius-lg: 12px;
     --shadow: 0 2px 8px rgba(0,0,0,0.3);
@@ -56,6 +63,13 @@
     --red: #dc2626;
     --red-dim: rgba(220, 38, 38, 0.08);
     --yellow: #d97706;
+    /* Highlighter-strength label colors — moderate alpha so text stays
+       readable on white during long editing sessions. */
+    --label-blue:   rgba(147, 197, 253, 0.60);
+    --label-green:  rgba(167, 243, 208, 0.55);
+    --label-purple: rgba(221, 214, 254, 0.55);
+    --label-orange: rgba(251, 146, 60,  0.55);
+    --label-red:    rgba(254, 202, 202, 0.55);
     --shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
 
@@ -1515,11 +1529,11 @@ select.form-input {
     padding: 0.1rem 0;
 }
 
-body[data-brush="blue"] .tw-drag-preview  { background: var(--accent-dim) !important; box-shadow: 3px 0 0 var(--accent-dim), -3px 0 0 var(--accent-dim); }
-body[data-brush="green"] .tw-drag-preview { background: var(--green-dim) !important; box-shadow: 3px 0 0 var(--green-dim), -3px 0 0 var(--green-dim); }
-body[data-brush="purple"] .tw-drag-preview { background: var(--purple-dim) !important; box-shadow: 3px 0 0 var(--purple-dim), -3px 0 0 var(--purple-dim); }
-body[data-brush="orange"] .tw-drag-preview { background: var(--orange-dim) !important; box-shadow: 3px 0 0 var(--orange-dim), -3px 0 0 var(--orange-dim); }
-body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important; box-shadow: 3px 0 0 var(--red-dim), -3px 0 0 var(--red-dim); }
+body[data-brush="blue"] .tw-drag-preview  { background: var(--label-blue)   !important; box-shadow: 3px 0 0 var(--label-blue),   -3px 0 0 var(--label-blue); }
+body[data-brush="green"] .tw-drag-preview { background: var(--label-green)  !important; box-shadow: 3px 0 0 var(--label-green),  -3px 0 0 var(--label-green); }
+body[data-brush="purple"] .tw-drag-preview { background: var(--label-purple) !important; box-shadow: 3px 0 0 var(--label-purple), -3px 0 0 var(--label-purple); }
+body[data-brush="orange"] .tw-drag-preview { background: var(--label-orange) !important; box-shadow: 3px 0 0 var(--label-orange), -3px 0 0 var(--label-orange); }
+body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !important; box-shadow: 3px 0 0 var(--label-red),    -3px 0 0 var(--label-red); }
 
 /* Prevent text selection while painting */
 .painting-mode .transcript-container {
@@ -1536,11 +1550,11 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     -webkit-box-decoration-break: clone;
 }
 
-.tw-labeled[data-label-color="blue"]   { background: var(--accent-dim); box-shadow: 3px 0 0 var(--accent-dim), -3px 0 0 var(--accent-dim); }
-.tw-labeled[data-label-color="green"]  { background: var(--green-dim); box-shadow: 3px 0 0 var(--green-dim), -3px 0 0 var(--green-dim); }
-.tw-labeled[data-label-color="purple"] { background: var(--purple-dim); box-shadow: 3px 0 0 var(--purple-dim), -3px 0 0 var(--purple-dim); }
-.tw-labeled[data-label-color="orange"] { background: var(--orange-dim); box-shadow: 3px 0 0 var(--orange-dim), -3px 0 0 var(--orange-dim); }
-.tw-labeled[data-label-color="red"]    { background: var(--red-dim); box-shadow: 3px 0 0 var(--red-dim), -3px 0 0 var(--red-dim); }
+.tw-labeled[data-label-color="blue"]   { background: var(--label-blue);   box-shadow: 3px 0 0 var(--label-blue),   -3px 0 0 var(--label-blue); }
+.tw-labeled[data-label-color="green"]  { background: var(--label-green);  box-shadow: 3px 0 0 var(--label-green),  -3px 0 0 var(--label-green); }
+.tw-labeled[data-label-color="purple"] { background: var(--label-purple); box-shadow: 3px 0 0 var(--label-purple), -3px 0 0 var(--label-purple); }
+.tw-labeled[data-label-color="orange"] { background: var(--label-orange); box-shadow: 3px 0 0 var(--label-orange), -3px 0 0 var(--label-orange); }
+.tw-labeled[data-label-color="red"]    { background: var(--label-red);    box-shadow: 3px 0 0 var(--label-red),    -3px 0 0 var(--label-red); }
 
 /* Section start tag (inline badge before first word) */
 .label-range-tag {
@@ -4574,4 +4588,41 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
 .tw.search-match-active {
     background-image: linear-gradient(rgba(255, 210, 0, 0.5), rgba(255, 210, 0, 0.5));
     border-radius: 2px;
+}
+
+/* ── Transcript label context menu ── */
+
+.transcript-context-menu {
+    position: fixed;
+    z-index: 1000;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.25rem;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    min-width: 180px;
+    font-family: var(--font);
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+
+.transcript-context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.45rem 0.7rem;
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.transcript-context-menu-item:hover {
+    background: var(--bg-hover);
+}
+
+.transcript-context-menu-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
 }

@@ -120,6 +120,7 @@ body {
 .app-logo-group { display: flex; align-items: center; gap: 0.5rem; }
 .logo-byline { font-size: 0.65rem; color: var(--text-muted); text-decoration: none; font-weight: 400; white-space: nowrap; }
 .logo-byline:hover { color: var(--accent); }
+.app-version { font-size: 0.6rem; color: var(--text-muted); font-weight: 500; padding: 2px 6px; border-radius: 4px; background: var(--surface-2, rgba(127,127,127,0.08)); letter-spacing: 0.02em; user-select: text; }
 
 .container {
     max-width: 1200px;

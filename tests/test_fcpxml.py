@@ -17,6 +17,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import pytest
+from lxml import etree
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -29,7 +30,7 @@ from doza_assist.fcpxml import (  # noqa: E402
     seconds_to_rational,
     timeline_to_segment,
 )
-from doza_assist.fcpxml.parser import SpineSegment, strip_file_url  # noqa: E402
+from doza_assist.fcpxml.parser import SpineSegment, _resolve_asset_path, strip_file_url  # noqa: E402
 
 
 ELLA_FCPXML = Path("/Users/dozavisuals/Downloads/Ella Interview.fcpxmld/Info.fcpxml")
@@ -150,6 +151,41 @@ class TestStripFileUrl:
 
     def test_passthrough_when_no_scheme(self):
         assert strip_file_url("/tmp/foo.wav") == "/tmp/foo.wav"
+
+
+# ---------- proxy-media preference -----------------------------------------
+
+class TestResolveAssetPath:
+    """``_resolve_asset_path`` prefers ``proxy-media`` when the proxy file
+    exists on disk — high-res 10-bit originals choke software decode on M1/M2,
+    and ProRes Proxy plays back smoothly. Falls back to the first media-rep
+    when no usable proxy is present so behavior is unchanged for the
+    overwhelming majority of FCPXMLs (audio assets, video without proxies)."""
+
+    def _asset(self, *reps):
+        rep_xml = "\n".join(f'    <media-rep kind="{kind}" src="{src}"/>' for kind, src in reps)
+        xml = f'<asset id="r1">\n{rep_xml}\n</asset>'
+        return etree.fromstring(xml)
+
+    def test_picks_first_when_only_one_rep(self):
+        asset = self._asset(("original-media", "file:///tmp/clip.mov"))
+        assert _resolve_asset_path(asset) == "/tmp/clip.mov"
+
+    def test_prefers_proxy_when_file_exists(self, tmp_path):
+        proxy = tmp_path / "clip.proxy.mov"
+        proxy.write_bytes(b"")
+        asset = self._asset(
+            ("original-media", "file:///tmp/missing-original.mov"),
+            ("proxy-media", f"file://{proxy}"),
+        )
+        assert _resolve_asset_path(asset) == str(proxy)
+
+    def test_falls_back_to_original_when_proxy_missing(self):
+        asset = self._asset(
+            ("original-media", "file:///tmp/clip.mov"),
+            ("proxy-media", "file:///tmp/does-not-exist.proxy.mov"),
+        )
+        assert _resolve_asset_path(asset) == "/tmp/clip.mov"
 
 
 # ---------- multicam parsing: Ella Interview --------------------------------

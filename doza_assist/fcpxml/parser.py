@@ -26,6 +26,7 @@ Supports FCPXML 1.13 and 1.14.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -239,11 +240,30 @@ def _extract_resources_bytes(fcpxml_bytes: bytes) -> bytes:
 
 
 def _resolve_asset_path(asset_el) -> str:
-    """Extract and decode the filesystem path from an ``<asset>`` element."""
-    media_rep = asset_el.find("media-rep")
-    if media_rep is None:
+    """Extract and decode the filesystem path from an ``<asset>`` element.
+
+    Prefers ``<media-rep kind="proxy-media">`` when present and the proxy
+    file exists on disk. FCP proxies (typically ProRes Proxy) decode much
+    faster on Apple Silicon than 10-bit Long-GOP originals, so high-res
+    Lumix/Sony footage plays back without choking the software-decode path
+    on M1/M2 hardware. Falls back to the first ``<media-rep>`` when no
+    usable proxy is present, preserving the previous behavior.
+    """
+    media_reps = asset_el.findall("media-rep")
+    if not media_reps:
         raise ParseError(f"asset {asset_el.get('id')!r} has no <media-rep>")
-    src = media_rep.get("src")
+
+    chosen = None
+    for mr in media_reps:
+        if mr.get("kind") == "proxy-media":
+            src = mr.get("src")
+            if src and os.path.exists(strip_file_url(src)):
+                chosen = mr
+                break
+    if chosen is None:
+        chosen = media_reps[0]
+
+    src = chosen.get("src")
     if not src:
         raise ParseError(f"asset {asset_el.get('id')!r} has no media-rep/@src")
     return strip_file_url(src)

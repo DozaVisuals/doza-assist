@@ -155,7 +155,7 @@ class TestAnalyzeTranscriptRouting:
         # per-chunk summaries into one sidebar overview.
         synth_calls = {'count': 0, 'seen_summaries': None, 'seen_titles': None}
 
-        def _stub_synthesize(summaries, titles, project_name):
+        def _stub_synthesize(summaries, titles, project_name, warnings=None):
             synth_calls['count'] += 1
             synth_calls['seen_summaries'] = list(summaries)
             synth_calls['seen_titles'] = list(titles)
@@ -214,7 +214,7 @@ class TestAnalyzeTranscriptRouting:
         # so this test doesn't try to hit an AI backend.
         monkeypatch.setattr(
             ai_analysis, '_synthesize_overall_summary',
-            lambda summaries, titles, name: {'summary': '', 'suggested_title': ''},
+            lambda summaries, titles, name, warnings=None: {'summary': '', 'suggested_title': ''},
         )
 
         out = analyze_transcript({'segments': segs}, project_name='Flaky', analysis_type='story')

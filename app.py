@@ -84,9 +84,11 @@ def inject_brand():
     for ensuring whatever URL it points at actually serves an image
     (drop the logo into static/ before launch).
     """
+    from doza_assist import __version__ as _doza_version
     return {
         'brand': os.environ.get('DOZA_BRAND', 'Doza Assist'),
         'logo_url': os.environ.get('DOZA_LOGO_URL', '/static/logo.jpg'),
+        'app_version': _doza_version,
     }
 
 

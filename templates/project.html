@@ -17,6 +17,7 @@
             <span>{% if is_shared %}Doza Visuals{% else %}{{ brand }}{% endif %}</span>
         </a>
         <a href="https://www.dozavisuals.com/" target="_blank" class="logo-byline">by Doza Visuals</a>
+        {% if not is_shared %}<span class="app-version" title="Doza Assist version">v{{ app_version }}</span>{% endif %}
     </div>
     <div class="btn-group">
         {% if not is_shared %}

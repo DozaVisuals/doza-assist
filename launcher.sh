@@ -24,6 +24,15 @@ mkdir -p "$SUPPORT_DIR"
 mkdir -p "$SUPPORT_DIR/projects"
 mkdir -p "$SUPPORT_DIR/exports"
 
+# Security: ensure log files are user-only (mode 600) before any redirection
+# writes to them. Shell `>>` honors the file's existing permissions, so
+# pre-creating with 600 keeps logs out of reach of other local accounts.
+for _logfile in "$LOG_FILE" "$SUPPORT_DIR/server.log" "$SUPPORT_DIR/setup.log"; do
+    touch "$_logfile" 2>/dev/null || true
+    chmod 600 "$_logfile" 2>/dev/null || true
+done
+unset _logfile
+
 # Signed .app bundles are read-only; writing inside Contents/Resources/app
 # (even a symlink) returns EPERM and invalidates the Developer ID signature.
 # Instead we point app.py at Application Support via DOZA_DATA_DIR.

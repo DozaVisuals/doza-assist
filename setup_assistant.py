@@ -23,6 +23,17 @@ VENV_DIR = os.path.join(SUPPORT_DIR, "venv")
 SETUP_JSON = os.path.join(SUPPORT_DIR, "setup.json")
 LOG_FILE = os.path.join(SUPPORT_DIR, "setup.log")
 
+# Security: setup.log is opened with default permissions (often 0644 via the
+# bash launcher's prior `>>` redirection). Tighten to user-only at import so
+# transcript-adjacent setup output isn't readable by other local accounts,
+# even if a stale file exists from an older install.
+try:
+    if not os.path.exists(LOG_FILE):
+        open(LOG_FILE, "a").close()
+    os.chmod(LOG_FILE, 0o600)
+except Exception:
+    pass
+
 # The app source directory (set by launcher, defaults to script directory)
 APP_DIR = os.environ.get("DOZA_APP_DIR", os.path.dirname(os.path.abspath(__file__)))
 REQUIREMENTS_FILE = os.path.join(APP_DIR, "requirements.txt")

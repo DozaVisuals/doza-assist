@@ -12,6 +12,11 @@ LOG_FILE="$SUPPORT_DIR/setup.log"
 
 mkdir -p "$SUPPORT_DIR"
 
+# Security: ensure setup.log is user-only (mode 600) before any redirection
+# writes to it. Shell `>>` honors the file's existing permissions.
+touch "$LOG_FILE" 2>/dev/null || true
+chmod 600 "$LOG_FILE" 2>/dev/null || true
+
 # ── Logging ──
 log() {
     echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"

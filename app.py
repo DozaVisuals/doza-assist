@@ -3180,60 +3180,67 @@ def _find_cloudflared():
     return None
 
 
-@app.route('/tunnel/start', methods=['POST'])
-def start_tunnel():
-    """Start a Cloudflare quick tunnel and return the public URL."""
-    global _tunnel_process, _tunnel_url
-
-    # Already running?
-    if _tunnel_process and _tunnel_process.poll() is None and _tunnel_url:
-        return jsonify({'url': _tunnel_url, 'status': 'running'})
-
-    cloudflared = _find_cloudflared()
-    if not cloudflared:
-        return jsonify({'error': 'cloudflared not installed. Run: brew install cloudflared'}), 500
-
-    # Start tunnel in background
-    _tunnel_process = subprocess.Popen(
-        [cloudflared, 'tunnel', '--url', 'http://127.0.0.1:5050'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    # Read output in a thread to capture the URL
-    url_found = threading.Event()
-
-    def _read_output():
-        global _tunnel_url
-        for line in _tunnel_process.stdout:
-            # Cloudflare prints the URL like: https://xxxx-xxxx.trycloudflare.com
-            match = _re.search(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', line)
-            if match:
-                _tunnel_url = match.group(1)
-                url_found.set()
-
-    t = threading.Thread(target=_read_output, daemon=True)
-    t.start()
-
-    # Wait up to 15 seconds for the URL
-    url_found.wait(timeout=15)
-
-    if _tunnel_url:
-        return jsonify({'url': _tunnel_url, 'status': 'started'})
-    else:
-        return jsonify({'error': 'Tunnel started but URL not detected yet. Try again in a few seconds.'}), 500
-
-
-@app.route('/tunnel/stop', methods=['POST'])
-def stop_tunnel():
-    """Stop the Cloudflare tunnel."""
-    global _tunnel_process, _tunnel_url
-    if _tunnel_process:
-        _tunnel_process.terminate()
-        _tunnel_process = None
-    _tunnel_url = None
-    return jsonify({'status': 'stopped'})
+# Tunnel disabled for beta. Re-enable with auth scoping before public release.
+# The current implementation exposes the entire Flask API to the public
+# internet via cloudflared with no token, no Cloudflare Access policy, and
+# no per-route gating — anyone with the trycloudflare URL can reach every
+# project, media file, and chat endpoint. Restore behind a per-session token
+# (and ideally Cloudflare Access) before re-enabling the Share UI.
+#
+# @app.route('/tunnel/start', methods=['POST'])
+# def start_tunnel():
+#     """Start a Cloudflare quick tunnel and return the public URL."""
+#     global _tunnel_process, _tunnel_url
+#
+#     # Already running?
+#     if _tunnel_process and _tunnel_process.poll() is None and _tunnel_url:
+#         return jsonify({'url': _tunnel_url, 'status': 'running'})
+#
+#     cloudflared = _find_cloudflared()
+#     if not cloudflared:
+#         return jsonify({'error': 'cloudflared not installed. Run: brew install cloudflared'}), 500
+#
+#     # Start tunnel in background
+#     _tunnel_process = subprocess.Popen(
+#         [cloudflared, 'tunnel', '--url', 'http://127.0.0.1:5050'],
+#         stdout=subprocess.PIPE,
+#         stderr=subprocess.STDOUT,
+#         text=True,
+#     )
+#
+#     # Read output in a thread to capture the URL
+#     url_found = threading.Event()
+#
+#     def _read_output():
+#         global _tunnel_url
+#         for line in _tunnel_process.stdout:
+#             # Cloudflare prints the URL like: https://xxxx-xxxx.trycloudflare.com
+#             match = _re.search(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', line)
+#             if match:
+#                 _tunnel_url = match.group(1)
+#                 url_found.set()
+#
+#     t = threading.Thread(target=_read_output, daemon=True)
+#     t.start()
+#
+#     # Wait up to 15 seconds for the URL
+#     url_found.wait(timeout=15)
+#
+#     if _tunnel_url:
+#         return jsonify({'url': _tunnel_url, 'status': 'started'})
+#     else:
+#         return jsonify({'error': 'Tunnel started but URL not detected yet. Try again in a few seconds.'}), 500
+#
+#
+# @app.route('/tunnel/stop', methods=['POST'])
+# def stop_tunnel():
+#     """Stop the Cloudflare tunnel."""
+#     global _tunnel_process, _tunnel_url
+#     if _tunnel_process:
+#         _tunnel_process.terminate()
+#         _tunnel_process = None
+#     _tunnel_url = None
+#     return jsonify({'status': 'stopped'})
 
 
 @app.route('/tunnel/status')

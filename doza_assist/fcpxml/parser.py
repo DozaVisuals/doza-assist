@@ -503,7 +503,11 @@ def parse_fcpxml(path) -> ParsedFCPXML:
     raw_bytes = Path(path_str).read_bytes()
 
     try:
-        root = etree.fromstring(raw_bytes)
+        # Harden against entity-expansion DoS and external resource fetches.
+        # FCPXML never relies on DTDs, internal/external entities, or remote
+        # content, so disabling these defaults is safe for valid input.
+        parser = etree.XMLParser(resolve_entities=False, huge_tree=False, no_network=True)
+        root = etree.fromstring(raw_bytes, parser=parser)
     except etree.XMLSyntaxError as e:
         raise ParseError(f"invalid FCPXML: {e}") from e
 

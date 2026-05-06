@@ -116,7 +116,18 @@ chmod +x "${APP_SRC_DIR}/dep_check.sh"
 echo "   Bundled $(find "${APP_SRC_DIR}" -type f | wc -l | tr -d ' ') files."
 
 # ── Step 5: Create Info.plist ──
-cat > "${CONTENTS_DIR}/Info.plist" << 'PLIST'
+# Single-source the version from doza_assist/__init__.py so the macOS-level
+# CFBundleVersion never drifts from the in-app __version__ pill.
+APP_VERSION="$(grep -E '^__version__' "${SCRIPT_DIR}/doza_assist/__init__.py" \
+    | head -1 \
+    | sed -E 's/.*"([^"]+)".*/\1/')"
+if [ -z "${APP_VERSION}" ]; then
+    echo "   ERROR: could not read __version__ from doza_assist/__init__.py" >&2
+    exit 1
+fi
+echo "   App version: ${APP_VERSION}"
+
+cat > "${CONTENTS_DIR}/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -128,9 +139,9 @@ cat > "${CONTENTS_DIR}/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.dozavisuals.transcribe</string>
     <key>CFBundleVersion</key>
-    <string>3.2.0</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.2.0</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

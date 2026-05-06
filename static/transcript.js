@@ -246,29 +246,30 @@ function updateSelectCount() {
     if (typeof _refreshExportButtonState === 'function') _refreshExportButtonState();
 }
 
-// ── Undo (single-step) ──
+// ── Undo (multi-step history) ──
 //
 // Every label mutation — commitSelection, removeSection, clearAllLabels —
-// snapshots labelSections BEFORE mutating. The Undo button (#labelUndoBtn,
-// onclick="undoLastAction()") enables on snapshot, disables on consume.
-// One step back, no redo. Reset on transcriptInit() so a Pro Collections
-// interview swap can't restore the wrong interview's labels.
+// pushes a snapshot of labelSections onto _undoStack BEFORE mutating. The
+// Undo button (#labelUndoBtn, onclick="undoLastAction()") is enabled
+// whenever the stack is non-empty; each click pops the most recent snapshot
+// and restores it. No redo. The stack is reset on transcriptInit() so a
+// Pro Collections interview swap can't restore the wrong interview's labels.
 
-let _undoSnapshot = null;
+let _undoStack = [];
 
 function _snapshotForUndo() {
-    _undoSnapshot = labelSections.map(s => ({ ...s }));
+    _undoStack.push(labelSections.map(s => ({ ...s })));
     _setUndoButtonEnabled(true);
 }
 
 function undoLastAction() {
-    if (!_undoSnapshot) return;
-    labelSections = _undoSnapshot.map(s => ({ ...s }));
-    _undoSnapshot = null;
+    if (_undoStack.length === 0) return;
+    const snap = _undoStack.pop();
+    labelSections = snap.map(s => ({ ...s }));
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
-    _setUndoButtonEnabled(false);
+    _setUndoButtonEnabled(_undoStack.length > 0);
     if (typeof showToast === 'function') showToast('Undone');
 }
 
@@ -283,7 +284,7 @@ function clearAllLabels() {
 }
 
 function _resetUndo() {
-    _undoSnapshot = null;
+    _undoStack = [];
     _setUndoButtonEnabled(false);
 }
 
@@ -345,9 +346,9 @@ function transcriptInit(opts) {
     colorLabels = opts.colorLabels || {};
     segmentVectors = opts.segmentVectors || [];
 
-    // Discard any pending undo snapshot from the previous interview so the
+    // Discard any pending undo history from the previous interview so the
     // Pro Collections interview swap can't restore the wrong labels.
-    if (_undoSnapshot) _resetUndo();
+    if (_undoStack.length) _resetUndo();
 
     // Reset and reload labeled sections.
     labelSections = [];

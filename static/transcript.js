@@ -188,12 +188,12 @@ function commitSelection(startWord, endWord, color) {
         }
     }
 
+    // Snapshot BEFORE the mutation so Undo restores the pre-add state.
+    _snapshotForUndo();
+
     // Create new section
     const id = ++sectionIdCounter;
     labelSections.push({ id, start: startTime, end: endTime, color, text: text.substring(0, 200) });
-
-    // New section means the prior clear-undo snapshot is stale.
-    if (_clearUndoSnapshot) _invalidateClearUndo();
 
     renderAllHighlights();
     updateSelectCount();
@@ -205,6 +205,7 @@ function findSectionAt(time) {
 }
 
 function removeSection(id) {
+    _snapshotForUndo();
     labelSections = labelSections.filter(s => s.id !== id);
     renderAllHighlights();
     updateSelectCount();
@@ -245,41 +246,44 @@ function updateSelectCount() {
     if (typeof _refreshExportButtonState === 'function') _refreshExportButtonState();
 }
 
-// ── Clear / Undo ──
+// ── Undo (single-step) ──
 //
-// Clear snapshots the current labelSections and enables a separate Undo
-// button (#labelUndoBtn) sitting next to Clear. Persistent — no timeout.
-// The snapshot is invalidated by:
-//   - Clicking Undo (consumed)
-//   - Adding a new section via commitSelection (would be lost on undo)
-//   - transcriptInit() (Pro Collections interview swap)
+// Every label mutation — commitSelection, removeSection, clearAllLabels —
+// snapshots labelSections BEFORE mutating. The Undo button (#labelUndoBtn,
+// onclick="undoLastAction()") enables on snapshot, disables on consume.
+// One step back, no redo. Reset on transcriptInit() so a Pro Collections
+// interview swap can't restore the wrong interview's labels.
 
-let _clearUndoSnapshot = null;
+let _undoSnapshot = null;
 
-function clearAllLabels() {
-    if (!confirm('Remove all color labels?')) return;
-    _clearUndoSnapshot = labelSections.slice();
-    labelSections = [];
-    renderAllHighlights();
-    updateSelectCount();
-    saveLabels();
+function _snapshotForUndo() {
+    _undoSnapshot = labelSections.map(s => ({ ...s }));
     _setUndoButtonEnabled(true);
-    if (typeof showToast === 'function') showToast('Labels cleared');
 }
 
-function undoClearLabels() {
-    if (!_clearUndoSnapshot) return;
-    labelSections = _clearUndoSnapshot.slice();
-    _clearUndoSnapshot = null;
+function undoLastAction() {
+    if (!_undoSnapshot) return;
+    labelSections = _undoSnapshot.map(s => ({ ...s }));
+    _undoSnapshot = null;
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
     _setUndoButtonEnabled(false);
-    if (typeof showToast === 'function') showToast('Labels restored');
+    if (typeof showToast === 'function') showToast('Undone');
 }
 
-function _invalidateClearUndo() {
-    _clearUndoSnapshot = null;
+function clearAllLabels() {
+    if (!confirm('Remove all color labels?')) return;
+    _snapshotForUndo();
+    labelSections = [];
+    renderAllHighlights();
+    updateSelectCount();
+    saveLabels();
+    if (typeof showToast === 'function') showToast('Labels cleared');
+}
+
+function _resetUndo() {
+    _undoSnapshot = null;
     _setUndoButtonEnabled(false);
 }
 
@@ -341,9 +345,9 @@ function transcriptInit(opts) {
     colorLabels = opts.colorLabels || {};
     segmentVectors = opts.segmentVectors || [];
 
-    // Discard any pending clear-undo from the previous interview so the
+    // Discard any pending undo snapshot from the previous interview so the
     // Pro Collections interview swap can't restore the wrong labels.
-    if (_clearUndoSnapshot) _invalidateClearUndo();
+    if (_undoSnapshot) _resetUndo();
 
     // Reset and reload labeled sections.
     labelSections = [];

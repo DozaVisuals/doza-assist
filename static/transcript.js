@@ -389,3 +389,283 @@ function _wireDragHandlers() {
         dragCurrentWord = null;
     });
 }
+
+
+// ── Transcript search ──
+//
+// Live filter + match navigation + timecode jump for the transcript tab.
+// Inserted as a sibling above #labelToolbar so it sits at the top of the
+// right column, transcript-tab-only. Wired by transcriptSearchInit() which
+// is idempotent — the host page may call it once on first render. The
+// Pro Collections Transcript tab calls transcriptSearchReset() after each
+// transcriptInit() interview swap so the prior interview's match state
+// doesn't leak.
+//
+// Highlighting strategy: class-only on .tw spans (.search-match,
+// .search-match-active). Never wraps text in <mark> — that would break
+// allWords identity across re-init and complicate getWordFromEvent. Match
+// granularity is the .tw, which is one word in the common path; substring
+// matches inside a .tw still light the whole word, which aligns with how
+// editors think.
+
+let _searchEls = null;
+let _searchMatches = [];
+let _searchActiveIdx = -1;
+let _searchMarkedTws = new Set();
+let _searchHiddenParas = new Set();
+let _searchDebounceTimer = null;
+let _searchHandlersWired = false;
+
+const _TC_RE = /^\d{1,2}:\d{2}(:\d{2})?$/;
+
+function transcriptSearchInit(container) {
+    if (_searchEls) return;  // Idempotent — DOM created once per page.
+    if (!container) container = (typeof transcriptContainer !== 'undefined') ? transcriptContainer : null;
+    if (!container) return;
+
+    // Anchor: insert above #labelToolbar if present, else above the
+    // container's tab-content parent.
+    const toolbar = document.getElementById('labelToolbar');
+    const anchor = toolbar || container.closest('.tab-content');
+    if (!anchor || !anchor.parentNode) return;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'transcript-search';
+    wrap.id = 'transcriptSearch';
+    wrap.innerHTML = `
+        <div class="transcript-search-inner">
+            <svg class="transcript-search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.5"/>
+                <line x1="10.5" y1="10.5" x2="14" y2="14" stroke-linecap="round"/>
+            </svg>
+            <input type="text" class="transcript-search-input" id="transcriptSearchInput"
+                   placeholder="Search transcript or jump to timecode (e.g. 14:30)"
+                   spellcheck="false" autocomplete="off">
+            <button class="transcript-search-clear" id="transcriptSearchClear"
+                    type="button" title="Clear (Esc)" aria-label="Clear search" style="display:none;">×</button>
+        </div>
+        <div class="transcript-search-meta">
+            <span class="transcript-search-count" id="transcriptSearchCount"></span>
+            <button class="transcript-search-nav" id="transcriptSearchPrev"
+                    type="button" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+            <button class="transcript-search-nav" id="transcriptSearchNext"
+                    type="button" title="Next match (Enter)" aria-label="Next match">↓</button>
+        </div>
+    `;
+    anchor.parentNode.insertBefore(wrap, anchor);
+
+    _searchEls = {
+        wrap,
+        input: wrap.querySelector('#transcriptSearchInput'),
+        clear: wrap.querySelector('#transcriptSearchClear'),
+        count: wrap.querySelector('#transcriptSearchCount'),
+        prev: wrap.querySelector('#transcriptSearchPrev'),
+        next: wrap.querySelector('#transcriptSearchNext'),
+        container,
+    };
+
+    _searchEls.input.addEventListener('input', () => {
+        _searchEls.clear.style.display = _searchEls.input.value ? '' : 'none';
+        clearTimeout(_searchDebounceTimer);
+        _searchDebounceTimer = setTimeout(() => {
+            _searchRun(_searchEls.input.value);
+        }, 150);
+    });
+
+    _searchEls.input.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            if (_searchEls.input.value) {
+                _searchEls.input.value = '';
+                _searchEls.clear.style.display = 'none';
+                _searchRun('');
+            }
+            _searchEls.input.blur();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (_searchMatches.length === 0) return;
+            _searchSetActive(_searchActiveIdx + (e.shiftKey ? -1 : 1), true);
+        }
+    });
+
+    _searchEls.clear.addEventListener('click', () => {
+        _searchEls.input.value = '';
+        _searchEls.clear.style.display = 'none';
+        _searchRun('');
+        _searchEls.input.focus();
+    });
+
+    _searchEls.prev.addEventListener('click', () => {
+        if (_searchMatches.length) _searchSetActive(_searchActiveIdx - 1, true);
+    });
+    _searchEls.next.addEventListener('click', () => {
+        if (_searchMatches.length) _searchSetActive(_searchActiveIdx + 1, true);
+    });
+
+    if (!_searchHandlersWired) {
+        window.addEventListener('keydown', (e) => {
+            if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'f') return;
+            if (e.shiftKey || e.altKey) return;  // Don't hijack Cmd+Shift+F etc.
+            const tab = document.getElementById('tab-transcript');
+            if (!tab || !tab.classList.contains('active')) return;
+            if (!_searchEls || _searchEls.wrap.style.display === 'none') return;
+            e.preventDefault();
+            _searchEls.input.focus();
+            _searchEls.input.select();
+        });
+        _searchHandlersWired = true;
+    }
+
+    _searchUpdateCounter();
+}
+
+function transcriptSearchReset() {
+    if (!_searchEls) return;
+    clearTimeout(_searchDebounceTimer);
+    _searchClearVisualState();
+    _searchMatches = [];
+    _searchActiveIdx = -1;
+    _searchEls.input.value = '';
+    _searchEls.clear.style.display = 'none';
+    _searchUpdateCounter();
+}
+
+function _searchClearVisualState() {
+    for (const w of _searchMarkedTws) {
+        w.classList.remove('search-match', 'search-match-active');
+    }
+    _searchMarkedTws.clear();
+    for (const p of _searchHiddenParas) p.style.display = '';
+    _searchHiddenParas.clear();
+}
+
+function _searchRun(query) {
+    _searchClearVisualState();
+    _searchMatches = [];
+    _searchActiveIdx = -1;
+
+    const q = (query || '').trim();
+    if (!q) {
+        _searchUpdateCounter();
+        return;
+    }
+
+    if (_TC_RE.test(q)) {
+        _searchTimecodeJump(q);
+        _searchUpdateCounter();
+        return;
+    }
+
+    const qLower = q.toLowerCase();
+    const paras = _searchEls.container.querySelectorAll('.para-block');
+
+    for (const para of paras) {
+        const tws = para.querySelectorAll('.para-text .tw');
+        if (!tws.length) continue;
+
+        let flat = '';
+        const offsets = [];
+        for (const tw of tws) {
+            const text = tw.textContent;
+            offsets.push({ tw, start: flat.length, end: flat.length + text.length });
+            flat += text;
+        }
+        const flatLower = flat.toLowerCase();
+
+        const ranges = [];
+        let pos = 0;
+        while (true) {
+            const idx = flatLower.indexOf(qLower, pos);
+            if (idx === -1) break;
+            ranges.push({ start: idx, end: idx + qLower.length });
+            pos = idx + qLower.length;
+        }
+
+        if (ranges.length === 0) {
+            para.style.display = 'none';
+            _searchHiddenParas.add(para);
+            continue;
+        }
+
+        for (const range of ranges) {
+            const matchTws = [];
+            for (const o of offsets) {
+                if (o.end > range.start && o.start < range.end) {
+                    matchTws.push(o.tw);
+                    _searchMarkedTws.add(o.tw);
+                }
+            }
+            if (matchTws.length) {
+                _searchMatches.push({ paraBlock: para, twNodes: matchTws, firstTw: matchTws[0] });
+            }
+        }
+    }
+
+    for (const w of _searchMarkedTws) w.classList.add('search-match');
+
+    if (_searchMatches.length > 0) _searchSetActive(0, true);
+    _searchUpdateCounter();
+}
+
+function _searchSetActive(idx, scroll) {
+    if (_searchMatches.length === 0) return;
+    if (idx < 0) idx = _searchMatches.length - 1;
+    if (idx >= _searchMatches.length) idx = 0;
+
+    if (_searchActiveIdx >= 0 && _searchActiveIdx < _searchMatches.length) {
+        for (const w of _searchMatches[_searchActiveIdx].twNodes) {
+            w.classList.remove('search-match-active');
+        }
+    }
+    _searchActiveIdx = idx;
+    const m = _searchMatches[idx];
+    for (const w of m.twNodes) w.classList.add('search-match-active');
+
+    if (scroll && m.firstTw && typeof m.firstTw.scrollIntoView === 'function') {
+        m.firstTw.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    _searchUpdateCounter();
+}
+
+function _searchUpdateCounter() {
+    if (!_searchEls) return;
+    const total = _searchMatches.length;
+    const q = (_searchEls.input.value || '').trim();
+    if (!q) {
+        _searchEls.count.textContent = '';
+    } else if (_TC_RE.test(q)) {
+        // Counter text was set by _searchTimecodeJump; leave it.
+    } else if (total === 0) {
+        _searchEls.count.textContent = 'No matches';
+    } else {
+        _searchEls.count.textContent = `${_searchActiveIdx + 1} of ${total} matches`;
+    }
+    const disabled = total === 0;
+    _searchEls.prev.disabled = disabled;
+    _searchEls.next.disabled = disabled;
+}
+
+function _searchTimecodeJump(tcStr) {
+    const target = _segTcToSec(tcStr);
+    const paras = Array.from(_searchEls.container.querySelectorAll('.para-block'));
+    let best = null;
+    let bestStart = -Infinity;
+    for (const p of paras) {
+        const start = parseFloat(p.dataset.start);
+        if (Number.isNaN(start)) continue;
+        if (start <= target && start > bestStart) {
+            best = p;
+            bestStart = start;
+        }
+    }
+    if (!best && paras.length) best = paras[0];
+    if (best) {
+        best.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (typeof jumpTo === 'function') {
+            jumpTo(target, best.dataset.project);
+        }
+        _searchEls.count.textContent = `Jump to ${tcStr}`;
+    } else {
+        _searchEls.count.textContent = `No paragraph at ${tcStr}`;
+    }
+}

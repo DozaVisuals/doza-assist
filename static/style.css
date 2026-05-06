@@ -4467,3 +4467,111 @@ body[data-brush="red"] .tw-drag-preview { background: var(--red-dim) !important;
     font-size: 12px;
     color: var(--text-primary);
 }
+
+/* ── Transcript Search ── */
+
+.transcript-search {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 0.4rem 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.transcript-search-inner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+}
+
+.transcript-search-icon {
+    width: 14px;
+    height: 14px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.transcript-search-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 0.9rem;
+    padding: 0.25rem 0;
+    min-width: 0;
+}
+
+.transcript-search-input:focus { outline: none; }
+.transcript-search-input::placeholder { color: var(--text-muted); }
+
+.transcript-search-clear {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0 0.35rem;
+    border-radius: 3px;
+}
+.transcript-search-clear:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.transcript-search-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-shrink: 0;
+}
+
+.transcript-search-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.transcript-search-nav {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    font-size: 0.85rem;
+    line-height: 1;
+}
+.transcript-search-nav:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+.transcript-search-nav:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+/* Match highlights — semi-transparent yellow that alpha-blends over the
+   .tw-labeled color so an editor sees both the label color AND the
+   search hit on the same word. background-image (not background-color)
+   is the trick: it doesn't override the .tw-labeled background-color
+   underneath, so yellow stacks ON TOP of e.g. --green-dim. */
+.tw.search-match {
+    background-image: linear-gradient(rgba(255, 210, 0, 0.25), rgba(255, 210, 0, 0.25));
+    border-radius: 2px;
+}
+.tw.search-match-active {
+    background-image: linear-gradient(rgba(255, 210, 0, 0.5), rgba(255, 210, 0, 0.5));
+    border-radius: 2px;
+}

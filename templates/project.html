@@ -972,6 +972,12 @@ function switchTab(tab) {
         toolbar.style.display = (tab === 'transcript' || tab === 'clips') ? '' : 'none';
     }
 
+    // Show search bar only on transcript tab
+    const searchBar = document.getElementById('transcriptSearch');
+    if (searchBar) {
+        searchBar.style.display = (tab === 'transcript') ? '' : 'none';
+    }
+
     // Show clip library and story list in sidebar only on story tab
     const clipSidebar = document.getElementById('storyClipLibrarySidebar');
     if (clipSidebar) {
@@ -1397,6 +1403,7 @@ transcriptInit({
     labeledSections: {{ (project.labeled_sections or [])|tojson }},
     segmentVectors: {{ (segment_vectors or [])|tojson }},
 });
+transcriptSearchInit(transcriptContainer);
 
 // ── Chat ──
 // Preloaded from meta.json on render so the conversation survives reloads

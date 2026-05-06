@@ -247,14 +247,14 @@ function updateSelectCount() {
 
 // ── Clear / Undo ──
 //
-// Clear snapshots the current labelSections and turns the "Clear" button
-// into an "Undo" button for 10 seconds. The snapshot is invalidated when
-// the editor adds a new section (commitSelection calls _invalidateClearUndo)
-// so a stale snapshot can never overwrite fresh work.
+// Clear snapshots the current labelSections and enables a separate Undo
+// button (#labelUndoBtn) sitting next to Clear. Persistent — no timeout.
+// The snapshot is invalidated by:
+//   - Clicking Undo (consumed)
+//   - Adding a new section via commitSelection (would be lost on undo)
+//   - transcriptInit() (Pro Collections interview swap)
 
 let _clearUndoSnapshot = null;
-let _clearUndoTimer = null;
-const _CLEAR_UNDO_MS = 10000;
 
 function clearAllLabels() {
     if (!confirm('Remove all color labels?')) return;
@@ -263,45 +263,31 @@ function clearAllLabels() {
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
-    _setClearButtonUndoMode(true);
-    clearTimeout(_clearUndoTimer);
-    _clearUndoTimer = setTimeout(_invalidateClearUndo, _CLEAR_UNDO_MS);
-    if (typeof showToast === 'function') showToast('Labels cleared — click Undo to restore');
+    _setUndoButtonEnabled(true);
+    if (typeof showToast === 'function') showToast('Labels cleared');
 }
 
 function undoClearLabels() {
     if (!_clearUndoSnapshot) return;
     labelSections = _clearUndoSnapshot.slice();
     _clearUndoSnapshot = null;
-    clearTimeout(_clearUndoTimer);
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
-    _setClearButtonUndoMode(false);
+    _setUndoButtonEnabled(false);
     if (typeof showToast === 'function') showToast('Labels restored');
 }
 
 function _invalidateClearUndo() {
     _clearUndoSnapshot = null;
-    clearTimeout(_clearUndoTimer);
-    _clearUndoTimer = null;
-    _setClearButtonUndoMode(false);
+    _setUndoButtonEnabled(false);
 }
 
-function _setClearButtonUndoMode(isUndo) {
-    const btn = document.querySelector('.label-actions button');
+function _setUndoButtonEnabled(enabled) {
+    const btn = document.getElementById('labelUndoBtn');
     if (!btn) return;
-    if (isUndo) {
-        btn.textContent = 'Undo';
-        btn.title = 'Restore the labels you just cleared';
-        btn.setAttribute('onclick', 'undoClearLabels()');
-        btn.classList.add('btn-undo');
-    } else {
-        btn.textContent = 'Clear';
-        btn.title = 'Remove all color labels';
-        btn.setAttribute('onclick', 'clearAllLabels()');
-        btn.classList.remove('btn-undo');
-    }
+    btn.disabled = !enabled;
+    btn.classList.toggle('btn-undo', enabled);
 }
 
 function saveLabels() {

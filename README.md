@@ -383,3 +383,11 @@ Users are responsible for complying with the licenses of any models they downloa
 ---
 
 Built by [Doza Visuals](https://dozavisuals.com)
+
+---
+
+## Commercial Version
+
+The signed Mac app is a proprietary derivative work of this open-source core, licensed separately. One-click install, bundled models, auto-updates, and priority support.
+
+Visit [dozavisuals.com/doza-assist](https://dozavisuals.com/doza-assist) for the paid version.

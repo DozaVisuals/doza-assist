@@ -25,7 +25,7 @@ MODEL_CONFIG_FILE = os.path.join(SUPPORT_DIR, "model_config.json")
 # tier -> (ollama_tag, download_size, description)
 GEMMA4_VARIANTS = {
     'small':  ('gemma4:e2b', '8.4 GB',  'Gemma 4 2B · 5B total (smallest, fastest)'),
-    'medium': ('gemma4:e4b', '11.5 GB', 'Gemma 4 4B · 8B total (balanced)'),
+    'medium': ('gemma4:e4b', '9.6 GB',  'Gemma 4 4B · 8B total (balanced)'),
     'large':  ('gemma4:26b', '18 GB',   'Gemma 4 27B (high quality)'),
     'xlarge': ('gemma4:31b', '19 GB',   'Gemma 4 32B (highest quality)'),
 }
@@ -88,30 +88,16 @@ def detect_hardware_tier():
     arch = _get_arch()
     disk_gb = _get_available_disk_gb()
 
-    if ram_gb < 16:
-        tier = 'small'
-        reason = (
-            f"{ram_gb:.0f} GB RAM detected (< 16 GB) — using smallest variant "
-            "to ensure it fits in memory. Quality may be reduced."
-        )
-    elif ram_gb < 32:
-        tier = 'medium'
-        reason = (
-            f"{ram_gb:.0f} GB RAM detected (16–32 GB) — using mid-tier variant "
-            "for the best balance of speed and quality."
-        )
-    elif ram_gb < 64:
-        tier = 'large'
-        reason = (
-            f"{ram_gb:.0f} GB RAM detected (32–64 GB) — using larger variant "
-            "for higher quality."
-        )
-    else:
-        tier = 'xlarge'
-        reason = (
-            f"{ram_gb:.0f} GB RAM detected (64 GB+) — using largest variant "
-            "for maximum quality."
-        )
+    # gemma4:e4b is the universal first-launch default. The whole analysis
+    # pipeline is tuned against it, and it outperforms gemma4:26b on the
+    # single-request inference Doza Assist actually runs. The small/large/
+    # xlarge tiers stay defined so users can opt in via --model-tier or the
+    # in-app picker, but auto-detection no longer steers anyone away from e4b.
+    tier = 'medium'
+    reason = (
+        f"{ram_gb:.0f} GB RAM detected — using gemma4:e4b, the model the "
+        "analysis pipeline is tuned for."
+    )
 
     variant, download_size, description = GEMMA4_VARIANTS[tier]
     return {

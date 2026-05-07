@@ -900,6 +900,18 @@ document.addEventListener('DOMContentLoaded', () => {
 // For multi-project, chat/labels use combined ID string
 const COMBINED_ID = PROJECT_IDS.join(',');
 
+// Restore active tab from URL hash if reloadAndKeepTab() set one before
+// reloading. Runs on the next tick so it happens after the template's
+// hardcoded initial transcript-tab activation.
+window.addEventListener('DOMContentLoaded', () => {
+    const hash = (window.location.hash || '').slice(1);
+    if (hash && typeof switchTab === 'function') {
+        if (document.getElementById('tab-' + hash)) {
+            switchTab(hash);
+        }
+    }
+});
+
 // Hide tab content for tabs not shared, activate first visible tab
 if (IS_SHARED && Object.keys(SHARED_TABS).length > 0) {
     const allTabNames = ['transcript', 'clips', 'analysis', 'chat', 'story', 'export'];
@@ -954,6 +966,18 @@ function toggleGearMenu(e) {
 }
 function closeGearMenu() {
     document.getElementById('gearMenu').classList.remove('open');
+}
+
+const KNOWN_TABS = ['transcript', 'clips', 'analysis', 'chat', 'story', 'export'];
+
+// Reload the page after an action while preserving which tab the user was on.
+// Without this, location.reload() always lands the user back on the transcript
+// tab (which is hardcoded as initially-active in the template).
+function reloadAndKeepTab(tabName) {
+    if (tabName && KNOWN_TABS.indexOf(tabName) !== -1) {
+        window.location.hash = '#' + tabName;
+    }
+    location.reload();
 }
 
 // ── Tab Switching ──
@@ -2645,7 +2669,7 @@ async function startTranscription() {
             statusText.textContent = 'Done!';
             timeText.textContent = `Completed in ${elapsed}s`;
             showToast('Transcription complete!');
-            setTimeout(() => location.reload(), 1000);
+            setTimeout(() => reloadAndKeepTab('transcript'), 3000);
         } else {
             statusText.textContent = 'Error';
             timeText.textContent = data.error || 'Unknown error';
@@ -2695,7 +2719,7 @@ async function runAnalysis() {
         stopAnalyzeProgressPoll();
         if (data.status === 'analyzed' || data.status === 'cached') {
             showToast(data.status === 'cached' ? 'Loaded cached analysis' : 'Analysis complete!');
-            setTimeout(() => location.reload(), 1000);
+            setTimeout(() => reloadAndKeepTab('analysis'), 3000);
         } else {
             showToast('Error: ' + (data.error || 'Unknown error'), true);
             resetAnalyzeBtn();
@@ -3200,7 +3224,7 @@ async function clearTranscript() {
         const data = await res.json();
         if (res.ok) {
             showToast('Transcript cleared');
-            setTimeout(() => location.reload(), 500);
+            setTimeout(() => reloadAndKeepTab('transcript'), 3000);
         } else {
             showToast('Error: ' + (data.error || 'Unknown error'), true);
         }
@@ -3358,7 +3382,7 @@ async function doRetranscribe() {
         });
         if (res.ok) {
             showToast('Retranscribing with ' + document.getElementById('retranscribeLang').selectedOptions[0].text + '...');
-            setTimeout(() => location.reload(), 500);
+            setTimeout(() => reloadAndKeepTab('transcript'), 3000);
         } else {
             const data = await res.json();
             showToast('Error: ' + (data.error || 'Unknown error'), true);

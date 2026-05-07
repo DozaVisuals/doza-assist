@@ -167,8 +167,11 @@ if [ -z "$MISSING" ]; then
     log "Flask server PID: $SERVER_PID"
     echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
 
-    # Wait for server to be ready (up to 30 seconds)
-    for _ in {1..60}; do
+    # Wait for server to be ready (up to 180 seconds). On a clean machine
+    # the first import + Ollama warm-up can take well over the previous 30s
+    # budget; the Electron shell also polls for 30 minutes so this is just
+    # the deadline before we fall back to an error dialog.
+    for _ in {1..360}; do
         if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
             log "Server ready."
             if [ -z "${DOZA_NO_BROWSER:-}" ]; then
@@ -179,8 +182,8 @@ if [ -z "$MISSING" ]; then
         sleep 0.5
     done
 
-    log "ERROR: Server failed to start within 30 seconds."
-    show_error_dialog "Doza Assist failed to start within 30 seconds." "$SUPPORT_DIR/server.log"
+    log "ERROR: Server failed to start within 180 seconds."
+    show_error_dialog "Doza Assist failed to start within 180 seconds." "$SUPPORT_DIR/server.log"
     exit 1
 fi
 
@@ -307,7 +310,10 @@ $ARCH_PREFIX python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
 
-for _ in {1..60}; do
+# 180s budget — first launch after a fresh setup is the slowest case
+# (cold Python import, Ollama warm-up). The Electron shell polls for 30
+# minutes so this is just the launcher's own deadline before erroring.
+for _ in {1..360}; do
     if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
         log "Server ready after setup. PID: $SERVER_PID"
         # Don't call `open` here — the setup UI already has a browser tab

@@ -26,6 +26,7 @@ Supports FCPXML 1.13 and 1.14.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -41,6 +42,24 @@ from .timecode import parse_rational
 
 SUPPORTED_VERSIONS = {"1.13", "1.14"}
 
+_log = logging.getLogger(__name__)
+
+
+def _safe_parse_rational(value: Optional[str], *, what: str) -> Fraction:
+    """Parse an FCPXML rational, defaulting to 0 with a warning on failure.
+
+    Used for ``tcStart`` and asset ``start`` attributes where a malformed value
+    should not abort ingest — falling back to 0 yields the original (tcStart=0)
+    code path.
+    """
+    if value is None:
+        return Fraction(0)
+    try:
+        return parse_rational(value)
+    except (ValueError, ZeroDivisionError) as e:
+        _log.warning("could not parse %s=%r (%s); defaulting to 0", what, value, e)
+        return Fraction(0)
+
 
 class ParseError(ValueError):
     """Raised when an FCPXML document cannot be interpreted."""
@@ -54,6 +73,14 @@ class SegmentAudioSource:
     derived from ``<audio-role-source@active>`` on sync-clips (default active).
     Muted segments still carry a path so callers can inspect the source, but
     the timeline-audio renderer skips them.
+
+    ``container_tc_start_fraction`` and ``asset_start_fraction`` capture the
+    timecode origins of, respectively, the multicam container and the
+    underlying asset. Time-of-day timecode (jam-synced cameras, sync boxes,
+    Panasonic / RED / ARRI / Sony FX recorders) makes both of these non-zero;
+    seek math must subtract them to get a zero-based offset into the actual
+    media file. Sync-clips leave both at zero — their existing seek formula
+    (``angle_offset = angle_start = 0``) already operates in source-time.
     """
 
     path: str
@@ -62,6 +89,8 @@ class SegmentAudioSource:
     angle_start_fraction: Fraction
     active_audio_angle_id: Optional[str] = None
     is_muted: bool = False
+    container_tc_start_fraction: Fraction = Fraction(0)
+    asset_start_fraction: Fraction = Fraction(0)
 
     def to_dict(self) -> dict:
         def _frac(f: Fraction) -> str:
@@ -73,6 +102,8 @@ class SegmentAudioSource:
             "angle_start_fraction": _frac(self.angle_start_fraction),
             "active_audio_angle_id": self.active_audio_angle_id,
             "is_muted": self.is_muted,
+            "container_tc_start_fraction": _frac(self.container_tc_start_fraction),
+            "asset_start_fraction": _frac(self.asset_start_fraction),
         }
 
 
@@ -281,6 +312,14 @@ def _resolve_multicam_audio(
     files stitched into one angle), ``segment_start`` — the mc-clip's ``start``
     attribute — is used to pick the asset-clip whose time range covers that
     position within the multicam container.
+
+    ``segment_start`` is in the multicam's timecode space, which is offset by
+    the multicam's ``tcStart`` (jam-synced cameras and time-of-day TC make this
+    non-zero — e.g. 7464.48s for an interview that started at 02:04:24:11). The
+    asset-clips inside the multicam are positioned in zero-based container
+    time, so the comparison must subtract ``tcStart`` first; otherwise every
+    spine clip lands past every asset-clip range and the loop falls through to
+    ``all_clips[0]``, sending every segment to the first .MOV's audio.
     """
     media_el = resource_by_id.get(container_ref)
     if media_el is None:
@@ -288,6 +327,11 @@ def _resolve_multicam_audio(
     multicam = media_el.find("multicam")
     if multicam is None:
         raise ParseError(f"resource {container_ref!r} is not a <multicam> media")
+
+    mcam_tc_start = _safe_parse_rational(
+        multicam.get("tcStart"),
+        what=f"multicam {container_ref!r} tcStart",
+    )
 
     angles = multicam.findall("mc-angle")
     chosen = None
@@ -321,13 +365,15 @@ def _resolve_multicam_audio(
         )
 
     # When an angle has multiple asset-clips, pick the one whose range covers
-    # the segment's start position within the multicam container.
+    # the segment's start position within the multicam container. Compare in
+    # zero-based container time, not multicam-tc space.
+    zero_based_start = segment_start - mcam_tc_start
     asset_clip = all_clips[0]
     if len(all_clips) > 1:
         for ac in all_clips:
             ac_offset = parse_rational(ac.get("offset"))
             ac_duration = parse_rational(ac.get("duration"))
-            if ac_offset <= segment_start < ac_offset + ac_duration:
+            if ac_offset <= zero_based_start < ac_offset + ac_duration:
                 asset_clip = ac
                 break
 
@@ -341,6 +387,10 @@ def _resolve_multicam_audio(
         "asset_id": asset_ref,
         "angle_offset": parse_rational(asset_clip.get("offset")),
         "angle_start": parse_rational(asset_clip.get("start")),
+        "container_tc_start": mcam_tc_start,
+        "asset_start": _safe_parse_rational(
+            asset_el.get("start"), what=f"asset {asset_ref!r} start",
+        ),
     }
 
 
@@ -450,8 +500,12 @@ def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
         "asset_id": asset_ref,
         # Sync-clip@start maps directly to source time; collapse the angle
         # offsets so downstream math reduces to source_time = segment.start.
+        # tcStart and asset-start are similarly zeroed so the seek formula
+        # reduces identically — sync-clip seek behavior is unchanged.
         "angle_offset": Fraction(0),
         "angle_start": Fraction(0),
+        "container_tc_start": Fraction(0),
+        "asset_start": Fraction(0),
         "is_muted": is_muted,
     }
 
@@ -480,6 +534,8 @@ def _resolve_segment_audio(
             angle_start_fraction=info["angle_start"],
             active_audio_angle_id=angle_id,
             is_muted=False,
+            container_tc_start_fraction=info["container_tc_start"],
+            asset_start_fraction=info["asset_start"],
         )
     else:  # sync-clip
         info = _resolve_sync_clip_audio(child, resource_by_id)
@@ -490,6 +546,8 @@ def _resolve_segment_audio(
             angle_start_fraction=info["angle_start"],
             active_audio_angle_id=None,
             is_muted=info["is_muted"],
+            container_tc_start_fraction=info["container_tc_start"],
+            asset_start_fraction=info["asset_start"],
         )
 
 

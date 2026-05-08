@@ -152,6 +152,140 @@ class TestBuildFfmpegCommand:
         assert argv[-1] == "/tmp/out.wav"
 
 
+# Multicam with non-zero tcStart: jam-synced / time-of-day timecode.
+# The multicam tcStart and the asset's own start are both 186612/25s
+# (= 7464.48s, mirroring the original Panasonic / RED / ARRI time-of-day TC
+# from the bug report). Four mc-clips on the spine each pick a different
+# one-quarter slice of the multicam by advancing `start` along the
+# multicam's tc-space. The first two slices land in asset rA1; the last
+# two in asset rA2.
+TC_START_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.14">
+        <resources>
+            <format id="r1" name="FF" frameDuration="1001/24000s" width="1920" height="1080"/>
+            <asset id="rA1" name="cam1" start="186612/25s" duration="100s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+                <media-rep kind="original-media" src="file://{audio_1}"/>
+            </asset>
+            <asset id="rA2" name="cam2" start="186612/25s" duration="100s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+                <media-rep kind="original-media" src="file://{audio_2}"/>
+            </asset>
+            <asset id="rV" name="v" start="0s" duration="200s" hasVideo="1" videoSources="1">
+                <media-rep kind="original-media" src="file:///tmp/v.mov"/>
+            </asset>
+            <media id="mcTOD" name="TOD MC">
+                <multicam tcStart="186612/25s">
+                    <mc-angle name="V" angleID="v1">
+                        <asset-clip ref="rV" offset="0s" duration="200s"/>
+                    </mc-angle>
+                    <mc-angle name="A" angleID="a1">
+                        <asset-clip ref="rA1" offset="0s" start="186612/25s" duration="50s" audioRole="dialogue"/>
+                        <asset-clip ref="rA2" offset="50s" start="186612/25s" duration="50s" audioRole="dialogue"/>
+                    </mc-angle>
+                </multicam>
+            </media>
+        </resources>
+        <library>
+            <event name="E">
+                <project name="TOD">
+                    <sequence format="r1" duration="100s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                        <spine>
+                            <mc-clip ref="mcTOD" offset="0s" start="186612/25s" name="seg1" duration="25s">
+                                <mc-source angleID="v1" srcEnable="video"/>
+                                <mc-source angleID="a1" srcEnable="audio"/>
+                            </mc-clip>
+                            <mc-clip ref="mcTOD" offset="25s" start="187237/25s" name="seg2" duration="25s">
+                                <mc-source angleID="v1" srcEnable="video"/>
+                                <mc-source angleID="a1" srcEnable="audio"/>
+                            </mc-clip>
+                            <mc-clip ref="mcTOD" offset="50s" start="187862/25s" name="seg3" duration="25s">
+                                <mc-source angleID="v1" srcEnable="video"/>
+                                <mc-source angleID="a1" srcEnable="audio"/>
+                            </mc-clip>
+                            <mc-clip ref="mcTOD" offset="75s" start="188487/25s" name="seg4" duration="25s">
+                                <mc-source angleID="v1" srcEnable="video"/>
+                                <mc-source angleID="a1" srcEnable="audio"/>
+                            </mc-clip>
+                        </spine>
+                    </sequence>
+                </project>
+            </event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestMulticamNonZeroTcStart:
+    """Bug fix: multicam jam-synced / time-of-day timecode (tcStart != 0).
+
+    Pre-fix: the asset-clip selector compared multicam-tc-space starts against
+    zero-based asset-clip offsets, so every spine segment fell through to
+    ``all_clips[0]`` (only the first .MOV got transcribed). Seek positions
+    were also wrong because ``asset.start`` was added without subtracting
+    ``asset.start``. This suite locks in the corrected behavior.
+    """
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        audio_1 = tmp_path / "cam1.wav"
+        audio_2 = tmp_path / "cam2.wav"
+        audio_1.write_bytes(b"")
+        audio_2.write_bytes(b"")
+        fcpxml = tmp_path / "tod.fcpxml"
+        fcpxml.write_text(TC_START_FIXTURE.format(audio_1=str(audio_1), audio_2=str(audio_2)))
+        return parse_fcpxml(fcpxml), audio_1, audio_2
+
+    def test_each_segment_resolves_to_correct_asset_clip(self, parsed):
+        # First two spine segments fall in the first multicam asset-clip
+        # (zero-based [0,50)); last two fall in the second ([50,100)).
+        parsed_obj, audio_1, audio_2 = parsed
+        paths = [s.audio_source.path for s in parsed_obj.spine_segments]
+        assert paths == [str(audio_1), str(audio_1), str(audio_2), str(audio_2)]
+
+    def test_all_segments_carry_container_tc_start(self, parsed):
+        from fractions import Fraction
+        parsed_obj, _, _ = parsed
+        for seg in parsed_obj.spine_segments:
+            # 7464.48 = 186612/25
+            assert seg.audio_source.container_tc_start_fraction == Fraction(186612, 25)
+            assert seg.audio_source.asset_start_fraction == Fraction(186612, 25)
+
+    def test_seek_positions_are_zero_based_into_source(self, parsed):
+        parsed_obj, _, _ = parsed
+        plan = plan_render(parsed_obj)
+        # 4 spine clips slicing the multicam at 0/25/50/75s. After tcStart
+        # subtraction the first asset-clip provides [0,25) and [25,50);
+        # the second asset-clip provides [0,25) and [25,50) again.
+        starts = [round(p["source_start_seconds"], 4) for p in plan]
+        assert starts == [0.0, 25.0, 0.0, 25.0]
+
+    def test_is_multi_source_true_with_distinct_files(self, parsed):
+        parsed_obj, _, _ = parsed
+        assert parsed_obj.is_multi_source is True
+
+    def test_metadata_dict_round_trips_tc_fields(self, parsed):
+        import json
+        parsed_obj, _, _ = parsed
+        data = parsed_obj.to_metadata_dict()
+        round_tripped = json.loads(json.dumps(data))
+        first = round_tripped["spine_segments"][0]["audio_source"]
+        assert first["container_tc_start_fraction"] == "186612/25"
+        assert first["asset_start_fraction"] == "186612/25"
+
+
+class TestMulticamZeroTcStartUnchanged:
+    """Regression guard: tcStart=0 path must produce identical seek math to
+    the pre-fix formula (``seg.start - angle_offset + angle_start``)."""
+
+    def test_existing_mixed_fixture_seek_unchanged(self, parsed_mixed):
+        parsed, _, _ = parsed_mixed
+        plan = plan_render(parsed)
+        # mc-clip starts at 0s, sync-clip at 50s — same as before the fix.
+        starts = [round(p["source_start_seconds"], 6) for p in plan]
+        assert starts == [0.0, 0.0]
+
+
 class TestRenderErrors:
     def test_raises_when_source_missing(self, tmp_path):
         # Point the fixture at a path that doesn't exist; parse succeeds

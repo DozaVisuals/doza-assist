@@ -41,12 +41,25 @@ def _segment_source_window(seg: SpineSegment) -> Tuple[Fraction, Fraction]:
 
     Container time ranges ``[seg.start, seg.start + seg.duration)``. Within the
     container, the audio asset-clip is positioned at ``angle_offset`` with its
-    own ``angle_start``. Mapping from container time C to source time is
-    ``C - angle_offset + angle_start``.
+    own ``angle_start``. With timecode origins factored in, the mapping is:
+
+      source_seek = (seg.start - container_tc_start)        # zero-based container time
+                    - angle_offset                          # asset-clip's position in container
+                    + (angle_start - asset_start)           # zero-based seek into source media
+
+    For tcStart-zero multicams and sync-clips, ``container_tc_start`` and
+    ``asset_start`` are both zero, so this collapses to the original
+    ``seg.start - angle_offset + angle_start`` formula. For jam-synced /
+    time-of-day TC multicams (Panasonic, RED, ARRI, Sony FX), subtracting both
+    is what brings the seek position back inside the actual media file.
     """
     src = seg.audio_source
     assert src is not None, "segment audio_source must be resolved before rendering"
-    source_start = seg.start_fraction - src.angle_offset_fraction + src.angle_start_fraction
+    source_start = (
+        (seg.start_fraction - src.container_tc_start_fraction)
+        - src.angle_offset_fraction
+        + (src.angle_start_fraction - src.asset_start_fraction)
+    )
     return source_start, seg.duration_fraction
 
 

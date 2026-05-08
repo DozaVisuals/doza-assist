@@ -21,7 +21,8 @@ on the same storyline) are supported: each segment carries its own resolved
 audio path still find it at :attr:`ParsedFCPXML.audio_file_path` (the first
 non-muted segment).
 
-Supports FCPXML 1.13 and 1.14.
+Supports FCPXML 1.8–1.14 (DaVinci Resolve exports 1.8–1.11; Final Cut Pro
+exports 1.13–1.14).
 """
 
 from __future__ import annotations
@@ -40,7 +41,14 @@ from lxml import etree
 from .timecode import parse_rational
 
 
-SUPPORTED_VERSIONS = {"1.13", "1.14"}
+SUPPORTED_VERSIONS = {
+    "1.8", "1.9", "1.10", "1.11", "1.12",
+    "1.13", "1.14",
+}
+
+NLE_FCP = "fcp"
+NLE_RESOLVE = "resolve"
+NLE_UNKNOWN = "unknown"
 
 _log = logging.getLogger(__name__)
 
@@ -59,6 +67,27 @@ def _safe_parse_rational(value: Optional[str], *, what: str) -> Fraction:
     except (ValueError, ZeroDivisionError) as e:
         _log.warning("could not parse %s=%r (%s); defaulting to 0", what, value, e)
         return Fraction(0)
+
+
+def _detect_nle(root) -> str:
+    """Guess which NLE produced this FCPXML.
+
+    FCP always wraps content in ``<library location="...">``.  Resolve omits
+    ``<library>`` entirely (pre-19) or includes it without a ``location``.
+    The version number is also a strong signal: 1.13+ is FCP territory,
+    1.8–1.11 is Resolve territory.
+    """
+    version = root.get("version") or ""
+    library = root.find("library")
+    if library is not None and library.get("location"):
+        return NLE_FCP
+    if version in {"1.13", "1.14"}:
+        return NLE_FCP
+    if version in {"1.8", "1.9", "1.10", "1.11"}:
+        return NLE_RESOLVE
+    if library is None:
+        return NLE_RESOLVE
+    return NLE_UNKNOWN
 
 
 class ParseError(ValueError):
@@ -190,9 +219,10 @@ class ParsedFCPXML:
 
     spine_segments: List[SpineSegment]
     is_multi_source: bool                         # True if segments reference >1 distinct audio asset
+    nle_source: str = NLE_UNKNOWN                 # 'fcp' | 'resolve' | 'unknown'
 
-    original_resources_xml: bytes                 # verbatim byte-slice from the source
-    original_fcpxml_bytes: bytes
+    original_resources_xml: bytes = b""           # verbatim byte-slice from the source
+    original_fcpxml_bytes: bytes = b""
 
     @property
     def timeline_duration_seconds(self) -> float:
@@ -227,6 +257,7 @@ class ParsedFCPXML:
         return {
             "version": self.version,
             "source_path": self.source_path,
+            "nle_source": self.nle_source,
             "container_type": self.container_type,
             "container_ref": self.container_ref,
             "audio_file_path": self.audio_file_path,
@@ -248,7 +279,11 @@ class ParsedFCPXML:
 
 
 def strip_file_url(src: str) -> str:
-    """Convert a ``media-rep`` ``src`` attribute to an absolute filesystem path."""
+    """Convert a ``media-rep`` ``src`` attribute to an absolute filesystem path.
+
+    Handles FCP's ``file:///Volume/...`` URLs, Resolve's occasional bare paths,
+    and percent-encoded characters in either form.
+    """
     if src.startswith("file://"):
         src = src[len("file://"):]
     return unquote(src)
@@ -333,17 +368,34 @@ def _resolve_multicam_audio(
         what=f"multicam {container_ref!r} tcStart",
     )
 
+    # FCP uses <mc-angle angleID="...">, Resolve may also use <mc-angle> but
+    # older versions (1.8–1.9) sometimes use <angle> instead.
     angles = multicam.findall("mc-angle")
+    if not angles:
+        angles = multicam.findall("angle")
+        if angles:
+            _log.debug("multicam %r uses <angle> elements (Resolve-style)", container_ref)
+
     chosen = None
     if angle_id:
         for a in angles:
             if a.get("angleID") == angle_id:
                 chosen = a
                 break
+        # Resolve may match on name instead of angleID.
+        if chosen is None:
+            for a in angles:
+                if a.get("name") == angle_id:
+                    _log.debug(
+                        "matched angle by name=%r instead of angleID in multicam %r",
+                        angle_id, container_ref,
+                    )
+                    chosen = a
+                    break
         if chosen is None:
             raise ParseError(
                 f"mc-source references angleID {angle_id!r}, "
-                f"no matching <mc-angle> in multicam {container_ref!r}"
+                f"no matching angle in multicam {container_ref!r}"
             )
     else:
         # No explicit audio mc-source: fall back to the first angle with an audio asset-clip.
@@ -357,10 +409,17 @@ def _resolve_multicam_audio(
                 "cannot resolve audio source"
             )
 
+    # Resolve may nest asset-clips inside a child <clip> rather than directly
+    # under the angle — unwrap one level if needed.
     all_clips = chosen.findall("asset-clip")
     if not all_clips:
+        for clip_wrapper in chosen.findall("clip"):
+            all_clips.extend(clip_wrapper.findall("asset-clip"))
+        if all_clips:
+            _log.debug("found asset-clips inside <clip> wrapper in angle %r", chosen.get("name"))
+    if not all_clips:
         raise ParseError(
-            f"mc-angle {chosen.get('name')!r} has no <asset-clip>; "
+            f"angle {chosen.get('name')!r} has no <asset-clip>; "
             "audio-only angle formats are not supported"
         )
 
@@ -371,8 +430,10 @@ def _resolve_multicam_audio(
     asset_clip = all_clips[0]
     if len(all_clips) > 1:
         for ac in all_clips:
-            ac_offset = parse_rational(ac.get("offset"))
-            ac_duration = parse_rational(ac.get("duration"))
+            ac_offset = _safe_parse_rational(ac.get("offset"), what="asset-clip offset")
+            ac_duration = _safe_parse_rational(ac.get("duration"), what="asset-clip duration")
+            if ac_duration <= 0:
+                continue
             if ac_offset <= zero_based_start < ac_offset + ac_duration:
                 asset_clip = ac
                 break
@@ -578,21 +639,36 @@ def parse_fcpxml(path) -> ParsedFCPXML:
             f"unsupported FCPXML version {version!r}; supported: {sorted(SUPPORTED_VERSIONS)}"
         )
 
+    nle = _detect_nle(root)
+    _log.debug("detected NLE source: %s (version %s)", nle, version)
+
     resources = root.find("resources")
     if resources is None:
         raise ParseError("no <resources> block")
     resource_by_id = {el.get("id"): el for el in resources if el.get("id")}
 
+    # FCP always nests <sequence> inside <library>/<event>/<project>.
+    # Resolve may omit <library> or <event>, putting <project>/<sequence>
+    # directly under <fcpxml> or under a bare <event>.
     sequence = root.find(".//project/sequence")
     if sequence is None:
-        raise ParseError("no <sequence> inside <library>/<event>/<project>")
+        raise ParseError("no <sequence> inside a <project> element")
 
     sequence_format_id = sequence.get("format") or ""
     sequence_duration = parse_rational(sequence.get("duration"))
     fmt_el = resource_by_id.get(sequence_format_id)
     if fmt_el is None:
-        raise ParseError(f"sequence references missing format id {sequence_format_id!r}")
-    frame_duration = parse_rational(fmt_el.get("frameDuration"))
+        if nle == NLE_RESOLVE:
+            _log.warning(
+                "sequence format %r not in <resources>; "
+                "Resolve export may use inline format — defaulting frame duration to 1001/24000",
+                sequence_format_id,
+            )
+            frame_duration = Fraction(1001, 24000)
+        else:
+            raise ParseError(f"sequence references missing format id {sequence_format_id!r}")
+    else:
+        frame_duration = parse_rational(fmt_el.get("frameDuration"))
 
     spine = sequence.find("spine")
     if spine is None:
@@ -611,6 +687,11 @@ def parse_fcpxml(path) -> ParsedFCPXML:
                     "angleID": ms.get("angleID") or "",
                     "srcEnable": ms.get("srcEnable") or "",
                 })
+            if not mc_sources:
+                _log.debug(
+                    "mc-clip %r has no <mc-source> children — will fall back to first audio angle",
+                    child.get("name"),
+                )
 
         audio_source = _resolve_segment_audio(child, resource_by_id, mc_sources)
 
@@ -656,6 +737,7 @@ def parse_fcpxml(path) -> ParsedFCPXML:
     return ParsedFCPXML(
         version=version,
         source_path=path_str,
+        nle_source=nle,
         container_type=segments[0].kind,
         container_ref=segments[0].ref,
         audio_file_path=rep_audio.path,

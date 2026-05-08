@@ -30,7 +30,10 @@ from doza_assist.fcpxml import (  # noqa: E402
     seconds_to_rational,
     timeline_to_segment,
 )
-from doza_assist.fcpxml.parser import SpineSegment, _resolve_asset_path, strip_file_url  # noqa: E402
+from doza_assist.fcpxml.parser import (  # noqa: E402
+    NLE_FCP, NLE_RESOLVE,
+    SpineSegment, _resolve_asset_path, strip_file_url,
+)
 
 
 ELLA_FCPXML = Path("/Users/dozavisuals/Downloads/Ella Interview.fcpxmld/Info.fcpxml")
@@ -343,7 +346,7 @@ class TestSyncClip:
 class TestParseErrors:
     def test_rejects_unsupported_version(self, tmp_path):
         p = tmp_path / "old.fcpxml"
-        p.write_text('<?xml version="1.0"?><fcpxml version="1.9"><resources/></fcpxml>')
+        p.write_text('<?xml version="1.0"?><fcpxml version="1.5"><resources/></fcpxml>')
         with pytest.raises(ParseError, match="unsupported FCPXML version"):
             parse_fcpxml(p)
 
@@ -736,3 +739,263 @@ class TestSyncClipFullyMuted:
         parsed = parse_fcpxml(p)
         seg = parsed.spine_segments[0]
         assert seg.audio_source.is_muted is True
+
+
+# ---------- DaVinci Resolve FCPXML multicam support ---------------------------
+
+RESOLVE_MULTICAM_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.9">
+        <resources>
+            <format id="r1" name="FFVideoFormat1080p2398" frameDuration="1001/24000s" width="1920" height="1080"/>
+            <asset id="rAudio" name="interview_audio" start="0s" duration="600s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+                <media-rep kind="original-media" src="file://{audio_path}"/>
+            </asset>
+            <asset id="rVideo" name="cam_a" start="0s" duration="600s" hasVideo="1" videoSources="1">
+                <media-rep kind="original-media" src="file:///tmp/cam.mov"/>
+            </asset>
+            <media id="mc1" name="Multicam 1">
+                <multicam>
+                    <mc-angle name="Video" angleID="v1">
+                        <asset-clip ref="rVideo" offset="0s" duration="600s"/>
+                    </mc-angle>
+                    <mc-angle name="Audio" angleID="a1">
+                        <asset-clip ref="rAudio" offset="0s" duration="600s" audioRole="dialogue"/>
+                    </mc-angle>
+                </multicam>
+            </media>
+        </resources>
+        <event name="Timeline 1">
+            <project name="Resolve Project">
+                <sequence format="r1" duration="300s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <mc-clip ref="mc1" offset="0s" name="seg1" duration="150s">
+                            <mc-source angleID="v1" srcEnable="video"/>
+                            <mc-source angleID="a1" srcEnable="audio"/>
+                        </mc-clip>
+                        <mc-clip ref="mc1" offset="150s" start="150s" name="seg2" duration="150s">
+                            <mc-source angleID="v1" srcEnable="video"/>
+                            <mc-source angleID="a1" srcEnable="audio"/>
+                        </mc-clip>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </fcpxml>
+""")
+
+
+class TestResolveMulticam:
+    """DaVinci Resolve FCPXML multicam imports (version 1.9, no <library>)."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        audio = tmp_path / "interview.wav"
+        audio.write_bytes(b"")
+        p = tmp_path / "resolve.fcpxml"
+        p.write_text(RESOLVE_MULTICAM_FIXTURE.format(audio_path=str(audio)))
+        return parse_fcpxml(p), audio
+
+    def test_detects_resolve_nle(self, parsed):
+        obj, _ = parsed
+        assert obj.nle_source == NLE_RESOLVE
+
+    def test_version_1_9_accepted(self, parsed):
+        obj, _ = parsed
+        assert obj.version == "1.9"
+
+    def test_resolves_audio_without_library_wrapper(self, parsed):
+        obj, audio = parsed
+        assert obj.audio_file_path == str(audio)
+
+    def test_two_segments_on_spine(self, parsed):
+        obj, _ = parsed
+        assert len(obj.spine_segments) == 2
+        assert obj.spine_segments[0].duration_fraction == 150
+        assert obj.spine_segments[1].duration_fraction == 150
+
+    def test_both_segments_resolve_same_audio(self, parsed):
+        obj, audio = parsed
+        for seg in obj.spine_segments:
+            assert seg.audio_source.path == str(audio)
+            assert seg.audio_source.asset_id == "rAudio"
+
+    def test_metadata_includes_nle_source(self, parsed):
+        obj, _ = parsed
+        data = obj.to_metadata_dict()
+        assert data["nle_source"] == "resolve"
+
+
+RESOLVE_ANGLE_ELEMENT_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.8">
+        <resources>
+            <format id="r1" name="FFVideoFormat1080p2398" frameDuration="1001/24000s" width="1920" height="1080"/>
+            <asset id="rA" name="audio" start="0s" duration="300s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+                <media-rep kind="original-media" src="file://{audio_path}"/>
+            </asset>
+            <asset id="rV" name="video" start="0s" duration="300s" hasVideo="1" videoSources="1">
+                <media-rep kind="original-media" src="file:///tmp/v.mov"/>
+            </asset>
+            <media id="mc1" name="MC">
+                <multicam>
+                    <angle name="V" angleID="v1">
+                        <asset-clip ref="rV" offset="0s" duration="300s"/>
+                    </angle>
+                    <angle name="A" angleID="a1">
+                        <asset-clip ref="rA" offset="0s" duration="300s" audioRole="dialogue"/>
+                    </angle>
+                </multicam>
+            </media>
+        </resources>
+        <event name="TL">
+            <project name="P">
+                <sequence format="r1" duration="100s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <mc-clip ref="mc1" offset="0s" name="seg" duration="100s">
+                            <mc-source angleID="v1" srcEnable="video"/>
+                            <mc-source angleID="a1" srcEnable="audio"/>
+                        </mc-clip>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </fcpxml>
+""")
+
+
+class TestResolveAngleElement:
+    """Older Resolve exports may use <angle> instead of <mc-angle>."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"")
+        p = tmp_path / "angle.fcpxml"
+        p.write_text(RESOLVE_ANGLE_ELEMENT_FIXTURE.format(audio_path=str(audio)))
+        return parse_fcpxml(p), audio
+
+    def test_resolves_audio_from_angle_element(self, parsed):
+        obj, audio = parsed
+        assert obj.audio_file_path == str(audio)
+
+    def test_version_1_8_accepted(self, parsed):
+        obj, _ = parsed
+        assert obj.version == "1.8"
+        assert obj.nle_source == NLE_RESOLVE
+
+
+RESOLVE_ANGLE_NAME_MATCH_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.10">
+        <resources>
+            <format id="r1" name="FFVideoFormat1080p2398" frameDuration="1001/24000s" width="1920" height="1080"/>
+            <asset id="rA" name="audio" start="0s" duration="300s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+                <media-rep kind="original-media" src="file://{audio_path}"/>
+            </asset>
+            <asset id="rV" name="video" start="0s" duration="300s" hasVideo="1" videoSources="1">
+                <media-rep kind="original-media" src="file:///tmp/v.mov"/>
+            </asset>
+            <media id="mc1" name="MC">
+                <multicam>
+                    <mc-angle name="V">
+                        <asset-clip ref="rV" offset="0s" duration="300s"/>
+                    </mc-angle>
+                    <mc-angle name="A">
+                        <asset-clip ref="rA" offset="0s" duration="300s" audioRole="dialogue"/>
+                    </mc-angle>
+                </multicam>
+            </media>
+        </resources>
+        <event name="TL">
+            <project name="P">
+                <sequence format="r1" duration="100s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <mc-clip ref="mc1" offset="0s" name="seg" duration="100s">
+                            <mc-source angleID="A" srcEnable="all"/>
+                        </mc-clip>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </fcpxml>
+""")
+
+
+class TestResolveAngleNameMatch:
+    """Resolve mc-source may reference angles by name when angleID is absent."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"")
+        p = tmp_path / "name_match.fcpxml"
+        p.write_text(RESOLVE_ANGLE_NAME_MATCH_FIXTURE.format(audio_path=str(audio)))
+        return parse_fcpxml(p), audio
+
+    def test_resolves_audio_via_angle_name(self, parsed):
+        obj, audio = parsed
+        assert obj.audio_file_path == str(audio)
+
+    def test_srcEnable_all_matches_audio(self, parsed):
+        obj, _ = parsed
+        seg = obj.spine_segments[0]
+        assert seg.audio_source is not None
+        assert seg.audio_source.asset_id == "rA"
+
+
+class TestNLEDetection:
+    """NLE source detection from FCPXML structure."""
+
+    def test_fcp_with_library_location(self, tmp_path):
+        p = tmp_path / "fcp.fcpxml"
+        p.write_text(textwrap.dedent("""\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <fcpxml version="1.14">
+                <resources>
+                    <format id="r1" name="FF" frameDuration="1001/24000s" width="1920" height="1080"/>
+                    <asset id="rA" name="a" start="0s" duration="100s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+                        <media-rep kind="original-media" src="file:///tmp/a.wav"/>
+                    </asset>
+                    <media id="mc1" name="MC">
+                        <multicam>
+                            <mc-angle name="A" angleID="a1">
+                                <asset-clip ref="rA" offset="0s" duration="100s" audioRole="dialogue"/>
+                            </mc-angle>
+                        </multicam>
+                    </media>
+                </resources>
+                <library location="file:///Users/test/Movies/MyLib.fcpbundle/">
+                    <event name="E">
+                        <project name="P">
+                            <sequence format="r1" duration="100s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                                <spine>
+                                    <mc-clip ref="mc1" offset="0s" name="s" duration="100s">
+                                        <mc-source angleID="a1" srcEnable="audio"/>
+                                    </mc-clip>
+                                </spine>
+                            </sequence>
+                        </project>
+                    </event>
+                </library>
+            </fcpxml>
+        """))
+        parsed = parse_fcpxml(p)
+        assert parsed.nle_source == NLE_FCP
+
+    def test_resolve_no_library(self, tmp_path):
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"")
+        p = tmp_path / "resolve.fcpxml"
+        p.write_text(RESOLVE_MULTICAM_FIXTURE.format(audio_path=str(audio)))
+        parsed = parse_fcpxml(p)
+        assert parsed.nle_source == NLE_RESOLVE
+
+    def test_all_fcp_fixtures_detect_as_fcp(self, tmp_path):
+        p = tmp_path / "fcp.fcpxml"
+        p.write_text(SYNC_CLIP_FIXTURE)
+        parsed = parse_fcpxml(p)
+        assert parsed.nle_source == NLE_FCP

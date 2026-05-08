@@ -10,6 +10,9 @@ from .parser import (
     SegmentAudioSource,
     parse_fcpxml,
     ParseError,
+    NLE_FCP,
+    NLE_RESOLVE,
+    NLE_UNKNOWN,
 )
 from .timecode import (
     parse_rational,
@@ -31,6 +34,9 @@ __all__ = [
     "SegmentAudioSource",
     "parse_fcpxml",
     "ParseError",
+    "NLE_FCP",
+    "NLE_RESOLVE",
+    "NLE_UNKNOWN",
     "parse_rational",
     "rational_to_seconds",
     "seconds_to_rational",

@@ -1641,13 +1641,22 @@ def analyze(project_id):
     bucket = cache.get(transcript_hash) if isinstance(cache.get(transcript_hash), dict) else {}
     cached_entry = bucket.get(analysis_type) if isinstance(bucket.get(analysis_type), dict) else None
     if not force and cached_entry and isinstance(cached_entry.get('analysis'), dict):
-        project['analysis'] = cached_entry['analysis']
-        save_project(project_id, project)
-        return jsonify({
-            'status': 'cached',
-            'analysis': cached_entry['analysis'],
-            'segment_vectors': load_segment_vectors(project_id),
-        })
+        cached_analysis = cached_entry['analysis']
+        has_content = (
+            cached_analysis.get('story_beats')
+            or cached_analysis.get('social_clips')
+            or cached_analysis.get('strongest_soundbites')
+        )
+        if not has_content or cached_analysis.get('error'):
+            pass  # stale/empty cache — fall through to re-analyze
+        else:
+            project['analysis'] = cached_analysis
+            save_project(project_id, project)
+            return jsonify({
+                'status': 'cached',
+                'analysis': cached_analysis,
+                'segment_vectors': load_segment_vectors(project_id),
+            })
 
     progress = _make_progress_writer(project_id)
     try:
@@ -1683,6 +1692,10 @@ def analyze(project_id):
             segment_vectors=existing_vectors or None,
             progress_callback=_from_analyzer,
         )
+        if not (result.get('story_beats') or result.get('social_clips')
+                or result.get('strongest_soundbites')):
+            _clear_analyze_status(project_id)
+            return jsonify({'error': 'Analysis produced no results — the model may need to be restarted. Try again.'}), 500
         project['analysis'] = result
 
         analyzer_total = analyzer_state['total']

@@ -81,11 +81,17 @@ class OllamaProvider(BaseProvider):
                     "keep_alive": _KEEP_ALIVE,
                     "options": {
                         "temperature": kwargs.get("temperature", 0.1),
-                        "num_predict": kwargs.get("num_predict", 768),
-                        "num_ctx": kwargs.get("num_ctx", 12288),
+                        # Bumped from 768 → 4096. The story-analyze schema
+                        # easily needs 1k+ output tokens; 768 was forcing
+                        # format='json' to close the JSON early, producing
+                        # syntactically valid but mostly empty dicts.
+                        "num_predict": kwargs.get("num_predict", 4096),
+                        # Bumped 12288 → 32768. Generous context window
+                        # prevents transcript truncation on long interviews.
+                        "num_ctx": kwargs.get("num_ctx", 32768),
                     },
                 },
-                timeout=kwargs.get("timeout", 180),
+                timeout=kwargs.get("timeout", 300),
             )
             if response.status_code != 200:
                 return ""

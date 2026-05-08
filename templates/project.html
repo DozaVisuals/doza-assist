@@ -356,7 +356,7 @@
 
     <!-- Analysis Tab -->
     <div class="tab-content" id="tab-analysis">
-        {% if project.analysis %}
+        {% if project.analysis and (project.analysis.get('story_beats') or project.analysis.get('social_clips') or project.analysis.get('strongest_soundbites')) %}
 
         {% if project.analysis.get('analysis_warnings') %}
         <div class="analysis-warnings-note" role="status">
@@ -901,9 +901,8 @@ document.addEventListener('DOMContentLoaded', () => {
 const COMBINED_ID = PROJECT_IDS.join(',');
 
 // Restore active tab from URL hash if reloadAndKeepTab() set one before
-// reloading. Runs on the next tick so it happens after the template's
-// hardcoded initial transcript-tab activation.
-window.addEventListener('DOMContentLoaded', () => {
+// reloading. Uses document (not window) for broadest browser compat.
+document.addEventListener('DOMContentLoaded', () => {
     const hash = (window.location.hash || '').slice(1);
     if (hash && typeof switchTab === 'function') {
         if (document.getElementById('tab-' + hash)) {
@@ -2718,8 +2717,9 @@ async function runAnalysis() {
         const data = await res.json();
         stopAnalyzeProgressPoll();
         if (data.status === 'analyzed' || data.status === 'cached') {
-            showToast(data.status === 'cached' ? 'Loaded cached analysis' : 'Analysis complete!');
-            setTimeout(() => reloadAndKeepTab('analysis'), 3000);
+            const isCached = data.status === 'cached';
+            showToast(isCached ? 'Loaded cached analysis' : 'Analysis complete!');
+            setTimeout(() => reloadAndKeepTab('analysis'), isCached ? 800 : 3000);
         } else {
             showToast('Error: ' + (data.error || 'Unknown error'), true);
             resetAnalyzeBtn();

@@ -1653,6 +1653,11 @@ def _build_chat_analysis_index(analysis) -> str:
 # independently so we get coverage across the whole interview.
 CHUNK_MINUTES = 15
 _LONG_INTERVIEW_SECONDS = CHUNK_MINUTES * 60
+_CHUNK_DROP_WARNING = (
+    'Analysis incomplete: the AI model returned an unexpected response '
+    'for part of this interview. Some story beats or clips may be '
+    'missing. Try re-running analysis.'
+)
 
 # Paragraph-grouping threshold for the chat path. Chat fits the full transcript
 # into a single prompt (unlike Story Builder, which chunks) because follow-up
@@ -3282,7 +3287,7 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type,
 
     _emit("starting")
 
-    result = {}
+    result = {'analysis_warnings': []}
     if analysis_type in ('story', 'all'):
         step += 1
         _emit("story beats and soundbites")
@@ -3306,6 +3311,10 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type,
             result['broll_suggestions'] = _first_present_list(
                 story_data, 'broll_suggestions', 'broll', 'bRoll', 'b_roll'
             )
+            if not result['story_beats'] and not result['strongest_soundbites'] \
+                    and not result['broll_suggestions'] and not result['themes']:
+                if _CHUNK_DROP_WARNING not in result['analysis_warnings']:
+                    result['analysis_warnings'].append(_CHUNK_DROP_WARNING)
 
     if analysis_type in ('social', 'all'):
         step += 1
@@ -3748,7 +3757,18 @@ def _call_ai(prompt, system_prompt="", task_type="analysis"):
     clear message to the user instead of silently falling back.
     """
     from ai_providers import get_active_provider
-    system_prompt = inject_storytelling_foundation(system_prompt)
+    # Skip the storytelling foundation for structured JSON analysis.
+    # The foundation is ~28 KB (~7 K tokens) of narrative-editorial
+    # guidance. For analysis calls the prompt is a self-contained JSON
+    # extraction task: the transcript IS the data and it must survive
+    # intact. With num_ctx=12288 and num_predict=4096 the available
+    # input budget is ~8192 tokens — the foundation alone would consume
+    # ~7094 of those, leaving ~1098 for the entire transcript. Ollama
+    # silently truncates the overflow, so the model never sees the real
+    # transcript and hallucinates plausible-looking timecodes and generic
+    # descriptions. Chat and Story Builder still get the full foundation.
+    if task_type != "analysis":
+        system_prompt = inject_storytelling_foundation(system_prompt)
     provider = get_active_provider(model_resolver=_get_ollama_model)
     return provider.generate(
         system_prompt, prompt, task_type=task_type,
@@ -4470,68 +4490,165 @@ Return ONLY valid JSON in this shape:
 def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_target=7):
     """Analyze transcript for documentary story structure.
 
-    ``beats_target`` and ``soundbites_target`` set the upper bound the model
-    is asked to return. The chunked-analysis path passes smaller per-chunk
-    values so the merged total lands near the global cap; the single-chunk
-    path uses the global default. Post-merge ranking trims further if the
+    Three-pass split: local Gemma 4b can't reliably populate multiple
+    timecoded arrays in a single call — the model runs out of output
+    budget (num_predict) or gets confused by overlapping instructions
+    and returns partial results. Dedicating one call per concern keeps
+    each schema small enough to fill completely:
+
+      1. **Soundbites** — the most valuable editorial asset; done first
+         so it always gets the model's freshest attention.
+      2. **Story beats + b-roll** — narrative structure and visual ideas
+         share the same arc-reasoning pass.
+      3. **Overview** — summary, title, themes. No timecodes needed;
+         easiest for the model and fine to run last.
+
+    ``beats_target`` and ``soundbites_target`` set the upper bound each
+    pass is asked to return. Post-merge ranking trims further if the
     model overshoots.
     """
     beats_target = max(1, int(beats_target))
     soundbites_target = max(1, int(soundbites_target))
-    system_prompt = """You are an expert documentary film editor.
-Analyze transcripts for story structure and narrative beats.
-Always respond in valid JSON only. No markdown fences, no extra text."""
 
-    prompt = f"""Analyze this interview for documentary story structure.
+    # Pass 1 — soundbites (highest editorial value, runs first)
+    soundbites_result = _analyze_story_soundbites(
+        transcript_text, project_name, soundbites_target,
+    )
+    # Pass 2 — story beats + b-roll suggestions
+    beats_result = _analyze_story_beats(
+        transcript_text, project_name, beats_target,
+    )
+    # Pass 3 — overview (summary, title, themes — no timecodes)
+    overview = _analyze_story_overview(transcript_text, project_name)
 
-PROJECT: {project_name}
+    return {
+        'summary': _first_present(overview or {}, 'summary', 'overview', 'synopsis'),
+        'suggested_title': _first_present(
+            overview or {}, 'suggested_title', 'title', 'working_title'
+        ),
+        'themes': _first_present_list(overview or {}, 'themes', 'topics', 'theme_list'),
+        'story_beats': _first_present_list(
+            beats_result or {}, 'story_beats', 'beats', 'narrative_beats', 'story'
+        ),
+        'strongest_soundbites': _first_present_list(
+            soundbites_result or {}, 'strongest_soundbites', 'soundbites',
+            'quotes', 'best_quotes'
+        ),
+        'broll_suggestions': _first_present_list(
+            beats_result or {}, 'broll_suggestions', 'broll', 'bRoll', 'b_roll'
+        ),
+    }
+
+
+def _analyze_story_soundbites(transcript_text, project_name, soundbites_target):
+    """Pass 1: strongest soundbites only."""
+    system_prompt = (
+        "You are an expert documentary film editor. Output JSON only. "
+        "No markdown, no fences, no commentary, no <think> tags. "
+        "Copy HH:MM:SS timecodes exactly from the transcript — "
+        "do not invent or round timecodes."
+    )
+    prompt = f"""PROJECT: {project_name}
 
 TRANSCRIPT:
 {transcript_text}
 
-Return a JSON object with:
+Return ONLY this JSON object:
 {{
-  "summary": "2-3 sentence overview of the story",
-  "suggested_title": "A compelling working title",
-  "story_beats": [
-    {{
-      "order": 1,
-      "label": "Opening Hook",
-      "description": "Why this moment works",
-      "start": "00:00:45",
-      "end": "00:01:02"
-    }}
-  ],
-  "themes": [
-    "Short noun-phrase theme the interview returns to",
-    "Another recurring theme"
-  ],
   "strongest_soundbites": [
-    {{
-      "text": "The actual quote",
-      "start": "00:02:00",
-      "end": "00:02:18",
-      "why": "Why this is powerful"
-    }}
+    {{"text": "the actual verbatim quote from the transcript", "start": "00:02:00", "end": "00:02:18", "why": "why this is editorially powerful"}}
+  ]
+}}
+
+Find the {soundbites_target} BEST soundbites. A great soundbite is a self-contained moment that works pulled out of context: emotional, surprising, quotable, or carrying the story's thesis in a single breath.
+- "text" MUST be the speaker's actual words copied from the transcript — not a paraphrase.
+- "start" and "end" MUST be HH:MM:SS timecodes copied from the transcript's timecodes for that passage.
+- "why" is a short phrase explaining editorial value (emotional peak, thesis statement, surprising admission, etc.).
+Be ruthless — return fewer if the transcript only has fewer genuine standouts.
+Return ONLY valid JSON, nothing else."""
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    if isinstance(parsed, dict) and (
+        parsed.get('strongest_soundbites') or parsed.get('soundbites')
+        or parsed.get('quotes') or parsed.get('best_quotes')
+    ):
+        return parsed
+    retry = _parse_json_response(_call_ai(
+        prompt + '\n\nNO MARKDOWN. JSON ONLY. Fill the strongest_soundbites array with real quotes from the transcript.',
+        system_prompt,
+    ))
+    return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
+
+
+def _analyze_story_beats(transcript_text, project_name, beats_target):
+    """Pass 2: story beats + b-roll suggestions."""
+    system_prompt = (
+        "You are an expert documentary film editor. Output JSON only. "
+        "No markdown, no fences, no commentary, no <think> tags. "
+        "Copy HH:MM:SS timecodes exactly from the transcript — "
+        "do not invent or round timecodes."
+    )
+    prompt = f"""PROJECT: {project_name}
+
+TRANSCRIPT:
+{transcript_text}
+
+Return ONLY this JSON object — fill both lists:
+{{
+  "story_beats": [
+    {{"order": 1, "label": "Opening Hook", "description": "why this moment works editorially", "start": "00:00:45", "end": "00:01:02"}}
   ],
   "broll_suggestions": [
-    {{
-      "description": "Concrete visual to cut to here",
-      "start": "00:03:10",
-      "end": "00:03:25"
-    }}
+    {{"description": "concrete visual to cut to here — be specific", "start": "00:03:10", "end": "00:03:25"}}
   ]
 }}
 
 Pick the {beats_target} BEST story beats following a documentary arc: hook, context, rising action, emotional peak, resolution, closing. Diversify across beat types — don't stack three hooks.
-Pick the {soundbites_target} BEST soundbites. Be ruthless; return fewer if the transcript only has fewer standouts.
-Pick 3-7 themes — short noun phrases (2-5 words) for the recurring topics, ideas, or motifs the interview keeps returning to. Skip if there aren't real recurring patterns; an empty list is fine.
 Suggest 3-7 b-roll moments. Each one should be a CONCRETE visual idea pinned to the timecode where it would land — describe what you'd specifically want to see, not generic filler like "nature shots" or "stock footage".
 CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end. Use string format like "00:02:45".
-Return ONLY valid JSON."""
+Return ONLY valid JSON, nothing else."""
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    if isinstance(parsed, dict) and (
+        parsed.get('story_beats') or parsed.get('beats')
+        or parsed.get('broll_suggestions') or parsed.get('broll')
+    ):
+        return parsed
+    retry = _parse_json_response(_call_ai(
+        prompt + '\n\nNO MARKDOWN. JSON ONLY. FILL BOTH LISTS — story_beats and broll_suggestions.',
+        system_prompt,
+    ))
+    return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
-    response = _call_ai(prompt, system_prompt)
-    return _parse_json_response(response)
+
+def _analyze_story_overview(transcript_text, project_name):
+    """Pass 3: summary + suggested_title + themes only."""
+    system_prompt = (
+        "You are an expert documentary film editor. Output JSON only. "
+        "No markdown, no fences, no commentary, no <think> tags."
+    )
+    prompt = f"""PROJECT: {project_name}
+
+TRANSCRIPT:
+{transcript_text}
+
+Return ONLY this JSON object:
+{{
+  "summary": "2-3 sentence overview of the story",
+  "suggested_title": "A compelling working title",
+  "themes": ["short 2-5 word phrase", "another recurring theme"]
+}}
+
+Pick 3-7 themes — short noun phrases for the recurring topics. An empty list is fine if there aren't real recurring patterns.
+Return ONLY valid JSON, nothing else."""
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    if isinstance(parsed, dict) and (
+        parsed.get('summary') or parsed.get('themes')
+        or parsed.get('overview') or parsed.get('synopsis')
+    ):
+        return parsed
+    retry = _parse_json_response(_call_ai(
+        prompt + '\n\nNO MARKDOWN. NO PROSE. JSON ONLY.', system_prompt
+    ))
+    return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
 
 def _analyze_social(transcript_text, project_name, clips_target=7):
@@ -4585,7 +4702,35 @@ Use the HH:MM:SS format as a string, like "00:02:45". Do NOT convert to decimal 
 Return ONLY valid JSON, no markdown formatting."""
 
     response = _call_ai(prompt, system_prompt)
-    return _parse_json_response(response)
+    parsed = _parse_json_response(response)
+    if isinstance(parsed, dict) and (
+        parsed.get('social_clips') or parsed.get('clips')
+        or parsed.get('social') or parsed.get('reels')
+    ):
+        return parsed
+    if isinstance(parsed, list) and parsed:
+        return parsed
+    retry_system = (
+        'You output JSON only. No markdown, no prose, no <think> tags. '
+        'Output a single JSON array of clip objects matching the schema below.'
+    )
+    retry_prompt = (
+        'Re-analyze the interview below for short-form social media clips. '
+        'Respond ONLY with this JSON array:\n'
+        '[{"rank":1,"title":"...","start":"00:00:00","end":"00:00:00",'
+        '"duration_seconds":30,"text":"...","platform":"instagram_reels",'
+        '"why":"...","hook":"...","hashtags":["..."]}]\n\n'
+        f'PROJECT: {project_name}\n\nTRANSCRIPT:\n{transcript_text}\n\n'
+        f'Pick the {clips_target} BEST clips, 15-60 seconds each, '
+        'ranked by predicted engagement. Return ONLY the JSON array, '
+        'nothing else.'
+    )
+    retry = _parse_json_response(_call_ai(retry_prompt, retry_system))
+    if isinstance(retry, dict) and retry:
+        return retry
+    if isinstance(retry, list) and retry:
+        return retry
+    return parsed
 
 
 def _parse_json_response(response_text):

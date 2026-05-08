@@ -52,7 +52,7 @@ def test_first_call_runs_analysis(client, project_with_transcript, monkeypatch):
 
     def _fake_analyze(*a, **k):
         calls['count'] += 1
-        return {'summary': 'fresh', 'story_beats': []}
+        return {'summary': 'fresh', 'story_beats': [{'label': 'Hook', 'description': 'test', 'start': '00:00:00', 'end': '00:00:05'}]}
 
     monkeypatch.setattr('ai_analysis.analyze_transcript', _fake_analyze)
     monkeypatch.setattr('ai_analysis.generate_segment_vectors', lambda *a, **k: [])
@@ -68,7 +68,7 @@ def test_second_call_hits_cache(client, project_with_transcript, monkeypatch):
 
     def _fake_analyze(*a, **k):
         calls['count'] += 1
-        return {'summary': 'fresh', 'story_beats': []}
+        return {'summary': 'fresh', 'story_beats': [{'label': 'Hook', 'description': 'test', 'start': '00:00:00', 'end': '00:00:05'}]}
 
     monkeypatch.setattr('ai_analysis.analyze_transcript', _fake_analyze)
     monkeypatch.setattr('ai_analysis.generate_segment_vectors', lambda *a, **k: [])
@@ -85,7 +85,7 @@ def test_force_bypasses_cache(client, project_with_transcript, monkeypatch):
 
     def _fake_analyze(*a, **k):
         calls['count'] += 1
-        return {'summary': f"run-{calls['count']}", 'story_beats': []}
+        return {'summary': f"run-{calls['count']}", 'story_beats': [{'label': 'Hook', 'description': 'test', 'start': '00:00:00', 'end': '00:00:05'}]}
 
     monkeypatch.setattr('ai_analysis.analyze_transcript', _fake_analyze)
     monkeypatch.setattr('ai_analysis.generate_segment_vectors', lambda *a, **k: [])
@@ -104,7 +104,7 @@ def test_different_analysis_types_cached_separately(client, project_with_transcr
 
     def _fake_analyze(*a, **k):
         calls['count'] += 1
-        return {'summary': k.get('analysis_type', '?'), 'story_beats': []}
+        return {'summary': k.get('analysis_type', '?'), 'story_beats': [{'label': 'Hook', 'description': 'test', 'start': '00:00:00', 'end': '00:00:05'}]}
 
     monkeypatch.setattr('ai_analysis.analyze_transcript', _fake_analyze)
     monkeypatch.setattr('ai_analysis.generate_segment_vectors', lambda *a, **k: [])
@@ -126,7 +126,7 @@ def test_transcript_edit_invalidates_cache(client, project_with_transcript, monk
 
     def _fake_analyze(*a, **k):
         calls['count'] += 1
-        return {'summary': f"r{calls['count']}", 'story_beats': []}
+        return {'summary': f"r{calls['count']}", 'story_beats': [{'label': 'Hook', 'description': 'test', 'start': '00:00:00', 'end': '00:00:05'}]}
 
     monkeypatch.setattr('ai_analysis.analyze_transcript', _fake_analyze)
     monkeypatch.setattr('ai_analysis.generate_segment_vectors', lambda *a, **k: [])

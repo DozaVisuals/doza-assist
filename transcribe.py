@@ -26,7 +26,19 @@ ssl.create_default_context = _create_ssl_context
 
 
 def _ensure_ffmpeg_on_path():
-    """Ensure ffmpeg is discoverable on PATH (needed by whisper internally)."""
+    """Ensure ffmpeg is discoverable on PATH (needed by whisper internally).
+
+    Resolution order:
+      1. ``DOZA_FFMPEG_DIR`` env var — set by the 0.7.0 Electron shell to
+         the path of the bundled LGPL ffmpeg build inside the .app. Wins
+         so the user gets the deterministic version we shipped.
+      2. Existing PATH entry (e.g. Homebrew install on a dev machine).
+      3. Common Homebrew prefixes as a last resort.
+    """
+    bundled = os.environ.get('DOZA_FFMPEG_DIR')
+    if bundled and os.path.isfile(os.path.join(bundled, 'ffmpeg')):
+        os.environ['PATH'] = bundled + ':' + os.environ.get('PATH', '')
+        return
     if shutil.which('ffmpeg'):
         return
     for bin_dir in ['/opt/homebrew/bin', '/usr/local/bin']:
@@ -56,7 +68,16 @@ _whisper_cache = {}             # {model_name: model}
 
 
 def _find_ffmpeg():
-    """Find the ffmpeg binary, checking common Homebrew paths if not on PATH."""
+    """Find the ffmpeg binary.
+
+    Same resolution order as ``_ensure_ffmpeg_on_path`` (bundled first,
+    PATH, then Homebrew prefixes).
+    """
+    bundled_dir = os.environ.get('DOZA_FFMPEG_DIR')
+    if bundled_dir:
+        candidate = os.path.join(bundled_dir, 'ffmpeg')
+        if os.path.isfile(candidate):
+            return candidate
     path = shutil.which('ffmpeg')
     if path:
         return path

@@ -160,21 +160,33 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
         note = _escape_xml(m.get('note', ''))
         category = _escape_xml(m.get('category', 'Clip'))
+        speaker = (m.get('speaker') or '').strip()
 
         # Optional marker inside the clip
         marker_xml = ''
         if mode == "both":
+            marker_note = f"{note} [{category}]"
+            if speaker:
+                marker_note = f"{marker_note} — {_escape_xml(speaker)}"
             marker_xml = (
                 f'\n                            <chapter-marker start="{src_start_str}" '
                 f'duration="{frame_dur}" value="{clip_name}" '
-                f'note="{note} [{category}]"/>'
+                f'note="{marker_note}"/>'
             )
 
-        # Keyword for the clip
+        # Keyword for the clip's category
         keyword_xml = (
             f'\n                            <keyword start="{src_start_str}" '
             f'duration="{dur_str}" value="{category}"/>'
         )
+        # Second keyword carrying the speaker (when known). Editors can filter
+        # the clip pool by speaker inside the NLE without us having to rename
+        # the asset-clip itself.
+        if speaker:
+            keyword_xml += (
+                f'\n                            <keyword start="{src_start_str}" '
+                f'duration="{dur_str}" value="Speaker: {_escape_xml(speaker)}"/>'
+            )
 
         spine_clips.append(
             f'                        <asset-clip name="{clip_name}" ref="r2" '
@@ -261,17 +273,27 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 
         clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
         note = _escape_xml(m.get('note', ''))
+        speaker = (m.get('speaker') or '').strip()
+        marker_note = note
+        if speaker:
+            marker_note = f"{note} — {_escape_xml(speaker)}" if note else _escape_xml(speaker)
 
         marker_xml = (
             f'\n                            <chapter-marker start="{src_start_str}" '
             f'duration="{frame_dur}" value="{clip_name}" '
-            f'note="{note}"/>'
+            f'note="{marker_note}"/>'
         )
+        speaker_kw = ''
+        if speaker:
+            speaker_kw = (
+                f'\n                            <keyword start="{src_start_str}" '
+                f'duration="{dur_str}" value="Speaker: {_escape_xml(speaker)}"/>'
+            )
 
         spine_clips.append(
             f'                        <asset-clip name="{clip_name}" ref="r2" '
             f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
-            f'format="r1" tcFormat="NDF">{marker_xml}'
+            f'format="r1" tcFormat="NDF">{speaker_kw}{marker_xml}'
             f'\n                        </asset-clip>'
         )
 
@@ -329,13 +351,17 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
         name = _escape_xml(m.get('text', f'Marker {i+1}'))
         note = _escape_xml(m.get('note', ''))
         category = m.get('category', 'Marker')
+        speaker = (m.get('speaker') or '').strip()
 
         display_name = name[:80] + '...' if len(name) > 80 else name
+        marker_note = f"{note} [{category}]"
+        if speaker:
+            marker_note = f"{marker_note} — {_escape_xml(speaker)}"
 
         markers_xml.append(
             f'                        <chapter-marker start="{start_time}" '
             f'duration="{dur_str}" value="{display_name}" '
-            f'note="{note} [{category}]"/>'
+            f'note="{marker_note}"/>'
         )
 
     markers_block = '\n'.join(markers_xml)

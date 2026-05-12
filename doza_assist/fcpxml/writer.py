@@ -50,6 +50,14 @@ class Select:
 
     Times are in seconds. See the module docstring for how they are
     interpreted relative to single-source vs. multi-source projects.
+
+    ``speaker`` is the resolved display name of whoever is talking at the
+    select's start (looked up from the transcript + ``speaker_names``
+    rename map before the select is built). Empty when the project carries
+    no speaker info; when set, round-trip writers emit a "Speaker: Name"
+    keyword on the new mc-clip / sync-clip and append the name to any
+    marker note, matching what ``fcpxml_export.generate_fcpxml`` does for
+    direct-media exports.
     """
 
     start_seconds: float
@@ -57,6 +65,7 @@ class Select:
     label: str = "Select"
     note: str = ""
     kind: str = "standard"        # 'strong' | 'standard' | 'question'
+    speaker: str = ""
 
     @property
     def duration_seconds(self) -> float:
@@ -187,10 +196,13 @@ def _locate_select_range(
     )
 
 
-def _iter_selects(selects: Iterable[Select]) -> List[Select]:
+def _iter_selects(selects: Iterable[Select], *, preserve_order: bool = False) -> List[Select]:
     out = [s for s in selects if s.duration_seconds > 0]
-    # Sort by in-point so the new timeline reads chronologically.
-    out.sort(key=lambda s: s.start_seconds)
+    if not preserve_order:
+        # Default: sort by in-point so the new timeline reads chronologically.
+        # Story Builder exports pass preserve_order=True so the build's
+        # narrative ordering survives the round-trip.
+        out.sort(key=lambda s: s.start_seconds)
     return out
 
 
@@ -225,9 +237,12 @@ def _build_mc_clip_node(
     # Violating this order makes FCP silently drop the mc-source overrides
     # and fall back to the multicam's default angle — which manifests as
     # "audio but no video" on import.
-    if select.note:
+    note_text = select.note
+    if select.speaker:
+        note_text = f"{note_text} — {select.speaker}" if note_text else select.speaker
+    if note_text:
         note = etree.SubElement(mc, "note")
-        note.text = select.note
+        note.text = note_text
 
     # Replay the source segment's mc-source enablement so both video and audio
     # angles match what the editor had on the original timeline.
@@ -278,9 +293,12 @@ def _build_sync_clip_node(
     new_clip.set("name", select.label or "Select")
 
     # Per the FCPXML DTD, <note> must be the first child of <sync-clip>.
-    if select.note:
+    note_text = select.note
+    if select.speaker:
+        note_text = f"{note_text} — {select.speaker}" if note_text else select.speaker
+    if note_text:
         note = etree.Element("note")
-        note.text = select.note
+        note.text = note_text
         new_clip.insert(0, note)
 
     return new_clip
@@ -303,7 +321,9 @@ def _index_original_spine(parsed: ParsedFCPXML) -> List[etree._Element]:
 
 
 def _build_selects_spine(
-    parsed: ParsedFCPXML, selects: List[Select], skipped: Optional[List[Select]] = None
+    parsed: ParsedFCPXML,
+    selects: List[Select],
+    skipped: Optional[List[Select]] = None,
 ) -> etree._Element:
     spine = etree.Element("spine")
     timeline_cursor = Fraction(0)
@@ -341,13 +361,18 @@ def write_selects_as_new_project(
     *,
     project_name: Optional[str] = None,
     event_name: Optional[str] = None,
+    preserve_order: bool = False,
 ) -> bytes:
     """Mode A — emit an FCPXML where the selects are a new project's spine.
 
     The original ``<resources>`` block is preserved byte-for-byte; only the
     ``<library>`` is rebuilt. Returns UTF-8 encoded FCPXML bytes.
+
+    Pass ``preserve_order=True`` for Story Builder exports — keeps the build's
+    custom clip order intact instead of chronologically sorting by source
+    in-point.
     """
-    selects = _iter_selects(selects)
+    selects = _iter_selects(selects, preserve_order=preserve_order)
     if not selects:
         raise WriterError("no selects provided")
 
@@ -427,8 +452,11 @@ def _marker_element(
     marker.set("value", select.label or "Marker")
     for k, v in _MARKER_KIND_ATTRS.get(select.kind, {}).items():
         marker.set(k, v)
-    if select.note:
-        marker.set("note", select.note)
+    note_text = select.note
+    if select.speaker:
+        note_text = f"{note_text} — {select.speaker}" if note_text else select.speaker
+    if note_text:
+        marker.set("note", note_text)
     return marker
 
 

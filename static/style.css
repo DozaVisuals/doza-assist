@@ -570,6 +570,63 @@ body {
     background: #000;
 }
 
+/* Audio waveform shell — replaces the empty player box for audio-only
+   projects and when the editor toggles audio-only mode on a video project.
+   16:9 so the player footprint matches the video preview exactly and the
+   layout doesn't shift on mode switch. The actual visualization is the
+   .dz-waveform component (mirrored from doza-assist-electron/theme.css so
+   the splash loader and the in-app player share one identity). */
+.audio-waveform-shell {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background:
+        radial-gradient(ellipse 70% 60% at 50% 40%, rgba(40, 92, 165, 0.18), transparent 70%),
+        linear-gradient(180deg, #0d1117 0%, #050608 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+/* Reusable waveform component. Identical bar count, gap proportions, and
+   colors to the splash version in the Electron repo. data-mode controls
+   the driver: ambient = CSS keyframes, reactive = JS-driven --dz-bar-scale. */
+.dz-waveform {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    height: 60%;
+}
+.dz-waveform .dz-bar {
+    display: block;
+    width: 5px;
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(180deg,
+        rgba(255, 255, 255, 0.95) 0%,
+        rgba(255, 255, 255, 0.78) 50%,
+        rgba(255, 255, 255, 0.55) 100%);
+    transform-origin: 50% 50%;
+    transform: scaleY(var(--dz-bar-scale, 0.25));
+    will-change: transform;
+}
+.dz-waveform[data-mode="ambient"] .dz-bar {
+    animation: dz-wave 1.5s ease-in-out infinite;
+}
+.dz-waveform[data-mode="ambient"] .dz-bar:nth-child(1) { animation-delay: 0.00s; }
+.dz-waveform[data-mode="ambient"] .dz-bar:nth-child(2) { animation-delay: 0.10s; }
+.dz-waveform[data-mode="ambient"] .dz-bar:nth-child(3) { animation-delay: 0.20s; }
+.dz-waveform[data-mode="ambient"] .dz-bar:nth-child(4) { animation-delay: 0.10s; }
+.dz-waveform[data-mode="ambient"] .dz-bar:nth-child(5) { animation-delay: 0.00s; }
+@keyframes dz-wave {
+    0%, 100% { transform: scaleY(0.22); opacity: 0.55; }
+    50%      { transform: scaleY(1.0);  opacity: 1; }
+}
+.dz-waveform[data-mode="reactive"] .dz-bar {
+    transition: transform 90ms ease-out;
+}
+
 .player-controls-box {
     padding: 0;
 }
@@ -1667,15 +1724,26 @@ body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !imp
     color: var(--text-muted);
 }
 
+/* Title — same position/weight/size as before, but uses an explicit class
+   so the cascade is predictable across themes. */
+.chat-welcome-title,
 .chat-welcome h3 {
     font-size: 1.2rem;
-    color: var(--text-secondary);
-    margin-bottom: 0.5rem;
+    color: var(--text-primary);
+    margin: 0 0 14px 0;
+    font-weight: 600;
 }
 
+/* Subtitle — muted/secondary color, slightly smaller, more breathing room
+   below the title. */
+.chat-welcome-subtitle,
 .chat-welcome p {
-    font-size: 0.9rem;
-    margin-bottom: 1.5rem;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    margin: 0 auto 1.75rem auto;
+    max-width: 32rem;
+    line-height: 1.5;
+    opacity: 0.85;
 }
 
 .chat-suggestions {
@@ -1701,6 +1769,32 @@ body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !imp
     border-color: var(--accent);
     color: var(--accent);
     background: var(--accent-dim);
+}
+
+/* Primary "start here" suggestion — same size as the others, just filled.
+   Reads as the suggested entry point without being pushy. */
+.chat-suggestion-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    font-weight: 500;
+}
+[data-theme="light"] .chat-suggestion-primary { color: #fff; }
+.chat-suggestion-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    opacity: 0.88;
+}
+[data-theme="light"] .chat-suggestion-primary:hover { color: #fff; }
+
+/* Hint line — the lowest-contrast text on the card. A whisper, not a CTA. */
+.chat-welcome-hint {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    opacity: 0.6;
+    margin: 18px 0 0 0;
+    font-style: italic;
 }
 
 .chat-msg {
@@ -1847,6 +1941,22 @@ body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !imp
 .cc-note { font-size: 12px; color: var(--text-primary); line-height: 1.45; margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--border); }
 .cc-excerpt { font-size: 11px; color: var(--text-secondary); line-height: 1.4; max-height: 0; overflow: hidden; transition: max-height 0.25s ease; }
 .cc-card.cc-open .cc-excerpt { max-height: 600px; margin-top: 4px; }
+
+/* Markdown structure inside chat replies — headers, lists, paragraph
+   spacing. The renderer (renderChatReply) parses ## / ### / - / 1. and
+   double-newlines so editor responses scan like a doc instead of a wall
+   of text. Styles are scoped tight (chat-h, chat-list, chat-para-gap) so
+   they don't bleed into the rest of the app. */
+.chat-h { font-size: 13px; font-weight: 600; margin: 16px 0 6px 0; color: var(--text-primary); letter-spacing: -0.005em; line-height: 1.35; }
+.chat-h:first-child { margin-top: 2px; }
+h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); letter-spacing: 0.01em; margin-top: 14px; }
+.chat-list { margin: 4px 0 8px 18px; padding: 0; line-height: 1.6; }
+.chat-list li { margin: 3px 0; }
+.chat-list li > strong:first-child { color: var(--text-primary); }
+/* Real paragraph break — the renderer emits this for every blank line in
+   the source. Replaces the old "all blank lines collapse to one <br>"
+   behavior that made multi-paragraph replies look like wall-of-text. */
+.chat-para-gap { height: 12px; }
 
 /* Inline clip confirmation in chat */
 .chat-inline-clip { display: flex; align-items: center; gap: 8px; margin: 6px 0; padding: 6px 10px; background: var(--bg-card); border: 1px solid #22c55e; border-radius: 6px; font-size: 12px; animation: clipSlideIn 0.2s ease; }
@@ -4154,14 +4264,48 @@ body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !imp
     line-height: 1.3;
 }
 
-/* FCPXML Round-Trip panel — visually distinct from the main export
-   flow above it so users recognize it as a separate workflow. */
-.export-roundtrip {
-    margin-top: 1.25rem;
-    padding: 1rem;
-    border: 1px dashed var(--border);
-    border-radius: 8px;
+/* Read-only form value (e.g. framerate from FCPXML source) */
+.form-input-readonly {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
     background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+/* Segmented control for export output mode */
+.export-mode-segmented {
+    display: inline-flex;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 3px;
+    gap: 0;
+    width: 100%;
+}
+.export-mode-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 500;
+    padding: 0.4rem 0.75rem;
+    border-radius: calc(var(--radius) - 2px);
+    cursor: pointer;
+    flex: 1;
+    text-align: center;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.export-mode-btn:hover {
+    color: var(--text-primary);
+}
+.export-mode-btn.is-active {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 /* Delivery toggle (top of Export tab) — controls whether every export in

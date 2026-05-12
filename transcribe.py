@@ -323,13 +323,21 @@ def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
             model_a, metadata = align_entry[0], align_entry[1]
     result = whisperx.align(result["segments"], model_a, metadata, audio, device)
 
-    # Speaker diarization
-    print("Running speaker diarization...")
+    # Speaker diarization.
+    # When the Pro `diarization` extension is active (DIARIZATION_ENABLED=true,
+    # which the extension sets at load time) we skip the inline WhisperX
+    # diarization here — the extension owns speaker labeling for all engines
+    # via a separate post-transcription worker using a newer pyannote model.
+    # When DIARIZATION_ENABLED is false/unset, the legacy inline path runs.
+    _diar_ext_active = os.environ.get('DIARIZATION_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on')
     hf_token = os.environ.get('HF_TOKEN', '')
-    if hf_token:
+    if hf_token and not _diar_ext_active:
+        print("Running speaker diarization (WhisperX inline)...")
         diarize_model = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
         diarize_segments = diarize_model(audio)
         result = whisperx.assign_word_speakers(diarize_segments, result)
+    elif _diar_ext_active:
+        print("Skipping inline WhisperX diarization — Pro extension will handle speakers.")
 
     # Format output
     segments = []

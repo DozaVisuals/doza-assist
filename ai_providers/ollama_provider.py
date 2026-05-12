@@ -81,8 +81,29 @@ class OllamaProvider(BaseProvider):
                     "keep_alive": _KEEP_ALIVE,
                     "options": {
                         "temperature": kwargs.get("temperature", 0.1),
-                        "num_predict": kwargs.get("num_predict", 768),
-                        "num_ctx": kwargs.get("num_ctx", 12288),
+                        # Bumped from 768 → 4096. The story-analyze schema
+                        # (7 beats + 7 soundbites + 5 themes + 5 b-roll +
+                        # summary + title) easily needs 1k+ output tokens;
+                        # 768 was forcing format='json' to close the JSON
+                        # early, producing syntactically valid but mostly
+                        # empty dicts. That masked the truncation as
+                        # "Gemma returned content-free response" — the
+                        # AI Analysis tab would show only a summary or
+                        # only social clips with no story beats. 4096
+                        # gives every realistic schema room to finish.
+                        "num_predict": kwargs.get("num_predict", 4096),
+                        # Bumped 12288 → 32768 to match the chat path.
+                        # The previous 12288 left only ~8192 input tokens
+                        # after num_predict was reserved. With the
+                        # storytelling foundation (~7K tokens) prepended
+                        # to the system prompt, barely 1K remained for
+                        # the transcript — Ollama silently truncated the
+                        # overflow and the model hallucinated timecodes.
+                        # Even with the foundation now skipped for analysis
+                        # calls, a generous context window prevents
+                        # truncation on long transcripts (25-min Gemma
+                        # chunk ≈ 5K tokens of transcript text alone).
+                        "num_ctx": kwargs.get("num_ctx", 32768),
                     },
                 },
                 timeout=kwargs.get("timeout", 180),
@@ -118,6 +139,17 @@ class OllamaProvider(BaseProvider):
     def generate_stream(self, system_prompt, user_or_messages, task_type="general", **kwargs):
         model = self._resolve_model(kwargs.get("model_override"))
         messages = _ollama_messages(system_prompt, user_or_messages)
+        # Tuple-form timeout: (connect, read). The read leg applies between
+        # bytes from the server, not to the whole response — so 60s here
+        # means "abort if Ollama goes silent for a full minute mid-stream",
+        # not "abort after 60s total". The previous single-value 300s was
+        # producing the stuck-chat symptom: Ollama could go quiet for up
+        # to 5 minutes (model warmup + silent-thinking) without raising,
+        # leaving the editor staring at the typing dots. 60s of complete
+        # silence on a chat request is well past "something is wrong" on
+        # any local model the app supports.
+        connect_timeout = kwargs.get("connect_timeout", 15)
+        read_timeout = kwargs.get("read_timeout", kwargs.get("timeout", 60))
         with requests.post(
             f"{self.base_url}/api/chat",
             json={
@@ -134,7 +166,7 @@ class OllamaProvider(BaseProvider):
                     "stop": kwargs.get("stop", DEFAULT_STOP_TOKENS),
                 },
             },
-            timeout=kwargs.get("timeout", 300),
+            timeout=(connect_timeout, read_timeout),
             stream=True,
         ) as response:
             if response.status_code != 200:

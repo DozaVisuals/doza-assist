@@ -715,6 +715,85 @@ def save_setup_state():
     log(f"Setup state saved to {SETUP_JSON}")
 
 
+def spawn_flask_detached():
+    """Spawn the Flask server detached from this process group so it
+    survives whatever happens to ``launcher.sh``.
+
+    Background: in v0.5.3 the Electron shell's auto-recovery flow could
+    SIGTERM ``launcher.sh`` mid-Phase-2 (e.g. on a window-focus event
+    during the long ``wait $SETUP_PID``). ``setup_assistant.py`` itself
+    was started with ``&`` and continued running orphaned, finishing
+    setup successfully — but the parent that was supposed to spawn Flask
+    afterward was already gone, so ``server.log`` stayed at 0 bytes.
+
+    Having ``setup_assistant`` own the Flask spawn directly removes that
+    coupling. ``start_new_session=True`` puts the child in a brand-new
+    process group via ``setsid()``, so it's immune to a TERM directed at
+    our own process group when this script exits.
+
+    Idempotent: if something is already serving HTTP on the chosen port,
+    we log and return — the Electron poller will pick that up. The
+    ``launcher.sh`` Phase 3 path that previously spawned Flask now just
+    sees the already-running server and exits 0 too.
+    """
+    port = int(os.environ.get('PORT', FLASK_PORT))
+    # Already up? Don't fight an existing instance.
+    try:
+        rc, _, _ = run_cmd(f"curl -sf --max-time 2 http://127.0.0.1:{port}/")
+        if rc == 0:
+            log(f"Flask already running on port {port}; skipping detached spawn.")
+            return True
+    except Exception:
+        pass
+
+    venv_python = os.path.join(VENV_DIR, 'bin', 'python3')
+    if not os.path.exists(venv_python):
+        log(f"ERROR: cannot spawn Flask — venv python missing at {venv_python}")
+        return False
+
+    app_py = os.path.join(APP_DIR, 'app.py')
+    if not os.path.exists(app_py):
+        log(f"ERROR: cannot spawn Flask — app.py missing at {app_py}")
+        return False
+
+    cmd = [venv_python, 'app.py']
+    if is_apple_silicon():
+        cmd = ['arch', '-arm64'] + cmd
+
+    env = os.environ.copy()
+    env.setdefault('DOZA_APP_DIR', APP_DIR)
+    env.setdefault('DOZA_DATA_DIR', SUPPORT_DIR)
+    env.setdefault('PYTHONUNBUFFERED', '1')
+
+    server_log = os.path.join(SUPPORT_DIR, 'server.log')
+    try:
+        os.makedirs(SUPPORT_DIR, exist_ok=True)
+        # Touch with restrictive perms first so the open below inherits 600.
+        if not os.path.exists(server_log):
+            open(server_log, 'a').close()
+            try: os.chmod(server_log, 0o600)
+            except Exception: pass
+        with open(server_log, 'ab') as logf:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=APP_DIR,
+                stdout=logf,
+                stderr=logf,
+                env=env,
+                start_new_session=True,
+            )
+        try:
+            with open(os.path.join(SUPPORT_DIR, 'server.pid'), 'w') as f:
+                f.write(str(proc.pid))
+        except Exception:
+            pass
+        log(f"Spawned Flask detached (PID {proc.pid}, port {port}).")
+        return True
+    except Exception as e:
+        log(f"ERROR: failed to spawn Flask: {e}")
+        return False
+
+
 # ── Setup Runner Thread ──
 
 def run_setup():
@@ -748,7 +827,13 @@ def run_setup():
                 setup_state["error"] = f"Failed at step: {setup_state['steps'][idx]['name']}"
             return
 
-    # All steps done
+    # All steps done. Spawn Flask BEFORE writing setup.json — that way the
+    # Electron shell sees a live Flask the moment it sees setup_complete,
+    # and we don't depend on launcher.sh being alive to do the post-setup
+    # spawn (the v0.5.3 regression: launcher could be SIGTERM'd mid-Phase-2
+    # by Electron's recovery flow, leaving setup_assistant orphaned and
+    # finishing successfully but with no Flask).
+    spawn_flask_detached()
     save_setup_state()
     with state_lock:
         setup_state["status"] = "complete"

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -41,7 +41,7 @@ function toggleTheme() {
 }
 (function() {
     const saved = localStorage.getItem('doza-theme');
-    document.documentElement.setAttribute('data-theme', saved || 'light');
+    document.documentElement.setAttribute('data-theme', saved || 'dark');
 })();
 
 async function refreshActivePill() {
@@ -66,7 +66,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
     <div class="page-title-area">
         <div>
             <h1 class="page-title">Projects</h1>
-            <p class="page-subtitle">Reference local interview files, transcribe, and export to FCPX</p>
+            <p class="page-subtitle">Reference local interview files, transcribe, and export to FCPX, Premiere, and Resolve</p>
         </div>
         <button class="btn btn-sm" id="newFolderBtn" onclick="createFolder()">New Folder</button>
     </div>
@@ -80,7 +80,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                        placeholder="/Volumes/MyDrive/Interviews/interview.mov"
                        style="font-family: var(--mono); font-size: 0.85rem;">
             </div>
-            <button class="btn btn-primary" onclick="openBrowseModal()" style="white-space: nowrap;">
+            <button class="btn btn-primary" onclick="openNativeFilePicker()" style="white-space: nowrap;">
                 Browse
             </button>
             <button class="btn btn-primary" id="selectPathBtn" onclick="selectFilePath()" style="white-space: nowrap; display: none;">
@@ -446,6 +446,112 @@ async function createFromPath() {
 }
 
 // ── File Browser Modal ──
+// Open a native macOS file dialog and run the chosen file through the
+// same import flow as drag-drop. Two paths in priority order:
+//
+// 1. Electron preload bridge (window.dozaBatch.openFileDialog) — calls
+//    main process dialog.showOpenDialog. This is the bulletproof path:
+//    programmatic <input type="file">.click() doesn't reliably trigger
+//    a dialog in packaged Electron builds (we hit this in 0.5.x), so we
+//    do the dialog from the main process and just receive the absolute
+//    path back over IPC.
+//
+// 2. Bare <input type="file"> fallback for non-Electron contexts (dev
+//    browser). Uses webUtils.getPathForFile if available, otherwise
+//    /find-file search.
+async function openNativeFilePicker() {
+    console.log('[browse] openNativeFilePicker invoked',
+        'dozaBatch?', !!window.dozaBatch,
+        'openFileDialog?', !!(window.dozaBatch && window.dozaBatch.openFileDialog));
+    // IMPORTANT: Always look up #filePathInput and #selectPathBtn from the
+    // live DOM instead of using the cached const references from page load.
+    // The Pro import-queue clone-replaces #dropCard (to strip OSS drag/drop
+    // listeners), which detaches the original elements. The cached
+    // ``filePathInput`` const still points at the OLD, removed node — so
+    // writing to it is a no-op from the user's perspective. The import
+    // queue's ``selectFilePath`` override reads the LIVE element via
+    // getElementById, finds an empty value, and returns immediately.
+    // Fresh lookups here ensure the path reaches whichever handler is
+    // active (OSS modal or Pro import queue).
+    if (window.dozaBatch && typeof window.dozaBatch.openFileDialog === 'function') {
+        let absPath = null;
+        try {
+            absPath = await window.dozaBatch.openFileDialog({ title: 'Select a media file' });
+        } catch (err) {
+            console.error('[browse] openFileDialog threw', err);
+            absPath = null;
+        }
+        console.log('[browse] absPath after dialog:', absPath);
+        if (absPath) {
+            const liveInput = document.getElementById('filePathInput');
+            const liveBtn = document.getElementById('selectPathBtn');
+            if (liveInput) liveInput.value = absPath;
+            if (liveBtn) liveBtn.style.display = 'inline-flex';
+            try {
+                selectFilePath();
+            } catch (err) {
+                console.error('[browse] selectFilePath threw', err);
+                alert('Could not open the project setup modal: ' + (err && err.message || err));
+            }
+        }
+        return;
+    }
+    console.warn('[browse] dozaBatch.openFileDialog unavailable; using legacy <input type=file> fallback');
+
+    // Fallback: programmatic file input (dev / non-Electron only).
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'audio/*,video/*,.wav,.mp3,.mp4,.mov,.aac,.m4a,.flac,.aif,.aiff,.mxf,.fcpxml';
+    input.style.display = 'none';
+    input.addEventListener('change', async () => {
+        const file = input.files && input.files[0];
+        try { input.remove(); } catch (_) { /* already gone */ }
+        if (!file) return;
+        let absPath = null;
+        if (window.dozaBatch && typeof window.dozaBatch.getPathForFile === 'function') {
+            try { absPath = window.dozaBatch.getPathForFile(file); } catch (_) { absPath = null; }
+        }
+        if (absPath) {
+            const liveInput = document.getElementById('filePathInput');
+            const liveBtn = document.getElementById('selectPathBtn');
+            if (liveInput) liveInput.value = absPath;
+            if (liveBtn) liveBtn.style.display = 'inline-flex';
+            selectFilePath();
+            return;
+        }
+        const findingDiv = document.getElementById('findingFile');
+        const matchesDiv = document.getElementById('multipleMatches');
+        if (matchesDiv) matchesDiv.style.display = 'none';
+        if (findingDiv) {
+            document.getElementById('findingFileName').textContent = file.name;
+            findingDiv.style.display = 'block';
+        }
+        try {
+            const res = await fetch('/find-file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: file.name, size: file.size }),
+            });
+            const data = await res.json();
+            if (findingDiv) findingDiv.style.display = 'none';
+            if (data.status === 'found') {
+                const liveInput = document.getElementById('filePathInput');
+                const liveBtn = document.getElementById('selectPathBtn');
+                if (liveInput) liveInput.value = data.path;
+                if (liveBtn) liveBtn.style.display = 'inline-flex';
+                selectFilePath();
+            } else {
+                alert('Could not resolve a path for "' + file.name + '". Try pasting the full path manually.');
+            }
+        } catch (err) {
+            if (findingDiv) findingDiv.style.display = 'none';
+            alert('Error opening file: ' + err.message);
+        }
+    });
+    document.body.appendChild(input);
+    input.click();
+}
+
 function openBrowseModal() {
     document.getElementById('browseModal').classList.add('active');
     loadBrowseRoot();

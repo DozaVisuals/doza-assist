@@ -1609,6 +1609,144 @@ def _clear_analyze_status(project_id):
         pass
 
 
+# Registry of background analysis threads keyed by project_id. Lets the
+# /analyze handler reject duplicate requests on the same project and the
+# UI detect that a re-rendered project page has work in flight that it
+# should attach progress polling to. Module-global because Flask's
+# in-process threaded server keeps everything in one Python process.
+_analysis_threads = {}
+_analysis_threads_lock = threading.Lock()
+
+
+def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snapshot):
+    """Background-thread worker for /analyze.
+
+    Mirrors what the inline /analyze handler used to do, but detached
+    from the request lifecycle. The user-visible bug this fixes: editors
+    who navigated away from a project mid-analysis came back to nothing
+    — Flask's request thread was either getting torn down on disconnect
+    or simply abandoned without persisting the partial result. Now the
+    analysis runs in a daemon thread that survives navigation and writes
+    the result to meta.json regardless of whether the editor is still
+    looking. Per-step progress goes to analyze_status.json so a polling
+    UI on any future page load can pick up where it left off.
+
+    ``cache_snapshot`` is the analysis_cache dict captured at the time
+    the request came in. We avoid re-reading the project's cache from
+    disk inside the worker so we don't lose unrelated cache entries that
+    a separate /analyze on a different transcript might have written
+    concurrently.
+    """
+    progress = _make_progress_writer(project_id)
+    try:
+        project = get_project(project_id)
+        if not project or not project.get('transcript'):
+            return
+        from ai_analysis import analyze_transcript, generate_segment_vectors, expected_vector_chunks
+
+        existing_vectors = load_segment_vectors(project_id)
+        n_vector_chunks = expected_vector_chunks(project['transcript'])
+        post_analyzer_steps = n_vector_chunks + 1  # +1 for paragraph index
+        analyzer_state = {'step': 0, 'total': 1}
+
+        def _from_analyzer(step, total, current):
+            analyzer_state['step'] = step
+            analyzer_state['total'] = total
+            progress(step=step, total=total + post_analyzer_steps, current=current)
+
+        result = analyze_transcript(
+            project['transcript'],
+            project_name=project['name'],
+            analysis_type=analysis_type,
+            segment_vectors=existing_vectors or None,
+            progress_callback=_from_analyzer,
+        )
+        project['analysis'] = result
+        analyzer_total = analyzer_state['total']
+        global_total = analyzer_total + post_analyzer_steps
+
+        def _from_vectors(chunk_idx=1, total_chunks=1, label="vectors"):
+            progress(step=analyzer_total + int(chunk_idx),
+                     total=global_total, current=label)
+
+        segment_vectors = []
+        try:
+            segment_vectors = generate_segment_vectors(
+                project['transcript'],
+                project_name=project['name'],
+                progress_callback=_from_vectors,
+            )
+        except Exception as ve:
+            print(f"Segment vector generation failed: {ve}")
+
+        if segment_vectors:
+            project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+            vectors_path = os.path.join(project_dir, 'segment_vectors.json')
+            with open(vectors_path, 'w') as f:
+                json.dump(segment_vectors, f, indent=2)
+
+        progress(step=global_total, total=global_total,
+                 current="building paragraph index")
+        try:
+            from doza_assist.retrieval import build_paragraph_index, save_index
+            paragraph_index = build_paragraph_index(project['transcript'])
+            project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+            save_index(paragraph_index, _paragraph_index_path(project_id))
+        except Exception as ie:
+            print(f"Paragraph index build failed: {ie}")
+
+        project['analysis_cache'] = {
+            transcript_hash: {
+                **(cache_snapshot.get(transcript_hash, {}) if isinstance(cache_snapshot, dict) else {}),
+                analysis_type: {
+                    'analysis': result,
+                    'cached_at': datetime.now().isoformat(),
+                },
+            }
+        }
+        save_project(project_id, project)
+        title = result.get('suggested_title') or project.get('name', 'Project')
+        log_activity(project_id, 'analyzed', f'AI analysis run · "{title}"')
+
+        # Pro-only post-step: ask the LLM to identify each diarized speaker
+        # by name from the first ~5 min of transcript context. The function
+        # is loaded lazily so OSS installs (no Pro extension on sys.path)
+        # silently skip this. The function itself is also defensive — it
+        # short-circuits unless diarization is `done` and speaker_names is
+        # empty, and it never raises. Wrapped here for belt-and-braces.
+        try:
+            from diarization import auto_name_speakers  # type: ignore
+            auto_name_speakers(project_id, app.config['PROJECTS_DIR'])
+        except ImportError:
+            pass  # OSS / no Pro extension loaded
+        except Exception as e:
+            print(f"[analyze worker] auto_name_speakers failed for {project_id}: {e}")
+
+        _clear_analyze_status(project_id)
+    except Exception as e:
+        print(f"[analyze worker] {project_id} failed: {e}")
+        # Surface the error through the status file so the polling UI can
+        # show it. We deliberately don't re-raise — the worker is detached.
+        try:
+            from ai_providers import ProviderError
+            payload = {
+                'done': True,
+                'error': str(e),
+                'updated_at': datetime.now().isoformat(),
+            }
+            if isinstance(e, ProviderError):
+                payload['provider_error'] = True
+                payload['code'] = e.code
+            os.makedirs(os.path.dirname(_analyze_status_path(project_id)), exist_ok=True)
+            with open(_analyze_status_path(project_id), 'w') as f:
+                json.dump(payload, f)
+        except Exception as inner:
+            print(f"[analyze worker] could not persist error: {inner}")
+    finally:
+        with _analysis_threads_lock:
+            _analysis_threads.pop(project_id, None)
+
+
 def _transcript_hash(transcript):
     """Stable fingerprint for the transcript content. Caches AI analysis on
     this so re-running /analyze on an unchanged transcript returns instantly.
@@ -1624,7 +1762,14 @@ def _transcript_hash(transcript):
 
 @app.route('/project/<project_id>/analyze', methods=['POST'])
 def analyze(project_id):
-    """Run AI analysis on the transcript."""
+    """Kick off AI analysis on the transcript.
+
+    Cache hits return synchronously with ``status: 'cached'``. Real runs
+    detach to a background thread (:func:`_run_analysis_worker`) and
+    return immediately with ``status: 'started'`` — the editor can
+    navigate away from the project page without aborting the run, and
+    progress is published to ``analyze_status.json`` for the polling UI.
+    """
     project = get_project(project_id)
     if not project or not project.get('transcript'):
         return jsonify({'error': 'No transcript available'}), 400
@@ -1649,113 +1794,29 @@ def analyze(project_id):
             'segment_vectors': load_segment_vectors(project_id),
         })
 
-    progress = _make_progress_writer(project_id)
-    try:
-        from ai_analysis import analyze_transcript, generate_segment_vectors, expected_vector_chunks
-        # Reuse vectors from a previous run if they're on disk so the cap+rerank
-        # pass can score by narrative_score instead of falling back to length.
-        # First-ever analysis runs without this signal — that's expected; the
-        # caller still gets the ≤7 cap, just less curated.
-        existing_vectors = load_segment_vectors(project_id)
+    # Already running on this project? Don't kick off a duplicate worker;
+    # let the existing one finish and the polling UI pick it up.
+    with _analysis_threads_lock:
+        existing = _analysis_threads.get(project_id)
+        if existing and existing.is_alive():
+            return jsonify({'status': 'running', 'analysis_type': analysis_type})
 
-        # Each chunk of vector generation is its own LLM call, so it has to
-        # count as its own progress step or the bar races to ~94% and stalls
-        # while the vector phase grinds on for several minutes. Pre-compute
-        # how many vector chunks the analyzer will run so we can size the
-        # global step total correctly.
-        n_vector_chunks = expected_vector_chunks(project['transcript'])
-        post_analyzer_steps = n_vector_chunks + 1  # +1 for paragraph index
+    # Seed the status file synchronously so the very first poll from the
+    # frontend already sees the run as started — no race between thread
+    # spawn and the UI noticing.
+    _make_progress_writer(project_id)(step=0, total=1, current="starting")
 
-        # Wrap the analyzer's progress callback so its step count rolls into
-        # a global total that includes the vector + index phases. The
-        # analyzer reports e.g. step=5, total=16; we publish step=5 of 24.
-        analyzer_state = {'step': 0, 'total': 1}
+    t = threading.Thread(
+        target=_run_analysis_worker,
+        args=(project_id, analysis_type, transcript_hash, cache),
+        daemon=True,
+        name=f'analyze-{project_id}',
+    )
+    with _analysis_threads_lock:
+        _analysis_threads[project_id] = t
+    t.start()
 
-        def _from_analyzer(step, total, current):
-            analyzer_state['step'] = step
-            analyzer_state['total'] = total
-            progress(step=step, total=total + post_analyzer_steps, current=current)
-
-        result = analyze_transcript(
-            project['transcript'],
-            project_name=project['name'],
-            analysis_type=analysis_type,
-            segment_vectors=existing_vectors or None,
-            progress_callback=_from_analyzer,
-        )
-        project['analysis'] = result
-
-        analyzer_total = analyzer_state['total']
-        global_total = analyzer_total + post_analyzer_steps
-
-        # Vector phase: each chunk = one progress step. With this the bar
-        # advances at a real per-LLM-call cadence through the second half of
-        # the run instead of jumping from "94%" to "100%".
-        def _from_vectors(chunk_idx=1, total_chunks=1, label="vectors"):
-            progress(step=analyzer_total + int(chunk_idx),
-                     total=global_total,
-                     current=label)
-
-        segment_vectors = []
-        try:
-            segment_vectors = generate_segment_vectors(
-                project['transcript'],
-                project_name=project['name'],
-                progress_callback=_from_vectors,
-            )
-        except Exception as ve:
-            # Don't fail the whole analysis if vector generation hiccups —
-            # the human-readable analysis is still useful on its own.
-            print(f"Segment vector generation failed: {ve}")
-
-        if segment_vectors:
-            project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
-            vectors_path = os.path.join(project_dir, 'segment_vectors.json')
-            with open(vectors_path, 'w') as f:
-                json.dump(segment_vectors, f, indent=2)
-
-        # Final step: paragraph index build (instant, but worth a tick so
-        # the user sees the bar finish properly).
-        progress(step=global_total, total=global_total,
-                 current="building paragraph index")
-        try:
-            from doza_assist.retrieval import build_paragraph_index, save_index
-            paragraph_index = build_paragraph_index(project['transcript'])
-            project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
-            save_index(paragraph_index, _paragraph_index_path(project_id))
-        except Exception as ie:
-            print(f"Paragraph index build failed: {ie}")
-
-        # Update cache. Keyed by (transcript_hash, analysis_type) so the same
-        # transcript can hold separate entries for 'story', 'social', and
-        # 'all'. Drop stale buckets — anything keyed off a different hash is
-        # for a transcript content that no longer matches.
-        project['analysis_cache'] = {
-            transcript_hash: {
-                **(cache.get(transcript_hash, {}) if isinstance(cache, dict) else {}),
-                analysis_type: {
-                    'analysis': result,
-                    'cached_at': datetime.now().isoformat(),
-                },
-            }
-        }
-
-        save_project(project_id, project)
-        title = result.get('suggested_title') or project.get('name', 'Project')
-        log_activity(project_id, 'analyzed', f"AI analysis run · \"{title}\"")
-        _clear_analyze_status(project_id)
-        return jsonify({
-            'status': 'analyzed',
-            'analysis': result,
-            'segment_vectors': segment_vectors,
-        })
-
-    except Exception as e:
-        _clear_analyze_status(project_id)
-        from ai_providers import ProviderError
-        if isinstance(e, ProviderError):
-            return _provider_error_response(e)
-        return jsonify({'error': str(e)}), 500
+    return jsonify({'status': 'started', 'analysis_type': analysis_type})
 
 
 @app.route('/project/<project_id>/analyze/status', methods=['GET'])
@@ -1823,6 +1884,8 @@ def chat(project_id):
                 profile_id=profile_id,
                 segment_vectors=load_segment_vectors(p['id']) or None,
                 paragraph_index=load_paragraph_index(p['id']),
+                labeled_sections=p.get('labeled_sections') or None,
+                speaker_names=p.get('speaker_names') or None,
             )
         else:
             # Multi-project: combine transcripts with project labels.
@@ -1909,6 +1972,8 @@ def chat_stream(project_id):
             'profile_id': profile_id,
             'segment_vectors': load_segment_vectors(p['id']) or None,
             'paragraph_index': load_paragraph_index(p['id']),
+            'labeled_sections': p.get('labeled_sections') or None,
+            'speaker_names': p.get('speaker_names') or None,
         }
         single_pid = p['id']
     else:
@@ -1933,6 +1998,13 @@ def chat_stream(project_id):
     def _generate():
         from ai_providers import ProviderError
         final_reply = ''
+        # Emit a synthetic heartbeat as the very first SSE frame so the
+        # browser knows the connection is alive before the model produces
+        # any tokens. Some local models (Gemma 4 in particular) can sit in
+        # a thinking phase for 10+ seconds; without this the renderer's
+        # readable-stream pump only sees blocked I/O and the user thinks
+        # the chat is stuck.
+        yield f"data: {json.dumps({'event': 'heartbeat', 'data': 'connected'})}\n\n"
         try:
             for event_type, payload in chat_about_transcript_stream(**stream_kwargs):
                 if event_type == 'done':
@@ -2056,16 +2128,45 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         except (ValueError, TypeError):
             return 0.0
 
+    # Resolve a clip-style marker's speaker by looking up the first transcript
+    # segment whose start time falls inside the marker's [start, end] range,
+    # then applying the project's speaker_names rename map (Pro diarization).
+    # Returns '' when the transcript carries no speaker labels or no segment
+    # overlaps.
+    _transcript_segments = (project.get('transcript') or {}).get('segments') or []
+    _speaker_names_map = project.get('speaker_names') or {}
+
+    def _speaker_at_range(start_s, end_s):
+        if end_s <= start_s:
+            return ''
+        for seg in _transcript_segments:
+            try:
+                ss = _to_seconds(seg.get('start', 0))
+            except Exception:
+                continue
+            if ss >= start_s and ss < end_s:
+                raw = (seg.get('speaker') or '').strip()
+                if not raw:
+                    return ''
+                resolved = _speaker_names_map.get(raw, raw)
+                if isinstance(resolved, str):
+                    return resolved.strip()
+                return raw
+        return ''
+
     if 'social' in requested:
         analysis = project.get('analysis', {})
         for clip in analysis.get('social_clips', []):
+            cs = _to_seconds(clip.get('start', 0))
+            ce = _to_seconds(clip.get('end', 0))
             markers.append({
-                'start': _to_seconds(clip.get('start', 0)),
-                'end': _to_seconds(clip.get('end', 0)),
+                'start': cs,
+                'end': ce,
                 'text': clip.get('title', ''),
                 'note': clip.get('platform', ''),
                 'color': 'green',
                 'category': 'Social Clip',
+                'speaker': _speaker_at_range(cs, ce),
             })
 
     if 'story' in requested:
@@ -2082,6 +2183,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'note': beat.get('description', ''),
                 'color': 'purple',
                 'category': 'Story Beat',
+                'speaker': _speaker_at_range(start, end),
             })
 
     if 'soundbites' in requested:
@@ -2098,34 +2200,46 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'note': sb.get('why', ''),
                 'color': 'orange',
                 'category': 'Soundbite',
+                'speaker': _speaker_at_range(start, end),
             })
 
     if 'labels' in requested:
         color_labels = project.get('color_labels', {})
         for sec in project.get('labeled_sections', []):
             label_name = color_labels.get(sec.get('color', ''), sec.get('color', ''))
+            ls = _to_seconds(sec.get('start', 0))
+            le = _to_seconds(sec.get('end', 0))
             markers.append({
-                'start': _to_seconds(sec.get('start', 0)),
-                'end': _to_seconds(sec.get('end', 0)),
+                'start': ls,
+                'end': le,
                 'text': label_name,
                 'note': sec.get('text', '')[:80],
                 'color': sec.get('color', 'blue'),
                 'category': label_name,
+                'speaker': _speaker_at_range(ls, le),
             })
 
     if 'transcript' in requested:
         # Emit one marker per transcript segment so editors can navigate the
         # full interview in the NLE timeline. Kept separate from the other
         # categories because it can be noisy — user opts in explicitly.
+        # The marker label is the speaker, resolved through the project's
+        # ``speaker_names`` map so renamed speakers (e.g. SPEAKER_00 -> "Sarah
+        # Chen" via the Pro diarization rename UI) surface as the display
+        # name in the NLE timeline.
         transcript = project.get('transcript') or {}
+        speaker_names_map = project.get('speaker_names') or {}
         for seg in transcript.get('segments', []):
             start = _to_seconds(seg.get('start', 0))
             end = _to_seconds(seg.get('end', start))
             if end <= start:
                 end = start + 1
-            speaker = (seg.get('speaker') or '').strip()
+            raw_speaker = (seg.get('speaker') or '').strip()
+            display_speaker = speaker_names_map.get(raw_speaker, raw_speaker) if raw_speaker else ''
+            if isinstance(display_speaker, str):
+                display_speaker = display_speaker.strip()
             text = (seg.get('text') or '').strip()
-            label = speaker or 'Transcript'
+            label = display_speaker or raw_speaker or 'Transcript'
             markers.append({
                 'start': start,
                 'end': end,
@@ -2133,6 +2247,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'note': text[:160],
                 'color': 'blue',
                 'category': 'Transcript',
+                'speaker': raw_speaker or '',
             })
 
     # Source file + media metadata
@@ -2383,16 +2498,31 @@ def send_to_nle():
     })
 
 
-def _project_selects_for_fcpxml(project: dict, source: str):
-    """Build ``Select`` objects from a project, pulling from the requested bucket.
+def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
+    """Build ``Select`` objects from a project, pulling from the requested buckets.
 
-    ``source`` is one of:
+    ``source`` may be a single string or a list of strings. Recognised values:
       - ``'client_selects'``: editor-chosen labels (default)
       - ``'social'``: AI-identified social clips
       - ``'story'``: AI-identified story beats
       - ``'soundbites'``: AI-identified strongest soundbites
+      - ``'story_build'``: a Story Builder build's ordered clips, supplied as
+        ``story_build_clips`` (each ``{start_time, end_time, title,
+        editorial_note, order}``). The round-trip Story Builder export uses
+        this — clips come from the request body, not from project data.
       - ``'all'``: everything combined, in chronological order
+
+    Speaker is resolved per-select via the transcript segments + the project's
+    ``speaker_names`` rename map (so renamed pyannote labels surface in the
+    round-trip FCPXML's ``<note>`` the same way they do in the standard
+    direct-media export from Step 6).
     """
+    if isinstance(source, (list, tuple)):
+        sources = set(source)
+    else:
+        sources = {source}
+    if 'all' in sources:
+        sources = {'client_selects', 'social', 'story', 'soundbites'}
     def _to_seconds(val):
         if isinstance(val, (int, float)):
             return float(val)
@@ -2420,32 +2550,61 @@ def _project_selects_for_fcpxml(project: dict, source: str):
             return 'question'
         return 'standard'
 
+    # Speaker lookup helper — overlap a clip's time range against transcript
+    # segments and resolve the first hit through the speaker_names map. Cheap
+    # linear scan; transcript segment lists are typically ~150-1500 items and
+    # we only do this once per select, not per segment.
+    transcript_segments = (project.get('transcript') or {}).get('segments') or []
+    speaker_names_map = project.get('speaker_names') or {}
+
+    def _speaker_for_range(start_s: float, end_s: float) -> str:
+        if end_s <= start_s:
+            return ''
+        for seg in transcript_segments:
+            try:
+                ss = _to_seconds(seg.get('start', 0))
+            except Exception:
+                continue
+            if ss >= start_s and ss < end_s:
+                raw = (seg.get('speaker') or '').strip()
+                if not raw:
+                    return ''
+                resolved = speaker_names_map.get(raw, raw)
+                return resolved.strip() if isinstance(resolved, str) else raw
+        return ''
+
     selects: list[Select] = []
 
-    if source in ('client_selects', 'all'):
+    if 'client_selects' in sources:
         for sec in project.get('labeled_sections') or []:
             color_labels = project.get('color_labels', {})
             label_name = color_labels.get(sec.get('color', ''), sec.get('color', '')) or 'Select'
+            cs = _to_seconds(sec.get('start', 0))
+            ce = _to_seconds(sec.get('end', 0))
             selects.append(Select(
-                start_seconds=_to_seconds(sec.get('start', 0)),
-                end_seconds=_to_seconds(sec.get('end', 0)),
+                start_seconds=cs,
+                end_seconds=ce,
                 label=label_name,
                 note=(sec.get('text') or '')[:80],
                 kind=_kind_for_color(sec.get('color', '')),
+                speaker=_speaker_for_range(cs, ce),
             ))
 
-    if source in ('social', 'all'):
+    if 'social' in sources:
         analysis = project.get('analysis') or {}
         for clip in analysis.get('social_clips') or []:
+            cs = _to_seconds(clip.get('start', 0))
+            ce = _to_seconds(clip.get('end', 0))
             selects.append(Select(
-                start_seconds=_to_seconds(clip.get('start', 0)),
-                end_seconds=_to_seconds(clip.get('end', 0)),
+                start_seconds=cs,
+                end_seconds=ce,
                 label=clip.get('title') or 'Social Clip',
                 note=clip.get('platform', ''),
                 kind='strong',
+                speaker=_speaker_for_range(cs, ce),
             ))
 
-    if source in ('story', 'all'):
+    if 'story' in sources:
         analysis = project.get('analysis') or {}
         for beat in analysis.get('story_beats') or []:
             start = _to_seconds(beat.get('start', 0))
@@ -2457,9 +2616,10 @@ def _project_selects_for_fcpxml(project: dict, source: str):
                 label=beat.get('label') or 'Story Beat',
                 note=(beat.get('description') or '')[:120],
                 kind='strong',
+                speaker=_speaker_for_range(start, end),
             ))
 
-    if source in ('soundbites', 'all'):
+    if 'soundbites' in sources:
         analysis = project.get('analysis') or {}
         for sb in analysis.get('strongest_soundbites') or []:
             start = _to_seconds(sb.get('start', 0))
@@ -2471,7 +2631,31 @@ def _project_selects_for_fcpxml(project: dict, source: str):
                 label=(sb.get('text') or 'Soundbite')[:60],
                 note=(sb.get('why') or '')[:120],
                 kind='strong',
+                speaker=_speaker_for_range(start, end),
             ))
+
+    if 'story_build' in sources:
+        # Story Builder clips come from the request body, not from project
+        # data — the build itself is stored under a build_id and the
+        # frontend ships the full ordered clip list at export time. Preserve
+        # order via the original 'order' field (or input index as fallback)
+        # so the round-trip timeline reads narratively, not chronologically.
+        if story_build_clips:
+            ordered = list(enumerate(story_build_clips))
+            ordered.sort(key=lambda iv: iv[1].get('order', iv[0]))
+            for idx, clip in ordered:
+                cs = _to_seconds(clip.get('start_time', clip.get('start', 0)))
+                ce = _to_seconds(clip.get('end_time', clip.get('end', 0)))
+                if ce <= cs:
+                    continue
+                selects.append(Select(
+                    start_seconds=cs,
+                    end_seconds=ce,
+                    label=(clip.get('title') or f'Clip {idx + 1}')[:80],
+                    note=(clip.get('editorial_note') or '')[:160],
+                    kind='strong',
+                    speaker=_speaker_for_range(cs, ce),
+                ))
 
     return selects
 
@@ -2505,17 +2689,30 @@ def _build_nle_multicam_export(project, body):
         )
 
     mode = body.get('mode', 'selects_project')
-    source = body.get('source', 'client_selects')
+    sources = body.get('sources') or [body.get('source', 'client_selects')]
+    # Story Builder builds ship their clip list inline (the build's narrative
+    # order isn't stored on the project — it lives in the request body).
+    # When sources includes 'story_build', the frontend must also pass the
+    # clip list. Preserve_order keeps that narrative ordering across the
+    # round-trip; without it _iter_selects would sort by source in-point and
+    # the story would read chronologically instead of the way the editor
+    # arranged it.
+    story_build_clips = body.get('story_build_clips') or body.get('clips')
+    preserve_order = bool(body.get('preserve_order')) or (
+        isinstance(sources, (list, tuple, set)) and 'story_build' in set(sources)
+    )
 
     try:
         parsed = parse_fcpxml(stored_path)
     except ParseError as e:
         raise MulticamExportError(f'Could not re-read stored FCPXML: {e}', status=500)
 
-    selects = _project_selects_for_fcpxml(project, source)
+    selects = _project_selects_for_fcpxml(
+        project, sources, story_build_clips=story_build_clips,
+    )
     if not selects:
         raise MulticamExportError(
-            f'No selects available for source={source!r}. '
+            f'No selects available for sources={sources!r}. '
             'Pick a source with content, or add clip labels first.'
         )
 
@@ -2524,11 +2721,18 @@ def _build_nle_multicam_export(project, body):
             output = write_markers_on_timeline(parsed, selects)
             suffix = 'Doza Notes'
         else:
-            output = write_selects_as_new_project(parsed, selects)
+            output = write_selects_as_new_project(
+                parsed, selects, preserve_order=preserve_order,
+            )
             suffix = 'Doza Selects'
     except WriterError as e:
         raise MulticamExportError(f'Export failed: {e}')
 
+    # Story Builder exports get a more specific filename suffix.
+    if preserve_order and story_build_clips:
+        story_title = (body.get('story_title') or '').strip()
+        if story_title:
+            suffix = f"{story_title}"
     base = (project.get('name') or 'Project').strip().replace('/', '-')
     filename = f"{base} - {suffix}.fcpxml"
     exports_dir = app.config['EXPORTS_DIR']
@@ -2929,17 +3133,27 @@ def story_list(project_id):
 
 @app.route('/project/<project_id>/story/builds/<build_id>', methods=['PUT'])
 def story_update(project_id, build_id):
-    """Update a story build (reorder clips, remove clips, etc.)."""
+    """Update or create a story build (upsert).
+
+    If the build_id already exists, update it. If not, create a new entry.
+    This supports both the Story Builder's edit-in-place flow and the Story
+    Brief's "Send to Story Builder" flow which creates a build client-side
+    and needs to persist it.
+    """
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     builds_path = os.path.join(project_dir, 'story_builds.json')
 
-    if not os.path.exists(builds_path):
-        return jsonify({'error': 'No builds found'}), 404
-
-    with open(builds_path, 'r') as f:
-        builds = json.load(f)
+    builds = []
+    if os.path.exists(builds_path):
+        try:
+            with open(builds_path, 'r') as f:
+                builds = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            builds = []
 
     data = request.json or {}
+
+    # Try to find and update an existing build
     for i, b in enumerate(builds):
         if b['id'] == build_id:
             if 'clips' in data:
@@ -2950,7 +3164,17 @@ def story_update(project_id, build_id):
                 json.dump(builds, f, indent=2)
             return jsonify({'status': 'updated', 'build': builds[i]})
 
-    return jsonify({'error': 'Build not found'}), 404
+    # Build not found — create it (upsert)
+    new_build = {
+        'id': build_id,
+        'story_title': data.get('story_title', 'Untitled'),
+        'clips': data.get('clips', []),
+        'created_at': datetime.now().isoformat(),
+    }
+    builds.append(new_build)
+    with open(builds_path, 'w') as f:
+        json.dump(builds, f, indent=2)
+    return jsonify({'status': 'created', 'build': new_build}), 201
 
 
 @app.route('/project/<project_id>/story/builds/<build_id>', methods=['DELETE'])

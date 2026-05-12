@@ -132,6 +132,47 @@ APPLESCRIPT
     exit 1
 fi
 
+# ── Idempotent post-setup fast-path ──
+# If a prior install completed setup but the Flask handoff didn't reach
+# Phase 3 (the v0.5.3 regression where launcher.sh was SIGTERM'd mid-
+# Phase-2), setup.json is on disk with setup_complete:true and the venv
+# is intact, but no Flask is listening. Jump straight to the Flask
+# launch block instead of re-running dep_check + Phase 2 — that path
+# would just kick off another setup_assistant cycle on a system that's
+# already been set up. This is invoked AFTER the early "is Flask
+# already running?" exit above, so we only land here when port 5050 is
+# actually free.
+if [ -f "$SETUP_JSON" ] \
+   && [ -x "${VENV_DIR}/bin/python3" ] \
+   && /usr/bin/grep -q '"setup_complete":[[:space:]]*true' "$SETUP_JSON" 2>/dev/null; then
+    log "Setup already complete; skipping dep_check and starting Flask directly."
+
+    export DOZA_APP_DIR="${APP_SRC}"
+    # shellcheck source=/dev/null
+    source "${VENV_DIR}/bin/activate"
+    cd "${APP_SRC}" || exit 1
+
+    $ARCH_PREFIX python3 app.py >> "$SUPPORT_DIR/server.log" 2>&1 &
+    SERVER_PID=$!
+    log "Flask server PID: $SERVER_PID (post-setup fast path)"
+    echo "$SERVER_PID" > "$SUPPORT_DIR/server.pid"
+
+    for _ in {1..360}; do
+        if /usr/bin/curl -sf "${FLASK_URL}" > /dev/null 2>&1; then
+            log "Server ready (post-setup fast path)."
+            if [ -z "${DOZA_NO_BROWSER:-}" ]; then
+                /usr/bin/open "${FLASK_URL}"
+            fi
+            exit 0
+        fi
+        sleep 0.5
+    done
+
+    log "ERROR: Server failed to start within 180s on the post-setup fast path."
+    show_error_dialog "Doza Assist server failed to start." "$SUPPORT_DIR/server.log"
+    exit 1
+fi
+
 # ── Quick dependency check ──
 log "Running dependency check..."
 MISSING=$( bash "${APP_SRC}/dep_check.sh" 2>/dev/null ) || true

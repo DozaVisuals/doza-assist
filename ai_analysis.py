@@ -21,6 +21,267 @@ from editorial_dna.storytelling import inject_storytelling_foundation
 _OLLAMA_KEEP_ALIVE = '30m'
 
 
+# ── Conversational vs extractive intent ──────────────────────────────────
+#
+# The new chat orientation says "default to conversation, use clips when
+# they earn their place." But two systems fight that default:
+#   1. _salvage_clips_if_missing forces clips into ANY clipless response
+#   2. Long-interview chat (>60min) uses _chat_layer2_chunked_search which
+#      ONLY returns clip cards — no conversational LLM call at all
+# This classifier tells those code paths when to step out of the way.
+#
+# Heuristic, not LLM-based — must be cheap (runs on every chat turn) and
+# fail-safe toward "conversational" so the orientation paragraph is the
+# default behavior rather than the exception.
+_EXTRACTIVE_VERB_STARTS = (
+    'find', 'finds', 'pull', 'pulls', 'list', 'show', 'shows', 'show me',
+    'give', 'gives', 'give me', 'get', 'gets', 'get me', 'surface',
+    'surfaces', 'search', 'searches', 'identify', 'identifies', 'gather',
+    'gathers', 'compile', 'compiles', 'fetch', 'extract', 'extracts',
+    'point me', 'point out', 'pick',
+)
+_NO_CLIP_SIGNALS = (
+    'no clip', 'without clip', 'no markers', 'without markers',
+    'just talk', 'just tell me', 'just tell me in general', 'in general',
+    "don't pull", "don't find", "don't list", "don't return",
+    "don't surface", 'do not pull', 'do not find', 'do not return',
+    'no need for clips', 'skip the clips', 'skip clips',
+)
+
+
+def _is_conversational_query(message: str, segments=None) -> bool:
+    """Return True when the editor's message looks like discussion (themes,
+    story, character, craft, opinion, chitchat) rather than clip extraction.
+
+    Heuristic order:
+      1. Empty / whitespace → conversational (let model handle gracefully)
+      2. Explicit "no clips" instruction → conversational, hard signal
+      3. Mentions a known speaker name → extractive (route to chunk search
+         which actually scans the transcript for that speaker's content)
+      4. Starts with an extractive verb → extractive
+      5. Default → conversational (matches the orientation: default to talk)
+
+    The speaker-name check matters on long interviews: the conversational
+    synthesis path has only a summary + digest, not the full transcript,
+    so it can claim "I don't have her interview loaded" when asked about
+    one specific speaker. Routing speaker-anchored questions through chunk
+    search guarantees real transcript content reaches the answer.
+    """
+    if not message:
+        return True
+    msg = message.lower().strip()
+    if not msg:
+        return True
+    for s in _NO_CLIP_SIGNALS:
+        if s in msg:
+            return True
+    # Speaker-name anchor: any token in the message matches a known speaker.
+    # Compare on first names too — editors say "do mae" not "do mae babcock".
+    if segments:
+        speaker_tokens = set()
+        for spk in _extract_speaker_names(segments):
+            for part in spk.lower().split():
+                # Skip generic / role labels — only real names anchor
+                if part in ('speaker', 'host', 'guest', 'interviewer',
+                            'subject', 'narrator', 'unknown'):
+                    continue
+                if len(part) >= 3:
+                    speaker_tokens.add(part)
+        if speaker_tokens:
+            # Word-boundary check so "mae" doesn't match "make" or "name"
+            import re
+            for tok in speaker_tokens:
+                if re.search(rf'\b{re.escape(tok)}\b', msg):
+                    return False
+    # Strip leading punctuation/symbols, then look at first word + bigram
+    stripped = msg.lstrip('"\'`([{ \t')
+    first_token = stripped.split()[0].rstrip(',.!?:;') if stripped.split() else ''
+    first_two = ' '.join(stripped.split()[:2]).rstrip(',.!?:;')
+    for verb in _EXTRACTIVE_VERB_STARTS:
+        # Match either "verb" or "verb me" / "show me" patterns
+        if first_token == verb or first_two == verb:
+            return False
+    return True
+
+
+# ── Clip-aware chat (editor selections context) ──────────────────────────
+#
+# When the editor has clips in `labeled_sections`, we replace the
+# pre-analyzed moments block with an enriched <editor_selections> block so
+# the chat can act as an editorial partner (find gaps, flag overlaps,
+# suggest running order) instead of just a transcript search tool.
+#
+# Toggle off via the env var when something breaks in the wild — one switch
+# reverts to the legacy analysis-block behavior without rolling back a build.
+def _clip_aware_chat_enabled() -> bool:
+    val = os.environ.get('DOZA_DISABLE_CLIP_AWARE_CHAT', '').strip().lower()
+    return val not in ('1', 'true', 'yes', 'on')
+
+
+# Cap the clips block at the size of the analysis block it replaces.
+# Measured on a representative 100-min project with full analysis (7 beats,
+# 7 soundbites, 7 social clips): ~4,074 chars / ~1,072 tokens. The spec
+# says "if the analysis block is smaller than 3,000 tokens, lower the
+# clips ceiling to match" — 1,072 < 3,000 so we use that as the ceiling.
+_CLIP_AWARE_MAX_CHARS = 4074
+_CHARS_PER_TOKEN_EST = 3.8
+
+
+def _seconds_to_hms_tc(secs) -> str:
+    """Format float seconds as HH:MM:SS for editor_selections markers."""
+    if not isinstance(secs, (int, float)) or secs < 0:
+        return "00:00:00"
+    s = int(secs)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h:02d}:{m:02d}:{sec:02d}'
+
+
+def _display_speaker(raw, speaker_names):
+    """Resolve a raw speaker label to its display name via the project's
+    ``speaker_names`` map (populated by the Pro diarization rename UI).
+
+    Returns the raw label unchanged when no mapping exists, when ``raw`` is
+    falsy, or when the mapped value is whitespace-only. Pure function — no
+    side effects, never raises.
+    """
+    if not raw or not speaker_names:
+        return raw
+    try:
+        custom = speaker_names.get(raw)
+    except AttributeError:
+        return raw
+    if isinstance(custom, str) and custom.strip():
+        return custom.strip()
+    return raw
+
+
+def _lookup_speaker_for_clip(clip, segments, speaker_names=None) -> str:
+    """Return the speaker label for the first transcript segment whose
+    timecode falls within the clip's [start, end] range. Returns '' when
+    the transcript carries no speaker labels (single-speaker projects)
+    or no segment overlaps.
+
+    When ``speaker_names`` is provided, the raw segment speaker is resolved
+    through that map before being returned — so renamed speakers surface
+    their display name in clip enrichment (Step 6 of the diarization rollout).
+    """
+    try:
+        start = float(clip.get('start') or 0)
+        end = float(clip.get('end') or 0)
+    except (TypeError, ValueError):
+        return ''
+    if end <= start:
+        return ''
+    for seg in segments or []:
+        try:
+            s = float(seg.get('start') or 0)
+        except (TypeError, ValueError):
+            continue
+        if s >= start and s < end:
+            spk = (seg.get('speaker') or '').strip()
+            if spk:
+                return _display_speaker(spk, speaker_names)
+            return ''
+    return ''
+
+
+def _build_editor_selections_block(labeled_sections, segments, speaker_names=None) -> str:
+    """Build the <editor_selections> XML block from labeled_sections.
+
+    Each clip is enriched at prompt-assembly time (not at save time):
+      1. Speaker looked up from the first transcript segment in the clip's range
+      2. All clips sorted by start time
+      3. Sequential index (1, 2, 3...) assigned in chronological order
+
+    Token management: the total block is capped at _CLIP_AWARE_MAX_CHARS to
+    match the analysis block it replaces. If we're over budget, each clip's
+    text is truncated to the first 50 characters + "…".
+
+    Returns "" when labeled_sections is empty so callers can concatenate
+    unconditionally.
+    """
+    if not labeled_sections:
+        return ''
+
+    # Normalize + sort by start time
+    clips = []
+    for c in labeled_sections:
+        if not isinstance(c, dict):
+            continue
+        try:
+            start = float(c.get('start') or 0)
+            end = float(c.get('end') or 0)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        clips.append({
+            'start': start,
+            'end': end,
+            'text': str(c.get('text') or '').strip(),
+            'speaker': _lookup_speaker_for_clip(c, segments, speaker_names),
+        })
+    if not clips:
+        return ''
+    clips.sort(key=lambda x: x['start'])
+
+    def _format(clips_, truncate_text=False) -> str:
+        lines = []
+        for i, c in enumerate(clips_, start=1):
+            text = c['text']
+            if truncate_text and len(text) > 50:
+                text = text[:50].rstrip() + '…'
+            elif not text:
+                text = '(no transcript text saved)'
+            block_lines = [
+                f"[SELECTED {i}] [{_seconds_to_hms_tc(c['start'])}-{_seconds_to_hms_tc(c['end'])}]",
+            ]
+            if c['speaker']:
+                block_lines.append(f"Speaker: {c['speaker']}")
+            block_lines.append(f"Content: {text}")
+            lines.append('\n'.join(block_lines))
+        body = '\n\n'.join(lines)
+        return (
+            "<editor_selections>\n"
+            "The editor has selected the following clips from the transcript, "
+            "listed in chronological order:\n\n"
+            f"{body}\n\n"
+            f"Total selections: {len(clips_)}\n"
+            "</editor_selections>"
+        )
+
+    full = _format(clips, truncate_text=False)
+    if len(full) <= _CLIP_AWARE_MAX_CHARS:
+        return full
+    # Over budget — truncate clip text to 50 chars + ellipsis
+    return _format(clips, truncate_text=True)
+
+
+def _build_clip_aware_framing(my_style_active: bool) -> str:
+    """Framing paragraph appended to the system prompt when clips exist.
+    Two variants based on whether a My Style profile is active."""
+    if my_style_active:
+        return (
+            "\n\nYou have three layers of context:\n"
+            "1. <storytelling_foundation> describes how this editor builds stories based on their past work\n"
+            "2. The transcript is the raw source material\n"
+            "3. <editor_selections> are the clips the editor has already chosen for this project\n\n"
+            "When the editor asks for suggestions, gaps, or sequence advice, always filter your "
+            "recommendations through their storytelling foundation. Prioritize moments and structures "
+            "that match their editorial patterns. When something breaks from their pattern, note it "
+            "as a deliberate departure rather than correcting it."
+        )
+    return (
+        "\n\nYou have two layers of context:\n"
+        "1. The transcript is the raw source material\n"
+        "2. <editor_selections> are the clips the editor has already chosen for this project\n\n"
+        "When the editor asks for suggestions, gaps, or sequence advice, reason about coverage, "
+        "redundancy, and narrative arc based on the clips they've selected and the surrounding "
+        "transcript context."
+    )
+
+
 def _load_chat_system_prompt():
     """Load the master chat system prompt from prompts/chat-system-prompt.md.
 
@@ -119,7 +380,7 @@ def _build_transcript_ack(project_name):
 
 def _build_chat_messages(message, history, project_name, segments,
                         formatted, analysis_block, relevant_excerpts_block,
-                        profile_id):
+                        profile_id, labeled_sections=None, speaker_names=None):
     """Construct the (system_message, messages_array) pair for an Ollama
     /api/chat call.
 
@@ -133,6 +394,12 @@ def _build_chat_messages(message, history, project_name, segments,
     History cap: 6 entries (3 round-trips). Long transcripts already eat
     most of the context window; older turns rarely contribute editorial
     value beyond what's already in the system + transcript.
+
+    Clip-aware swap: when ``labeled_sections`` is non-empty AND the
+    feature flag is on, the analysis_block is replaced by an enriched
+    <editor_selections> block in the transcript message, and a framing
+    paragraph is appended to the system prompt. When the list is empty
+    (or the flag is off), behavior is unchanged.
     """
     if CHAT_SYSTEM_PROMPT is None:
         raise RuntimeError(
@@ -148,8 +415,25 @@ def _build_chat_messages(message, history, project_name, segments,
     # in those separate code paths.
     system_message = CHAT_SYSTEM_PROMPT
 
-    messages = []
     style_block = get_active_style_block(profile_id=profile_id)
+
+    # Conditional swap: when the editor has clips, replace the
+    # pre-analyzed moments block with the enriched editor_selections
+    # block and add a framing paragraph to the system prompt.
+    selections_block = ''
+    if labeled_sections and _clip_aware_chat_enabled():
+        try:
+            selections_block = _build_editor_selections_block(labeled_sections, segments, speaker_names)
+        except Exception as e:
+            print(f"[chat] editor_selections build failed: {e}")
+            selections_block = ''
+        if selections_block:
+            system_message = system_message + _build_clip_aware_framing(bool(style_block))
+            # The clips block REPLACES the analysis block — same slot in
+            # the transcript message, no double-injection.
+            analysis_block = selections_block
+
+    messages = []
     if style_block:
         messages.append({
             'role': 'user',
@@ -195,7 +479,8 @@ _CHUNK_CACHE_LOCK = threading.Lock()
 
 def chat_about_transcript(transcript, message, history=None, project_name="Interview",
                           analysis=None, profile_id=None, segment_vectors=None,
-                          paragraph_index=None):
+                          paragraph_index=None, labeled_sections=None,
+                          speaker_names=None):
     """
     Chat with AI about the transcript. Supports follow-up questions.
     Returns the AI reply as a string (may contain embedded clip suggestions).
@@ -241,15 +526,28 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     #             reminder so recency bias reinforces the answer.
     # ─────────────────────────────────────────────────────────────────────
     if duration > _LONG_CHAT_SECONDS:
+        # Conversational divert: long interviews normally go straight to
+        # chunked clip search, which only ever returns clip cards. When the
+        # editor's question is conversational ("what's the story", "no
+        # clips just tell me", greetings), bypass the chunk search and run
+        # a synthesis call against the analysis block + summary instead.
+        # Pass segments so the classifier can detect speaker-name anchors
+        # ("do mae", "what about Posey") and route those to chunk search.
+        if _is_conversational_query(message, segments=segments):
+            return _chat_layer2_conversational_synthesis(
+                message, history, project_name, segments,
+                analysis, profile_id, labeled_sections,
+                speaker_names=speaker_names,
+            )
         paragraphs = _build_paragraphs(transcript)
         return _chat_layer2_chunked_search(
             paragraphs, message, history, project_name,
             phrases, words, profile_id, analysis,
             segment_vectors=segment_vectors, theme_phrases=theme_phrases,
-            tfidf_hits=tfidf_hits,
+            tfidf_hits=tfidf_hits, speaker_names=speaker_names,
         )
 
-    formatted = _format_transcript_for_ai(transcript)
+    formatted = _format_transcript_for_ai(transcript, speaker_names)
     relevant_excerpts_block = ''
     matched = []
     if phrases or words or theme_phrases or tfidf_hits:
@@ -266,22 +564,29 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         # Augment with high-narrative-score segments overlapping any literal
         # match — when vectors are present, these are pre-curated highlights.
         matched = _augment_with_high_score_vectors(matched, segments, segment_vectors, theme_phrases)
-        relevant_excerpts_block = _build_relevant_excerpts_block(matched)
+        relevant_excerpts_block = _build_relevant_excerpts_block(
+            matched, synthesis=_is_synthesis_query(message),
+        )
     analysis_block = _build_chat_analysis_index(analysis)
 
     system_message, messages = _build_chat_messages(
         message, history, project_name, segments,
         formatted, analysis_block, relevant_excerpts_block, profile_id,
+        labeled_sections=labeled_sections, speaker_names=speaker_names,
     )
     num_ctx = _estimate_layer1_num_ctx(formatted)
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
     response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)
     cleaned = _validate_clip_markers_in_text(cleaned, segments)
-    cleaned = _salvage_clips_if_missing(
-        cleaned, formatted, segments, num_ctx=num_ctx,
-        matched_paragraphs=matched, user_message=message,
-    )
+    # Skip clip salvage when the editor's question is conversational
+    # (themes, story, craft, chitchat, or explicit "no clips"). Forcing
+    # markers into a discussion answer breaks the orientation contract.
+    if not _is_conversational_query(message, segments=segments):
+        cleaned = _salvage_clips_if_missing(
+            cleaned, formatted, segments, num_ctx=num_ctx,
+            matched_paragraphs=matched, user_message=message,
+        )
     # Enforce explicit clip count from the user message. Gemma 4B
     # routinely ignores "1 clip" / "one more" / "another" and emits 2-3.
     # Trim server-side so the user sees what they asked for.
@@ -324,7 +629,8 @@ def _call_ai_chat_stream(system_message, messages, num_ctx=32768):
 
 def chat_about_transcript_stream(transcript, message, history=None, project_name="Interview",
                                  analysis=None, profile_id=None, segment_vectors=None,
-                                 paragraph_index=None):
+                                 paragraph_index=None, labeled_sections=None,
+                                 speaker_names=None):
     """Streaming variant of :func:`chat_about_transcript`.
 
     Layer 1 yields ``('token', piece)`` events as Ollama produces them, then
@@ -339,18 +645,52 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     On hard failure (no AI backend), yields ``('done', '')`` so the SSE
     client can show an error rather than hanging.
     """
+    # Tell the UI we're alive before we touch any potentially-slow
+    # retrieval helper. With a malformed segment the editor saw the chat
+    # handler block silently for 30+ seconds before the ollama call even
+    # started — this gives the SSE pump something to flush so the
+    # "Thinking…" indicator updates and the client-side watchdog timer
+    # has a recent event to anchor on.
+    yield ('heartbeat', 'preparing')
+
     segments = (transcript or {}).get('segments', [])
     duration = segments[-1].get('end', 0) if segments else 0
-    phrases, words = _extract_query_keywords(message)
-    theme_phrases = _collect_theme_phrases_from_vectors(segment_vectors, message)
+    # Each retrieval step is wrapped so a single misbehaving helper can't
+    # take the whole chat down. Failures degrade gracefully — empty result
+    # + heartbeat — instead of bubbling up and blocking the SSE.
+    try:
+        phrases, words = _extract_query_keywords(message)
+    except Exception as e:
+        print(f"[chat-stream] keyword extraction failed: {e}")
+        phrases, words = [], []
+    try:
+        theme_phrases = _collect_theme_phrases_from_vectors(segment_vectors, message)
+    except Exception as e:
+        print(f"[chat-stream] theme phrase collection failed: {e}")
+        theme_phrases = []
     tfidf_hits = []
     if paragraph_index is not None:
         try:
             tfidf_hits = paragraph_index.query_paragraphs(message, k=8) or []
-        except Exception:
+        except Exception as e:
+            print(f"[chat-stream] tfidf query failed: {e}")
             tfidf_hits = []
+    yield ('heartbeat', 'preparing')
 
     if duration > _LONG_CHAT_SECONDS:
+        # Conversational divert (mirror of the non-streaming variant): when
+        # the editor asked a discussion-style question, skip chunk search
+        # and yield a synthesized prose answer instead. Speaker-name
+        # anchors ("do mae", "Posey's story") count as extractive even
+        # without a verb start, so they reach the chunk search.
+        if _is_conversational_query(message, segments=segments):
+            for event in _chat_layer2_conversational_synthesis_stream(
+                message, history, project_name, segments,
+                analysis, profile_id, labeled_sections,
+                speaker_names=speaker_names,
+            ):
+                yield event
+            return
         # Layer 2 is parallel by chunk. Token-stream isn't meaningful, but
         # per-chunk progress is — yield a counter as each chunk completes
         # so the UI can show "3/8 chunks searched…" instead of a frozen
@@ -361,7 +701,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             paragraphs, message, history, project_name,
             phrases, words, profile_id, analysis,
             segment_vectors=segment_vectors, theme_phrases=theme_phrases,
-            tfidf_hits=tfidf_hits,
+            tfidf_hits=tfidf_hits, speaker_names=speaker_names,
         ):
             yield event
         return
@@ -369,21 +709,38 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     # Layer 1: build messages, stream tokens. Single source of truth for
     # prompt construction is _build_chat_messages above; the streaming
     # variant just wraps the same call with token-level filtering.
-    formatted = _format_transcript_for_ai(transcript)
+    try:
+        formatted = _format_transcript_for_ai(transcript, speaker_names)
+    except Exception as e:
+        print(f"[chat-stream] transcript format failed: {e}")
+        formatted = ''
     relevant_excerpts_block = ''
     matched = []
     if phrases or words or theme_phrases or tfidf_hits:
-        matched = _find_relevant_paragraphs(
-            segments, phrases, words, context=2, theme_phrases=theme_phrases,
-        )
-        matched = _merge_paragraph_lists(matched, tfidf_hits)
-        matched = _augment_with_high_score_vectors(matched, segments, segment_vectors, theme_phrases)
-        relevant_excerpts_block = _build_relevant_excerpts_block(matched)
-    analysis_block = _build_chat_analysis_index(analysis)
+        try:
+            matched = _find_relevant_paragraphs(
+                segments, phrases, words, context=2, theme_phrases=theme_phrases,
+            )
+            matched = _merge_paragraph_lists(matched, tfidf_hits)
+            matched = _augment_with_high_score_vectors(matched, segments, segment_vectors, theme_phrases)
+            relevant_excerpts_block = _build_relevant_excerpts_block(
+                matched, synthesis=_is_synthesis_query(message),
+            )
+        except Exception as e:
+            print(f"[chat-stream] relevance retrieval failed: {e}")
+            matched = []
+            relevant_excerpts_block = ''
+    try:
+        analysis_block = _build_chat_analysis_index(analysis)
+    except Exception as e:
+        print(f"[chat-stream] analysis index build failed: {e}")
+        analysis_block = ''
+    yield ('heartbeat', 'preparing')
 
     system_message, messages = _build_chat_messages(
         message, history, project_name, segments,
         formatted, analysis_block, relevant_excerpts_block, profile_id,
+        labeled_sections=labeled_sections, speaker_names=speaker_names,
     )
 
     pieces = []
@@ -415,19 +772,36 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
                 return True
         return False
 
+    # Heartbeat bookkeeping. When the model spends long stretches in a
+    # ``<think>...</think>`` phase, this loop consumes pieces silently and
+    # the SSE connection has nothing to flush. Browsers see "connection is
+    # alive but quiet" — typing dots forever. We emit a synthetic
+    # ``heartbeat`` event every ~25 silent pieces so the client knows
+    # we're still processing and so any intermediate buffering layer
+    # actually flushes bytes.
+    _piece_count = 0
+    _last_yield_piece = 0
+    _HEARTBEAT_PIECES = 25
+
     for piece in _call_ai_chat_stream(system_message, messages, num_ctx=num_ctx):
+        _piece_count += 1
         pieces.append(piece)
         _think_buf += piece
         if not _in_thinking:
             if any(op in _think_buf for op in _THINK_OPENERS):
                 _in_thinking = True
                 _think_buf = ''
+                # Tell the UI the model is in an internal reasoning phase
+                # so it can show a less-confusing label than "Thinking…".
+                yield ('heartbeat', 'reasoning')
+                _last_yield_piece = _piece_count
             else:
                 for tag in _THINK_OPENERS:
                     if any(_think_buf.endswith(tag[:i]) for i in range(1, len(tag))):
                         break
                 else:
                     yield ('token', piece)
+                    _last_yield_piece = _piece_count
                     _think_buf = _think_buf[-30:] if len(_think_buf) > 30 else _think_buf
                     _rep_tail = (_rep_tail + piece)[-_REP_WINDOW:]
                     if _is_stuck(_rep_tail):
@@ -436,6 +810,12 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             if any(cl in _think_buf for cl in _THINK_CLOSERS):
                 _in_thinking = False
                 _think_buf = ''
+                yield ('heartbeat', 'composing')
+                _last_yield_piece = _piece_count
+
+        if _piece_count - _last_yield_piece >= _HEARTBEAT_PIECES:
+            yield ('heartbeat', 'reasoning' if _in_thinking else 'composing')
+            _last_yield_piece = _piece_count
 
     # Strip any trailing repetition the model produced before we cut it off.
     full = ''.join(pieces)
@@ -446,10 +826,12 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     # the model's first attempt produced zero markers — most calls return
     # immediately. Streamed clients see a brief pause after the prose
     # finishes, then the marker block lands as part of the final message.
-    cleaned = _salvage_clips_if_missing(
-        cleaned, formatted, segments, num_ctx=num_ctx,
-        matched_paragraphs=matched, user_message=message,
-    )
+    # Skipped on conversational queries — see _is_conversational_query.
+    if not _is_conversational_query(message, segments=segments):
+        cleaned = _salvage_clips_if_missing(
+            cleaned, formatted, segments, num_ctx=num_ctx,
+            matched_paragraphs=matched, user_message=message,
+        )
     # Enforce explicit clip count from the user message — same defense
     # the non-streaming path applies. See _enforce_clip_count.
     cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
@@ -2114,7 +2496,7 @@ def _augment_with_high_score_vectors(matched_paragraphs, segments, segment_vecto
     return augmented
 
 
-def _build_relevant_excerpts_block(paragraphs):
+def _build_relevant_excerpts_block(paragraphs, synthesis=False):
     """Render matched paragraphs as a labeled block suitable for injecting
     between the full transcript and the FINAL REMINDER. Empty when nothing
     matched, so the caller can unconditionally concatenate the result.
@@ -2122,12 +2504,19 @@ def _build_relevant_excerpts_block(paragraphs):
     if not paragraphs:
         return ''
     body = _format_paragraphs_as_lines(paragraphs)
-    return (
-        "\n\n"
-        "RELEVANT EXCERPTS (auto-selected from the transcript above based on "
-        "your question — use these timecodes for [CLIP:] markers):\n"
-        f"{body}"
-    )
+    if synthesis:
+        header = (
+            "POSSIBLY RELEVANT EXCERPTS (these may contain useful moments, "
+            "but reason across the full transcript — the best answer may be "
+            "elsewhere):"
+        )
+    else:
+        header = (
+            "RELEVANT EXCERPTS (auto-selected from the transcript above "
+            "based on your question — prefer these timecodes for [CLIP:] "
+            "markers, but check the full transcript if none fit):"
+        )
+    return f"\n\n{header}\n{body}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2735,10 +3124,202 @@ def _chunks_overlapping_paragraphs(chunks, target_paragraphs):
     return indices
 
 
+_SPEAKER_DIGEST_MAX_CHARS = 9000  # budget for all speaker voice samples combined
+_SPEAKER_DIGEST_SAMPLE_PER_SPEAKER = 22  # max excerpts per speaker
+
+
+def _build_speaker_digest(segments) -> str:
+    """Build a per-speaker voice digest from transcript segments.
+
+    Groups segments by speaker, samples representative excerpts evenly
+    distributed across the timeline, and formats them as a compact block
+    the LLM can use to discuss what each speaker actually said — tone,
+    vocabulary, themes, contradictions, personality.
+
+    Without this, the conversational synthesis path only has the analysis
+    summary (which might say "multiple artists discuss…") and the model
+    can't tell speakers apart or cite their actual words.
+
+    Returns "" when there's only one speaker or no usable segments.
+    """
+    if not segments:
+        return ''
+
+    # Group segments by speaker
+    by_speaker: dict[str, list] = {}
+    for seg in segments:
+        spk = (seg.get('speaker') or '').strip()
+        text = (seg.get('text') or '').strip()
+        if not spk or not text or len(text) < 10:
+            continue
+        by_speaker.setdefault(spk, []).append(seg)
+
+    if len(by_speaker) < 2:
+        # Single speaker — the summary already covers them; no need for
+        # a voice digest that would just duplicate content.
+        return ''
+
+    # Budget per speaker: divide evenly, then cap at sample count
+    budget_per = _SPEAKER_DIGEST_MAX_CHARS // len(by_speaker)
+    lines = ['SPEAKER VOICE SAMPLES (representative excerpts from each speaker):']
+
+    for spk, segs in by_speaker.items():
+        lines.append(f'\n  {spk}:')
+        # Sample evenly across timeline — don't cluster at the start
+        n = min(len(segs), _SPEAKER_DIGEST_SAMPLE_PER_SPEAKER)
+        if n <= 0:
+            continue
+        step = max(1, len(segs) // n)
+        sampled = segs[::step][:n]
+
+        char_used = 0
+        for seg in sampled:
+            start = seg.get('start', 0)
+            tc = _seconds_to_hms_tc(start)
+            text = (seg.get('text') or '').strip()
+            # Truncate very long segments to keep budget — but allow enough
+            # words for the model to recognize voice / theme / vocabulary.
+            if len(text) > 320:
+                text = text[:320].rstrip() + '…'
+            entry = f'    [{tc}] {text}'
+            if char_used + len(entry) > budget_per:
+                break
+            lines.append(entry)
+            char_used += len(entry)
+
+    result = '\n'.join(lines)
+    if len(result) > _SPEAKER_DIGEST_MAX_CHARS:
+        result = result[:_SPEAKER_DIGEST_MAX_CHARS].rsplit('\n', 1)[0]
+    return result
+
+
+def _build_synthesis_context_block(project_name, segments, analysis, labeled_sections, speaker_names=None):
+    """Compact context block used by the conversational synthesis path on
+    long interviews. The full transcript doesn't fit in 32K context for
+    100+ minute interviews, but a curated summary + analysis index + the
+    editor's own selections gives the model enough to discuss themes,
+    story, and craft without extracting every clip from scratch.
+
+    Layout: PROJECT/DURATION/SPEAKERS header, then optional SUMMARY,
+    THEMES, SPEAKER VOICE SAMPLES, the existing PRE-ANALYZED MOMENTS
+    block, and the <editor_selections> block when clips have been pulled.
+    """
+    duration_sec = segments[-1].get('end', 0) if segments else 0
+    parts = [
+        "Here is the loaded project. The transcript IS loaded — you have "
+        "a project summary, per-speaker voice samples (real quotes from "
+        "each speaker spread across the timeline), pre-analyzed story "
+        "moments with timecodes, and any clips the editor has selected. "
+        "When asked about a specific speaker, draw from their voice "
+        "samples below — do NOT say their interview isn't loaded. When "
+        "asked about themes, story, or structure, synthesize from the "
+        "summary, themes, and pre-analyzed moments. Discuss what's here "
+        "with confidence and specificity.",
+        '',
+        f'PROJECT: {project_name}',
+        f'DURATION: {_format_duration_seconds(duration_sec)}',
+    ]
+    speakers = _extract_speaker_names(segments)
+    if speakers:
+        parts.append(f"SPEAKERS: {', '.join(speakers)}")
+    parts.append('')
+
+    if isinstance(analysis, dict):
+        summary = (analysis.get('summary') or '').strip()
+        if summary:
+            parts.append("PROJECT SUMMARY:")
+            parts.append(summary)
+            parts.append('')
+        suggested = (analysis.get('suggested_title') or '').strip()
+        if suggested:
+            parts.append(f"SUGGESTED TITLE: {suggested}")
+            parts.append('')
+        themes = analysis.get('themes') or []
+        if themes:
+            parts.append("THEMES IDENTIFIED IN ANALYSIS:")
+            for t in themes:
+                parts.append(f"  - {t}")
+            parts.append('')
+
+    # Per-speaker voice samples — so the model can discuss individual
+    # speakers by name with real quotes, not just the summary's mention
+    # of "multiple artists" or "several subjects."
+    digest = _build_speaker_digest(segments)
+    if digest:
+        parts.append(digest)
+        parts.append('')
+
+    analysis_block = _build_chat_analysis_index(analysis or {})
+    if analysis_block:
+        parts.append(analysis_block.strip())
+        parts.append('')
+
+    if labeled_sections:
+        sel_block = _build_editor_selections_block(labeled_sections, segments, speaker_names)
+        if sel_block:
+            parts.append(sel_block)
+
+    return '\n'.join(parts)
+
+
+def _chat_layer2_conversational_synthesis(message, history, project_name, segments,
+                                          analysis, profile_id, labeled_sections,
+                                          speaker_names=None):
+    """Conversational synthesis on long interviews — the divert from
+    chunked clip search when the editor's question is discussion-style.
+
+    Builds a compact context (summary + analysis index + selected clips,
+    no transcript), runs it through the standard conversational LLM via
+    _build_chat_messages so the orientation paragraph and framing apply,
+    and returns the prose response. Skips the clip-salvage post-processor
+    so a clean conversational answer doesn't get clips bolted on.
+    """
+    context = _build_synthesis_context_block(project_name, segments, analysis, labeled_sections, speaker_names)
+    system_message, messages = _build_chat_messages(
+        message, history, project_name, segments,
+        formatted=context,            # context block in the transcript slot
+        analysis_block='',            # already inside the context block above
+        relevant_excerpts_block='',
+        profile_id=profile_id,
+        labeled_sections=labeled_sections,
+        speaker_names=speaker_names,
+    )
+    num_ctx = max(8192, _estimate_layer1_num_ctx(context))
+    response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
+    response = _strip_trailing_repetition(response)
+    cleaned = _clean_chat_response(response)
+    cleaned = _validate_clip_markers_in_text(cleaned, segments)
+    # Deliberately skip _salvage_clips_if_missing — this path is only
+    # reached on conversational queries.
+    return cleaned
+
+
+def _chat_layer2_conversational_synthesis_stream(message, history, project_name, segments,
+                                                  analysis, profile_id, labeled_sections,
+                                                  speaker_names=None):
+    """Streaming variant of :func:`_chat_layer2_conversational_synthesis`.
+
+    Yields ('progress', label) for the prep step, then ('done', reply) with
+    the synthesized prose. Keeps the SSE shape identical to the chunked
+    search variant so the frontend doesn't need a separate handler.
+    """
+    yield ('progress', 'Reading the project context…')
+    try:
+        reply = _chat_layer2_conversational_synthesis(
+            message, history, project_name, segments,
+            analysis, profile_id, labeled_sections,
+            speaker_names=speaker_names,
+        )
+    except Exception as e:
+        print(f"[chat-stream] conversational synthesis failed: {e}")
+        reply = ''
+    yield ('done', reply)
+
+
 def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
                                 phrases, words, profile_id, analysis,
                                 segment_vectors=None, theme_phrases=None,
-                                tfidf_hits=None):
+                                tfidf_hits=None, speaker_names=None):
     """Orchestrate the Layer 2 path: chunk → concurrent per-chunk search →
     aggregate → render clip cards. No LLM sees the full transcript; the
     model's ranking job is scoped to a single ~10-minute window at a time.
@@ -2843,7 +3424,7 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
 def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_name,
                                        phrases, words, profile_id, analysis,
                                        segment_vectors=None, theme_phrases=None,
-                                       tfidf_hits=None):
+                                       tfidf_hits=None, speaker_names=None):
     """Streaming variant of :func:`_chat_layer2_chunked_search`.
 
     Yields ``('progress', label)`` events as each chunk completes so the
@@ -2928,6 +3509,14 @@ def _seconds_to_tc(sec) -> str:
     return f"{sec//3600:02d}:{(sec%3600)//60:02d}:{sec%60:02d}"
 
 
+# Tail chunks shorter than this fold into the previous chunk instead of
+# being yielded as a standalone slice. Without this, a 15-minute interview
+# can split into "900s + 13s tail", where the tail's analysis is the only
+# one some providers keep — the long slice gets dropped on a malformed JSON
+# response. Folding the tail in protects the analysis regardless of model.
+_MIN_TAIL_CHUNK_SECONDS = 90
+
+
 def _iter_transcript_chunks(segments, target_minutes=CHUNK_MINUTES):
     """Yield ~N-minute chunks of the transcript in order.
 
@@ -2935,10 +3524,17 @@ def _iter_transcript_chunks(segments, target_minutes=CHUNK_MINUTES):
     segments within that window. Segments preserve their original absolute
     timecodes so story beats and social clips come back timeline-absolute
     regardless of which chunk they originated from.
+
+    A trailing chunk shorter than :data:`_MIN_TAIL_CHUNK_SECONDS` is folded
+    into the previous chunk before yielding. See the constant's docstring
+    for the failure mode this guards against.
     """
     if not segments:
         return
     target_seconds = target_minutes * 60
+
+    # First pass: collect all chunks at the natural N-minute boundaries.
+    chunks = []
     cur = []
     cur_start = None
     for seg in segments:
@@ -2947,36 +3543,176 @@ def _iter_transcript_chunks(segments, target_minutes=CHUNK_MINUTES):
         cur.append(seg)
         elapsed = seg.get('end', seg.get('start', 0)) - cur_start
         if elapsed >= target_seconds:
-            yield {
+            chunks.append({
                 'start_seconds': cur_start,
                 'end_seconds': seg.get('end', cur_start),
                 'segments': cur,
-            }
+            })
             cur = []
             cur_start = None
     if cur:
-        yield {
+        chunks.append({
             'start_seconds': cur_start,
             'end_seconds': cur[-1].get('end', cur_start),
             'segments': cur,
-        }
+        })
+
+    # Second pass: fold a too-short trailing chunk into its predecessor.
+    if len(chunks) >= 2:
+        last = chunks[-1]
+        last_dur = (last.get('end_seconds') or 0) - (last.get('start_seconds') or 0)
+        if last_dur < _MIN_TAIL_CHUNK_SECONDS:
+            prev = chunks[-2]
+            prev['segments'] = prev['segments'] + last['segments']
+            prev['end_seconds'] = last['end_seconds']
+            chunks.pop()
+
+    for chunk in chunks:
+        yield chunk
 
 
-def _format_segments_for_ai(segments) -> str:
-    """Format an arbitrary slice of segments for the prompt."""
+def _format_segments_for_ai(segments, speaker_names=None) -> str:
+    """Format an arbitrary slice of segments for the prompt.
+
+    When ``speaker_names`` is supplied (populated by the Pro diarization
+    rename UI) raw labels like ``SPEAKER_00`` are resolved to their custom
+    display names so the model sees ``Sarah Chen: …`` instead of the raw
+    pyannote token. Single-speaker projects without the map render exactly
+    as before.
+    """
     lines = []
     for seg in segments:
         start_tc = seg.get('start_formatted', _seconds_to_tc(seg.get('start', 0)))[:8]
         end_s = seg.get('end', seg.get('start', 0))
         end_tc = _seconds_to_tc(end_s)
-        speaker = seg.get('speaker', 'Speaker')
+        raw_speaker = seg.get('speaker', 'Speaker')
+        speaker = _display_speaker(raw_speaker, speaker_names)
         text = seg.get('text', '')
         if text.strip():
             lines.append(f"[{start_tc}-{end_tc}] {speaker}: {text}")
     return '\n'.join(lines)
 
 
-def _merge_story_chunk(accum: dict, story_data: dict, is_first_chunk: bool):
+# User-facing copy when a chunk's response can't be repaired into something
+# usable. Surfaced via accum['analysis_warnings'] and rendered on the AI
+# Analysis tab so the editor knows part of the interview was dropped instead
+# of seeing a 3-second story for a 15-minute interview with no explanation.
+_CHUNK_DROP_WARNING = (
+    'Analysis incomplete: the AI model returned an unexpected response '
+    'for part of this interview. Some story beats or clips may be '
+    'missing. Try re-running analysis.'
+)
+
+
+def _attempt_chunk_response_repair(value):
+    """Salvage a non-conforming AI response into a dict the merge functions
+    can pull from.
+
+    :func:`_parse_json_response` already handles markdown fences and trailing
+    truncation, but local Gemma in particular can return:
+      * the parser's fallback dict (``{'error': ..., 'raw': ...}``) when the
+        full response wasn't valid JSON,
+      * a bare list ``[{...}, ...]`` when it dropped the wrapping object,
+      * prose preambles like "Here's the analysis: { ... }",
+      * markdown-fenced JSON nested inside other prose.
+
+    This helper walks those cases. Returns a dict on success, ``None``
+    otherwise. Keeps Gemma's outputs out of the warnings log most of the
+    time — they're usually repairable.
+    """
+    import re as _re
+    if value is None:
+        return None
+
+    # Already a dict — but check whether it's the parser's "I gave up" shape
+    # before declaring success. That fallback dict carries the raw text on
+    # ``raw``; we can sometimes recover real data from it.
+    if isinstance(value, dict):
+        is_parser_fallback = (
+            'error' in value and 'raw' in value
+            and not value.get('story_beats')
+            and not value.get('social_clips')
+            and not value.get('summary')
+            and not value.get('themes')
+        )
+        if not is_parser_fallback:
+            return value
+        text = str(value.get('raw') or '')
+    elif isinstance(value, list):
+        # Bare list — most often it's the social_clips array without the
+        # outer wrapper. We hand back a synthetic dict; the merge functions
+        # use _first_present_list which tolerates extra keys.
+        return {'social_clips': value, 'story_beats': value}
+    elif isinstance(value, str):
+        text = value
+    else:
+        return None
+
+    if not text:
+        return None
+
+    # Strip markdown fences and any "json" hint.
+    stripped = text.strip()
+    if stripped.startswith('```'):
+        nl = stripped.find('\n')
+        if nl != -1:
+            stripped = stripped[nl + 1:]
+        if stripped.endswith('```'):
+            stripped = stripped[:-3]
+        stripped = stripped.strip()
+        # Some models prefix with the language tag right after the fence.
+        if stripped.lower().startswith('json'):
+            stripped = stripped[4:].lstrip()
+
+    # Try the cleaned-up text directly.
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {'social_clips': parsed, 'story_beats': parsed}
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Walk inward from the first '{' to find the largest object that parses.
+    # Then the same for '[' as a fallback (bare-list path).
+    for opener, closer, key_target in (('{', '}', None), ('[', ']', 'social_clips')):
+        start = stripped.find(opener)
+        if start == -1:
+            continue
+        # Try truncating from end; bisect-like scan to find the longest
+        # parseable prefix without going O(n²) on large strings.
+        end = stripped.rfind(closer)
+        while end > start:
+            cand = stripped[start:end + 1]
+            try:
+                parsed = json.loads(cand)
+            except (json.JSONDecodeError, ValueError):
+                end = stripped.rfind(closer, start, end)
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list) and key_target:
+                return {key_target: parsed, 'story_beats': parsed}
+            break
+
+    # Last-ditch: hand the prose to _repair_truncated_json, which closes
+    # unmatched braces/brackets and strips trailing commas.
+    obj_match = _re.search(r'\{[\s\S]*', stripped)
+    if obj_match:
+        try:
+            repaired = _repair_truncated_json(obj_match.group(0))
+            if repaired:
+                parsed = json.loads(repaired)
+                if isinstance(parsed, dict):
+                    return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return None
+
+
+def _merge_story_chunk(accum: dict, story_data, is_first_chunk: bool):
     """Merge one chunk's story response into the accumulator.
 
     Chunk-level summaries/titles are accumulated into lists; the final
@@ -2985,9 +3721,24 @@ def _merge_story_chunk(accum: dict, story_data: dict, is_first_chunk: bool):
     summary (as an earlier version did) made the sidebar describe only the
     opening of the first interview when multiple interviews were strung
     into one timeline.
+
+    Non-dict / unparseable responses now go through
+    :func:`_attempt_chunk_response_repair` first; only when repair fails
+    do we append a user-visible warning to ``accum['analysis_warnings']``
+    and skip the chunk. The previous behavior was a silent early-return,
+    which produced the "3-second story from a 15-minute interview"
+    failure mode on Gemma 4b.
     """
-    if not isinstance(story_data, dict):
+    repaired = _attempt_chunk_response_repair(story_data) if not (
+        isinstance(story_data, dict)
+        and (story_data.get('story_beats') or story_data.get('summary')
+             or story_data.get('themes') or story_data.get('strongest_soundbites'))
+    ) else story_data
+    if not isinstance(repaired, dict):
+        if _CHUNK_DROP_WARNING not in accum['analysis_warnings']:
+            accum['analysis_warnings'].append(_CHUNK_DROP_WARNING)
         return
+    story_data = repaired
     summary = _first_present(story_data, 'summary', 'overview', 'synopsis')
     if summary:
         accum['_chunk_summaries'].append(summary)
@@ -3009,13 +3760,25 @@ def _merge_story_chunk(accum: dict, story_data: dict, is_first_chunk: bool):
 
 
 def _merge_social_chunk(accum: dict, social_data):
-    """Merge one chunk's social response into the accumulator."""
-    if isinstance(social_data, dict):
-        accum['social_clips'].extend(
-            _first_present_list(social_data, 'social_clips', 'clips', 'social', 'reels')
-        )
-    elif isinstance(social_data, list):
+    """Merge one chunk's social response into the accumulator.
+
+    Same repair-then-warn behavior as :func:`_merge_story_chunk`. Bare lists
+    are treated as the social_clips array (Gemma sometimes omits the outer
+    wrapper).
+    """
+    if isinstance(social_data, list):
         accum['social_clips'].extend(social_data)
+        return
+    repaired = _attempt_chunk_response_repair(social_data) if not (
+        isinstance(social_data, dict) and social_data.get('social_clips')
+    ) else social_data
+    if isinstance(repaired, dict):
+        accum['social_clips'].extend(
+            _first_present_list(repaired, 'social_clips', 'clips', 'social', 'reels')
+        )
+        return
+    if _CHUNK_DROP_WARNING not in accum['analysis_warnings']:
+        accum['analysis_warnings'].append(_CHUNK_DROP_WARNING)
 
 
 def _synthesize_overall_summary(summaries, titles, project_name, warnings=None):
@@ -3153,8 +3916,29 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
     segments = (transcript or {}).get('segments', [])
     total_duration = segments[-1].get('end', 0) if segments else 0
 
+    # Provider-aware chunking threshold. Cloud providers (Anthropic, OpenAI)
+    # have large context windows and a 1-hour interview fits comfortably in
+    # a single call — chunking there only adds latency and (per the v0.5.x
+    # bug) introduces failure modes around the chunk-merge step. Local
+    # Gemma still chunks for very long interviews where its instruction-
+    # following degrades on huge inputs, but a 15-25 min interview is
+    # better served by a single call (one schema, no merge step). The
+    # earlier 900s threshold landed mid-bucket on common interview lengths
+    # like 15:17 — we'd chunk into "900s + 17s tail" then fold the tail
+    # back into a single 917s chunk and pay the merge complexity for no
+    # gain. Bumped to 1500s.
+    try:
+        from ai_providers import get_active_provider
+        active_provider_name = get_active_provider(model_resolver=_get_ollama_model).name
+    except Exception:
+        active_provider_name = 'ollama'  # safest default — chunk on unknown
+    chunk_threshold = (
+        3600 if active_provider_name in ('anthropic', 'openai')
+        else 1500  # 25 min for local Gemma — single-call up to here
+    )
+
     # Short path: one AI call, original behavior.
-    if total_duration < _LONG_INTERVIEW_SECONDS or not segments:
+    if total_duration < chunk_threshold or not segments:
         formatted = _format_transcript_for_ai(transcript)
         return _analyze_transcript_single(
             formatted, project_name, analysis_type, segment_vectors=segment_vectors,
@@ -3282,7 +4066,7 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type,
 
     _emit("starting")
 
-    result = {}
+    result = {'analysis_warnings': []}
     if analysis_type in ('story', 'all'):
         step += 1
         _emit("story beats and soundbites")
@@ -3306,6 +4090,16 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type,
             result['broll_suggestions'] = _first_present_list(
                 story_data, 'broll_suggestions', 'broll', 'bRoll', 'b_roll'
             )
+            # If the model still produced nothing substantive after both
+            # the overview and timecoded sub-calls (each with its own
+            # retry), surface a user-visible warning. Without this the
+            # AI Analysis tab would silently render only the summary
+            # with no story beats / themes / soundbites — exactly the
+            # confusing state the user hit on 0.5.4.
+            if not result['story_beats'] and not result['strongest_soundbites'] \
+                    and not result['broll_suggestions'] and not result['themes']:
+                if _CHUNK_DROP_WARNING not in result['analysis_warnings']:
+                    result['analysis_warnings'].append(_CHUNK_DROP_WARNING)
 
     if analysis_type in ('social', 'all'):
         step += 1
@@ -3643,10 +4437,15 @@ def normalize_analysis(analysis):
     return out
 
 
-def _format_transcript_for_ai(transcript):
+def _format_transcript_for_ai(transcript, speaker_names=None):
     """Format transcript segments into readable text with timecodes.
 
     Always sends the full transcript — no truncation.
+
+    When ``speaker_names`` is supplied (Pro diarization rename map) raw
+    pyannote labels are resolved to display names before they reach the
+    model, so the LLM sees ``Sarah Chen: …`` instead of ``SPEAKER_00: …``.
+    Pre-diarization projects render unchanged.
     """
     segments = transcript.get('segments', [])
     if not segments:
@@ -3658,7 +4457,8 @@ def _format_transcript_for_ai(transcript):
         start_tc = seg['start_formatted'][:8]
         end_s = seg.get('end', seg.get('start', 0))
         end_tc = f"{int(end_s)//3600:02d}:{(int(end_s)%3600)//60:02d}:{int(end_s)%60:02d}"
-        speaker = seg.get('speaker', 'Speaker')
+        raw_speaker = seg.get('speaker', 'Speaker')
+        speaker = _display_speaker(raw_speaker, speaker_names)
         text = seg['text']
         if text.strip():
             all_lines.append(f"[{start_tc}-{end_tc}] {speaker}: {text}")
@@ -3748,7 +4548,18 @@ def _call_ai(prompt, system_prompt="", task_type="analysis"):
     clear message to the user instead of silently falling back.
     """
     from ai_providers import get_active_provider
-    system_prompt = inject_storytelling_foundation(system_prompt)
+    # Skip the storytelling foundation for structured JSON analysis.
+    # The foundation is ~28 KB (~7 K tokens) of narrative-editorial
+    # guidance. For analysis calls the prompt is a self-contained JSON
+    # extraction task: the transcript IS the data and it must survive
+    # intact. With num_ctx=12288 and num_predict=4096 the available
+    # input budget is ~8192 tokens — the foundation alone would consume
+    # ~7094 of those, leaving ~1098 for the entire transcript. Ollama
+    # silently truncates the overflow, so the model never sees the real
+    # transcript and hallucinates plausible-looking timecodes and generic
+    # descriptions. Chat and Story Builder still get the full foundation.
+    if task_type != "analysis":
+        system_prompt = inject_storytelling_foundation(system_prompt)
     provider = get_active_provider(model_resolver=_get_ollama_model)
     return provider.generate(
         system_prompt, prompt, task_type=task_type,
@@ -4470,68 +5281,225 @@ Return ONLY valid JSON in this shape:
 def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_target=7):
     """Analyze transcript for documentary story structure.
 
-    ``beats_target`` and ``soundbites_target`` set the upper bound the model
-    is asked to return. The chunked-analysis path passes smaller per-chunk
-    values so the merged total lands near the global cap; the single-chunk
-    path uses the global default. Post-merge ranking trims further if the
+    Three-pass split: local Gemma 4b can't reliably populate multiple
+    timecoded arrays in a single call — the model runs out of output
+    budget (num_predict) or gets confused by overlapping instructions
+    and returns partial results. Dedicating one call per concern keeps
+    each schema small enough to fill completely:
+
+      1. **Soundbites** — the most valuable editorial asset; done first
+         so it always gets the model's freshest attention.
+      2. **Story beats + b-roll** — narrative structure and visual ideas
+         share the same arc-reasoning pass.
+      3. **Overview** — summary, title, themes. No timecodes needed;
+         easiest for the model and fine to run last.
+
+    ``beats_target`` and ``soundbites_target`` set the upper bound each
+    pass is asked to return. Post-merge ranking trims further if the
     model overshoots.
     """
     beats_target = max(1, int(beats_target))
     soundbites_target = max(1, int(soundbites_target))
-    system_prompt = """You are an expert documentary film editor.
-Analyze transcripts for story structure and narrative beats.
-Always respond in valid JSON only. No markdown fences, no extra text."""
 
-    prompt = f"""Analyze this interview for documentary story structure.
+    # Pass 1 — soundbites (highest editorial value, runs first)
+    soundbites_result = _analyze_story_soundbites(
+        transcript_text, project_name, soundbites_target,
+    )
+    # Pass 2 — story beats + b-roll suggestions
+    beats_result = _analyze_story_beats(
+        transcript_text, project_name, beats_target,
+    )
+    # Pass 3 — overview (summary, title, themes — no timecodes)
+    overview = _analyze_story_overview(transcript_text, project_name)
 
-PROJECT: {project_name}
+    return {
+        'summary': _first_present(overview or {}, 'summary', 'overview', 'synopsis'),
+        'suggested_title': _first_present(
+            overview or {}, 'suggested_title', 'title', 'working_title'
+        ),
+        'themes': _first_present_list(overview or {}, 'themes', 'topics', 'theme_list'),
+        'story_beats': _first_present_list(
+            beats_result or {}, 'story_beats', 'beats', 'narrative_beats', 'story'
+        ),
+        'strongest_soundbites': _first_present_list(
+            soundbites_result or {}, 'strongest_soundbites', 'soundbites',
+            'quotes', 'best_quotes'
+        ),
+        'broll_suggestions': _first_present_list(
+            beats_result or {}, 'broll_suggestions', 'broll', 'bRoll', 'b_roll'
+        ),
+    }
+
+
+def _analyze_story_soundbites(transcript_text, project_name, soundbites_target):
+    """Pass 1: strongest soundbites only.
+
+    Dedicated call so the model focuses entirely on finding the best
+    quotes. This was the most common casualty when soundbites shared a
+    call with story beats and b-roll — Gemma 4b would populate the first
+    two arrays and truncate before reaching soundbites, or produce
+    shallow generic entries when attention was split three ways.
+    """
+    system_prompt = (
+        "You are an expert documentary film editor. Output JSON only. "
+        "No markdown, no fences, no commentary, no <think> tags. "
+        "Copy HH:MM:SS timecodes exactly from the transcript — "
+        "do not invent or round timecodes."
+    )
+    prompt = f"""PROJECT: {project_name}
 
 TRANSCRIPT:
 {transcript_text}
 
-Return a JSON object with:
+Return ONLY this JSON object:
 {{
-  "summary": "2-3 sentence overview of the story",
-  "suggested_title": "A compelling working title",
-  "story_beats": [
-    {{
-      "order": 1,
-      "label": "Opening Hook",
-      "description": "Why this moment works",
-      "start": "00:00:45",
-      "end": "00:01:02"
-    }}
-  ],
-  "themes": [
-    "Short noun-phrase theme the interview returns to",
-    "Another recurring theme"
-  ],
   "strongest_soundbites": [
-    {{
-      "text": "The actual quote",
-      "start": "00:02:00",
-      "end": "00:02:18",
-      "why": "Why this is powerful"
-    }}
+    {{"text": "the actual verbatim quote from the transcript", "start": "00:02:00", "end": "00:02:18", "why": "why this is editorially powerful"}}
+  ]
+}}
+
+Find the {soundbites_target} BEST soundbites. A great soundbite is a self-contained moment that works pulled out of context: emotional, surprising, quotable, or carrying the story's thesis in a single breath.
+- "text" MUST be the speaker's actual words copied from the transcript — not a paraphrase.
+- "start" and "end" MUST be HH:MM:SS timecodes copied from the transcript's timecodes for that passage.
+- "why" is a short phrase explaining editorial value (emotional peak, thesis statement, surprising admission, etc.).
+Be ruthless — return fewer if the transcript only has fewer genuine standouts.
+Return ONLY valid JSON, nothing else."""
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    if isinstance(parsed, dict) and (
+        parsed.get('strongest_soundbites') or parsed.get('soundbites')
+        or parsed.get('quotes') or parsed.get('best_quotes')
+    ):
+        return parsed
+    retry = _parse_json_response(_call_ai(
+        prompt + '\n\nNO MARKDOWN. JSON ONLY. Fill the strongest_soundbites array with real quotes from the transcript.',
+        system_prompt,
+    ))
+    return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
+
+
+def _analyze_story_beats(transcript_text, project_name, beats_target):
+    """Pass 2: story beats + b-roll suggestions.
+
+    These share a pass because they reason about the same narrative arc —
+    b-roll ideas are naturally anchored to the same moments the beats
+    identify. Two small arrays in one call is within Gemma 4b's reliable
+    output budget.
+    """
+    system_prompt = (
+        "You are an expert documentary film editor. Output JSON only. "
+        "No markdown, no fences, no commentary, no <think> tags. "
+        "Copy HH:MM:SS timecodes exactly from the transcript — "
+        "do not invent or round timecodes."
+    )
+    prompt = f"""PROJECT: {project_name}
+
+TRANSCRIPT:
+{transcript_text}
+
+Return ONLY this JSON object — fill both lists:
+{{
+  "story_beats": [
+    {{"order": 1, "label": "Opening Hook", "description": "why this moment works editorially", "start": "00:00:45", "end": "00:01:02"}}
   ],
   "broll_suggestions": [
-    {{
-      "description": "Concrete visual to cut to here",
-      "start": "00:03:10",
-      "end": "00:03:25"
-    }}
+    {{"description": "concrete visual to cut to here — be specific", "start": "00:03:10", "end": "00:03:25"}}
   ]
 }}
 
 Pick the {beats_target} BEST story beats following a documentary arc: hook, context, rising action, emotional peak, resolution, closing. Diversify across beat types — don't stack three hooks.
-Pick the {soundbites_target} BEST soundbites. Be ruthless; return fewer if the transcript only has fewer standouts.
-Pick 3-7 themes — short noun phrases (2-5 words) for the recurring topics, ideas, or motifs the interview keeps returning to. Skip if there aren't real recurring patterns; an empty list is fine.
 Suggest 3-7 b-roll moments. Each one should be a CONCRETE visual idea pinned to the timecode where it would land — describe what you'd specifically want to see, not generic filler like "nature shots" or "stock footage".
 CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end. Use string format like "00:02:45".
-Return ONLY valid JSON."""
+Return ONLY valid JSON, nothing else."""
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    if isinstance(parsed, dict) and (
+        parsed.get('story_beats') or parsed.get('beats')
+        or parsed.get('broll_suggestions') or parsed.get('broll')
+    ):
+        return parsed
+    retry = _parse_json_response(_call_ai(
+        prompt + '\n\nNO MARKDOWN. JSON ONLY. FILL BOTH LISTS — story_beats and broll_suggestions.',
+        system_prompt,
+    ))
+    return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
-    response = _call_ai(prompt, system_prompt)
-    return _parse_json_response(response)
+
+def _analyze_story_overview(transcript_text, project_name):
+    """Pass 3: summary + suggested_title + themes only.
+
+    Small schema, no timecodes — easy for Gemma 4b to fill reliably.
+    Runs last because the timecoded passes carry higher editorial value.
+    """
+    system_prompt = (
+        "You are an expert documentary film editor. Output JSON only. "
+        "No markdown, no fences, no commentary, no <think> tags."
+    )
+    prompt = f"""PROJECT: {project_name}
+
+TRANSCRIPT:
+{transcript_text}
+
+Return ONLY this JSON object:
+{{
+  "summary": "2-3 sentence overview of the story",
+  "suggested_title": "A compelling working title",
+  "themes": ["short 2-5 word phrase", "another recurring theme"]
+}}
+
+Pick 3-7 themes — short noun phrases for the recurring topics. An empty list is fine if there aren't real recurring patterns.
+Return ONLY valid JSON, nothing else."""
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    if isinstance(parsed, dict) and (
+        parsed.get('summary') or parsed.get('themes')
+        or parsed.get('overview') or parsed.get('synopsis')
+    ):
+        return parsed
+    # Retry with even harder prompt
+    retry = _parse_json_response(_call_ai(
+        prompt + '\n\nNO MARKDOWN. NO PROSE. JSON ONLY.', system_prompt
+    ))
+    return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
+
+
+def _looks_usable_story(value):
+    """Return True if a story-analyze response carries enough substance
+    that we trust it without retrying.
+
+    The previous bar — "any of the schema fields is truthy" — was wrong
+    for Gemma 4b: the model often returned ``{"summary": "..."}`` with
+    every list empty (a partial generation hidden behind format='json'
+    closing the JSON early at the num_predict cap). That passed this
+    check, skipped the retry, and produced an analysis tab with only
+    a summary line and no story beats. We now require at least one of
+    the substantive lists — the things the editor actually sees as
+    cards — to be non-empty before declaring the response usable."""
+    if not isinstance(value, dict):
+        return False
+    if 'error' in value and 'raw' in value:
+        return False
+    if _first_present_list(value, 'story_beats', 'beats', 'narrative_beats', 'story'):
+        return True
+    if _first_present_list(value, 'themes', 'topics', 'theme_list'):
+        return True
+    if _first_present_list(value, 'strongest_soundbites', 'soundbites', 'quotes', 'best_quotes'):
+        return True
+    if _first_present_list(value, 'broll_suggestions', 'broll', 'bRoll', 'b_roll'):
+        return True
+    return False
+
+
+def _looks_usable_social(value):
+    """Same predicate for social-analyze responses."""
+    if isinstance(value, list):
+        return len(value) > 0
+    if not isinstance(value, dict):
+        return False
+    if 'error' in value and 'raw' in value:
+        return False
+    for key in ('social_clips', 'clips', 'social', 'reels'):
+        v = value.get(key)
+        if isinstance(v, list) and v:
+            return True
+    return False
 
 
 def _analyze_social(transcript_text, project_name, clips_target=7):
@@ -4585,7 +5553,32 @@ Use the HH:MM:SS format as a string, like "00:02:45". Do NOT convert to decimal 
 Return ONLY valid JSON, no markdown formatting."""
 
     response = _call_ai(prompt, system_prompt)
-    return _parse_json_response(response)
+    parsed = _parse_json_response(response)
+    if _looks_usable_social(parsed):
+        return parsed
+    # Retry once with a stricter prompt — same rationale as
+    # :func:`_analyze_story`. We pin Gemma to the bare social_clips array
+    # (no wrapper, no prose) since that's the shape the merge function
+    # most reliably accepts.
+    retry_system = (
+        'You output JSON only. No markdown, no prose, no <think> tags. '
+        'Output a single JSON array of clip objects matching the schema below.'
+    )
+    retry_prompt = (
+        'Re-analyze the interview below for short-form social media clips. '
+        'Respond ONLY with this JSON array:\n'
+        '[{"rank":1,"title":"...","start":"00:00:00","end":"00:00:00",'
+        '"duration_seconds":30,"text":"...","platform":"instagram_reels",'
+        '"why":"...","hook":"...","hashtags":["..."]}]\n\n'
+        f'PROJECT: {project_name}\n\nTRANSCRIPT:\n{transcript_text}\n\n'
+        f'Pick the {clips_target} BEST clips, 15-60 seconds each, '
+        'ranked by predicted engagement. Return ONLY the JSON array, '
+        'nothing else.'
+    )
+    retry = _parse_json_response(_call_ai(retry_prompt, retry_system))
+    if _looks_usable_social(retry):
+        return retry
+    return retry if (isinstance(retry, dict) or isinstance(retry, list)) and retry else parsed
 
 
 def _parse_json_response(response_text):

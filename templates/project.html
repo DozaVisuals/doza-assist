@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -182,8 +182,22 @@
 
     <!-- Left Column: Player (persists across all tabs) -->
     <div class="player-col" id="playerCol">
-        <div class="video-player-box" id="videoPlayerBox" style="{% if not is_video %}display:none{% endif %}">
-            <video id="videoPreview" preload="metadata" playsinline webkit-playsinline class="video-preview-main"></video>
+        <div class="video-player-box" id="videoPlayerBox">
+            <video id="videoPreview" preload="metadata" playsinline webkit-playsinline class="video-preview-main"{% if not is_video %} style="display:none"{% endif %}></video>
+            {# Audio waveform — shown for audio-only projects and when the     #}
+            {# editor toggles audio-only mode on a video project. Reactive     #}
+            {# mode: JS sets --dz-bar-scale on each bar from the AnalyserNode  #}
+            {# every animation frame. The shell maintains the 16:9 footprint   #}
+            {# so the layout doesn't shift when the editor switches modes.    #}
+            <div class="audio-waveform-shell"{% if is_video %} style="display:none"{% endif %} id="audioWaveformShell">
+                <div class="dz-waveform" data-mode="reactive" id="audioWaveform" aria-hidden="true">
+                    <span class="dz-bar"></span>
+                    <span class="dz-bar"></span>
+                    <span class="dz-bar"></span>
+                    <span class="dz-bar"></span>
+                    <span class="dz-bar"></span>
+                </div>
+            </div>
         </div>
         {# Audio element only when at least one project in scope is audio-only. #}
         {# For video projects we never need it, and a stray <audio> in the DOM #}
@@ -524,14 +538,15 @@
                 <div class="card chat-card">
                     <div class="chat-messages" id="chatMessages">
                         <div class="chat-welcome">
-                            <h3>Narrative Intelligence</h3>
-                            <p>Explore what this interview is really about. Tell it what kind of story you're making and let it find the moments that matter.</p>
+                            <h3 class="chat-welcome-title">Story Room</h3>
+                            <p class="chat-welcome-subtitle">Explore what this interview is really about. Tell it what kind of story you're making and let it find the moments that matter.</p>
                             <div class="chat-suggestions">
-                                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the emotional arc of this interview?</button>
+                                <button class="chat-suggestion chat-suggestion-primary" onclick="sendSuggestion(this)">What's the emotional arc of this interview?</button>
                                 <button class="chat-suggestion" onclick="sendSuggestion(this)">Where does the energy shift?</button>
                                 <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the most revealing thing they said about themselves?</button>
                                 <button class="chat-suggestion" onclick="sendSuggestion(this)">I'm making a film about resilience — what supports that?</button>
                             </div>
+                            <p class="chat-welcome-hint">or just ask me anything about this interview</p>
                         </div>
                     </div>
                     <div class="chat-input-area">
@@ -631,17 +646,81 @@
                 </button>
             </div>
         </div>
+        {% set social_count = (project.analysis.social_clips if project.analysis else [])|length %}
+        {% set story_count  = (project.analysis.story_beats if project.analysis else [])|length %}
+        {% set soundbite_count = (project.analysis.strongest_soundbites if project.analysis else [])|length %}
+        {% set label_count  = (project.labeled_sections or [])|length %}
+        {% set transcript_count = (project.transcript.segments if project.transcript else [])|length %}
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
             <div class="card">
+            {% if project.fcpxml_source %}
+                {# ── FCPXML Round-Trip (primary for imported projects) ───── #}
+                <div class="card-title" style="margin-bottom: 1rem;">FCPXML Round-Trip Export</div>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                    Exports reuse the original {{ project.fcpxml_source.container_type }} container
+                    so selects land on the same angles with video and audio sync intact.
+                </p>
+                <div class="form-group" style="margin-bottom: 1rem;">
+                    <label class="form-label">Select what to include</label>
+                    <div class="export-categories" id="rtExportCategories">
+                        <label class="export-category">
+                            <input type="checkbox" id="rtCatLabels" checked>
+                            <span>My Clips (<span id="rtCatLabelsCount">{{ label_count }}</span>)</span>
+                        </label>
+                        <label class="export-category">
+                            <input type="checkbox" id="rtCatSocial">
+                            <span>AI Social Clips (<span id="rtCatSocialCount">{{ social_count }}</span>)</span>
+                        </label>
+                        <label class="export-category">
+                            <input type="checkbox" id="rtCatStory">
+                            <span>AI Story Beats (<span id="rtCatStoryCount">{{ story_count }}</span>)</span>
+                        </label>
+                        <label class="export-category">
+                            <input type="checkbox" id="rtCatSoundbites">
+                            <span>AI Soundbites (<span id="rtCatSoundbitesCount">{{ soundbite_count }}</span>)</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-row" style="margin-bottom: 1rem;">
+                    <div class="form-group">
+                        <label class="form-label">Framerate</label>
+                        {% set raw_fps = project.fcpxml_source.sequence_framerate|float %}
+                        {% set snap_rates = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60] %}
+                        {% set ns = namespace(display_fps='') %}
+                        {% for rate in snap_rates %}
+                            {% if ns.display_fps == '' and (raw_fps - rate)|abs < 0.01 %}
+                                {% set clean = rate|string %}
+                                {% if '.' in clean %}
+                                    {% set clean = clean.rstrip('0').rstrip('.') %}
+                                {% endif %}
+                                {% set ns.display_fps = clean %}
+                            {% endif %}
+                        {% endfor %}
+                        {% if ns.display_fps == '' %}
+                            {% set ns.display_fps = ('%.3f' % raw_fps).rstrip('0').rstrip('.') %}
+                        {% endif %}
+                        <div class="form-input-readonly">{{ ns.display_fps }} fps</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Output mode</label>
+                        <div class="export-mode-segmented" id="rtOutputMode">
+                            <button type="button" class="export-mode-btn is-active" data-mode="selects_project"
+                                    onclick="setRtMode(this)">New Project</button>
+                            <button type="button" class="export-mode-btn" data-mode="markers_timeline"
+                                    onclick="setRtMode(this)">Markers</button>
+                        </div>
+                    </div>
+                </div>
+                <button class="btn btn-primary" id="rtExportBtn" onclick="exportFCPXMLMulticam()" style="width:100%;">
+                    Export to Final Cut Pro
+                </button>
+            {% else %}
+                {# ── Standard NLE Export (for drag-and-drop projects) ───── #}
                 <div class="card-title" style="margin-bottom: 1rem;" data-export-label-key="card-title">NLE Export</div>
                 <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 1rem;" data-export-label-key="card-blurb">
                     Exports create a timeline in Final Cut Pro with each clip pre-cut at the in/out points.
                     The source media is referenced — just import the .fcpxml and your selects are ready to edit.
                 </p>
-                {% set social_count = (project.analysis.social_clips if project.analysis else [])|length %}
-                {% set story_count  = (project.analysis.story_beats if project.analysis else [])|length %}
-                {% set label_count  = (project.labeled_sections or [])|length %}
-                {% set transcript_count = (project.transcript.segments if project.transcript else [])|length %}
                 <div class="form-group" style="margin-bottom: 1rem;">
                     <label class="form-label">Select what to include</label>
                     <div class="export-categories" id="exportCategories">
@@ -689,33 +768,7 @@
                 <button class="btn btn-primary" id="exportFCPXMLBtn" onclick="exportFCPXML()" data-export-label-key="unified" style="width:100%;">
                     Export to FCPX
                 </button>
-                {% if project.fcpxml_source %}
-                <div class="export-roundtrip">
-                    <div class="card-title" style="margin-bottom: 0.5rem; font-size: 0.95rem;">FCPXML Round-Trip</div>
-                    <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.75rem;">
-                        These exports reuse the original multicam / sync-clip container so selects drop
-                        against the same angles with video and audio sync intact.
-                    </p>
-                    <div class="form-group" style="margin-bottom: 0.75rem;">
-                        <label class="form-label">Selects from</label>
-                        <select class="form-input" id="fcpxmlMulticamSource">
-                            <option value="client_selects" selected>Clip labels</option>
-                            <option value="social">AI social clips</option>
-                            <option value="story">AI story beats</option>
-                            <option value="soundbites">AI soundbites</option>
-                            <option value="all">Everything</option>
-                        </select>
-                    </div>
-                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                        <button class="btn btn-primary" onclick="exportFCPXMLMulticam('selects_project')">
-                            Selects as new project
-                        </button>
-                        <button class="btn btn-outline" onclick="exportFCPXMLMulticam('markers_timeline')">
-                            Markers on existing timeline
-                        </button>
-                    </div>
-                </div>
-                {% endif %}
+            {% endif %}
             </div>
 
             <div class="card">
@@ -760,7 +813,7 @@ function toggleTheme() {
 // Restore saved theme (default: light)
 (function() {
     const saved = localStorage.getItem('doza-theme');
-    document.documentElement.setAttribute('data-theme', saved || 'light');
+    document.documentElement.setAttribute('data-theme', saved || 'dark');
 })();
 
 async function refreshActivePill() {
@@ -1024,6 +1077,11 @@ function switchTab(tab) {
         loadStoryBuilds();
         renderStoryClipLibrary();
     }
+
+    // Refresh export counts when switching to export tab
+    if (tab === 'export') {
+        _refreshExportCounts();
+    }
 }
 
 // ── Audio Player ──
@@ -1056,13 +1114,14 @@ function switchPlayerElement(useVideo) {
     if (oldPlayer) oldPlayer.pause();
 
     if (useVideo) {
-        videoPlayerBox.style.display = '';
         audio = videoEl;
     } else {
-        videoPlayerBox.style.display = 'none';
         audio = audioEl;
     }
     currentPlayerIsVideo = useVideo;
+    if (typeof setPlayerView === 'function') {
+        setPlayerView(useVideo ? 'video' : 'waveform');
+    }
     bindPlayerEvents();
 }
 let lastActiveSegment = null;
@@ -1114,9 +1173,245 @@ function registerTimeUpdateHandler(fn) {
 
 bindPlayerEvents();
 
+// ── Audio Waveform Visualization ──
+// Live 5-bar waveform shown in the player box whenever there's no video
+// to display: audio-only projects, the audio-only toggle on a video
+// project, and (multi-project view) when the active project crosses from
+// video to audio. Reactive mode of the .dz-waveform component — JS sets
+// --dz-bar-scale on each bar from AnalyserNode frequency data every frame.
+//
+// Web Audio constraints we have to live with:
+//   1. createMediaElementSource can only be called once per element ever,
+//      so we cache the source and reuse it across mode switches.
+//   2. Once an element's audio is routed through the audio graph, the
+//      analyser MUST stay connected to destination or the editor stops
+//      hearing the audio. We therefore connect once and never disconnect.
+const waveformShellEl = document.getElementById('audioWaveformShell');
+const waveformBars = Array.from(document.querySelectorAll('#audioWaveform .dz-bar'));
+const NUM_WF_BARS = waveformBars.length;
+const _wfBarScales = waveformBars.map(() => 0.22);
+let _wfAudioCtx = null;
+let _wfAnalyser = null;
+let _wfSource = null;
+let _wfRafId = null;
+let _wfActive = false;
+
+function _wfEnsureGraph() {
+    if (_wfAnalyser) return true;
+    try {
+        const Ctor = window.AudioContext || window.webkitAudioContext;
+        if (!Ctor) return false;
+        _wfAudioCtx = new Ctor();
+        _wfAnalyser = _wfAudioCtx.createAnalyser();
+        // 64 bins is plenty for 5 bars and keeps the per-frame work tiny.
+        _wfAnalyser.fftSize = 128;
+        _wfAnalyser.smoothingTimeConstant = 0.7;
+        return true;
+    } catch (err) {
+        console.warn('[waveform] AudioContext init failed', err);
+        return false;
+    }
+}
+
+function _wfAttachToAudioEl() {
+    if (!audioEl || !_wfEnsureGraph()) return false;
+    if (_wfSource) return true;
+    try {
+        _wfSource = _wfAudioCtx.createMediaElementSource(audioEl);
+        _wfSource.connect(_wfAnalyser);
+        _wfAnalyser.connect(_wfAudioCtx.destination);
+        return true;
+    } catch (err) {
+        console.warn('[waveform] createMediaElementSource failed', err);
+        return false;
+    }
+}
+
+// Per-frame driver. Three branches:
+//   - Reactive (audio playing): bin frequency data into NUM_WF_BARS groups,
+//     average each, smooth toward target with fast attack / slow release so
+//     the bars feel responsive on transients but don't flicker.
+//   - Idle with no source / stopped: tiny offset oscillation around 0.18
+//     amplitude so the row "breathes" subtly rather than reading as dead.
+//   - Paused: hold last scales — just keep redrawing the same values so
+//     the bars stay where they were when the editor hit pause.
+function _wfDrawLoop() {
+    if (!_wfActive) { _wfRafId = null; return; }
+    const playing = _wfAnalyser && audioEl && !audioEl.paused && !audioEl.ended && audioEl.currentSrc;
+    const stopped = !audioEl || !audioEl.currentSrc;
+
+    if (playing) {
+        const buf = new Uint8Array(_wfAnalyser.frequencyBinCount);
+        _wfAnalyser.getByteFrequencyData(buf);
+        const binSize = Math.max(1, Math.floor(buf.length / NUM_WF_BARS));
+        for (let i = 0; i < NUM_WF_BARS; i++) {
+            let sum = 0;
+            const start = i * binSize;
+            const end = Math.min(buf.length, start + binSize);
+            for (let j = start; j < end; j++) sum += buf[j];
+            const avg = sum / Math.max(1, end - start); // 0..255
+            const target = 0.22 + (avg / 255) * 1.05;   // 0.22..1.27
+            const cur = _wfBarScales[i];
+            const factor = target > cur ? 0.55 : 0.18;  // fast attack / slow release
+            _wfBarScales[i] = cur * (1 - factor) + target * factor;
+            waveformBars[i].style.setProperty('--dz-bar-scale', _wfBarScales[i].toFixed(3));
+        }
+    } else if (stopped) {
+        // Subtle idle drift. Slow sine, low amplitude — five bars share
+        // the same wave with offset phases.
+        const t = Date.now() / 1000;
+        for (let i = 0; i < NUM_WF_BARS; i++) {
+            const phase = (t + i * 0.22) * 1.4;
+            const target = 0.20 + 0.07 * (Math.sin(phase) * 0.5 + 0.5);
+            _wfBarScales[i] = _wfBarScales[i] * 0.85 + target * 0.15;
+            waveformBars[i].style.setProperty('--dz-bar-scale', _wfBarScales[i].toFixed(3));
+        }
+    }
+    // Paused branch is intentionally a no-op — the bars hold their last
+    // committed scale value (the CSS transform stays where we last set it).
+
+    _wfRafId = requestAnimationFrame(_wfDrawLoop);
+}
+
+// Switch the player box between showing the video element and the
+// waveform shell. Used by toggleAudioOnly() and switchPlayerElement().
+// The outer videoPlayerBox stays visible at all times — only its children
+// swap, which keeps the layout footprint stable across mode changes.
+function setPlayerView(mode) {
+    if (mode === 'waveform') {
+        if (videoEl) videoEl.style.display = 'none';
+        if (waveformShellEl) waveformShellEl.style.display = '';
+        _wfActive = true;
+        _wfAttachToAudioEl();
+        if (_wfAudioCtx && _wfAudioCtx.state === 'suspended') {
+            _wfAudioCtx.resume().catch(() => {});
+        }
+        if (!_wfRafId) _wfDrawLoop();
+    } else {
+        if (videoEl) videoEl.style.display = '';
+        if (waveformShellEl) waveformShellEl.style.display = 'none';
+        _wfActive = false;
+        if (_wfRafId) {
+            cancelAnimationFrame(_wfRafId);
+            _wfRafId = null;
+        }
+    }
+}
+
 {% if is_video %}
 videoEl.src = "/project/{{ project.id }}/media";
+{% else %}
+// Audio-only project: kick the waveform on so the player box isn't a
+// blank black rectangle while the editor scrubs through interview audio.
+setPlayerView('waveform');
 {% endif %}
+
+// ── Extension bridges ──
+// Expose player and Story Builder hooks for Pro extension tabs (Story
+// Brief, Collection dashboard). These use `let audio` (script-local,
+// NOT on window) and `storyBuilds` / `currentBuildId`, which Pro JS
+// can't reach directly. The bridges are intentionally thin wrappers —
+// they do not import Pro logic, they just expose OSS primitives.
+
+/**
+ * Play a time range on the active player element (video or audio).
+ * Called by the Story Brief tab's play-slice / play-arc / play-tension
+ * buttons. Uses the project page's `audio` variable which is correctly
+ * set to videoEl or audioEl based on the project's media type.
+ */
+window.dozaProjectPlay = function (startSec, endSec) {
+    if (!audio) return;
+    try {
+        audio.currentTime = startSec;
+        audio.play();
+    } catch (_) { /* autoplay restriction */ }
+    // Auto-pause at endSec so the editor hears just the slice.
+    if (endSec > startSec) {
+        const _checkPause = () => {
+            if (!audio || audio.paused) return;
+            if (audio.currentTime >= endSec) {
+                try { audio.pause(); } catch (_) {}
+                return;
+            }
+            setTimeout(_checkPause, 250);
+        };
+        setTimeout(_checkPause, 250);
+    }
+};
+
+/**
+ * Add segments to the Story Builder as a new build.
+ * Called by the Story Brief tab's "Send to Story Builder" buttons.
+ * Creates a client-side build from the provided segments and switches
+ * to the Story tab. The build is persisted on the next interaction
+ * with the Story Builder (e.g. the editor renames or exports it).
+ */
+window.addClipsToStoryBuilder = async function (payload) {
+    if (!payload || !Array.isArray(payload.segments) || !payload.segments.length) return;
+    const buildId = 'brief_' + Date.now();
+    const arcTitle = payload.title || 'Story Brief';
+    const arcNote = payload.editorialNote || '';
+    const clips = payload.segments.map(function (s, i) {
+        var speaker = s.speaker || '';
+        var quote = s.quote_preview || s.quote || '';
+        // Pull actual transcript text for this segment's time range
+        var startSec = _tcToSec(s.timecode_start);
+        var endSec = _tcToSec(s.timecode_end);
+        if (!quote && typeof allWords !== 'undefined' && allWords.length) {
+            var segWords = allWords.filter(function (w) {
+                var ws = parseFloat(w.dataset.s);
+                return ws >= startSec && ws < endSec;
+            });
+            quote = segWords.map(function (w) { return w.textContent; }).join('').trim();
+        }
+        // Clip title: arc name + part number
+        var title = arcTitle;
+        if (payload.segments.length > 1) title += ' · pt ' + (i + 1);
+        if (speaker) title += ' (' + speaker + ')';
+        // Editorial note: per-segment note if available, otherwise a
+        // truncated transcript excerpt so each clip has unique context
+        var note = s.editorial_note || s.why_it_lands || '';
+        if (!note && quote) {
+            note = quote.length > 160 ? quote.substring(0, 157) + '…' : quote;
+        }
+        if (!note) note = arcNote;
+        return {
+            id: i,
+            start_time: s.timecode_start || '00:00:00',
+            end_time: s.timecode_end || '00:00:00',
+            title: title,
+            editorial_note: note,
+            transcript: quote,
+            speaker: speaker,
+        };
+    });
+    var build = {
+        id: buildId,
+        story_title: arcTitle,
+        reasoning: arcNote,
+        clips: clips,
+        created_at: new Date().toISOString(),
+    };
+    // Push into local state and persist to disk BEFORE switching tabs.
+    // switchTab('story') triggers loadStoryBuilds() which fetches from
+    // server — without persisting first the new build would be lost.
+    if (typeof storyBuilds !== 'undefined') {
+        storyBuilds.push(build);
+        currentBuildId = buildId;
+    }
+    await saveStoryBuild(build);
+    // Now switch to the Story tab — loadStoryBuilds will find the saved build.
+    if (typeof switchTab === 'function') switchTab('story');
+    if (typeof showToast === 'function') showToast('Added to Story Builder');
+};
+
+function _tcToSec(tc) {
+    if (typeof tc === 'number') return tc;
+    if (typeof tc !== 'string') return 0;
+    var parts = tc.trim().split(':');
+    if (parts.length !== 3) return 0;
+    return (parseInt(parts[0],10)||0)*3600 + (parseInt(parts[1],10)||0)*60 + (parseInt(parts[2],10)||0);
+}
 
 // Detect manual scrolling to pause auto-scroll
 if (transcriptContainer) {
@@ -1146,18 +1441,18 @@ function toggleAudioOnly() {
         btn.style.background = 'var(--accent)';
         btn.style.color = '#fff';
         btn.title = 'Switch back to video playback';
-        videoPlayerBox.style.display = 'none';
         audioEl.src = `/project/{{ project.id }}/media/audio`;
         audio = audioEl;
         currentPlayerIsVideo = false;
+        setPlayerView('waveform');
     } else {
         btn.style.background = '';
         btn.style.color = '';
         btn.title = 'Audio-only mode (lighter playback for heavy footage)';
-        videoPlayerBox.style.display = '';
         audioEl.src = '';
         audio = videoEl;
         currentPlayerIsVideo = true;
+        setPlayerView('video');
     }
     bindPlayerEvents();
     audio.currentTime = currentTime;
@@ -1463,18 +1758,8 @@ async function clearChat() {
     }
     chatHistory = [];
     const container = document.getElementById('chatMessages');
-    container.innerHTML = `
-        <div class="chat-welcome">
-            <h3>Narrative Intelligence</h3>
-            <p>Explore what this interview is really about. Tell it what kind of story you're making and let it find the moments that matter.</p>
-            <div class="chat-suggestions">
-                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the emotional arc of this interview?</button>
-                <button class="chat-suggestion" onclick="sendSuggestion(this)">Where does the energy shift?</button>
-                <button class="chat-suggestion" onclick="sendSuggestion(this)">What's the most revealing thing they said about themselves?</button>
-                <button class="chat-suggestion" onclick="sendSuggestion(this)">I'm making a film about resilience — what supports that?</button>
-            </div>
-        </div>
-    `;
+    container.innerHTML = '';
+    renderChatWelcome();
     updateChatClearBtn();
 }
 
@@ -1487,6 +1772,10 @@ function updateChatClearBtn() {
 document.addEventListener('DOMContentLoaded', () => {
     replayChatHistory();
     updateChatClearBtn();
+    // Pick the right welcome (default vs clip-aware) once labelSections and
+    // the My Style pill are populated. renderChatWelcome no-ops if a chat is
+    // already on screen, so this is safe to call after replayChatHistory.
+    renderChatWelcome();
 });
 
 function autoGrowChatInput(el) {
@@ -1497,9 +1786,173 @@ function autoGrowChatInput(el) {
 
 function sendSuggestion(btn) {
     const input = document.getElementById('chatInput');
-    input.value = btn.textContent;
+    // Clip-aware suggestions carry a longer prompt in data-prompt so the
+    // visible label can stay short ("What am I missing?") while the actual
+    // chat input gets the full editorial framing. Falls back to textContent
+    // for legacy suggestions that don't have data-prompt.
+    input.value = btn.dataset.prompt || btn.textContent;
     autoGrowChatInput(input);
+    // Fill-in-the-blank pattern (e.g. "Find every moment about ").
+    // Drop the stem into the input, place the cursor at the end, focus —
+    // do NOT fire. The editor types their search term and hits enter.
+    if (btn.dataset.fillin === '1') {
+        input.focus();
+        const len = input.value.length;
+        try { input.setSelectionRange(len, len); } catch (_) {}
+        return;
+    }
     sendChat();
+}
+
+// ── Dynamic preloaded chat prompts ───────────────────────────────────────
+// The chat welcome shows different prompt buttons based on the state of
+// labelSections in the project. Three states:
+//   A — no clips pulled yet → discovery prompts
+//   B — 1-9 clips pulled    → editorial-partner prompts (gaps, overlap, story)
+//   C — 10+ clips pulled    → assembly prompts (running order, sag, threads)
+// Some prompts are "fill-in-the-blank" — clicking drops a stem like
+// "Find every moment about " into the input field with the cursor at
+// the end, instead of firing immediately. Marked with `fillIn: true`.
+const CHAT_STATE_THRESHOLD = 10;  // clips count that bumps from State B to C
+
+function _isMyStyleActive() {
+    const pill = document.querySelector('.my-style-pill');
+    return !!(pill && pill.classList.contains('active'));
+}
+
+function _clipCount() {
+    return (typeof labelSections !== 'undefined' && Array.isArray(labelSections))
+        ? labelSections.length : 0;
+}
+
+function _chatState() {
+    const n = _clipCount();
+    if (n === 0) return 'A';
+    if (n < CHAT_STATE_THRESHOLD) return 'B';
+    return 'C';
+}
+
+// Prompt strings — exact copy from the spec. Fill-in-the-blank prompts
+// have `fillIn: true` and the `prompt` field is the STEM (with trailing
+// space) that gets dropped into the input field.
+function _promptsForState(state, myStyleOn) {
+    if (state === 'A') {
+        return [
+            { label: "What's the story here?", prompt: "Read the full transcript and tell me what story is actually being told. What's the through-line, what's the surprise, and what's the strongest narrative thread? Be specific, not generic. Respond conversationally." },
+            { label: 'Pull the strongest soundbites', prompt: 'Identify the 8-10 strongest standalone soundbites in this transcript. Strong means quotable, self-contained, and emotionally or narratively distinctive. Return as [CLIP:] markers with a one-line note explaining why each one lands.' },
+            { label: 'What are the major themes?', prompt: 'Identify the 4-6 major themes running through this interview. For each theme, note 2-3 transcript moments that anchor it and what makes them strong examples. Return moments as [CLIP:] markers and discuss the themes conversationally.' },
+            { label: 'Where does this interview turn?', prompt: 'Find the inflection points in this interview. Moments where the conversation shifts emotionally, the subject opens up, the energy changes, or new ground gets broken. Return each turn as a [CLIP:] marker with a note on what shifts.' },
+            { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
+        ];
+    }
+    if (state === 'B') {
+        if (myStyleOn) {
+            return [
+                { label: 'What am I missing?', prompt: 'Based on the transcript, my selected clips, and my storytelling foundation, what strong moments have I not pulled yet? Prioritize moments that match my editorial patterns. Return suggestions as [CLIP:] markers.' },
+                { label: 'What story am I building?', prompt: 'Based on my selected clips and my storytelling foundation, what narrative am I assembling? Does the arc match how I typically structure pieces? Where does it diverge from my usual patterns? Respond conversationally.' },
+                { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
+                { label: "What's the subject avoiding?", prompt: "Read the full transcript. Where does the subject deflect, change topics, or skim past something that seemed important? These avoidance moments often signal what the real story is. Return as [CLIP:] markers with a note on what's being avoided." },
+            ];
+        }
+        return [
+            { label: 'What am I missing?', prompt: 'Based on the transcript and my selected clips, what strong moments have I not pulled yet? Consider thematic gaps, emotional range, and narrative completeness. Return suggestions as [CLIP:] markers.' },
+            { label: 'What story am I building?', prompt: 'Based on my selected clips, what narrative am I assembling? Describe the story arc taking shape, any missing pieces, and where the emotional turn point sits. Respond conversationally.' },
+            { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
+            { label: "What's the subject avoiding?", prompt: "Read the full transcript. Where does the subject deflect, change topics, or skim past something that seemed important? These avoidance moments often signal what the real story is. Return as [CLIP:] markers with a note on what's being avoided." },
+        ];
+    }
+    // State C
+    if (myStyleOn) {
+        return [
+            { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a sequence that matches my storytelling foundation. Return as an ordered list with [CLIP:] markers and note where this sequence follows or breaks from my typical story structure.' },
+            { label: 'Do any of my selects overlap?', prompt: 'Look at my selected clips in the context of my storytelling foundation. Which ones cover the same ground? Based on how I typically build stories, which is strongest and which could I cut?' },
+            { label: 'Where does my cut sag?', prompt: 'Looking at my selected clips in order, where does the pacing or energy drop? Identify any sections that feel redundant, too long, or low-momentum based on my storytelling foundation.' },
+            { label: 'Connect the threads', prompt: 'Find moments in my selected clips and the surrounding transcript that connect to or echo each other thematically. Bookend pairs, motifs that recur, ideas that pay off later. Return as paired [CLIP:] markers with a note on the connection.' },
+            { label: 'What am I missing?', prompt: 'Based on the transcript, my selected clips, and my storytelling foundation, what strong moments have I not pulled yet? Prioritize moments that match my editorial patterns. Return suggestions as [CLIP:] markers.' },
+        ];
+    }
+    return [
+        { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a narrative sequence. Return as an ordered list with [CLIP:] markers and a one-line rationale for the sequence.' },
+        { label: 'Do any of my selects overlap?', prompt: 'Look at my selected clips. Which ones cover the same ground? Which is strongest and which could I cut?' },
+        { label: 'Where does my cut sag?', prompt: 'Looking at my selected clips in order, where does the pacing or energy drop? Identify any sections that feel redundant, too long, or low-momentum.' },
+        { label: 'Connect the threads', prompt: 'Find moments in my selected clips and the surrounding transcript that connect to or echo each other thematically. Bookend pairs, motifs that recur, ideas that pay off later. Return as paired [CLIP:] markers with a note on the connection.' },
+        { label: 'What am I missing?', prompt: 'Based on the transcript and my selected clips, what strong moments have I not pulled yet? Consider thematic gaps, emotional range, and narrative completeness. Return suggestions as [CLIP:] markers.' },
+    ];
+}
+
+function _welcomeHeaderForState(state) {
+    // Title is consistent across states ("Story Room") — only the subtitle
+    // copy adapts to clip count. The first prompt button in each state
+    // signals the suggested starting point (rendered with primary fill).
+    if (state === 'A') {
+        return {
+            title: 'Story Room',
+            subtitle: "Explore what this interview is really about. Ask about themes, structure, or moments — or pull clips when you're ready.",
+        };
+    }
+    if (state === 'B') {
+        const n = _clipCount();
+        return {
+            title: 'Story Room',
+            subtitle: `You've pulled ${n} clip${n === 1 ? '' : 's'}. Ask me to find gaps, flag overlaps, or sketch the story you're building.`,
+        };
+    }
+    const n = _clipCount();
+    return {
+        title: 'Story Room',
+        subtitle: `You've got ${n} clips. Ready to think about running order, pacing, and where threads connect.`,
+    };
+}
+
+function _renderPromptButton(p, isPrimary) {
+    const promptAttr = p.prompt.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const labelText = p.label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const fillInAttr = p.fillIn ? ' data-fillin="1"' : '';
+    const cls = isPrimary ? 'chat-suggestion chat-suggestion-primary' : 'chat-suggestion';
+    return `<button class="${cls}" data-prompt="${promptAttr}"${fillInAttr} onclick="sendSuggestion(this)">${labelText}</button>`;
+}
+
+function _welcomeHtml() {
+    const state = _chatState();
+    const header = _welcomeHeaderForState(state);
+    const prompts = _promptsForState(state, _isMyStyleActive());
+    // First prompt is the primary "start here" pick — same size, filled
+    // accent treatment so it reads as a suggestion without being pushy.
+    const buttons = prompts.map((p, i) => _renderPromptButton(p, i === 0)).join('\n                ');
+    return `
+        <div class="chat-welcome" data-chat-state="${state}">
+            <h3 class="chat-welcome-title">${header.title}</h3>
+            <p class="chat-welcome-subtitle">${header.subtitle}</p>
+            <div class="chat-suggestions">
+                ${buttons}
+            </div>
+            <p class="chat-welcome-hint">or just ask me anything about this interview</p>
+        </div>`;
+}
+
+function renderChatWelcome() {
+    const container = document.getElementById('chatMessages');
+    if (!container) return;
+    // Don't clobber an in-flight conversation when clips change. Welcome is
+    // only rendered when no chat messages are on screen. (The class is
+    // .chat-msg, NOT .chat-message — getting this wrong wipes the entire
+    // conversation every time +Clip is clicked, because saveLabels triggers
+    // a welcome re-render through the wrapper below.)
+    const hasMessages = container.querySelector('.chat-msg');
+    if (hasMessages) return;
+    // If the welcome is already rendered AND in the right state, don't
+    // re-render (avoids flicker on every saveLabels call).
+    const existing = container.querySelector('.chat-welcome');
+    const newState = _chatState();
+    if (existing && existing.dataset.chatState === newState
+        && existing.dataset.myStyle === (_isMyStyleActive() ? '1' : '0')) {
+        return;
+    }
+    container.innerHTML = _welcomeHtml();
+    // Tag the rendered welcome with the My Style state so the next call
+    // can detect a toggle change without re-rendering otherwise-identical HTML.
+    const w = container.querySelector('.chat-welcome');
+    if (w) w.dataset.myStyle = _isMyStyleActive() ? '1' : '0';
 }
 
 function isStoryRequest(msg) {
@@ -1660,10 +2113,27 @@ async function streamChatReply({ message, typing, progressTimer }) {
     let finalReply = '';
     let sawDone = false;
 
+    // Watchdog: if the SSE stream goes completely silent for SILENCE_MS
+    // (no tokens, no heartbeats, no progress) we abort and fall back to
+    // the non-streaming /chat endpoint. Without this the typing dots can
+    // sit forever when a buffered hop drops the connection without
+    // surfacing an error.
+    const SILENCE_MS = 90 * 1000;
+    let lastEventAt = Date.now();
+    let watchdogFired = false;
+    const watchdogTimer = setInterval(() => {
+        if (Date.now() - lastEventAt > SILENCE_MS) {
+            watchdogFired = true;
+            try { reader.cancel(); } catch (_) { /* already gone */ }
+            clearInterval(watchdogTimer);
+        }
+    }, 5000);
+
     try {
         while (true) {
             const { value, done } = await reader.read();
             if (done) break;
+            lastEventAt = Date.now();
             buffer += decoder.decode(value, { stream: true });
             // SSE frames are separated by blank lines. Each frame starts
             // with "data: " followed by JSON.
@@ -1683,6 +2153,18 @@ async function streamChatReply({ message, typing, progressTimer }) {
                     // as clip cards + prose. streamedText is preserved as a
                     // fallback in case the stream cuts off before `done`.
                     streamedText += String(payload.data || '');
+                } else if (ev === 'heartbeat') {
+                    // Server is alive but the model is in a silent phase
+                    // (reasoning / composing). Update the indicator so the
+                    // editor sees a sign of life and doesn't think the chat
+                    // hung. Reset the watchdog implicitly via lastEventAt.
+                    const phase = String(payload.data || '');
+                    if (!streamedText) {
+                        const label = phase === 'reasoning'
+                            ? 'Reasoning…'
+                            : phase === 'composing' ? 'Composing reply…' : 'Thinking…';
+                        bubble.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> ' + label;
+                    }
                 } else if (ev === 'progress') {
                     // Progress events come from Layer 2 chunked search
                     // ("Searching across the full interview…"). Show them
@@ -1692,12 +2174,19 @@ async function streamChatReply({ message, typing, progressTimer }) {
                     finalReply = String(payload.data || '');
                     sawDone = true;
                 } else if (ev === 'error') {
+                    clearInterval(watchdogTimer);
                     bubble.classList.remove('chat-streaming');
                     return { ok: false, fallback: true };
                 }
             }
         }
     } catch (e) {
+        clearInterval(watchdogTimer);
+        bubble.classList.remove('chat-streaming');
+        return { ok: false, fallback: true };
+    }
+    clearInterval(watchdogTimer);
+    if (watchdogFired) {
         bubble.classList.remove('chat-streaming');
         return { ok: false, fallback: true };
     }
@@ -2050,9 +2539,29 @@ function renderChatReply(text) {
 
     // Markdown pass on narration only (cards are stashed). escapeHtml has
     // already neutralized real HTML, so these regexes operate on inert text.
+    //
+    // Headers: ## Header → <h4>, ### Sub → <h5> (h3/h4 collide with site type
+    // scale; chat reply content sits at h4/h5 visual weight). Must run BEFORE
+    // bold so the `##` aren't eaten by anything else, and BEFORE list parsing
+    // so a `-` immediately under a header doesn't break the list block.
+    html = html.replace(/^###\s+(.+)$/gm, '<h5 class="chat-h">$1</h5>');
+    html = html.replace(/^##\s+(.+)$/gm, '<h4 class="chat-h">$1</h4>');
     // Bold first so its `**` are consumed before single-asterisk italic runs.
     html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
     html = html.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s.,!?:;)]|$)/g, '$1<em>$2</em>');
+    // Bullet lists: contiguous lines starting with `- ` or `* ` (after we've
+    // consumed the bold/italic markers) become <ul><li>…</li></ul>. The
+    // regex matches a block of consecutive list lines so the list stays
+    // intact instead of getting <br>'d apart later.
+    html = html.replace(/(^|\n)((?:[-*]\s+.+(?:\n|$))+)/g, (m, lead, block) => {
+        const items = block.trim().split('\n').map(l => l.replace(/^[-*]\s+/, ''));
+        return lead + '<ul class="chat-list">' + items.map(i => `<li>${i}</li>`).join('') + '</ul>';
+    });
+    // Numbered lists: same treatment as bullet lists for `1. item`, `2. item`.
+    html = html.replace(/(^|\n)((?:\d+\.\s+.+(?:\n|$))+)/g, (m, lead, block) => {
+        const items = block.trim().split('\n').map(l => l.replace(/^\d+\.\s+/, ''));
+        return lead + '<ol class="chat-list">' + items.map(i => `<li>${i}</li>`).join('') + '</ol>';
+    });
 
     // Convert FREE-TEXT timecodes (outside cards) to clickable links with + button.
     // Cards are already stashed above, so this only touches narration text
@@ -2072,12 +2581,28 @@ function renderChatReply(text) {
     // Strip blank lines immediately around clip cards so they pack tightly
     html = html.replace(/\n*(<div class="cc-card"[\s\S]*?<\/div><\/div>)\n*/g, '$1');
 
-    // Newlines to <br>
+    // Paragraph breaks FIRST: convert 2+ newlines into a spacer div BEFORE
+    // we strip single newlines around block elements. This preserves the
+    // editor's intended paragraph breaks after lists/headers while still
+    // cleaning the single-newline noise the markdown pass leaves behind.
+    html = html.replace(/\n{2,}/g, '<div class="chat-para-gap"></div>');
+
+    // Strip single newlines around block-level markdown elements (lists,
+    // headers) so they don't become stray <br>s. Only strip single \n —
+    // paragraph gaps are already converted to divs above.
+    html = html.replace(/\n(<\/?(?:ul|ol|h4|h5)[^>]*>)/g, '$1');
+    html = html.replace(/(<\/?(?:ul|ol|h4|h5)[^>]*>)\n/g, '$1');
+
+    // Remaining single newlines → <br>
     html = html.replace(/\n/g, '<br>');
-    // Collapse runs of <br> and any <br> hugging a card
-    html = html.replace(/(<br>\s*){2,}/g, '<br>');
+
+    // Trim <br>/gap noise around clip cards
     html = html.replace(/<br>\s*(<div class="cc-card")/g, '$1');
     html = html.replace(/(<\/div><\/div>)\s*<br>/g, '$1');
+    html = html.replace(/<div class="chat-para-gap"><\/div>\s*(<div class="cc-card")/g, '$1');
+    html = html.replace(/(<\/div><\/div>)\s*<div class="chat-para-gap"><\/div>/g, '$1');
+    // Remove gaps between header and immediately following list
+    html = html.replace(/(<\/h[45]>)<div class="chat-para-gap"><\/div>(<[uo]l\b)/g, '$1$2');
 
     return html;
 }
@@ -2360,14 +2885,11 @@ function renderClipsTab() {
         clipText = words.map(w => w.textContent).join('').trim();
         if (clipText.length > 200) clipText = clipText.substring(0, 200) + '...';
 
-        const badges = renderClipBadges(clip.start, clip.end);
-
         if (viewMode === 'list') {
             return `<div class="clip-row" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}">
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
                 <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
-                ${badges}
                 <span class="clip-row-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</span>
                 <span class="clip-row-dur">${formatDuration(duration)}</span>
                 <button class="clip-row-play" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})">
@@ -2383,7 +2905,6 @@ function renderClipsTab() {
             <div class="clip-card-head">
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-card-title" title="${safeTitle}">${safeTitle}</span>
-                ${badges}
                 <span class="clip-card-duration">${formatDuration(duration)}</span>
             </div>
             <div class="clip-card-meta">
@@ -2461,7 +2982,7 @@ function playClip(clipId, start, end) {
 
     // Resume if same clip was paused
     if (clipPlaying && clipPlaying.id === clipId && audio.paused) {
-        audio.play();
+        audio.play().catch(function () {});
         updateClipIcons();
         return;
     }
@@ -2470,7 +2991,7 @@ function playClip(clipId, start, end) {
     document.querySelectorAll('.clip-card').forEach(c => c.classList.remove('clip-card-playing'));
     clipPlaying = { id: clipId, start, end };
     audio.currentTime = start;
-    audio.play();
+    audio.play().catch(function () {});
 
     const card = document.querySelector(`.clip-card[data-clip-id="${clipId}"]`);
     if (card) card.classList.add('clip-card-playing');
@@ -2627,6 +3148,12 @@ const _origSaveLabels = saveLabels;
 saveLabels = function() {
     _origSaveLabels();
     renderClipsTab();
+    _refreshExportCounts();
+    // Refresh the chat welcome — clips changing flips it between the
+    // default discovery prompts and the clip-aware editorial-partner ones.
+    if (typeof renderChatWelcome === 'function') {
+        try { renderChatWelcome(); } catch (_) {}
+    }
 };
 
 // ── Transcription ──
@@ -2716,14 +3243,32 @@ async function runAnalysis() {
             body: JSON.stringify({ type: 'all' }),
         });
         const data = await res.json();
-        stopAnalyzeProgressPoll();
-        if (data.status === 'analyzed' || data.status === 'cached') {
-            showToast(data.status === 'cached' ? 'Loaded cached analysis' : 'Analysis complete!');
+        // Cache hit returns the result synchronously — no polling needed.
+        if (data.status === 'cached') {
+            stopAnalyzeProgressPoll();
+            showToast('Loaded cached analysis');
             setTimeout(() => reloadAndKeepTab('analysis'), 3000);
-        } else {
-            showToast('Error: ' + (data.error || 'Unknown error'), true);
-            resetAnalyzeBtn();
+            return;
         }
+        // Legacy synchronous path (older Flask). Treat the same as cache
+        // for the user — we already have the result on this response.
+        if (data.status === 'analyzed') {
+            stopAnalyzeProgressPoll();
+            showToast('Analysis complete!');
+            setTimeout(() => reloadAndKeepTab('analysis'), 3000);
+            return;
+        }
+        // status === 'started' (fresh worker) or 'running' (worker was
+        // already in flight from a previous /analyze on this project,
+        // e.g. the editor reloaded the project page mid-run). The poll
+        // started above watches for completion and triggers the reload
+        // itself — nothing more to do here.
+        if (data.status === 'started' || data.status === 'running') {
+            return;
+        }
+        stopAnalyzeProgressPoll();
+        showToast('Error: ' + (data.error || 'Unknown error'), true);
+        resetAnalyzeBtn();
     } catch (err) {
         stopAnalyzeProgressPoll();
         showToast('Error: ' + err.message, true);
@@ -2731,23 +3276,83 @@ async function runAnalysis() {
     }
 }
 
+// Tracks whether the current poll session has ever seen the worker as
+// "running" (status file present, not idle). Once we've seen that, an
+// idle response means the worker finished — that's our completion signal
+// for the background-thread analyze path.
+let _analyzeSawProgress = false;
+
 function startAnalyzeProgressPoll() {
     // Poll the per-project analyze_status.json every second. ETA is computed
     // from real elapsed-per-step measurements — gets more accurate as more
     // steps complete. Network blips are non-fatal: each poll is independent.
     if (analyzeProgressTimer) clearInterval(analyzeProgressTimer);
+    _analyzeSawProgress = false;
     const tick = async () => {
         try {
             const r = await fetch(`/project/${PROJECT_ID}/analyze/status`, { cache: 'no-store' });
             if (!r.ok) return;
             const data = await r.json();
-            if (data.idle) return;
+            // Worker surfaced an error in the status file — show it and
+            // reset the UI so the editor can retry.
+            if (data.error) {
+                stopAnalyzeProgressPoll();
+                showToast('Analysis error: ' + data.error, true);
+                resetAnalyzeBtn();
+                return;
+            }
+            // No status file = worker not running. If we'd previously seen
+            // it running, that's the completion signal — reload to pick up
+            // the analysis the worker just wrote to meta.json.
+            if (data.idle) {
+                if (_analyzeSawProgress) {
+                    stopAnalyzeProgressPoll();
+                    showToast('Analysis complete!');
+                    setTimeout(() => reloadAndKeepTab('analysis'), 1500);
+                }
+                return;
+            }
+            _analyzeSawProgress = true;
             renderAnalyzeProgress(data);
+            // Worker explicitly marked done. Same reload flow.
+            if (data.done) {
+                stopAnalyzeProgressPoll();
+                showToast('Analysis complete!');
+                setTimeout(() => reloadAndKeepTab('analysis'), 1500);
+            }
         } catch (e) { /* keep polling */ }
     };
     tick();  // first tick immediately so the bar appears without a 1s gap
     analyzeProgressTimer = setInterval(tick, 1000);
 }
+
+// On project page load, attach the progress UI if a background analysis
+// worker is still in flight. Lets the editor navigate away and come back
+// to live progress instead of the "Run AI Analysis" button as if nothing
+// were happening.
+window.addEventListener('DOMContentLoaded', async () => {
+    if (typeof PROJECT_ID === 'undefined' || !PROJECT_ID) return;
+    try {
+        const r = await fetch(`/project/${PROJECT_ID}/analyze/status`, { cache: 'no-store' });
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data.idle || data.done || data.error) return;
+        const btn = document.getElementById('analyzeBtn');
+        if (btn) {
+            btn.disabled = true;
+            btn.classList.add('is-analyzing');
+            const label = btn.querySelector('.btn-label');
+            if (label) label.textContent = 'Analyzing…';
+        }
+        const runBtn = document.getElementById('runAnalysisBtn');
+        if (runBtn) runBtn.disabled = true;
+        const pre = document.getElementById('preAnalysis');
+        if (pre) pre.style.display = 'none';
+        const prog = document.getElementById('analysisProgress');
+        if (prog) prog.style.display = 'block';
+        startAnalyzeProgressPoll();
+    } catch (_) { /* page works fine without status check */ }
+});
 
 function stopAnalyzeProgressPoll() {
     if (analyzeProgressTimer) {
@@ -2846,10 +3451,20 @@ function _refreshExportButtonState() {
     btn.disabled = _collectExportCategories().length === 0;
 }
 
+// Map AI-Analysis ``category`` arg to the round-trip writer's ``sources``
+// vocabulary. ``labels`` (the My Clips bucket) maps to the round-trip
+// writer's ``client_selects`` source.
+const _CATEGORY_TO_RT_SOURCE = {
+    story: 'story',
+    social: 'social',
+    soundbites: 'soundbites',
+    labels: 'client_selects',
+};
+
 async function exportFCPXML(category) {
     // ``category`` is passed by the analysis-section buttons (story/social/
-    // soundbites) to export just one bucket; the Export tab calls without
-    // an arg and we read the checkboxes instead.
+    // soundbites/labels) to export just one bucket; the Export tab calls
+    // without an arg and we read the checkboxes instead.
     const types = category ? [category] : _collectExportCategories();
     if (types.length === 0) {
         showToast('Check at least one category to export.');
@@ -2870,6 +3485,27 @@ async function exportFCPXML(category) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
         });
+    }
+
+    // Round-trip branch: when the project was imported from FCPXML, route
+    // analysis-section single-category exports through /export/fcpxml-multicam
+    // so the original media references are preserved. The Export tab's bare
+    // exportFCPXML() call doesn't take this branch because that UI is gated
+    // out for fcpxml_source projects in favor of exportFCPXMLMulticam().
+    //
+    // NOTE: PROJECT is declared `const` at the top of the page script. Top-
+    // level `const` lives in the *lexical* global scope, not on `window` —
+    // so `window.PROJECT` is undefined here. Check the lexical binding via
+    // `typeof` instead.
+    const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
+    if (hasFcpxmlSource && category) {
+        const rtSource = _CATEGORY_TO_RT_SOURCE[category];
+        if (rtSource) {
+            return _exportFCPXMLRoundTrip({
+                sources: [rtSource],
+                mode: 'selects_project',
+            });
+        }
     }
 
     const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
@@ -2904,11 +3540,107 @@ async function exportFCPXML(category) {
     }
 }
 
+// Shared transport for AI Analysis + Story Builder round-trip exports.
+// Mirrors the body shape exportFCPXMLMulticam() uses so the Export tab's
+// existing path stays the source of truth for the round-trip endpoint.
+async function _exportFCPXMLRoundTrip(opts) {
+    const delivery = getDelivery();
+    const body = Object.assign(
+        { mode: 'selects_project', deliver_to: delivery },
+        opts || {},
+    );
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast((data && data.error) || 'Export failed', true);
+            return;
+        }
+        if (data.delivery === 'nle') {
+            showToast('Sent to Final Cut Pro');
+        } else {
+            showToast(`Exported to ${data.file || data.filename || 'disk'}`);
+        }
+    } catch (err) {
+        showToast('Export error: ' + err.message, true);
+    }
+}
+
 // ── FCPXML multicam round-trip (for projects imported from an FCPXML) ──
+// ── FCPXML Round-Trip helpers ──
+function setRtMode(btn) {
+    btn.closest('.export-mode-segmented').querySelectorAll('.export-mode-btn').forEach(b => b.classList.remove('is-active'));
+    btn.classList.add('is-active');
+}
+
+function _collectRtSources() {
+    const map = {
+        rtCatLabels: 'client_selects',
+        rtCatSocial: 'social',
+        rtCatStory: 'story',
+        rtCatSoundbites: 'soundbites',
+    };
+    const picked = [];
+    for (const [id, key] of Object.entries(map)) {
+        const el = document.getElementById(id);
+        if (el && el.checked) picked.push(key);
+    }
+    return picked;
+}
+
+function _refreshRtExportButtonState() {
+    const btn = document.getElementById('rtExportBtn');
+    if (!btn) return;
+    btn.disabled = _collectRtSources().length === 0;
+}
+
+function _refreshExportCounts() {
+    const analysis = (window.PROJECT && PROJECT.analysis) || {};
+    const clipCount = (typeof labelSections !== 'undefined') ? labelSections.length : 0;
+    const socialCount = (analysis.social_clips || []).length;
+    const storyCount = (analysis.story_beats || []).length;
+    const soundbiteCount = (analysis.strongest_soundbites || []).length;
+
+    // Round-trip export checkboxes
+    const rtMap = {
+        rtCatLabelsCount: clipCount, rtCatSocialCount: socialCount,
+        rtCatStoryCount: storyCount, rtCatSoundbitesCount: soundbiteCount,
+    };
+    for (const [id, count] of Object.entries(rtMap)) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = count;
+        // Disable checkbox if count is 0
+        const checkbox = document.getElementById(id.replace('Count', ''));
+        if (checkbox) {
+            checkbox.disabled = count === 0;
+            if (count === 0) checkbox.checked = false;
+        }
+    }
+    // Standard NLE export checkboxes
+    const stdMap = {
+        exportCatLabelsCount: clipCount, exportCatSocialCount: socialCount,
+        exportCatStoryCount: storyCount,
+    };
+    for (const [id, count] of Object.entries(stdMap)) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = count;
+        const checkbox = document.getElementById(id.replace('Count', ''));
+        if (checkbox) {
+            checkbox.disabled = count === 0;
+            if (count === 0) checkbox.checked = false;
+        }
+    }
+    _refreshRtExportButtonState();
+}
+
 // Round-trip is FCP-only by construction, so the delivery toggle picks
 // "save and reveal" vs "open in Final Cut Pro" but never targets Resolve
 // or Premiere.
-async function exportFCPXMLMulticam(mode) {
+async function exportFCPXMLMulticam() {
     // Persist the latest clip labels before export so "Clip labels" source is fresh.
     if (typeof labelSections !== 'undefined' && labelSections.length) {
         const sections = labelSections.map(s => ({
@@ -2921,7 +3653,13 @@ async function exportFCPXMLMulticam(mode) {
         });
     }
 
-    const source = document.getElementById('fcpxmlMulticamSource')?.value || 'client_selects';
+    const sources = _collectRtSources();
+    if (sources.length === 0) {
+        showToast('Check at least one category to export.');
+        return;
+    }
+    const modeBtn = document.querySelector('#rtOutputMode .export-mode-btn.is-active');
+    const mode = modeBtn ? modeBtn.getAttribute('data-mode') : 'selects_project';
     const delivery = getDelivery();
     const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
 
@@ -2929,7 +3667,7 @@ async function exportFCPXMLMulticam(mode) {
         const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode, source, deliver_to: delivery }),
+            body: JSON.stringify({ mode, sources, deliver_to: delivery }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -3791,6 +4529,26 @@ async function exportStoryFCPXML() {
         return;
     }
 
+    // Round-trip branch: for FCPXML-imported projects, route the Story
+    // Builder export through /export/fcpxml-multicam so the original media
+    // references are preserved. The 'story_build' source kind on
+    // _project_selects_for_fcpxml consumes the inline clips list (the
+    // build's clips don't live on the project, only in this request body)
+    // and preserve_order on the writer keeps the narrative ordering.
+    //
+    // NOTE: see exportFCPXML — top-level `const PROJECT` lives in the
+    // lexical global, not on `window`, so we check the binding directly.
+    const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
+    if (hasFcpxmlSource) {
+        return _exportFCPXMLRoundTrip({
+            sources: ['story_build'],
+            mode: 'selects_project',
+            story_build_clips: build.clips,
+            story_title: build.story_title,
+            preserve_order: true,
+        });
+    }
+
     const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
     const delivery = getDelivery();
     const nle = EDITING_PLATFORM;
@@ -4385,6 +5143,12 @@ function toggleMyStylePill() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({active: newState}),
     });
+    // My Style toggle changes which clip-aware prompt set the welcome shows
+    // (filtered through editorial DNA vs neutral). Re-render so the buttons
+    // pick up the new variants immediately.
+    if (typeof renderChatWelcome === 'function') {
+        try { renderChatWelcome(); } catch (_) {}
+    }
 }
 
 // ===== Editorial DNA v2.1 — session profile selector =====

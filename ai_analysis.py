@@ -4613,7 +4613,12 @@ def get_effective_ollama_model():
     }
 
     try:
-        response = requests.get('http://localhost:11434/api/tags', timeout=5)
+        # 2s timeout (was 5s). /api/ai-model/status calls this synchronously;
+        # a longer timeout would race the modal's 12s AbortController on
+        # systems where Ollama is mid-boot, hiding the variant list. With
+        # 2s we fail fast and the modal renders the hardware-derived
+        # variants while marking effective.model = None.
+        response = requests.get('http://localhost:11434/api/tags', timeout=2)
         if response.status_code == 200:
             models = response.json().get('models', [])
             available = [m['name'] for m in models]
@@ -4627,12 +4632,15 @@ def get_effective_ollama_model():
                 canonical = _LATEST_ALIASES.get(avail)
                 if canonical and canonical == selected_variant:
                     return avail, selected_variant, False
-            # Fall back through other variants — but flag it so the UI can
-            # warn the user that they're not actually using their selection.
-            fallback = [
-                'gemma4:e4b', 'gemma4:latest', 'gemma4:e2b', 'gemma4:26b', 'gemma4:31b',
-                'llama3:8b', 'mistral', 'llama3:70b',
-            ]
+            # Fall back through preferred IN-FAMILY variants — but flag
+            # it so the UI can warn the user that they're not on their
+            # selection. We previously also fell back to gemma3 / llama3 /
+            # mistral and to `available[0]`, which produced the 0.7.0
+            # "phantom gemma3:4b in Currently-loaded badge" bug. If no
+            # gemma4 variant is installed, return None so the UI can
+            # render an actionable empty state instead of pretending a
+            # different model is loaded.
+            fallback = ['gemma4:e4b', 'gemma4:latest', 'gemma4:e2b', 'gemma4:26b', 'gemma4:31b']
             for pref in fallback:
                 for avail in available:
                     if pref in avail:
@@ -4640,13 +4648,14 @@ def get_effective_ollama_model():
                               f"installed; using {avail!r} (matched on {pref!r}). "
                               "User won't see speed/quality changes from selection.")
                         return avail, selected_variant, True
-            if available:
-                print(f"[model] FALLBACK: selected {selected_variant!r} not installed "
-                      f"and no preferred fallback found; using first available {available[0]!r}.")
-                return available[0], selected_variant, True
+            # No usable gemma4 variant installed. Don't pretend.
+            return None, selected_variant, True
     except Exception as e:
         print(f"[model] could not query Ollama tags: {e}")
-    return selected_variant, selected_variant, False
+    # Ollama unreachable. Don't pretend the selected variant is loaded;
+    # return None so the UI surfaces "model not available" rather than
+    # quietly showing a phantom "currently loaded" badge.
+    return None, selected_variant, True
 
 
 def _get_ollama_model():

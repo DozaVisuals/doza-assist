@@ -74,21 +74,50 @@ os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
 
 @app.context_processor
 def inject_brand():
-    """Make the user-visible app brand and logo configurable from the
-    launching shell.
+    """Make the user-visible app brand and logo configurable.
 
-    Defaults: brand = "Doza Assist", logo_url = "/static/logo.jpg".
-    An external launcher (a downstream shell that bundles this Flask
-    backend) can override by setting DOZA_BRAND and/or DOZA_LOGO_URL in
-    the environment before spawning python -- the shell is responsible
-    for ensuring whatever URL it points at actually serves an image
-    (drop the logo into static/ before launch).
+    Resolution order:
+      1. Explicit env vars (``DOZA_BRAND``, ``DOZA_LOGO_URL``) win when set.
+         The 0.7.0 Electron shell doesn't set these, so this branch is
+         only used by legacy / dev overrides.
+      2. Sibling ``../pro/`` directory present → Pro edition. The
+         Electron bundle ships the Pro overlay at
+         ``Contents/Resources/pro/`` and the OSS core at
+         ``Contents/Resources/app/``; from this file's perspective that
+         lands as ``../pro``. Auto-detect picks up the Pro overlay
+         without requiring the launcher to know about branding.
+      3. Default OSS branding.
+
+    ``app_version`` falls back to the wrapper version when the launching
+    shell exposes it via DOZA_WRAPPER_VERSION (set by the 0.7.x Electron
+    shell). This eliminates the 0.7.0 confusion where the header showed
+    the OSS Flask app version (3.3.0) instead of the wrapper version
+    (0.7.0) that users actually downloaded.
     """
     from doza_assist import __version__ as _doza_version
+
+    brand = os.environ.get('DOZA_BRAND')
+    logo = os.environ.get('DOZA_LOGO_URL')
+
+    if not brand or not logo:
+        # __file__-relative detection — the legacy implementation looked
+        # at the CWD which resolved against the run directory rather
+        # than the source tree, missing the Pro overlay in the .app
+        # bundle even though it was right next door.
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _pro_sibling = os.path.join(_here, '..', 'pro')
+        if os.path.isdir(_pro_sibling):
+            if not brand:
+                brand = 'Doza Assist Pro'
+            if not logo:
+                # Pro overlay's collection blueprint serves the
+                # branded logo at /collection/static/logo-pro.png.
+                logo = '/collection/static/logo-pro.png'
+
     return {
-        'brand': os.environ.get('DOZA_BRAND', 'Doza Assist'),
-        'logo_url': os.environ.get('DOZA_LOGO_URL', '/static/logo.jpg'),
-        'app_version': _doza_version,
+        'brand': brand or 'Doza Assist',
+        'logo_url': logo or '/static/logo.jpg',
+        'app_version': os.environ.get('DOZA_WRAPPER_VERSION') or _doza_version,
     }
 
 

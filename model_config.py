@@ -34,16 +34,40 @@ VALID_TIERS = ('small', 'medium', 'large', 'xlarge')
 
 
 def _get_ram_gb():
-    """Return total system RAM in GB."""
+    """Return total system RAM in GB.
+
+    Resolution order:
+      1. ``os.sysconf`` (POSIX, no subprocess) — works inside the 0.7.x
+         bundled Python regardless of what PATH the Electron shell sets.
+      2. ``/usr/sbin/sysctl hw.memsize`` (absolute path; the bundled
+         Flask process has a sanitized PATH that may omit /usr/sbin).
+      3. Linux /proc/meminfo for completeness.
+      4. 8.0 GB as a last-resort default.
+
+    0.7.0 shipped a version of this function that called
+    ``subprocess.run(['sysctl', …])`` relying on PATH. The bundled
+    Flask's PATH was ``ffmpeg:/usr/bin:/bin`` — no /usr/sbin — so
+    sysctl wasn't found and every user saw the 8.0 default regardless
+    of actual hardware. Migrating to ``os.sysconf`` removes the
+    subprocess dependency entirely.
+    """
     try:
-        result = subprocess.run(
-            ['sysctl', '-n', 'hw.memsize'],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            return int(result.stdout.strip()) / (1024 ** 3)
-    except Exception:
+        page_size = os.sysconf('SC_PAGE_SIZE')
+        phys_pages = os.sysconf('SC_PHYS_PAGES')
+        if page_size > 0 and phys_pages > 0:
+            return (page_size * phys_pages) / (1024 ** 3)
+    except (OSError, ValueError):
         pass
+    for sysctl_path in ('/usr/sbin/sysctl', '/sbin/sysctl', 'sysctl'):
+        try:
+            result = subprocess.run(
+                [sysctl_path, '-n', 'hw.memsize'],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return int(result.stdout.strip()) / (1024 ** 3)
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+            continue
     try:
         with open('/proc/meminfo') as f:
             for line in f:

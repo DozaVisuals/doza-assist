@@ -183,8 +183,16 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
     total_samples = len(audio_data)
     total_duration = total_samples / sr
 
-    # Chunk into ~5 minute segments with 1s overlap to avoid cutting words
-    chunk_sec = 300  # 5 minutes
+    # Chunk into ~1 minute segments with 1s overlap to avoid cutting words.
+    # We previously used 300s, which fixed the original "whole-file OOM" but
+    # still occasionally trips a hard SIGABRT from inside Metal's completion
+    # handler on some M1 systems (issue #23: mlx::core::gpu::check_error →
+    # std::terminate → abort, which kills the whole Python process and shows
+    # as a generic "Load failed" to the user). Smaller chunks shrink each GPU
+    # command buffer and let us clear MLX's cache between chunks so GPU
+    # pressure stays flat across long files. ~5x the per-chunk overhead
+    # but per-chunk overhead is tiny so the net runtime cost is negligible.
+    chunk_sec = 60
     overlap_sec = 1
     chunk_samples = int(chunk_sec * sr)
     overlap_samples = int(overlap_sec * sr)
@@ -212,6 +220,25 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
 
         result = model.transcribe(tmp_path)
         os.remove(tmp_path)
+
+        # Flush pending Metal work and release cached GPU buffers between
+        # chunks. Without this, MLX carries command-buffer state across
+        # chunks and on long files that has triggered hard SIGABRT crashes
+        # from mlx::core::gpu::check_error (issue #23). Wrapped because the
+        # exact MLX cache API has moved between versions — we try the
+        # current top-level call, fall back to the older metal namespace,
+        # and silently skip if neither exists rather than turn cleanup into
+        # a new failure mode.
+        try:
+            import mlx.core as mx
+            if hasattr(mx, 'synchronize'):
+                mx.synchronize()
+            if hasattr(mx, 'clear_cache'):
+                mx.clear_cache()
+            elif hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
+                mx.metal.clear_cache()
+        except Exception:
+            pass
 
         for sent in result.sentences:
             if not sent.text.strip():

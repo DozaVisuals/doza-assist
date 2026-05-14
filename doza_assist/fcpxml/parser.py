@@ -531,6 +531,17 @@ def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
             lane = ac.get("lane", "")
             if lane and lane != "0":
                 lane_candidates.append(ac)
+    # Third shape: FCP also writes sync-clips with NO inner <spine>, where
+    # the external lane-attached audio sits nested INSIDE the primary
+    # asset-clip itself (lane=-1 child of the camera/video asset-clip).
+    # Without scanning here, sync-clips of this shape whose camera mic was
+    # muted via <sync-source>/<audio-role-source active="0"> resolve to
+    # is_muted=True and drop out of the timeline-audio plan entirely.
+    for primary_clip in list(sync_clip_el.findall("asset-clip")):
+        for ac in primary_clip.findall("asset-clip"):
+            lane = ac.get("lane", "")
+            if lane and lane != "0":
+                lane_candidates.append(ac)
 
     primary = _pick_dialogue_asset_clip(primary_candidates, resource_by_id)
     lane = _pick_dialogue_asset_clip(lane_candidates, resource_by_id)

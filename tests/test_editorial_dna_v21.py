@@ -58,7 +58,7 @@ def fake_llm(monkeypatch):
         'uses_narration': False,
     }
 
-    def fake(prompt):
+    def fake(prompt, *_args, **_kwargs):
         return json.dumps(canned)
 
     import ai_analysis
@@ -67,7 +67,7 @@ def fake_llm(monkeypatch):
     import editorial_dna.analysis as ea
     monkeypatch.setattr(ea, '_call_ai', fake)
     import editorial_dna.summarizer as es
-    monkeypatch.setattr(es, '_call_ai', lambda p: 'A calm, observational editor who lets subjects breathe.')
+    monkeypatch.setattr(es, '_call_ai', lambda p, *_a, **_k: 'A calm, observational editor who lets subjects breathe.')
     return canned
 
 
@@ -321,9 +321,9 @@ def test_analysis_survives_bad_llm_json(monkeypatch):
     import ai_analysis
     import editorial_dna.analysis as ea
     import editorial_dna.summarizer as es
-    monkeypatch.setattr(ai_analysis, '_call_ai', lambda p: 'not json at all!!')
-    monkeypatch.setattr(ea, '_call_ai', lambda p: 'not json at all!!')
-    monkeypatch.setattr(es, '_call_ai', lambda p: 'A calm editor.')
+    monkeypatch.setattr(ai_analysis, '_call_ai', lambda p, *_a, **_k: 'not json at all!!')
+    monkeypatch.setattr(ea, '_call_ai', lambda p, *_a, **_k: 'not json at all!!')
+    monkeypatch.setattr(es, '_call_ai', lambda p, *_a, **_k: 'A calm editor.')
 
     summary = ea.generate_structured_summary(
         'x', 'Test', {'speech_pacing': {'rhythm_descriptor': 'calm'}},

@@ -256,7 +256,7 @@ class TestSynthesizeOverallSummary:
         # a single 3-4 sentence overview covering every section.
         captured = {}
 
-        def _fake_call_ai(prompt, system_prompt=''):
+        def _fake_call_ai(prompt, system_prompt='', **_kwargs):
             captured['prompt'] = prompt
             return (
                 '{"summary": "Covers interviews A, B, and C across the whole '

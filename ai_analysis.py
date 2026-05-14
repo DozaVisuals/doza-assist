@@ -21,6 +21,90 @@ from editorial_dna.storytelling import inject_storytelling_foundation
 _OLLAMA_KEEP_ALIVE = '30m'
 
 
+# ── Anthropic prompt-cache sentinels ─────────────────────────────────────
+#
+# Heavy editorial calls reuse the same transcript across many requests in
+# one session (Story analysis runs four passes per chunk; chat resends
+# the transcript on every user turn). To let Anthropic prompt caching
+# kick in without refactoring every prompt template, call sites wrap the
+# cacheable content in these sentinels:
+#
+#   prompt = f"...TRANSCRIPT:\n{CACHE_TX_START}{transcript}{CACHE_TX_END}..."
+#
+# The wrapper functions below (_call_ai, _call_ai_json, _call_ai_chat,
+# _call_ai_chat_stream) detect the sentinels and:
+#   - On Anthropic, move the wrapped content into a structured system
+#     block list with cache_control markers (5m TTL for stable text and
+#     DNA examples, 1h TTL for the transcript). The user prompt is sent
+#     with the wrapped section replaced by a short pointer.
+#   - On Ollama / OpenAI, strip the sentinels and send the prompt
+#     verbatim so non-Anthropic behavior is byte-identical to before.
+#
+# The sentinels are deliberately unusual strings that will not collide
+# with real interview content. They are stripped before any non-Anthropic
+# call, so they never reach a model that does not understand them.
+CACHE_TX_START = "<<<DOZA_CACHE_TRANSCRIPT_START>>>"
+CACHE_TX_END = "<<<DOZA_CACHE_TRANSCRIPT_END>>>"
+CACHE_DNA_START = "<<<DOZA_CACHE_DNA_START>>>"
+CACHE_DNA_END = "<<<DOZA_CACHE_DNA_END>>>"
+_TRANSCRIPT_HOISTED_NOTICE = "(TRANSCRIPT provided in the system prompt above.)"
+_DNA_HOISTED_NOTICE = "(EDITORIAL STYLE provided in the system prompt above.)"
+
+
+def _extract_cache_segment(text: str, start: str, end: str):
+    """Return (segment_or_None, text_with_segment_replaced).
+
+    The replacement leaves a short notice in place of the cached content
+    so the user prompt still reads coherently. Sentinels themselves are
+    always removed. When the sentinels are absent, returns
+    ``(None, text)`` unchanged.
+    """
+    if not text or start not in text or end not in text:
+        return None, text
+    i = text.find(start)
+    j = text.find(end, i + len(start))
+    if j < 0:
+        return None, text.replace(start, "").replace(end, "")
+    segment = text[i + len(start):j]
+    notice = (
+        _TRANSCRIPT_HOISTED_NOTICE if start == CACHE_TX_START
+        else _DNA_HOISTED_NOTICE if start == CACHE_DNA_START
+        else ""
+    )
+    cleaned = text[:i] + notice + text[j + len(end):]
+    return segment, cleaned
+
+
+def _strip_cache_sentinels(text: str) -> str:
+    """Remove any cache sentinel markers from ``text`` without touching
+    the content they wrap. Used for non-Anthropic providers where the
+    full prompt is sent inline."""
+    if not text:
+        return text
+    return (
+        text
+        .replace(CACHE_TX_START, "")
+        .replace(CACHE_TX_END, "")
+        .replace(CACHE_DNA_START, "")
+        .replace(CACHE_DNA_END, "")
+    )
+
+
+def _split_cacheable_prompt(prompt: str):
+    """Pull transcript and DNA segments out of a sentinel-tagged prompt.
+
+    Returns ``(prompt_without_segments, transcript_or_None, dna_or_None)``.
+    Used by the wrapper functions to decide between the cached-system
+    Anthropic payload and the sentinel-stripped fallback path for other
+    providers.
+    """
+    if not prompt:
+        return prompt, None, None
+    transcript, prompt = _extract_cache_segment(prompt, CACHE_TX_START, CACHE_TX_END)
+    dna, prompt = _extract_cache_segment(prompt, CACHE_DNA_START, CACHE_DNA_END)
+    return prompt, transcript, dna
+
+
 def _load_chat_system_prompt():
     """Load the master chat system prompt from prompts/chat-system-prompt.md.
 
@@ -100,7 +184,12 @@ def _build_transcript_message(project_name, segments, formatted,
         parts.append(f"SPEAKERS: {', '.join(speakers)}")
     parts.append('')
     parts.append('TRANSCRIPT:')
-    parts.append(formatted)
+    # Wrap just the transcript bytes in cache sentinels. The chat-stream
+    # wrapper hoists the wrapped chunk into a cached text block when the
+    # active provider is Anthropic, so every follow-up turn in the
+    # session re-uses the cached transcript instead of paying full
+    # input-token cost. Ollama strips the sentinels.
+    parts.append(f'{CACHE_TX_START}{formatted}{CACHE_TX_END}')
     if analysis_block:
         parts.append(analysis_block)
     if relevant_excerpts_block:
@@ -151,9 +240,16 @@ def _build_chat_messages(message, history, project_name, segments,
     messages = []
     style_block = get_active_style_block(profile_id=profile_id)
     if style_block:
+        # The style block (Editorial DNA / My Style examples) is stable
+        # across a session, so wrap it in DNA sentinels for the
+        # Anthropic prompt cache. Non-Anthropic providers receive the
+        # sentinel-stripped string and behavior is unchanged.
         messages.append({
             'role': 'user',
-            'content': f'STYLE CONTEXT (active My Style profile):\n\n{style_block}',
+            'content': (
+                'STYLE CONTEXT (active My Style profile):\n\n'
+                f'{CACHE_DNA_START}{style_block}{CACHE_DNA_END}'
+            ),
         })
 
     transcript_msg = _build_transcript_message(
@@ -302,7 +398,103 @@ _OLLAMA_STOP_TOKENS = [
 ]
 
 
-def _call_ai_chat_stream(system_message, messages, num_ctx=32768):
+def _prepare_chat_messages_for_provider(provider_name, system_message, messages):
+    """Return (system_param, messages_param) ready for ``provider_name``.
+
+    Looks for cache sentinels inside the messages list. On Anthropic, the
+    transcript message's content becomes a list of text blocks with
+    cache_control so each turn after the first re-uses the cached prefix
+    instead of paying full input-token cost. On Ollama / OpenAI the
+    sentinels are stripped and the messages are returned unchanged.
+    """
+    if provider_name != "anthropic":
+        cleaned = []
+        for m in messages or []:
+            if not isinstance(m, dict):
+                cleaned.append(m)
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                cleaned.append({**m, "content": _strip_cache_sentinels(content)})
+            else:
+                cleaned.append(m)
+        return system_message, cleaned
+
+    from ai_providers.anthropic_provider import (
+        build_cached_system_blocks,
+        build_cached_user_messages,
+    )
+
+    transcript_text = None
+    dna_text = None
+    rebuilt: list = []
+    transcript_message_index = None
+
+    _NOISE_AFTER_HOIST = (
+        "style context (active my style profile):",
+    )
+    _HOIST_NOTICES = (
+        _TRANSCRIPT_HOISTED_NOTICE.lower(),
+        _DNA_HOISTED_NOTICE.lower(),
+    )
+
+    def _is_noise_only(s: str) -> bool:
+        stripped = (s or "").strip().lower()
+        if not stripped:
+            return True
+        for notice in _HOIST_NOTICES:
+            stripped = stripped.replace(notice, "").strip()
+        if not stripped:
+            return True
+        return any(stripped.startswith(p) and len(stripped) <= len(p) + 4
+                   for p in _NOISE_AFTER_HOIST)
+
+    for m in messages or []:
+        if not isinstance(m, dict):
+            rebuilt.append(m)
+            continue
+        content = m.get("content")
+        if not isinstance(content, str):
+            rebuilt.append(m)
+            continue
+        seg_tx, content_after = _extract_cache_segment(content, CACHE_TX_START, CACHE_TX_END)
+        seg_dna, content_after = _extract_cache_segment(content_after, CACHE_DNA_START, CACHE_DNA_END)
+        if seg_tx and transcript_text is None:
+            transcript_text = seg_tx
+        if seg_dna and dna_text is None:
+            dna_text = seg_dna
+        if (seg_tx or seg_dna) and _is_noise_only(content_after):
+            continue
+        new_msg = {**m, "content": content_after}
+        if seg_tx and transcript_message_index is None:
+            transcript_message_index = len(rebuilt)
+        rebuilt.append(new_msg)
+
+    if not transcript_text and not dna_text:
+        return system_message, rebuilt
+
+    system_param = build_cached_system_blocks(
+        system_message, dna_block=dna_text, transcript_block=None,
+    ) if (system_message or dna_text) else system_message
+
+    if transcript_text and transcript_message_index is not None:
+        head = rebuilt[:transcript_message_index]
+        tail = rebuilt[transcript_message_index + 1:]
+        framing = (rebuilt[transcript_message_index].get("content") or "").strip()
+        extras = []
+        if framing:
+            extras.append({"type": "text", "text": framing})
+        new_message_block = build_cached_user_messages(
+            transcript_block=transcript_text,
+            other_user_messages=[],
+            extra_user_blocks=extras,
+        )[0]
+        rebuilt = head + [new_message_block] + tail
+
+    return system_param, rebuilt
+
+
+def _call_ai_chat_stream(system_message, messages, num_ctx=32768, call_site=None):
     """Stream chat tokens through the active AI provider.
 
     ``system_message`` is the master system prompt (chat-system-prompt.md
@@ -317,9 +509,13 @@ def _call_ai_chat_stream(system_message, messages, num_ctx=32768):
     """
     from ai_providers import get_active_provider
     provider = get_active_provider(model_resolver=_get_ollama_model)
-    yield from provider.generate_stream(
-        system_message, messages, task_type="chat", num_ctx=num_ctx,
+    system_param, messages_param = _prepare_chat_messages_for_provider(
+        provider.name, system_message, messages,
     )
+    kwargs = {"task_type": "chat", "num_ctx": num_ctx}
+    if provider.name == "anthropic":
+        kwargs["call_site"] = call_site or "_call_ai_chat_stream"
+    yield from provider.generate_stream(system_param, messages_param, **kwargs)
 
 
 def chat_about_transcript_stream(transcript, message, history=None, project_name="Interview",
@@ -456,17 +652,26 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     yield ('done', cleaned)
 
 
-def _call_ai_chat(system_message, messages, num_ctx=32768):
+def _call_ai_chat(system_message, messages, num_ctx=32768, call_site=None):
     """Non-streaming chat call through the active provider.
 
     Same input shape as :func:`_call_ai_chat_stream` — a system string plus
     a messages array. Returns the full reply as a single string.
+
+    Honors the cache sentinels (CACHE_TX_START / END, CACHE_DNA_START / END)
+    when the active provider is Anthropic: the wrapped sections are moved
+    out of the user message and into structured cached system / user
+    content blocks before the request is sent.
     """
     from ai_providers import get_active_provider
     provider = get_active_provider(model_resolver=_get_ollama_model)
-    return provider.generate(
-        system_message, messages, task_type="chat", num_ctx=num_ctx,
+    system_param, messages_param = _prepare_chat_messages_for_provider(
+        provider.name, system_message, messages,
     )
+    kwargs = {"task_type": "chat", "num_ctx": num_ctx}
+    if provider.name == "anthropic":
+        kwargs["call_site"] = call_site or "_call_ai_chat"
+    return provider.generate(system_param, messages_param, **kwargs)
 
 
 def _count_clip_markers(text):
@@ -2275,13 +2480,13 @@ BAD:  "Discussion of the creative process."
 GOOD: "She walks through how a single rejected draft became the backbone of the final piece."{keyword_hint}
 
 EXCERPT:
-{chunk_block}"""
+{CACHE_TX_START}{chunk_block}{CACHE_TX_END}"""
 
     user_prompt = f"User's question: {message}\n\nReturn JSON with up to 3 candidate moments from this excerpt."
     return system_prompt, user_prompt
 
 
-def _call_ai_json(system_prompt, user_prompt, timeout=180, model_override=None):
+def _call_ai_json(system_prompt, user_prompt, timeout=180, model_override=None, call_site=None):
     """Low-temperature Ollama call optimized for structured output.
 
     Uses a smaller num_ctx than chat because each chunk fits comfortably
@@ -2315,9 +2520,16 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180, model_override=None):
     model_name = model_override or (
         _get_ollama_model() if provider.name == "ollama" else provider.name
     )
+    # Cache-key strips sentinels from BOTH prompts so a sentinel-tagged
+    # prompt and a plain equivalent prompt do not produce two LRU
+    # entries. The chunked-search path embeds the chunk inside the
+    # system prompt, so we also need to extract sentinels from there
+    # for the Anthropic prompt-cache hoist below.
+    plain_system_prompt = _strip_cache_sentinels(system_prompt)
+    plain_user_prompt = _strip_cache_sentinels(user_prompt)
     cache_key = (
-        hashlib.sha1(system_prompt.encode('utf-8', 'replace')).hexdigest(),
-        hashlib.sha1(user_prompt.encode('utf-8', 'replace')).hexdigest(),
+        hashlib.sha1(plain_system_prompt.encode('utf-8', 'replace')).hexdigest(),
+        hashlib.sha1(plain_user_prompt.encode('utf-8', 'replace')).hexdigest(),
         model_name,
         provider.name,
     )
@@ -2325,10 +2537,32 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180, model_override=None):
     if cached is not None:
         return cached
     try:
-        result = provider.generate(
-            system_prompt, user_prompt, task_type="analysis",
-            timeout=timeout, model_override=model_override,
-        )
+        if provider.name == "anthropic":
+            from ai_providers.anthropic_provider import build_cached_system_blocks
+            clean_user, user_tx, user_dna = _split_cacheable_prompt(user_prompt)
+            clean_system, sys_tx, sys_dna = _split_cacheable_prompt(system_prompt)
+            transcript = sys_tx or user_tx
+            dna = sys_dna or user_dna
+            if transcript or dna:
+                system_param = build_cached_system_blocks(
+                    clean_system, dna_block=dna, transcript_block=transcript,
+                )
+                result = provider.generate(
+                    system_param, clean_user, task_type="analysis",
+                    timeout=timeout, model_override=model_override,
+                    call_site=call_site or "_call_ai_json",
+                )
+            else:
+                result = provider.generate(
+                    plain_system_prompt, plain_user_prompt, task_type="analysis",
+                    timeout=timeout, model_override=model_override,
+                    call_site=call_site or "_call_ai_json",
+                )
+        else:
+            result = provider.generate(
+                plain_system_prompt, plain_user_prompt, task_type="analysis",
+                timeout=timeout, model_override=model_override,
+            )
     except RuntimeError as e:
         # Permanent provider problems (no key, bad key) must abort the
         # whole analysis — silently returning '' on every chunk would
@@ -2664,7 +2898,9 @@ def _rerank_candidates_globally(candidates, message, top_k=5):
         "Only return indices that appear in the menu above."
     )
     try:
-        response = _call_ai_json(system_prompt, user_prompt, timeout=90)
+        response = _call_ai_json(
+            system_prompt, user_prompt, timeout=90, call_site="chat_chunk_rerank",
+        )
     except Exception:
         response = ''
     if not response:
@@ -2815,7 +3051,10 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
         # available (~2-3× faster decode on Apple Silicon). Synthesis
         # rerank below stays on the user's hardware-tier variant so
         # the global pick remains high-quality.
-        response = _call_ai_json(system_prompt, user_prompt, model_override=fast_model)
+        response = _call_ai_json(
+            system_prompt, user_prompt, model_override=fast_model,
+            call_site="chat_chunk_search",
+        )
         return _parse_chunk_response(response, chunk)
 
     with ThreadPoolExecutor(max_workers=_CHAT_CHUNK_CONCURRENCY) as pool:
@@ -2901,7 +3140,10 @@ def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_nam
             chunk, message, phrases, words, idx, len(chunks), project_name,
             strict_keyword=strict_keyword,
         )
-        response = _call_ai_json(system_prompt, user_prompt, model_override=fast_model)
+        response = _call_ai_json(
+            system_prompt, user_prompt, model_override=fast_model,
+            call_site="chat_chunk_search_stream",
+        )
         return _parse_chunk_response(response, chunk)
 
     completed = 0
@@ -3745,7 +3987,7 @@ def _format_transcript_paragraphs_for_ai(transcript, max_paragraph_seconds=60):
     return _format_paragraphs_as_lines(paragraphs)
 
 
-def _call_ai(prompt, system_prompt="", task_type="analysis"):
+def _call_ai(prompt, system_prompt="", task_type="analysis", call_site=None):
     """Single-prompt generation through the active provider.
 
     ``task_type`` selects the model when the provider tiers (Anthropic uses
@@ -3753,25 +3995,38 @@ def _call_ai(prompt, system_prompt="", task_type="analysis"):
     Editorial DNA's classifier passes ``"analysis"``; My Style synthesis
     passes ``"profile_creation"``.
 
+    When the prompt contains the cache sentinels (CACHE_TX_START/END or
+    CACHE_DNA_START/END) and the active provider is Anthropic, the
+    wrapped sections are hoisted into structured system blocks with
+    cache_control. Other providers see the same prompt with sentinels
+    stripped, so behavior is unchanged on Ollama and OpenAI.
+
     Raises ``RuntimeError`` on provider error so the caller can surface a
     clear message to the user instead of silently falling back.
     """
     from ai_providers import get_active_provider
-    # Skip the storytelling foundation for structured JSON analysis.
-    # The foundation is ~28 KB (~7 K tokens) of narrative-editorial
-    # guidance. For analysis calls the prompt is a self-contained JSON
-    # extraction task: the transcript IS the data and it must survive
-    # intact. With num_ctx=12288 and num_predict=4096 the available
-    # input budget is ~8192 tokens — the foundation alone would consume
-    # ~7094 of those, leaving ~1098 for the entire transcript. Ollama
-    # silently truncates the overflow, so the model never sees the real
-    # transcript and hallucinates plausible-looking timecodes and generic
-    # descriptions. Chat and Story Builder still get the full foundation.
     if task_type != "analysis":
         system_prompt = inject_storytelling_foundation(system_prompt)
     provider = get_active_provider(model_resolver=_get_ollama_model)
+
+    if provider.name == "anthropic":
+        from ai_providers.anthropic_provider import build_cached_system_blocks
+        clean_prompt, transcript, dna = _split_cacheable_prompt(prompt)
+        if transcript or dna:
+            system_param = build_cached_system_blocks(
+                system_prompt, dna_block=dna, transcript_block=transcript,
+            )
+            return provider.generate(
+                system_param, clean_prompt, task_type=task_type,
+                call_site=call_site or "_call_ai",
+            )
+        return provider.generate(
+            system_prompt, _strip_cache_sentinels(prompt), task_type=task_type,
+            call_site=call_site or "_call_ai",
+        )
+
     return provider.generate(
-        system_prompt, prompt, task_type=task_type,
+        system_prompt, _strip_cache_sentinels(prompt), task_type=task_type,
     )
 
 
@@ -4053,12 +4308,12 @@ PROJECT: {project_name}
 USER REQUEST: {message}
 
 TRANSCRIPT (presented in recording order — re-sequence freely for narrative arc):
-{formatted}
+{CACHE_TX_START}{formatted}{CACHE_TX_END}
 
 Return ONLY valid JSON. No markdown, no extra text."""
 
     system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
-    response = _call_ai(prompt, system_prompt)
+    response = _call_ai(prompt, system_prompt, call_site="build_story")
     return _parse_json_response(response)
 
 
@@ -4071,7 +4326,7 @@ def _segment_vector_prompt(transcript_text: str, project_name: str) -> str:
 PROJECT: {project_name}
 
 TRANSCRIPT:
-{transcript_text}
+{CACHE_TX_START}{transcript_text}{CACHE_TX_END}
 
 STEP 1 — Identify the distinct threads or topics the speaker discusses. Use the speaker's own words and phrasing for each thread title. Do not invent abstract corporate language. "The day I quit" — yes. "Professional Transition Event" — no.
 
@@ -4130,6 +4385,7 @@ def _generate_vectors_single_chunk(transcript_text: str, project_name: str):
     response = _call_ai(
         _segment_vector_prompt(transcript_text, project_name),
         _SEGMENT_VECTOR_SYSTEM_PROMPT,
+        call_site="generate_segment_vectors",
     )
     return _extract_segment_list(_parse_json_response(response))
 
@@ -4420,7 +4676,7 @@ Rules:
 USER REQUEST: {message}
 
 AVAILABLE SEGMENTS (pre-classified):
-{menu}
+{CACHE_TX_START}{menu}{CACHE_TX_END}
 
 Return ONLY valid JSON in this shape:
 {{
@@ -4440,7 +4696,7 @@ Return ONLY valid JSON in this shape:
 }}"""
 
     system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
-    response = _call_ai(prompt, system_prompt)
+    response = _call_ai(prompt, system_prompt, call_site="build_story_from_vectors")
     parsed = _parse_json_response(response)
     if not isinstance(parsed, dict):
         parsed = {'clips': []}
@@ -4551,7 +4807,7 @@ def _analyze_story_soundbites(transcript_text, project_name, soundbites_target):
     prompt = f"""PROJECT: {project_name}
 
 TRANSCRIPT:
-{transcript_text}
+{CACHE_TX_START}{transcript_text}{CACHE_TX_END}
 
 Return ONLY this JSON object:
 {{
@@ -4566,7 +4822,7 @@ Find the {soundbites_target} BEST soundbites. A great soundbite is a self-contai
 - "why" is a short phrase explaining editorial value (emotional peak, thesis statement, surprising admission, etc.).
 Be ruthless — return fewer if the transcript only has fewer genuine standouts.
 Return ONLY valid JSON, nothing else."""
-    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt, call_site="analyze_story_soundbites"))
     if isinstance(parsed, dict) and (
         parsed.get('strongest_soundbites') or parsed.get('soundbites')
         or parsed.get('quotes') or parsed.get('best_quotes')
@@ -4574,7 +4830,7 @@ Return ONLY valid JSON, nothing else."""
         return parsed
     retry = _parse_json_response(_call_ai(
         prompt + '\n\nNO MARKDOWN. JSON ONLY. Fill the strongest_soundbites array with real quotes from the transcript.',
-        system_prompt,
+        system_prompt, call_site="analyze_story_soundbites_retry",
     ))
     return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
@@ -4590,7 +4846,7 @@ def _analyze_story_beats(transcript_text, project_name, beats_target):
     prompt = f"""PROJECT: {project_name}
 
 TRANSCRIPT:
-{transcript_text}
+{CACHE_TX_START}{transcript_text}{CACHE_TX_END}
 
 Return ONLY this JSON object — fill both lists:
 {{
@@ -4606,7 +4862,7 @@ Pick the {beats_target} BEST story beats following a documentary arc: hook, cont
 Suggest 3-7 b-roll moments. Each one should be a CONCRETE visual idea pinned to the timecode where it would land — describe what you'd specifically want to see, not generic filler like "nature shots" or "stock footage".
 CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end. Use string format like "00:02:45".
 Return ONLY valid JSON, nothing else."""
-    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt, call_site="analyze_story_beats"))
     if isinstance(parsed, dict) and (
         parsed.get('story_beats') or parsed.get('beats')
         or parsed.get('broll_suggestions') or parsed.get('broll')
@@ -4614,7 +4870,7 @@ Return ONLY valid JSON, nothing else."""
         return parsed
     retry = _parse_json_response(_call_ai(
         prompt + '\n\nNO MARKDOWN. JSON ONLY. FILL BOTH LISTS — story_beats and broll_suggestions.',
-        system_prompt,
+        system_prompt, call_site="analyze_story_beats_retry",
     ))
     return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
@@ -4628,7 +4884,7 @@ def _analyze_story_overview(transcript_text, project_name):
     prompt = f"""PROJECT: {project_name}
 
 TRANSCRIPT:
-{transcript_text}
+{CACHE_TX_START}{transcript_text}{CACHE_TX_END}
 
 Return ONLY this JSON object:
 {{
@@ -4639,14 +4895,15 @@ Return ONLY this JSON object:
 
 Pick 3-7 themes — short noun phrases for the recurring topics. An empty list is fine if there aren't real recurring patterns.
 Return ONLY valid JSON, nothing else."""
-    parsed = _parse_json_response(_call_ai(prompt, system_prompt))
+    parsed = _parse_json_response(_call_ai(prompt, system_prompt, call_site="analyze_story_overview"))
     if isinstance(parsed, dict) and (
         parsed.get('summary') or parsed.get('themes')
         or parsed.get('overview') or parsed.get('synopsis')
     ):
         return parsed
     retry = _parse_json_response(_call_ai(
-        prompt + '\n\nNO MARKDOWN. NO PROSE. JSON ONLY.', system_prompt
+        prompt + '\n\nNO MARKDOWN. NO PROSE. JSON ONLY.', system_prompt,
+        call_site="analyze_story_overview_retry",
     ))
     return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
@@ -4670,7 +4927,7 @@ Always respond in valid JSON format only. No other text."""
 PROJECT: {project_name}
 
 TRANSCRIPT:
-{transcript_text}
+{CACHE_TX_START}{transcript_text}{CACHE_TX_END}
 
 Return a JSON object with this exact structure:
 {{
@@ -4701,7 +4958,7 @@ CRITICAL: The "start" and "end" values MUST be copied exactly from the [HH:MM:SS
 Use the HH:MM:SS format as a string, like "00:02:45". Do NOT convert to decimal numbers.
 Return ONLY valid JSON, no markdown formatting."""
 
-    response = _call_ai(prompt, system_prompt)
+    response = _call_ai(prompt, system_prompt, call_site="analyze_social")
     parsed = _parse_json_response(response)
     if isinstance(parsed, dict) and (
         parsed.get('social_clips') or parsed.get('clips')
@@ -4720,12 +4977,13 @@ Return ONLY valid JSON, no markdown formatting."""
         '[{"rank":1,"title":"...","start":"00:00:00","end":"00:00:00",'
         '"duration_seconds":30,"text":"...","platform":"instagram_reels",'
         '"why":"...","hook":"...","hashtags":["..."]}]\n\n'
-        f'PROJECT: {project_name}\n\nTRANSCRIPT:\n{transcript_text}\n\n'
+        f'PROJECT: {project_name}\n\nTRANSCRIPT:\n'
+        f'{CACHE_TX_START}{transcript_text}{CACHE_TX_END}\n\n'
         f'Pick the {clips_target} BEST clips, 15-60 seconds each, '
         'ranked by predicted engagement. Return ONLY the JSON array, '
         'nothing else.'
     )
-    retry = _parse_json_response(_call_ai(retry_prompt, retry_system))
+    retry = _parse_json_response(_call_ai(retry_prompt, retry_system, call_site="analyze_social_retry"))
     if isinstance(retry, dict) and retry:
         return retry
     if isinstance(retry, list) and retry:

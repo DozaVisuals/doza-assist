@@ -365,7 +365,13 @@ def build_cached_system_blocks(
             d = dna_block.strip()
             dblock: Dict[str, Any] = {"type": "text", "text": d}
             if _approx_tokens(d) >= _MIN_CACHE_TOKENS:
-                dblock["cache_control"] = {"type": "ephemeral"}
+                # 1h TTL throughout: Anthropic enforces longer-TTL
+                # blocks must precede shorter ones in the global order
+                # (tools, system, messages). Mixing 5m and 1h causes
+                # HTTP 400 when the request also has a 1h transcript
+                # block downstream in messages. Uniform TTL sidesteps
+                # the rule entirely.
+                dblock["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
             blocks.append(dblock)
 
         sys_text = (system_prompt or "").strip()
@@ -383,7 +389,9 @@ def build_cached_system_blocks(
     if stable_text:
         block: Dict[str, Any] = {"type": "text", "text": stable_text}
         if _approx_tokens(stable_text) >= _MIN_CACHE_TOKENS:
-            block["cache_control"] = {"type": "ephemeral"}
+            # Same uniform-1h rationale as above; see the with-transcript
+            # branch comment.
+            block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         blocks.append(block)
     return blocks
 

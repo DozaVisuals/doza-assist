@@ -97,7 +97,10 @@ def test_build_cached_system_blocks_marks_long_segments():
     assert tx.get("cache_control") == {"type": "ephemeral", "ttl": "1h"}
 
     assert dna_block["type"] == "text" and dna_block["text"].startswith("D")
-    assert dna_block.get("cache_control") == {"type": "ephemeral"}
+    # 1h TTL throughout so Anthropic's longer-must-precede-shorter
+    # ordering rule never trips (mixed TTLs across system + messages
+    # were rejecting cloud chat requests with HTTP 400).
+    assert dna_block.get("cache_control") == {"type": "ephemeral", "ttl": "1h"}
 
     assert sys_block["type"] == "text" and sys_block["text"].startswith("S")
     # System text is intentionally uncached when a transcript precedes it.
@@ -106,9 +109,9 @@ def test_build_cached_system_blocks_marks_long_segments():
 
 def test_build_cached_system_blocks_no_transcript_caches_combined_stable_text():
     """Without a transcript (chat-style call), the system + DNA get joined
-    into one cached block with the default 5m TTL, since the system text
-    itself is the stable prefix and the transcript lives in a user
-    message instead."""
+    into one cached block at 1h TTL, matching the transcript block's TTL
+    in the messages array. Uniform TTL avoids the HTTP 400 ordering
+    error from mixing 5m and 1h cache_control markers in one request."""
     from ai_providers.anthropic_provider import build_cached_system_blocks
 
     system = "S" * (1024 * 4 + 10)
@@ -118,7 +121,7 @@ def test_build_cached_system_blocks_no_transcript_caches_combined_stable_text():
     assert len(blocks) == 1
     stable = blocks[0]
     assert stable["text"].startswith("S") and dna in stable["text"]
-    assert stable.get("cache_control") == {"type": "ephemeral"}
+    assert stable.get("cache_control") == {"type": "ephemeral", "ttl": "1h"}
 
 
 def test_build_cached_system_blocks_transcript_first_independent_of_system():
@@ -183,11 +186,14 @@ def test_prepare_chat_messages_hoists_transcript_to_user_block_list():
         "anthropic", "chat system prompt", messages,
     )
 
-    # System is now a structured list with chat-system + DNA cached together.
+    # System is now a structured list with chat-system + DNA cached
+    # together. TTL must match the transcript's 1h marker in messages
+    # — mixing 5m here with 1h in messages causes Anthropic to reject
+    # the request with HTTP 400 (longer-TTL-must-precede-shorter rule).
     assert isinstance(sys_param, list)
     assert sys_param[0]["text"].startswith("chat system prompt")
     assert dna in sys_param[0]["text"]
-    assert sys_param[0]["cache_control"] == {"type": "ephemeral"}
+    assert sys_param[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
     # The orphan style header message was dropped; the transcript message
     # carries the cache_control on its transcript block.
@@ -200,6 +206,64 @@ def test_prepare_chat_messages_hoists_transcript_to_user_block_list():
     assert len(cached_block) == 1
     assert cached_block[0]["text"] == transcript
     assert cached_block[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_chat_path_uses_uniform_cache_ttl():
+    """Regression for the cloud-chat bug where Anthropic rejected
+    requests with HTTP 400:
+
+      messages.0.content.1.cache_control.ttl: a ttl='1h' cache_control
+      block must not come after a ttl='5m' cache_control block.
+
+    The chat path puts a cache marker on the system block AND on the
+    transcript in messages. Mixed TTLs (5m on system, 1h on transcript)
+    fail Anthropic's processing-order rule. Uniform 1h TTL across all
+    markers sidesteps the rule entirely.
+    """
+    from ai_analysis import (
+        _prepare_chat_messages_for_provider,
+        CACHE_TX_START, CACHE_TX_END, CACHE_DNA_START, CACHE_DNA_END,
+    )
+
+    transcript = "T" * (1024 * 4 + 100)
+    dna = "D" * (1024 * 4 + 100)
+    style_msg = {
+        "role": "user",
+        "content": (
+            "STYLE CONTEXT (active My Style profile):\n\n"
+            f"{CACHE_DNA_START}{dna}{CACHE_DNA_END}"
+        ),
+    }
+    transcript_msg = {
+        "role": "user",
+        "content": f"PROJECT:\nTRANSCRIPT:\n{CACHE_TX_START}{transcript}{CACHE_TX_END}\n",
+    }
+    sys_param, msg_param = _prepare_chat_messages_for_provider(
+        "anthropic", "chat system prompt", [style_msg, transcript_msg],
+    )
+
+    ttls_seen: list = []
+
+    def _collect(block):
+        cc = block.get("cache_control") if isinstance(block, dict) else None
+        if cc:
+            ttls_seen.append(cc.get("ttl") or "5m")
+
+    if isinstance(sys_param, list):
+        for b in sys_param:
+            _collect(b)
+    for m in msg_param or []:
+        if isinstance(m, dict):
+            c = m.get("content")
+            if isinstance(c, list):
+                for b in c:
+                    _collect(b)
+
+    assert ttls_seen, "expected at least one cached block in the chat payload"
+    assert all(t == "1h" for t in ttls_seen), (
+        f"chat path must use a uniform 1h TTL across all cache_control "
+        f"markers (Anthropic rejects mixed TTLs with HTTP 400). Saw: {ttls_seen}"
+    )
 
 
 def test_prepare_chat_messages_passes_through_ollama():

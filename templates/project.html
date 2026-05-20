@@ -826,9 +826,11 @@
             <li>Open <strong>File → Import → Timeline…</strong> (or press <kbd>⇧⌘I</kbd>).</li>
             <li>Pick the highlighted <strong>.xml</strong> file in Finder.</li>
             <li>Click <strong>OK</strong> in Resolve's <em>Load XML</em> dialog (defaults are fine).</li>
+            <li>If Resolve asks <em>"The clip was not found"</em>, click <strong>No</strong> — the import still works.</li>
+            <li>Close the <em>Log</em> window. Your timeline + media are in the Media Pool.</li>
         </ol>
         <p id="resolveSetupFreeWhy" style="display:none; font-size:0.85rem; line-height:1.5; color:var(--text-muted); margin:0.5rem 0 0.75rem;">
-            Dragging the XML into the Media Pool doesn't work — Resolve treats it as a media file rather than a timeline. The Import → Timeline path is the supported route on Free.
+            Heads-up: Resolve's import flow shows a scary-looking "clip not found" prompt and a list of warnings, but the timeline imports correctly anyway — it's matching on the absolute source-media path in the XML. Dragging the XML into the Media Pool doesn't work because Resolve treats it as a media file rather than a timeline; File → Import → Timeline is the supported route on Free.
         </p>
         <p id="resolveSetupTrailer" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
             Your export is already in Finder — drop it into Resolve's Media Pool if you'd rather skip auto-import this time.

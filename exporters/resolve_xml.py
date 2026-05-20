@@ -1,36 +1,45 @@
-"""DaVinci Resolve timeline export — FCP7 XML (xmeml v5) format.
+"""DaVinci Resolve XML exporters.
 
-Why FCP7 XML and not EDL: EDL is CMX 3600 plain text. It truncates clip
-names into `* CLIP NAME:` comments, has no field for editorial notes,
-references source media only by an 8-char reel name, and forces the
-editor to import source media into the Media Pool separately. The
-resulting timeline lands offline until that manual import.
+Two flavors live here, picked via router.py:
 
-FCP7 XML carries:
-  - clip names verbatim (no truncation)
-  - per-clip notes via <comments><mastercomment*>
-  - absolute media paths via <pathurl>file://localhost/...</pathurl>
-  - rate/timebase/NTSC flags Resolve understands
+  - ``ResolveFCPXMLExporter`` (registry key ``"resolve"``, the default):
+    Apple's modern FCPXML format (.fcpxml). Resolve has first-class
+    support for FCPXML import — clip names, source media via
+    file:// URLs, AND per-clip audio routing all come through cleanly.
+    We learned this the hard way: an earlier version of this module
+    routed Resolve through FCP7 XML (the older xmeml v5 format), and
+    while video and timeline structure imported fine, the audio was
+    silent — Resolve couldn't bind the clipitems' <sourcetrack> entries
+    to source-file audio tracks without extra schema that's brittle to
+    emit. FCPXML side-steps that entirely.
 
-When this file is imported via Resolve's MediaPool.ImportTimelineFromFile,
-clips reconnect to media automatically without a separate Media Pool
-import step — closer to FCP's one-click behavior.
-
-EDL stays available as an opt-in (some workflows still need the bare
-CMX 3600 format), but the Resolve registry now defaults to this.
+  - ``ResolveXMLExporter`` (registry key ``"resolve-xml"``, opt-in):
+    FCP7 XML / xmeml v5 — kept for the rare case where someone needs to
+    round-trip through Premiere Pro on the way to Resolve, since
+    Premiere only reads FCP7 XML, not FCPXML. The audio limitation is
+    real for this path; users who need it usually re-link audio in
+    Resolve manually.
 """
 
+from .fcpxml import FCPXMLExporter
 from .premiere_xml import PremiereXMLExporter
 
 
-class ResolveXMLExporter(PremiereXMLExporter):
-    """FCP7 XML output, branded as Resolve.
+class ResolveFCPXMLExporter(FCPXMLExporter):
+    """FCPXML output, tagged for Resolve so toasts/filenames are accurate.
 
-    Identical schema to the Premiere XML exporter (it IS FCP7 XML —
-    Premiere doesn't have its own native interchange, just inherits
-    the FCP7 schema). The only thing that changes is which app this
-    file is destined for, so the wrapper just retags the metadata
-    that downstream code uses to label toasts and pick filenames.
+    Schema is identical to the Final Cut Pro exporter — Resolve and
+    FCP both consume the same FCPXML files. Only the metadata strings
+    change so the route layer knows this was a Resolve-targeted export.
+    """
+    platform_name = "DaVinci Resolve"
+
+
+class ResolveXMLExporter(PremiereXMLExporter):
+    """FCP7 XML output (xmeml v5), tagged for Resolve.
+
+    Opt-in via the ``resolve-xml`` platform key. See module docstring
+    for why FCPXML is the default for Resolve.
     """
     format_name = "FCP7 XML for Resolve"
     file_extension = ".xml"

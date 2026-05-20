@@ -824,13 +824,13 @@
         <ol id="resolveSetupFreeSteps" style="display:none; font-size:0.9rem; line-height:1.6; padding-left:1.25rem;">
             <li>Switch to <strong>DaVinci Resolve</strong>.</li>
             <li>Open <strong>File → Import → Timeline…</strong> (or press <kbd>⇧⌘I</kbd>).</li>
-            <li>Pick the highlighted <strong>.xml</strong> file in Finder.</li>
-            <li>Click <strong>OK</strong> in Resolve's <em>Load XML</em> dialog (defaults are fine).</li>
-            <li>If Resolve asks <em>"The clip was not found"</em>, click <strong>No</strong> — the import still works.</li>
-            <li>Close the <em>Log</em> window. Your timeline + media are in the Media Pool.</li>
+            <li>Pick the highlighted <strong>.fcpxml</strong> file in Finder.</li>
+            <li>Accept the defaults in Resolve's import dialog.</li>
+            <li>If Resolve asks <em>"The clip was not found"</em>, click <strong>No</strong> — the timeline still imports.</li>
+            <li>Close any warning log. Your timeline + media + audio are in the Media Pool.</li>
         </ol>
         <p id="resolveSetupFreeWhy" style="display:none; font-size:0.85rem; line-height:1.5; color:var(--text-muted); margin:0.5rem 0 0.75rem;">
-            Heads-up: Resolve's import flow shows a scary-looking "clip not found" prompt and a list of warnings, but the timeline imports correctly anyway — it's matching on the absolute source-media path in the XML. Dragging the XML into the Media Pool doesn't work because Resolve treats it as a media file rather than a timeline; File → Import → Timeline is the supported route on Free.
+            Heads-up: Resolve's import flow may show a "clip not found" prompt and a list of warnings, but the timeline imports correctly anyway — it's matching on the absolute source-media path in the FCPXML. Dragging the file into the Media Pool doesn't work because Resolve treats it as a media file rather than a timeline; File → Import → Timeline is the supported route.
         </p>
         <p id="resolveSetupTrailer" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
             Your export is already in Finder — drop it into Resolve's Media Pool if you'd rather skip auto-import this time.
@@ -903,7 +903,7 @@ const EXPORT_LABELS = {
     'card-blurb': p => {
         if (p === 'fcp')      return 'Exports an FCPXML timeline. Open in Final Cut Pro — the source media is referenced and your selects are pre-cut at the in/out points.';
         if (p === 'premiere') return 'Exports a Premiere XML (FCP7 XML). In Premiere Pro: File → Import → select the .xml. Source media must be at its original path.';
-        if (p === 'resolve')  return 'Exports an FCP7 XML timeline. On Resolve Studio with External Scripting on (Preferences → System → General), Doza Assist auto-imports the timeline and media. On Resolve Free, the file lands in Finder — in Resolve, File → Import → Timeline… → pick the .xml.';
+        if (p === 'resolve')  return 'Exports an FCPXML timeline. On Resolve Studio with External Scripting on, Doza Assist auto-imports the timeline and media. On Resolve Free, the file lands in Finder — in Resolve, File → Import → Timeline… → pick the .fcpxml. Audio routes through cleanly because FCPXML declares clip-by-clip audio mapping.';
         return '';
     },
 };

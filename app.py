@@ -29,6 +29,12 @@ from doza_assist.fcpxml.timeline_audio import (
 )
 import preferences as prefs
 
+# Hoisted from the global errorhandler to fail loud at server start if the
+# ``ai_providers`` package is missing from the bundle, instead of starting
+# Flask and then having every 500 response mask the real error with a
+# secondary ``ModuleNotFoundError`` from the lazy import (see issue #25).
+from ai_providers import ProviderError
+
 
 def get_project_platform(project: dict) -> str:
     """Return the project's editing platform, falling back to the global default."""
@@ -509,10 +515,16 @@ def _provider_error_response(e):
 
 @app.errorhandler(Exception)
 def _handle_provider_error(e):
-    from ai_providers import ProviderError
-    if not isinstance(e, ProviderError):
-        raise e
-    return _provider_error_response(e)
+    # Defense-in-depth: if anything in the ProviderError branch ever raises
+    # (e.g. jsonify fails on something exotic), re-raise the ORIGINAL
+    # exception so Flask logs the real cause. Otherwise the secondary error
+    # masks the root cause in server.log — exactly the bug from issue #25.
+    if isinstance(e, ProviderError):
+        try:
+            return _provider_error_response(e)
+        except Exception:
+            pass
+    raise e
 
 
 # ── BYO API key: provider settings ──────────────────────────────────

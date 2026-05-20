@@ -186,9 +186,11 @@ def probe() -> ProbeResult:
                 ok=False, reason='requires_studio',
                 hint=('Auto-import into DaVinci Resolve requires Resolve '
                       'Studio — Blackmagic gates the scripting API behind '
-                      'the paid tier as of Resolve 20. In Free, the export '
-                      'file is revealed in Finder; drag it into Resolve\'s '
-                      'Media Pool to bring the timeline in.'),
+                      'the paid tier as of Resolve 20. In Free, import the '
+                      'export manually: Resolve → File → Import → '
+                      'Timeline… → choose the XML in Finder. Resolve will '
+                      'create the timeline and link the source media '
+                      'automatically.'),
             )
         return ProbeResult(
             ok=False, reason='scripting_disabled',
@@ -272,9 +274,10 @@ def import_timeline(
             return ImportResult(
                 ok=False, reason='requires_studio',
                 hint=('Auto-import into DaVinci Resolve requires Resolve '
-                      'Studio. In Free, drag the file from Finder into '
-                      'Resolve\'s Media Pool — the timeline will load with '
-                      'media auto-reconnected from the XML.'),
+                      'Studio. In Free, import manually: File → Import → '
+                      'Timeline… → choose the XML file in Finder. Resolve '
+                      'creates the timeline and auto-links the source '
+                      'media from the XML\'s embedded paths.'),
             )
         return ImportResult(
             ok=False, reason='scripting_disabled',

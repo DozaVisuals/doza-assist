@@ -91,8 +91,17 @@ def _add_clipitem(track: ET.Element, *, clip_id: str, name: str, file_ref_id: st
                   source_in: int, source_out: int, record_in: int, record_out: int,
                   framerate: float, media_type: str, masterclip_id: str,
                   reuse_file: bool, file_element: ET.Element | None,
-                  comment: str = "") -> None:
-    """media_type is 'video' or 'audio' — affects which track this lands on."""
+                  comment: str = "", audio_channel: int | None = None) -> None:
+    """media_type is 'video' or 'audio' — affects which track this lands on.
+
+    ``audio_channel`` (1-based) is required for audio clipitems and IGNORED
+    for video. FCP7 XML uses a ``<sourcetrack>`` element to tell the NLE
+    which channel of the source file each audio clipitem should pull from
+    — without it, Resolve (and Premiere) place the clip on the track but
+    play silence because they don't know which source stream is wired
+    through. A1 → channel 1, A2 → channel 2; if the source is mono,
+    Resolve handles channel-2 references gracefully.
+    """
     clipitem = ET.SubElement(track, "clipitem", id=clip_id)
     ET.SubElement(clipitem, "name").text = name
     ET.SubElement(clipitem, "enabled").text = "TRUE"
@@ -109,6 +118,11 @@ def _add_clipitem(track: ET.Element, *, clip_id: str, name: str, file_ref_id: st
     else:
         # First reference: emit the full <file> definition.
         clipitem.append(file_element)
+
+    if media_type == "audio" and audio_channel is not None:
+        sourcetrack = ET.SubElement(clipitem, "sourcetrack")
+        ET.SubElement(sourcetrack, "mediatype").text = "audio"
+        ET.SubElement(sourcetrack, "trackindex").text = str(audio_channel)
 
     if comment:
         comments = ET.SubElement(clipitem, "comments")
@@ -237,6 +251,7 @@ def _build_sequence(
                 reuse_file=file_emitted,
                 file_element=None if file_emitted else file_element,
                 comment=comment,
+                audio_channel=ch_index,
             )
             file_emitted = True
 

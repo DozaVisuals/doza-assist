@@ -99,7 +99,7 @@
                             title="Premiere Pro — exports XML (FCP7 format)">Premiere</button>
                     <button type="button" data-platform="resolve"
                             onclick="setEditingPlatform('resolve')"
-                            title="DaVinci Resolve — exports EDL (CMX 3600)">Resolve</button>
+                            title="DaVinci Resolve — exports FCP7 XML; auto-imports into Resolve when External Scripting is enabled">Resolve</button>
                 </div>
                 {% endif %}
             </div>
@@ -796,6 +796,35 @@
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
+<!-- Resolve setup modal — surfaces when an export to Resolve falls back to
+     reveal-in-Finder because the scripting API isn't reachable. The most
+     common cause is the External Scripting preference being off (one-time
+     setup). The modal walks the user through enabling it and lets them
+     retry the auto-import without re-running the export. -->
+<div id="resolveSetupModal" class="modal-backdrop" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9999; align-items:center; justify-content:center;">
+    <div style="background:var(--bg-secondary); color:var(--text); padding:1.5rem; border-radius:8px; max-width:520px; width:90%; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+        <h2 style="margin-top:0; font-size:1.1rem;">One-time DaVinci Resolve setup</h2>
+        <p id="resolveSetupHint" style="font-size:0.9rem; line-height:1.5; color:var(--text-secondary);">
+            Resolve needs External Scripting enabled so Doza Assist can auto-import timelines.
+        </p>
+        <ol style="font-size:0.9rem; line-height:1.6; padding-left:1.25rem;">
+            <li>Open <strong>DaVinci Resolve</strong>.</li>
+            <li>Press <kbd>⌘</kbd>+<kbd>,</kbd> for Preferences.</li>
+            <li>Click the <strong>System</strong> tab at the top.</li>
+            <li>Pick <strong>General</strong> from the left sidebar.</li>
+            <li>Set <strong>External scripting using</strong> to <strong>Local</strong>.</li>
+            <li>Click <strong>Save</strong>, then quit and reopen Resolve.</li>
+        </ol>
+        <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
+            Your export is already in Finder — drop it into Resolve's Media Pool if you'd rather skip auto-import this time.
+        </p>
+        <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+            <button id="resolveSetupDismiss" class="btn btn-sm">Use Finder instead</button>
+            <button id="resolveSetupRetry" class="btn btn-sm btn-primary">Test again</button>
+        </div>
+    </div>
+</div>
+
 <!-- Transcript tab module (extracted from the inline script below;
      classic <script src> so its top-level let bindings live in the
      same global lexical environment as the inline code that follows
@@ -857,7 +886,7 @@ const EXPORT_LABELS = {
     'card-blurb': p => {
         if (p === 'fcp')      return 'Exports an FCPXML timeline. Open in Final Cut Pro — the source media is referenced and your selects are pre-cut at the in/out points.';
         if (p === 'premiere') return 'Exports a Premiere XML (FCP7 XML). In Premiere Pro: File → Import → select the .xml. Source media must be at its original path.';
-        if (p === 'resolve')  return 'Exports a CMX 3600 EDL. In DaVinci Resolve: File → Import → Timeline → Pre-Conformed EDL. Import your source media into the project bin first.';
+        if (p === 'resolve')  return 'Exports an FCP7 XML timeline. With External Scripting enabled in Resolve (Preferences → System → General), Doza Assist auto-imports the media and timeline; otherwise the file lands in Finder for File → Import → Timeline → AAF, EDL, XML.';
         return '';
     },
 };
@@ -3102,27 +3131,61 @@ async function exportSelectedClips() {
         body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
     });
 
-    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
-    const mode = document.getElementById('exportMode')?.value || 'cuts';
-
-    try {
-        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+    // FCPXML-imported projects: use the round-trip exporter so the
+    // original video media references are preserved (not just the WAV).
+    const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
+    if (hasFcpxmlSource) {
+        try {
+            await _exportFCPXMLRoundTrip({
+                sources: ['client_selects'],
+                mode: 'selects_project',
+            });
+            showToast(`Exported ${checkedIds.size} clips!`);
+        } catch (err) {
+            showToast('Export error: ' + err.message, true);
+        }
+        // Restore full labels after export
+        const allSections = labelSections.map(s => ({
+            start: s.start, end: s.end, color: s.color, text: s.text
+        }));
+        await fetch(`/project/${PROJECT_ID}/labels`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'labels', framerate, mode, total_clips: labelSections.length }),
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: allSections }),
         });
+        return;
+    }
 
+    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
+    const mode = document.getElementById('exportMode')?.value || 'cuts';
+    const delivery = typeof getDelivery === 'function' ? getDelivery() : null;
+    const nle = typeof EDITING_PLATFORM !== 'undefined' ? EDITING_PLATFORM : 'fcp';
+
+    const exportBody = {
+        type: 'labels', framerate, mode,
+        total_clips: labelSections.length,
+        deliver_to: delivery, nle,
+    };
+    const runLabelsExport = async () => {
+        const r = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(exportBody),
+        });
+        const d = await r.json().catch(() => ({}));
+        return { res: r, data: d };
+    };
+    try {
+        const { res, data } = await runLabelsExport();
         if (res.ok) {
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = getFilenameFromResponse(res) || 'clips.fcpxml';
-            a.click();
-            URL.revokeObjectURL(url);
-            showToast(`Exported ${checkedIds.size} clips!`);
+            if (data.delivery === 'nle') {
+                showToast(formatExportToast(data, `Exported ${checkedIds.size} clips`));
+                maybeShowResolveSetup(data, runLabelsExport);
+            } else {
+                showToast(`Exported ${checkedIds.size} clips!`);
+            }
         } else {
-            showToast('Export failed', true);
+            showToast((data && data.error) || 'Export failed', true);
         }
     } catch (err) {
         showToast('Export error: ' + err.message, true);
@@ -3514,24 +3577,29 @@ async function exportFCPXML(category) {
     const nle = EDITING_PLATFORM;
     const platName = PLATFORM_NAMES[nle] || 'NLE';
 
-    try {
-        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+    const exportBody = {
+        types, framerate, mode,
+        total_clips: labelSections.length,
+        deliver_to: delivery, nle,
+    };
+    const runExport = async () => {
+        const r = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                types, framerate, mode,
-                total_clips: labelSections.length,
-                deliver_to: delivery, nle,
-            }),
+            body: JSON.stringify(exportBody),
         });
-        const data = await res.json().catch(() => ({}));
+        const d = await r.json().catch(() => ({}));
+        return { res: r, data: d };
+    };
+    try {
+        const { res, data } = await runExport();
         if (!res.ok) {
             showToast((data && data.error) || 'Export failed', true);
             return;
         }
         if (data.delivery === 'nle') {
-            const tail = data.opened_in === 'finder' ? ' — revealed in Finder' : '';
-            showToast(`Sent to ${data.nle_name || platName}${tail}`);
+            showToast(formatExportToast(data, 'Sent'));
+            maybeShowResolveSetup(data, runExport);
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
@@ -4146,6 +4214,86 @@ function showToast(msg, isError = false) {
     setTimeout(() => toast.classList.remove('show'), 5000);
 }
 
+// Compose an NLE-export toast that's honest about what actually happened.
+// FCP auto-imports on Finder-open via file association; Premiere and Resolve
+// don't, so the toast has to point the user at the revealed file. The Resolve
+// case especially needs guidance — "Sent to DaVinci Resolve" alone makes it
+// sound like something arrived in the editor when nothing did.
+function formatExportToast(data, summary) {
+    const nle = data && data.nle;
+    const nleName = (data && data.nle_name) || 'NLE';
+    const openedIn = data && data.opened_in;
+    if (openedIn === 'scripted') {
+        const tlName = data && data.timeline_name;
+        const tail = tlName ? ` — opened "${tlName}"` : '';
+        return `${summary} → ${nleName}${tail} (auto-imported)`;
+    }
+    if (openedIn === 'app') {
+        return `${summary} → ${nleName} (auto-imported)`;
+    }
+    if (openedIn === 'finder+app') {
+        if (nle === 'resolve') {
+            return `${summary} → ${nleName} is open and the file is in Finder. Drag the file into Resolve's Media Pool, or use File → Import → Timeline.`;
+        }
+        return `${summary} → ${nleName} (file revealed in Finder)`;
+    }
+    if (openedIn === 'finder') {
+        return `${summary} → revealed in Finder for ${nleName}`;
+    }
+    return `${summary} → ${nleName}`;
+}
+
+// Resolve setup modal — opens when the backend reports setup_required after
+// trying the scripting API and falling back. Stores the last failed export's
+// retry payload so "Test again" can re-run it after the user enables
+// External Scripting, without making them click Export a second time.
+let _lastResolveRetryFn = null;
+
+function maybeShowResolveSetup(data, retryFn) {
+    if (!data || !data.setup_required) return;
+    const modal = document.getElementById('resolveSetupModal');
+    if (!modal) return;
+    const hintEl = document.getElementById('resolveSetupHint');
+    if (hintEl && data.hint) hintEl.textContent = data.hint;
+    _lastResolveRetryFn = typeof retryFn === 'function' ? retryFn : null;
+    modal.style.display = 'flex';
+}
+
+function _hideResolveSetup() {
+    const modal = document.getElementById('resolveSetupModal');
+    if (modal) modal.style.display = 'none';
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    const dismissBtn = document.getElementById('resolveSetupDismiss');
+    const retryBtn = document.getElementById('resolveSetupRetry');
+    if (dismissBtn) {
+        dismissBtn.addEventListener('click', () => {
+            _lastResolveRetryFn = null;
+            _hideResolveSetup();
+        });
+    }
+    if (retryBtn) {
+        retryBtn.addEventListener('click', async () => {
+            const retry = _lastResolveRetryFn;
+            if (!retry) {
+                _hideResolveSetup();
+                return;
+            }
+            retryBtn.disabled = true;
+            const orig = retryBtn.textContent;
+            retryBtn.textContent = 'Testing…';
+            try {
+                await retry();
+            } finally {
+                retryBtn.disabled = false;
+                retryBtn.textContent = orig;
+                _hideResolveSetup();
+            }
+        });
+    }
+});
+
 // ── Story Builder ──
 let storyBuilds = [];
 let currentBuildId = null;
@@ -4554,25 +4702,30 @@ async function exportStoryFCPXML() {
     const nle = EDITING_PLATFORM;
     const platName = PLATFORM_NAMES[nle] || 'NLE';
 
-    try {
-        const res = await fetch(`/project/${PROJECT_ID}/story/export`, {
+    const exportBody = {
+        clips: build.clips,
+        story_title: build.story_title,
+        framerate,
+        deliver_to: delivery, nle,
+    };
+    const runStoryExport = async () => {
+        const r = await fetch(`/project/${PROJECT_ID}/story/export`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                clips: build.clips,
-                story_title: build.story_title,
-                framerate,
-                deliver_to: delivery, nle,
-            }),
+            body: JSON.stringify(exportBody),
         });
-        const data = await res.json().catch(() => ({}));
+        const d = await r.json().catch(() => ({}));
+        return { res: r, data: d };
+    };
+    try {
+        const { res, data } = await runStoryExport();
         if (!res.ok) {
             showToast((data && data.error) || 'Export failed', true);
             return;
         }
         if (data.delivery === 'nle') {
-            const tail = data.opened_in === 'finder' ? ' — revealed in Finder' : '';
-            showToast(`Sent to ${data.nle_name || platName}${tail}`);
+            showToast(formatExportToast(data, 'Sent'));
+            maybeShowResolveSetup(data, runStoryExport);
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }

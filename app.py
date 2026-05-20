@@ -2352,15 +2352,23 @@ def export_fcpxml(project_id):
     if deliver_to == 'nle':
         if nle not in NLE_DISPLAY_NAMES:
             return jsonify({'error': f'Unknown NLE: {nle!r}'}), 400
-        opened_in, err = _hand_file_to_nle(result.file_path, nle)
-        if err:
-            return jsonify({'error': err, 'file': result.file_path}), 500
-        return jsonify({
+        opened_in, info = _hand_file_to_nle(
+            result.file_path, nle,
+            source_media_path=project.get('source_path') or project.get('filepath'),
+            project_name=project.get('name') or '',
+            timeline_name=os.path.splitext(result.filename)[0],
+        )
+        if opened_in is None:
+            return jsonify({'error': info.get('error', 'NLE delivery failed'),
+                            'file': result.file_path}), 500
+        payload = {
             'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
             'nle': nle, 'nle_name': NLE_DISPLAY_NAMES[nle],
             'file': result.file_path, 'filename': result.filename,
             'format_name': result.format_name,
-        })
+        }
+        payload.update(info)
+        return jsonify(payload)
 
     if deliver_to == 'file':
         _reveal_in_finder(result.file_path)
@@ -2409,24 +2417,99 @@ def _find_nle_app_path(nle: str):
     return None
 
 
-def _hand_file_to_nle(file_path: str, nle: str):
-    """Launch the chosen NLE with the export file, or reveal in Finder for Premiere.
+def _hand_file_to_nle(file_path: str, nle: str, *,
+                      source_media_path: str | None = None,
+                      project_name: str = '',
+                      timeline_name: str = ''):
+    """Launch the chosen NLE with the export file, or reveal in Finder for NLEs
+    that lack a file-association auto-import.
 
-    Returns ``(opened_in, error)`` where ``opened_in`` is ``'app'`` (NLE auto-imports
-    the file), ``'finder'`` (we revealed the file in Finder for the user to drag in),
-    or ``None`` on failure.
+    Returns ``(opened_in, info)`` where ``info`` is always a dict. Keys:
+      - ``error``: string if delivery failed; absent on success.
+      - For Resolve fallback: ``setup_required: True`` plus ``reason``
+        and ``hint`` strings the frontend uses to render the setup modal.
+      - For Resolve scripted success: ``timeline_name`` (which timeline
+        the user lands on inside Resolve).
+
+    ``opened_in`` values:
+      ``'app'``       — NLE auto-imports on Finder open (FCP only).
+      ``'scripted'``  — Resolve auto-imported via the scripting API.
+      ``'finder'``    — file revealed in Finder for manual drag-in.
+      ``'finder+app'`` — file revealed AND app focused (Resolve fallback).
+      ``None``        — failure (info['error'] is set).
+
+    Resolve path: try scripting auto-import first (Phase 2). If the
+    scripting API isn't reachable, fall back to Phase 1's reveal-in-Finder
+    + app-launch, and tag the response with ``setup_required`` so the
+    frontend can prompt the user to enable External Scripting.
     """
     app_path = _find_nle_app_path(nle)
     if not app_path:
-        return None, f'{NLE_DISPLAY_NAMES[nle]} not found at expected location'
+        return None, {'error': f'{NLE_DISPLAY_NAMES[nle]} not found at expected location'}
     try:
         if nle == 'premiere':
             subprocess.Popen(['open', '-R', file_path])
-            return 'finder', None
+            return 'finder', {}
+        if nle == 'resolve':
+            return _hand_file_to_resolve(
+                file_path,
+                app_path=app_path,
+                source_media_path=source_media_path,
+                project_name=project_name,
+                timeline_name=timeline_name,
+            )
         subprocess.Popen(['open', '-a', app_path, file_path])
-        return 'app', None
+        return 'app', {}
     except Exception as e:
-        return None, f'Could not launch {NLE_DISPLAY_NAMES[nle]}: {e}'
+        return None, {'error': f'Could not launch {NLE_DISPLAY_NAMES[nle]}: {e}'}
+
+
+def _hand_file_to_resolve(file_path: str, *,
+                          app_path: str,
+                          source_media_path: str | None,
+                          project_name: str,
+                          timeline_name: str):
+    """Resolve-specific delivery. Tries scripting auto-import first; falls
+    back to reveal-in-Finder + app-focus if scripting isn't available.
+
+    Returns the same shape as _hand_file_to_nle.
+    """
+    # Lazy import — keeps the module from loading on machines without
+    # Resolve, and avoids a startup cost.
+    try:
+        from exporters import resolve_import
+    except Exception as e:
+        # Module itself failed to import (shouldn't happen — it's pure
+        # stdlib). Fall back to reveal+open.
+        app.logger.warning('resolve_import unavailable: %s', e)
+        subprocess.Popen(['open', '-R', file_path])
+        subprocess.Popen(['open', '-a', app_path])
+        return 'finder+app', {}
+
+    result = resolve_import.import_timeline(
+        file_path,
+        source_media_path=source_media_path or None,
+        project_name=project_name or 'Doza Assist Import',
+        timeline_name=timeline_name or os.path.splitext(os.path.basename(file_path))[0],
+    )
+
+    if result.ok:
+        # Bring Resolve to the front so the imported timeline is visible.
+        # The scripting API does the import but doesn't activate the
+        # window — the user clicked Export, they expect to see something.
+        subprocess.Popen(['open', '-a', app_path])
+        return 'scripted', {'timeline_name': result.timeline_name}
+
+    # Scripting failed. Fall back to Phase-1 behavior so the file still
+    # ends up somewhere visible. Surface the setup hint so the frontend
+    # can show a remediation modal (especially for scripting_disabled).
+    subprocess.Popen(['open', '-R', file_path])
+    subprocess.Popen(['open', '-a', app_path])
+    return 'finder+app', {
+        'setup_required': True,
+        'reason': result.reason,
+        'hint': result.hint,
+    }
 
 
 def _reveal_in_finder(file_path: str):
@@ -2805,9 +2888,10 @@ def export_fcpxml_multicam(project_id):
     if deliver_to == 'nle':
         # Round-trip is FCP-only — ignore whatever NLE the user has selected
         # and always hand the file to Final Cut Pro.
-        opened_in, err = _hand_file_to_nle(out_path, 'fcp')
-        if err:
-            return jsonify({'error': err, 'file': out_path}), 500
+        opened_in, info = _hand_file_to_nle(out_path, 'fcp')
+        if opened_in is None:
+            return jsonify({'error': info.get('error', 'NLE delivery failed'),
+                            'file': out_path}), 500
         return jsonify({
             'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
             'nle': 'fcp', 'nle_name': NLE_DISPLAY_NAMES['fcp'],
@@ -3323,15 +3407,23 @@ def story_export(project_id):
     if deliver_to == 'nle':
         if nle not in NLE_DISPLAY_NAMES:
             return jsonify({'error': f'Unknown NLE: {nle!r}'}), 400
-        opened_in, err = _hand_file_to_nle(result.file_path, nle)
-        if err:
-            return jsonify({'error': err, 'file': result.file_path}), 500
-        return jsonify({
+        opened_in, info = _hand_file_to_nle(
+            result.file_path, nle,
+            source_media_path=project.get('source_path') or project.get('filepath'),
+            project_name=project.get('name') or '',
+            timeline_name=os.path.splitext(result.filename)[0],
+        )
+        if opened_in is None:
+            return jsonify({'error': info.get('error', 'NLE delivery failed'),
+                            'file': result.file_path}), 500
+        payload = {
             'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
             'nle': nle, 'nle_name': NLE_DISPLAY_NAMES[nle],
             'file': result.file_path, 'filename': result.filename,
             'format_name': result.format_name,
-        })
+        }
+        payload.update(info)
+        return jsonify(payload)
 
     if deliver_to == 'file':
         _reveal_in_finder(result.file_path)

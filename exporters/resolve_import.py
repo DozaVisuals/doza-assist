@@ -32,6 +32,14 @@ frontend can show the right setup hint):
                            CreateProject() failed.
   - ``import_failed``    — ImportTimelineFromFile returned None;
                            usually a source-media reconnect issue.
+  - ``requires_studio`` — Resolve Free is installed (verified via the
+                          app's CFBundleName) and the scripting daemon
+                          isn't listening. As of Resolve 20, Blackmagic
+                          gates the External Scripting toggle to Studio,
+                          so on Free the auto-import path can't work no
+                          matter what the user does — the frontend
+                          should show drag-into-Media-Pool guidance
+                          instead of a "flip this preference" walk-through.
   - ``unexpected_error`` — exception during the flow.
 """
 from __future__ import annotations
@@ -56,6 +64,28 @@ _FUSION_SO = (
     'Fusion/fusionscript.so'
 )
 _RESOLVE_APP = '/Applications/DaVinci Resolve/DaVinci Resolve.app'
+_RESOLVE_PLIST = f'{_RESOLVE_APP}/Contents/Info.plist'
+
+
+def edition() -> str:
+    """Return ``'studio'``, ``'free'``, or ``'unknown'``.
+
+    Studio installs ship as ``DaVinci Resolve Studio.app`` with
+    ``CFBundleName = "DaVinci Resolve Studio"``; Free is just
+    ``"DaVinci Resolve"``. Reading the plist is cheap and runs out of
+    process, so we don't have to import anything from Resolve to find
+    out — useful when scripting itself is unreachable.
+    """
+    if not os.path.isfile(_RESOLVE_PLIST):
+        return 'unknown'
+    try:
+        out = subprocess.check_output(
+            ['defaults', 'read', _RESOLVE_PLIST, 'CFBundleName'],
+            text=True, timeout=2, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return 'unknown'
+    return 'studio' if 'studio' in out.lower() else 'free'
 
 
 @dataclass
@@ -151,6 +181,15 @@ def probe() -> ProbeResult:
             hint=f'Resolve scripting raised: {e}',
         )
     if handle is None:
+        if edition() == 'free':
+            return ProbeResult(
+                ok=False, reason='requires_studio',
+                hint=('Auto-import into DaVinci Resolve requires Resolve '
+                      'Studio — Blackmagic gates the scripting API behind '
+                      'the paid tier as of Resolve 20. In Free, the export '
+                      'file is revealed in Finder; drag it into Resolve\'s '
+                      'Media Pool to bring the timeline in.'),
+            )
         return ProbeResult(
             ok=False, reason='scripting_disabled',
             hint=('Resolve needs External Scripting turned on for auto-import. '
@@ -226,8 +265,17 @@ def import_timeline(
     handle, err = _get_resolve_handle(dvr_script)
     if handle is None:
         # We launched Resolve (or it was running) but scriptapp never
-        # returned a handle. The most common cause by far is the
-        # external-scripting preference being off.
+        # returned a handle. On Free, this is structural (no toggle
+        # to flip — Blackmagic restricts scripting to Studio). On
+        # Studio, it's the External Scripting preference being off.
+        if edition() == 'free':
+            return ImportResult(
+                ok=False, reason='requires_studio',
+                hint=('Auto-import into DaVinci Resolve requires Resolve '
+                      'Studio. In Free, drag the file from Finder into '
+                      'Resolve\'s Media Pool — the timeline will load with '
+                      'media auto-reconnected from the XML.'),
+            )
         return ImportResult(
             ok=False, reason='scripting_disabled',
             hint=('Resolve is open but rejected the import. Enable External '

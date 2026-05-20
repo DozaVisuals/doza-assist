@@ -797,17 +797,20 @@
 <div class="toast" id="toast"></div>
 
 <!-- Resolve setup modal — surfaces when an export to Resolve falls back to
-     reveal-in-Finder because the scripting API isn't reachable. The most
-     common cause is the External Scripting preference being off (one-time
-     setup). The modal walks the user through enabling it and lets them
-     retry the auto-import without re-running the export. -->
+     reveal-in-Finder because the scripting API isn't reachable. Two code
+     paths:
+       (a) reason === 'requires_studio' — user is on Resolve Free, which
+           doesn't expose External Scripting at all. Show drag-into-Media-Pool
+           guidance and hide the toggle walkthrough + Test-again button.
+       (b) reason === 'scripting_disabled' — user is on Studio with the
+           preference off. Show the walkthrough; "Test again" retries. -->
 <div id="resolveSetupModal" class="modal-backdrop" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9999; align-items:center; justify-content:center;">
     <div style="background:var(--bg-secondary); color:var(--text); padding:1.5rem; border-radius:8px; max-width:520px; width:90%; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
-        <h2 style="margin-top:0; font-size:1.1rem;">One-time DaVinci Resolve setup</h2>
+        <h2 id="resolveSetupTitle" style="margin-top:0; font-size:1.1rem;">One-time DaVinci Resolve setup</h2>
         <p id="resolveSetupHint" style="font-size:0.9rem; line-height:1.5; color:var(--text-secondary);">
             Resolve needs External Scripting enabled so Doza Assist can auto-import timelines.
         </p>
-        <ol style="font-size:0.9rem; line-height:1.6; padding-left:1.25rem;">
+        <ol id="resolveSetupSteps" style="font-size:0.9rem; line-height:1.6; padding-left:1.25rem;">
             <li>Open <strong>DaVinci Resolve</strong>.</li>
             <li>Press <kbd>⌘</kbd>+<kbd>,</kbd> for Preferences.</li>
             <li>Click the <strong>System</strong> tab at the top.</li>
@@ -815,7 +818,10 @@
             <li>Set <strong>External scripting using</strong> to <strong>Local</strong>.</li>
             <li>Click <strong>Save</strong>, then quit and reopen Resolve.</li>
         </ol>
-        <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
+        <p id="resolveSetupFreeNote" style="display:none; font-size:0.9rem; line-height:1.5; color:var(--text-secondary); margin:0.5rem 0 0.75rem;">
+            On Resolve Free, drag the highlighted file from Finder into Resolve's <strong>Media Pool</strong>. The XML carries the source media's path so clips reconnect automatically — no separate import needed.
+        </p>
+        <p id="resolveSetupTrailer" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
             Your export is already in Finder — drop it into Resolve's Media Pool if you'd rather skip auto-import this time.
         </p>
         <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
@@ -4253,9 +4259,43 @@ function maybeShowResolveSetup(data, retryFn) {
     if (!data || !data.setup_required) return;
     const modal = document.getElementById('resolveSetupModal');
     if (!modal) return;
+    const titleEl = document.getElementById('resolveSetupTitle');
     const hintEl = document.getElementById('resolveSetupHint');
-    if (hintEl && data.hint) hintEl.textContent = data.hint;
-    _lastResolveRetryFn = typeof retryFn === 'function' ? retryFn : null;
+    const stepsEl = document.getElementById('resolveSetupSteps');
+    const freeNoteEl = document.getElementById('resolveSetupFreeNote');
+    const trailerEl = document.getElementById('resolveSetupTrailer');
+    const retryBtn = document.getElementById('resolveSetupRetry');
+    const dismissBtn = document.getElementById('resolveSetupDismiss');
+
+    if (data.reason === 'requires_studio') {
+        // Free Resolve — no toggle exists. Drop the walkthrough + retry
+        // button and pivot the modal into a "here's how Free works"
+        // explainer with a single dismiss.
+        if (titleEl) titleEl.textContent = 'Auto-import needs Resolve Studio';
+        if (hintEl) hintEl.textContent = data.hint
+            || 'Auto-import into DaVinci Resolve requires Resolve Studio.';
+        if (stepsEl) stepsEl.style.display = 'none';
+        if (freeNoteEl) freeNoteEl.style.display = '';
+        if (trailerEl) trailerEl.style.display = 'none';
+        if (retryBtn) retryBtn.style.display = 'none';
+        if (dismissBtn) dismissBtn.textContent = 'Got it';
+        _lastResolveRetryFn = null;
+    } else {
+        // Studio with External Scripting off (or some other recoverable
+        // state). Show the walkthrough + Test-again retry.
+        if (titleEl) titleEl.textContent = 'One-time DaVinci Resolve setup';
+        if (hintEl && data.hint) hintEl.textContent = data.hint;
+        if (stepsEl) stepsEl.style.display = '';
+        if (freeNoteEl) freeNoteEl.style.display = 'none';
+        if (trailerEl) trailerEl.style.display = '';
+        if (retryBtn) {
+            retryBtn.style.display = '';
+            retryBtn.disabled = false;
+            retryBtn.textContent = 'Test again';
+        }
+        if (dismissBtn) dismissBtn.textContent = 'Use Finder instead';
+        _lastResolveRetryFn = typeof retryFn === 'function' ? retryFn : null;
+    }
     modal.style.display = 'flex';
 }
 

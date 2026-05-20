@@ -76,6 +76,7 @@ echo "4. Bundling application files..."
 rsync -a \
     --exclude='.git' \
     --exclude='.gitignore' \
+    --exclude='.claude' \
     --exclude='.DS_Store' \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
@@ -108,6 +109,42 @@ rsync -a \
     --exclude='/*.jpeg' \
     --exclude='/*.xmp' \
     "${SCRIPT_DIR}/" "${APP_SRC_DIR}/"
+
+# Sanity check: every critical package/dir must be in the bundle. If the
+# rsync ever quietly drops one (a future denylist edit, a permissions
+# glitch, an exotic file mode), abort here instead of shipping a DMG that
+# 500s on every request — the failure mode behind issue #25.
+echo ""
+echo "   Verifying critical bundle contents..."
+REQUIRED_PATHS=(
+    "ai_providers/__init__.py"
+    "ai_providers/base.py"
+    "doza_assist/__init__.py"
+    "doza_assist/fcpxml/__init__.py"
+    "exporters/__init__.py"
+    "templates"
+    "static"
+    "app.py"
+    "ai_analysis.py"
+    "preferences.py"
+    "requirements.txt"
+)
+MISSING_FROM_BUNDLE=()
+for p in "${REQUIRED_PATHS[@]}"; do
+    if [ ! -e "${APP_SRC_DIR}/${p}" ]; then
+        MISSING_FROM_BUNDLE+=("$p")
+    fi
+done
+if [ "${#MISSING_FROM_BUNDLE[@]}" -gt 0 ]; then
+    echo ""
+    echo "   BUILD ABORTED — required paths missing from bundle:"
+    for p in "${MISSING_FROM_BUNDLE[@]}"; do
+        echo "     - ${p}"
+    done
+    echo ""
+    echo "   Check the rsync denylist above for a regression."
+    exit 1
+fi
 
 # Make scripts executable
 chmod +x "${APP_SRC_DIR}/setup_runner.sh"

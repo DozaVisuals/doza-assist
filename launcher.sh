@@ -45,18 +45,28 @@ log() {
 
 # ── Helpers ──
 
-# Show an error dialog that includes the last 15 lines of a log file, so the
+# Show an error dialog that includes the last 50 lines of a log file, so the
 # user can diagnose without having to open Application Support themselves.
+# If the log mentions ``ModuleNotFoundError``, prepend an actionable hint —
+# that error in server.log almost always means the .app bundle is missing a
+# Python package (issue #25) and the right answer is to re-download.
 show_error_dialog() {
     local message="$1"
     local log_path="${2:-}"
+
+    if [ -n "$log_path" ] && [ -f "$log_path" ] && grep -q "ModuleNotFoundError" "$log_path" 2>/dev/null; then
+        message="$message
+
+This usually means the Doza Assist install is incomplete. Please re-download the latest DMG from:
+https://github.com/DozaVisuals/doza-assist/releases"
+    fi
 
     /usr/bin/osascript <<APPLESCRIPT 2>/dev/null || true
 set dialogText to "$message"
 set logPath to "$log_path"
 if logPath is not "" then
     try
-        set logTail to do shell script "/usr/bin/tail -15 " & quoted form of logPath & " 2>/dev/null || true"
+        set logTail to do shell script "/usr/bin/tail -50 " & quoted form of logPath & " 2>/dev/null || true"
         if logTail is not "" then
             set dialogText to dialogText & "
 

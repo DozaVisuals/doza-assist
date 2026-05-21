@@ -89,8 +89,26 @@ def inject_brand():
     the environment before spawning python -- the shell is responsible
     for ensuring whatever URL it points at actually serves an image
     (drop the logo into static/ before launch).
+
+    The version import is wrapped because a stale or wrong ``doza_assist``
+    package on sys.path (e.g. shadowed by an old pip install in the user's
+    venv) can make ``__version__`` unimportable even on a v3.5.3+ bundle —
+    and an ImportError here crashes every dashboard render, which leaves
+    Flask half-alive and the port stuck (issue #25). Reading the version
+    as "unknown" is a much better failure mode than the app refusing to
+    launch.
     """
-    from doza_assist import __version__ as _doza_version
+    try:
+        from doza_assist import __version__ as _doza_version
+    except (ImportError, AttributeError) as e:
+        print(
+            f"WARNING: could not read doza_assist.__version__ ({type(e).__name__}: {e}). "
+            "App will render with version='unknown'. This usually means a stale or "
+            "shadowed doza_assist package on sys.path — check the venv at "
+            "~/Library/Application Support/DozaAssist/venv for an old install.",
+            flush=True,
+        )
+        _doza_version = 'unknown'
     return {
         'brand': os.environ.get('DOZA_BRAND', 'Doza Assist'),
         'logo_url': os.environ.get('DOZA_LOGO_URL', '/static/logo.jpg'),

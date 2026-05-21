@@ -115,6 +115,9 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
 
     Tries engines in order: Parakeet MLX (fastest) → WhisperX → Whisper.
     For non-English languages, skips Parakeet (English-only) and uses WhisperX/Whisper.
+    For multi-speaker requests, also skips Parakeet — it has no diarization, so
+    every segment would collapse onto SPEAKER_00 and the user would see one
+    speaker even though they configured several (issue #28).
 
     Returns:
         dict with 'segments' list, each containing:
@@ -127,8 +130,11 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     # Extract audio first — needed for all engines (video files are too large for direct processing)
     audio_path = extract_audio(filepath, project_dir=project_dir)
 
-    # Try Parakeet MLX first (fastest on Apple Silicon) — English only
-    if language == 'en':
+    # Try Parakeet MLX first (fastest on Apple Silicon) — English, single-speaker only.
+    # Parakeet doesn't diarize; on a multi-speaker project it would label every
+    # word as the first speaker, so we route those to WhisperX instead even
+    # though Parakeet is the faster engine.
+    if language == 'en' and num_speakers <= 1:
         try:
             return _transcribe_parakeet(audio_path, speaker_labels)
         except ImportError:
@@ -138,12 +144,14 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
             print(f"Parakeet failed: {e}", flush=True)
             traceback.print_exc()
             print("Falling back to Whisper...", flush=True)
-    else:
+    elif language != 'en':
         print(f"Language '{language}' selected — skipping Parakeet (English-only), using Whisper...", flush=True)
+    else:
+        print(f"num_speakers={num_speakers} — skipping Parakeet (no diarization), using WhisperX for speaker labels...", flush=True)
 
     # Try WhisperX
     try:
-        return _transcribe_whisperx(audio_path, speaker_labels, language=language)
+        return _transcribe_whisperx(audio_path, speaker_labels, language=language, num_speakers=num_speakers)
     except ImportError:
         print("WhisperX not available, trying standard Whisper...")
 
@@ -302,7 +310,7 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
     }
 
 
-def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
+def _transcribe_whisperx(audio_path, speaker_labels=None, language='en', num_speakers=2):
     """Transcribe using WhisperX with word-level timestamps and diarization."""
     global _whisperx_model
     import whisperx
@@ -350,13 +358,35 @@ def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
             model_a, metadata = align_entry[0], align_entry[1]
     result = whisperx.align(result["segments"], model_a, metadata, audio, device)
 
-    # Speaker diarization
+    # Speaker diarization.
+    # Requires HF_TOKEN env var + the HF account having accepted the pyannote
+    # speaker-diarization model terms. Without the token diarization silently
+    # no-ops and every segment ends up as SPEAKER_00, which on a multi-speaker
+    # project surfaces to the user as "I asked for 2 speakers, got 1" (issue
+    # #28). Log the missing-token case loudly so the support flow is obvious.
     print("Running speaker diarization...")
-    hf_token = os.environ.get('HF_TOKEN', '')
+    hf_token = os.environ.get('HF_TOKEN', '') or os.environ.get('HUGGINGFACE_TOKEN', '')
     if hf_token:
         diarize_model = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
-        diarize_segments = diarize_model(audio)
+        # Hint pyannote with the expected speaker count from the project so it
+        # doesn't auto-detect a different number. Bounds are inclusive.
+        if num_speakers and num_speakers > 1:
+            diarize_segments = diarize_model(audio, min_speakers=num_speakers, max_speakers=num_speakers)
+        else:
+            diarize_segments = diarize_model(audio)
         result = whisperx.assign_word_speakers(diarize_segments, result)
+    elif num_speakers and num_speakers > 1:
+        print(
+            "WARNING: HF_TOKEN env var not set — speaker diarization will be "
+            "skipped and all segments will be labeled with the first speaker. "
+            "To enable multi-speaker labeling: "
+            "1) create a HuggingFace account, "
+            "2) accept the model terms at "
+            "https://huggingface.co/pyannote/speaker-diarization-3.1, "
+            "3) generate a read token, "
+            "4) set HF_TOKEN=<your-token> before launching the app.",
+            flush=True,
+        )
 
     # Format output
     segments = []

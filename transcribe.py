@@ -6,6 +6,7 @@ Falls back to standard Whisper if WhisperX is not available.
 
 import os
 import ssl
+import sys
 import json
 import shutil
 import time
@@ -49,7 +50,8 @@ _ensure_ffmpeg_on_path()
 import threading
 
 _model_lock = threading.Lock()
-_parakeet_model = None
+# Parakeet runs in a subprocess (see _transcribe_parakeet); no parent-side
+# model cache. Whisper variants stay in-process and share the lock.
 _whisperx_model = None          # (model, device, compute_type)
 _whisperx_align_cache = {}      # {lang_code: (model_a, metadata, device)}
 _whisper_cache = {}             # {model_name: model}
@@ -167,147 +169,82 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
 
 
 def _transcribe_parakeet(filepath, speaker_labels=None):
-    """Transcribe using Parakeet MLX — fastest on Apple Silicon.
+    """Transcribe using Parakeet MLX in an isolated subprocess.
 
-    Chunks long audio into 5-minute segments to avoid Metal GPU memory limits.
+    The Parakeet decode is moved into ``parakeet_worker.py`` and spawned
+    as a child Python process. Rationale: on some M1 systems MLX/Metal
+    raises a C++ exception inside the Metal completion handler that
+    Python literally cannot catch — it propagates to ``std::terminate``
+    and aborts the whole process (issue #23). With this isolation the
+    SIGABRT kills the worker, not the Flask server, and the outer
+    ``transcribe_file`` falls through to the WhisperX / Whisper engines.
+
+    Chunking and the per-chunk MLX cache flush both live inside the
+    worker — see ``parakeet_worker.transcribe``. The model is re-loaded
+    on every call (no shared cache across files) which is the cost of
+    process isolation; first-load is ~5–15 s. If batch throughput
+    becomes a concern later, switch to a long-lived worker with a
+    request pipe — keeping it per-call for now is the simplest shape
+    that fixes the crash.
     """
-    global _parakeet_model
-    import numpy as np
-    from parakeet_mlx.audio import load_audio
-
-    with _model_lock:
-        if _parakeet_model is None:
-            from parakeet_mlx import from_pretrained
-            print("Loading Parakeet TDT model...", flush=True)
-            _parakeet_model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
-        else:
-            print("Using cached Parakeet TDT model.", flush=True)
-        model = _parakeet_model
-
-    print("Loading audio...", flush=True)
-    audio_data = load_audio(filepath, model.preprocessor_config.sample_rate)
-
-    sr = model.preprocessor_config.sample_rate
-    total_samples = len(audio_data)
-    total_duration = total_samples / sr
-
-    # Chunk into ~1 minute segments with 1s overlap to avoid cutting words.
-    # We previously used 300s, which fixed the original "whole-file OOM" but
-    # still occasionally trips a hard SIGABRT from inside Metal's completion
-    # handler on some M1 systems (issue #23: mlx::core::gpu::check_error →
-    # std::terminate → abort, which kills the whole Python process and shows
-    # as a generic "Load failed" to the user). Smaller chunks shrink each GPU
-    # command buffer and let us clear MLX's cache between chunks so GPU
-    # pressure stays flat across long files. ~5x the per-chunk overhead
-    # but per-chunk overhead is tiny so the net runtime cost is negligible.
-    chunk_sec = 60
-    overlap_sec = 1
-    chunk_samples = int(chunk_sec * sr)
-    overlap_samples = int(overlap_sec * sr)
-
     default_speaker = 'Speaker'
     if speaker_labels:
         default_speaker = speaker_labels.get('SPEAKER_00', 'Speaker')
 
-    all_segments = []
-    chunk_start = 0
-    chunk_idx = 0
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parakeet_worker.py')
+    if not os.path.isfile(worker):
+        raise RuntimeError(f"parakeet_worker.py not found next to transcribe.py at {worker}")
 
-    while chunk_start < total_samples:
-        chunk_end = min(chunk_start + chunk_samples, total_samples)
-        chunk = audio_data[chunk_start:chunk_end]
-        time_offset = chunk_start / sr
+    fd, out_path = tempfile.mkstemp(prefix='parakeet_result_', suffix='.json')
+    os.close(fd)
+    try:
+        cmd = [
+            sys.executable, worker,
+            '--audio', filepath,
+            '--output', out_path,
+            '--speaker', default_speaker,
+        ]
+        # Stream child stdout/stderr forward so the app log keeps
+        # showing per-chunk progress lines. Combine streams so the
+        # interleaving stays in causal order.
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end='', flush=True)
+        proc.wait()
 
-        chunk_idx += 1
-        print(f"Transcribing chunk {chunk_idx} ({time_offset:.0f}s - {chunk_end/sr:.0f}s)...", flush=True)
+        if proc.returncode != 0:
+            # On Unix a process killed by signal N reports returncode -N.
+            # We surface either the negative signal or the positive exit
+            # code; if the worker wrote {"error": ...} before exiting we
+            # also include that for diagnostics. A SIGABRT (issue #23)
+            # leaves the file empty / absent so this just falls through.
+            extra = ''
+            try:
+                if os.path.getsize(out_path) > 0:
+                    with open(out_path) as f:
+                        err = (json.load(f) or {}).get('error')
+                        if err:
+                            extra = f' -- {err}'
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Parakeet worker exited with code {proc.returncode}{extra}"
+            )
 
-        # Save chunk as temp WAV (parakeet.transcribe expects a file path)
-        import soundfile as sf
-        tmp_path = os.path.join(tempfile.gettempdir(), f'parakeet_chunk_{chunk_idx}.wav')
-        sf.write(tmp_path, np.array(chunk), sr)
-
-        result = model.transcribe(tmp_path)
-        os.remove(tmp_path)
-
-        # Flush pending Metal work and release cached GPU buffers between
-        # chunks. Without this, MLX carries command-buffer state across
-        # chunks and on long files that has triggered hard SIGABRT crashes
-        # from mlx::core::gpu::check_error (issue #23). Wrapped because the
-        # exact MLX cache API has moved between versions — we try the
-        # current top-level call, fall back to the older metal namespace,
-        # and silently skip if neither exists rather than turn cleanup into
-        # a new failure mode.
+        with open(out_path) as f:
+            return json.load(f)
+    finally:
         try:
-            import mlx.core as mx
-            if hasattr(mx, 'synchronize'):
-                mx.synchronize()
-            if hasattr(mx, 'clear_cache'):
-                mx.clear_cache()
-            elif hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
-                mx.metal.clear_cache()
-        except Exception:
+            os.remove(out_path)
+        except FileNotFoundError:
             pass
-
-        for sent in result.sentences:
-            if not sent.text.strip():
-                continue
-
-            # Merge subword tokens into full words
-            # Parakeet uses BPE: tokens starting with space begin a new word
-            words = []
-            for tok in sent.tokens:
-                tok_text = tok.text
-                tok_start = round(tok.start + time_offset, 3)
-                tok_end = round(tok.end + time_offset, 3)
-
-                if tok_text.startswith(' ') or not words:
-                    # New word
-                    words.append({
-                        'start': tok_start,
-                        'end': tok_end,
-                        'word': tok_text,
-                    })
-                else:
-                    # Continuation of previous word — merge
-                    words[-1]['word'] += tok_text
-                    words[-1]['end'] = tok_end
-
-            seg_start = (sent.tokens[0].start if sent.tokens else 0) + time_offset
-            seg_end = (sent.tokens[-1].end if sent.tokens else 0) + time_offset
-
-            all_segments.append({
-                'start': round(seg_start, 3),
-                'end': round(seg_end, 3),
-                'text': sent.text.strip(),
-                'speaker': default_speaker,
-                'start_formatted': format_timestamp(seg_start),
-                'end_formatted': format_timestamp(seg_end),
-                'words': words,
-            })
-
-        # Advance past this chunk, minus overlap
-        chunk_start = chunk_end - overlap_samples
-        if chunk_end >= total_samples:
-            break
-
-    # Remove duplicate segments from overlap regions
-    if len(all_segments) > 1:
-        deduped = [all_segments[0]]
-        for seg in all_segments[1:]:
-            # Skip if this segment starts before the previous one ends (overlap duplicate)
-            if seg['start'] < deduped[-1]['end'] - 0.5:
-                continue
-            deduped.append(seg)
-        all_segments = deduped
-
-    print(f"Parakeet done: {len(all_segments)} segments in {total_duration:.0f}s of audio", flush=True)
-
-    return {
-        'segments': all_segments,
-        'language': 'en',
-        'duration': all_segments[-1]['end'] if all_segments else 0,
-        'engine': 'parakeet-mlx',
-    }
 
 
 def _transcribe_whisperx(audio_path, speaker_labels=None, language='en', num_speakers=2):

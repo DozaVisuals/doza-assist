@@ -1663,6 +1663,48 @@ allWords.forEach(w => {
 });
 let lastActiveWord = null;
 
+// Rebuild the word index after an innerHTML swap (e.g. diarization
+// replaces transcript paragraphs with speaker-tagged versions). The
+// old .tw DOM nodes are detached; allWords must point at the new ones
+// or drag-to-highlight and playback highlighting both silently fail
+// (indexOf returns -1 for every word). Called by the diarization module
+// via window.rebuildWordIndex().
+window.rebuildWordIndex = function rebuildWordIndex() {
+    // allWords is const — mutate in place so every reference stays valid.
+    allWords.length = 0;
+    Array.from(transcriptContainer.querySelectorAll('.tw[data-s]')).forEach(w => allWords.push(w));
+
+    // Rebuild per-project lookup.
+    Object.keys(wordsByProject).forEach(k => delete wordsByProject[k]);
+    allWords.forEach(w => {
+        const para = w.closest('.para-block');
+        const pid = para ? para.dataset.project : PROJECT_ID;
+        if (!wordsByProject[pid]) wordsByProject[pid] = [];
+        wordsByProject[pid].push(w);
+    });
+
+    lastActiveWord = null;
+
+    // Re-init the transcript module so existing labeled sections get
+    // repainted onto the new DOM words and the drag handlers' internal
+    // state is consistent. preserveBrush:true keeps the editor's
+    // current color selection.
+    if (typeof transcriptInit === 'function') {
+        transcriptInit({
+            colorLabels:     colorLabels,
+            labeledSections: labelSections.map(s => ({ start: s.start, end: s.end, color: s.color, text: s.text })),
+            segmentVectors:  segmentVectors,
+            preserveBrush:   true,
+        });
+    }
+
+    // Clear any stale search matches (their .tw nodes were detached by
+    // the innerHTML swap).
+    if (typeof transcriptSearchReset === 'function') {
+        transcriptSearchReset();
+    }
+};
+
 function highlightActiveSegment(currentTime) {
     // Remove previous highlight
     if (lastActiveWord) lastActiveWord.classList.remove('tw-active');

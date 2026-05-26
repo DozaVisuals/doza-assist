@@ -1,0 +1,95 @@
+<!-- Update banner — injected by Electron's preload bridge (dozaUpdate).
+     Self-contained: CSS + JS + HTML. No-ops gracefully when running
+     outside Electron (Flask dev server) since window.dozaUpdate is undefined. -->
+<div id="updateBanner" style="display:none;">
+  <div class="update-banner">
+    <span id="updateMsg"></span>
+    <button id="updateBtn" class="update-btn"></button>
+    <button id="updateDismiss" class="update-dismiss" title="Dismiss">&times;</button>
+  </div>
+</div>
+
+<style>
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--accent-dim);
+  border-bottom: 1px solid var(--accent);
+  font-size: 0.82rem;
+  color: var(--text-primary);
+}
+.update-btn {
+  padding: 4px 14px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.update-btn:hover { background: var(--accent-hover); }
+.update-btn:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+.update-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.update-dismiss:hover { color: var(--text-primary); }
+</style>
+
+<script>
+(function () {
+  if (typeof window.dozaUpdate === 'undefined') return;
+
+  var banner  = document.getElementById('updateBanner');
+  var msg     = document.getElementById('updateMsg');
+  var btn     = document.getElementById('updateBtn');
+  var dismiss = document.getElementById('updateDismiss');
+  var version = '';
+
+  // Phase 1: "Update available" — user can click to download
+  window.dozaUpdate.onUpdateAvailable(function (info) {
+    version = info.version;
+    msg.textContent = 'Update available: v' + version;
+    btn.textContent = 'Download';
+    btn.disabled = false;
+    btn.onclick = function () {
+      btn.textContent = 'Downloading…';
+      btn.disabled = true;
+      window.dozaUpdate.downloadUpdate();
+    };
+    banner.style.display = '';
+  });
+
+  // Phase 2: Download progress
+  window.dozaUpdate.onDownloadProgress(function (progress) {
+    btn.textContent = 'Downloading ' + progress.percent + '%';
+  });
+
+  // Phase 3: Download complete — user can click to restart
+  window.dozaUpdate.onUpdateDownloaded(function () {
+    msg.textContent = 'v' + version + ' is ready to install.';
+    btn.textContent = 'Restart Now';
+    btn.disabled = false;
+    btn.onclick = function () {
+      window.dozaUpdate.installUpdate();
+    };
+  });
+
+  dismiss.onclick = function () {
+    banner.style.display = 'none';
+  };
+})();
+</script>

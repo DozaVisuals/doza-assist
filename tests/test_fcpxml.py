@@ -736,3 +736,79 @@ class TestSyncClipFullyMuted:
         parsed = parse_fcpxml(p)
         seg = parsed.spine_segments[0]
         assert seg.audio_source.is_muted is True
+
+
+# ---------- sync-clip with external audio nested INSIDE the primary clip ----
+#
+# Real-world pattern (Meeting and Interview project): FCP writes a sync-clip
+# with NO inner <spine>; the external recorder is nested as a lane=-1
+# asset-clip INSIDE the primary camera asset-clip rather than as a sibling.
+# Before the fix, the parser scanned only direct children of <sync-clip>
+# and children of <sync-clip>/<spine>, so the lane-attached external audio
+# was never collected. With the camera mic muted, the segment fell to
+# is_muted=True and got dropped from the timeline-audio plan — Parakeet
+# transcribed silence for that half of the interview.
+
+NESTED_LANE_AUDIO_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.14">
+        <resources>
+            <format id="r1" name="FF" frameDuration="1001/24000s" width="1920" height="1080"/>
+            <format id="r4" name="audioOnly"/>
+            <asset id="rCam" name="C9892" start="0s" duration="35820000/24000s" hasVideo="1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/C9892.MP4"/>
+            </asset>
+            <asset id="rExt" name="external_wav" start="0s" duration="1476s" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000" format="r4">
+                <media-rep kind="original-media" src="file:///tmp/external.wav"/>
+            </asset>
+        </resources>
+        <library>
+            <event name="E">
+                <project name="Nested Lane">
+                    <sequence format="r1" duration="200s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                        <spine>
+                            <sync-clip offset="0s" name="C9892 - Synchronized Clip" start="92100/2400s" duration="426500/2400s">
+                                <asset-clip ref="rCam" offset="0s" name="C9892" duration="35820000/24000s" audioRole="dialogue">
+                                    <asset-clip ref="rExt" lane="-1" offset="156893/8000s" name="external_wav" duration="1476s" format="r4" audioRole="dialogue"/>
+                                </asset-clip>
+                                <sync-source sourceID="storyline">
+                                    <audio-role-source role="dialogue.dialogue-1" active="0"/>
+                                </sync-source>
+                            </sync-clip>
+                        </spine>
+                    </sequence>
+                </project>
+            </event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestSyncClipNestedLaneAudio:
+    """Sync-clip with no inner <spine>, external audio nested as lane=-1
+    asset-clip INSIDE the primary asset-clip, camera mic muted via
+    audio-role-source active='0'. The parser must still surface the
+    external recorder so the segment is transcribed instead of dropping
+    to silence."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "nested_lane.fcpxml"
+        p.write_text(NESTED_LANE_AUDIO_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_picks_nested_external_audio(self, parsed):
+        seg = parsed.spine_segments[0]
+        assert seg.audio_source.asset_id == "rExt", (
+            "Expected the external recorder nested inside the primary asset-clip "
+            f"to be chosen; got {seg.audio_source.asset_id!r} instead"
+        )
+        assert seg.audio_source.path == "/tmp/external.wav"
+
+    def test_segment_not_muted_when_nested_lane_rescues(self, parsed):
+        seg = parsed.spine_segments[0]
+        assert seg.audio_source.is_muted is False, (
+            "Nested lane=-1 external audio must rescue the muted-camera segment "
+            "from is_muted=True (which would drop it from the timeline-audio plan)"
+        )

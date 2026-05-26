@@ -25,6 +25,33 @@ def _create_ssl_context(*args, **kwargs):
 ssl.create_default_context = _create_ssl_context
 
 
+# ── mlx startup probe ────────────────────────────────────────────────
+# Detect the macOS Metal SDK drift class of regression at app boot
+# instead of mid-transcribe. A bundled mlx wheel compiled against the
+# macOS 26 (Tahoe) Metal SDK emits a .metallib at Shader Language
+# version 4.0, which only loads on macOS 26. Users still on macOS 15
+# (Sequoia) hit "Failed to load the default metallib" and the
+# transcribe path silently falls through to Whisper-CPU (~10x slower,
+# ~7 GB RAM). Surfacing the failure here makes the support flow obvious
+# instead of looking like a generic "transcription is slow" ticket.
+try:
+    import mlx  # noqa: F401
+    import mlx.nn  # triggers metallib load
+    _mlx_version = getattr(mlx, "__version__", "?")
+    print(f"mlx OK: {_mlx_version}", flush=True)
+except Exception as _mlx_err:
+    print(
+        f"WARN mlx unavailable at startup: {_mlx_err}. "
+        "Parakeet path will be disabled; transcription will fall back "
+        "to Whisper. If the message above mentions 'language version 4', "
+        "the bundled mlx wheel is incompatible with this macOS version "
+        "(macOS 26 build host shipping wheels that need macOS 26 runtime); "
+        "pin mlx to a version compiled against an older Metal SDK in "
+        "requirements-bundle.txt and rebuild the bundle.",
+        flush=True,
+    )
+
+
 def _ensure_ffmpeg_on_path():
     """Ensure ffmpeg is discoverable on PATH (needed by whisper internally).
 
@@ -89,17 +116,18 @@ def _find_ffmpeg():
 
 def extract_audio(filepath, project_dir=None):
     """
-    Extract audio from video files to WAV for processing.
+    Extract / convert any media file to a 16 kHz mono WAV for processing.
 
-    If project_dir is provided, the extracted WAV is written there
-    (projects/<id>/audio.wav) instead of next to the source file.
-    This avoids copying huge video files -- we only create a small
-    16kHz mono WAV (~10MB per hour of audio).
+    Always produces a WAV so the browser's ``<audio>`` element plays the
+    exact same decoded PCM that Parakeet used for timestamping.  Without
+    this, compressed formats (MP3, AAC …) are decoded independently by
+    the browser and by ffmpeg, and differences in encoder-delay handling
+    or VBR frame timing cause progressive drift between the transcript
+    timestamps and the audible playback position.
+
+    If *project_dir* is provided the WAV is written to
+    ``projects/<id>/audio.wav``; otherwise it lands next to the source.
     """
-    ext = filepath.rsplit('.', 1)[-1].lower()
-    if ext in ('wav', 'mp3', 'aac', 'm4a', 'flac', 'aif', 'aiff'):
-        return filepath
-
     # Determine output path for extracted audio
     if project_dir:
         audio_path = os.path.join(project_dir, 'audio.wav')
@@ -109,6 +137,20 @@ def extract_audio(filepath, project_dir=None):
     # Skip extraction if audio already exists in the project dir
     if os.path.exists(audio_path):
         return audio_path
+
+    # If the source is already a 16 kHz mono WAV we can just reference it
+    # directly — no decode ambiguity is possible for uncompressed PCM.
+    ext = filepath.rsplit('.', 1)[-1].lower()
+    if ext == 'wav':
+        try:
+            import wave
+            with wave.open(filepath, 'rb') as wf:
+                if (wf.getnchannels() == 1
+                        and wf.getframerate() == 16000
+                        and wf.getsampwidth() == 2):
+                    return filepath
+        except Exception:
+            pass  # not a valid WAV or wrong format — fall through to ffmpeg
 
     ffmpeg = _find_ffmpeg()
     result = subprocess.run([
@@ -130,12 +172,26 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
-def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speakers=2, language='en'):
+def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speakers=2,
+                    language='en', progress_cb=None):
     """
     Transcribe an audio/video file.
 
     Tries engines in order: Parakeet MLX (fastest) → WhisperX → Whisper.
     For non-English languages, skips Parakeet (English-only) and uses WhisperX/Whisper.
+
+    ``progress_cb`` is an optional ``callable(dict)`` invoked at major
+    milestones. The dict carries ``{"phase": str, "pct": int, "engine":
+    str}``. Phases land in this order:
+
+      - ``extract_audio`` (pct=0)
+      - ``load_model`` with the engine name (pct=5)
+      - ``transcribing`` with periodic pct updates as the engine works
+      - ``finalize`` (pct=90, downstream code can use 90..100 for
+        diarization or post-processing)
+
+    Pct caps at 90 so the caller can reserve the last decile for
+    whatever post-transcription work it queues.
 
     Returns:
         dict with 'segments' list, each containing:
@@ -145,18 +201,51 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
             - start_formatted, end_formatted (str HH:MM:SS.mmm)
             - words (list of {start, end, word})
     """
+    def _emit(phase, pct, engine=None, **extra):
+        """Best-effort progress emit. A bad callback never breaks the
+        actual transcription run."""
+        if progress_cb is None:
+            return
+        try:
+            event = {"phase": phase, "pct": int(pct)}
+            if engine is not None:
+                event["engine"] = engine
+            event.update(extra)
+            progress_cb(event)
+        except Exception:
+            pass
+
+    _emit("extract_audio", 0)
     # Extract audio first — needed for all engines (video files are too large for direct processing)
     audio_path = extract_audio(filepath, project_dir=project_dir)
 
     # Try Parakeet MLX first (fastest on Apple Silicon) — English only
     if language == 'en':
         try:
-            return _transcribe_parakeet(audio_path, speaker_labels)
+            _emit("load_model", 5, engine="parakeet-mlx")
+            return _transcribe_parakeet(audio_path, speaker_labels, progress_cb=_emit)
         except ImportError:
             print("Parakeet MLX not available, trying Whisper...", flush=True)
         except Exception as e:
             import traceback
-            print(f"Parakeet failed: {e}", flush=True)
+            err_text = str(e)
+            # macOS 13/14: bundled mlx.metallib is compiled against Metal
+            # SL 4.0 which only loads on macOS 15+. The user-visible
+            # symptom is Parakeet failing and the app silently falling
+            # to Whisper-CPU (10x slower, ~7 GB RAM). Annotate the log
+            # with a clear cause so the support flow doesn't waste time
+            # diagnosing a "transcription is slow" ticket.
+            if "default metallib" in err_text or "language version 4" in err_text:
+                print(
+                    "Parakeet failed: Metal shader library is incompatible "
+                    "with this macOS version. The bundled mlx package needs "
+                    "macOS 15 (Sequoia) or newer; this Mac will use the "
+                    "slower Whisper fallback for now. Upgrade macOS for "
+                    "the fast transcription path.",
+                    flush=True,
+                )
+            else:
+                print(f"Parakeet failed: {e}", flush=True)
             traceback.print_exc()
             print("Falling back to Whisper...", flush=True)
     else:
@@ -164,13 +253,18 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
 
     # Try WhisperX
     try:
-        return _transcribe_whisperx(audio_path, speaker_labels, language=language)
+        _emit("load_model", 5, engine="whisperx", slow_mode=True)
+        return _transcribe_whisperx(audio_path, speaker_labels, language=language, progress_cb=_emit)
     except ImportError:
         print("WhisperX not available, trying standard Whisper...")
 
     # Fall back to standard Whisper
     try:
-        return _transcribe_whisper(audio_path, speaker_labels, num_speakers=num_speakers, language=language)
+        _emit("load_model", 5, engine="whisper", slow_mode=True)
+        return _transcribe_whisper(
+            audio_path, speaker_labels, num_speakers=num_speakers,
+            language=language, progress_cb=_emit,
+        )
     except ImportError:
         raise RuntimeError(
             "No transcription engine found. Install one of:\n"
@@ -179,25 +273,42 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
         )
 
 
-def _transcribe_parakeet(filepath, speaker_labels=None):
+def _transcribe_parakeet(filepath, speaker_labels=None, progress_cb=None):
     """Transcribe using Parakeet MLX — fastest on Apple Silicon.
 
     Chunks long audio into 5-minute segments to avoid Metal GPU memory limits.
+
+    ``progress_cb`` is invoked per chunk with phase=transcribing and a
+    pct in [10, 90] derived from chunk_end / total_samples. The 10-90
+    band is the engine's working share; the wrapper reserves 0-10 for
+    audio extraction + model load and 90-100 for post-processing.
     """
     global _parakeet_model
     import numpy as np
     from parakeet_mlx.audio import load_audio
 
+    def _emit(phase, pct, **extra):
+        if progress_cb is None:
+            return
+        try:
+            event = {"phase": phase, "pct": int(pct), "engine": "parakeet-mlx"}
+            event.update(extra)
+            progress_cb(event)
+        except Exception:
+            pass
+
     with _model_lock:
         if _parakeet_model is None:
             from parakeet_mlx import from_pretrained
             print("Loading Parakeet TDT model...", flush=True)
+            _emit("load_model", 5)
             _parakeet_model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
         else:
             print("Using cached Parakeet TDT model.", flush=True)
         model = _parakeet_model
 
     print("Loading audio...", flush=True)
+    _emit("load_audio", 8)
     audio_data = load_audio(filepath, model.preprocessor_config.sample_rate)
 
     sr = model.preprocessor_config.sample_rate
@@ -224,6 +335,10 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
         time_offset = chunk_start / sr
 
         chunk_idx += 1
+        # Emit AFTER chunk_end is known so the bar tracks actual
+        # progress (which sample range we're about to decode).
+        pct = 10 + int(80 * chunk_end / max(1, total_samples))
+        _emit("transcribing", pct, audio_sec=int(total_duration))
         print(f"Transcribing chunk {chunk_idx} ({time_offset:.0f}s - {chunk_end/sr:.0f}s)...", flush=True)
 
         # Save chunk as temp WAV (parakeet.transcribe expects a file path)
@@ -296,8 +411,22 @@ def _transcribe_parakeet(filepath, speaker_labels=None):
     }
 
 
-def _transcribe_whisperx(audio_path, speaker_labels=None, language='en'):
-    """Transcribe using WhisperX with word-level timestamps and diarization."""
+def _transcribe_whisperx(audio_path, speaker_labels=None, language='en', progress_cb=None):
+    """Transcribe using WhisperX with word-level timestamps and diarization.
+
+    ``progress_cb`` emits a single ``transcribing`` event when the
+    model starts (slow_mode=True) so the UI can switch to an
+    indeterminate barber-pole. WhisperX doesn't expose per-segment
+    progress, so we can't drive a determinate bar from inside.
+    """
+    if progress_cb is not None:
+        try:
+            progress_cb({
+                "phase": "transcribing", "pct": 10, "engine": "whisperx",
+                "slow_mode": True,
+            })
+        except Exception:
+            pass
     global _whisperx_model
     import whisperx
     import torch
@@ -424,7 +553,8 @@ def _transcribe_lightning(audio_path, speaker_labels=None):
     }
 
 
-def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, language='en'):
+def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, language='en',
+                        progress_cb=None):
     """Transcribe using OpenAI Whisper. Speaker assignment done manually by user.
 
     Uses 'turbo' (Whisper large-v3-turbo, 1.62GB) — the same model MacWhisper uses.
@@ -432,8 +562,24 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
     with comparable quality including strong non-English support (Czech, Polish,
     Russian, etc.). Previously used 'base' (74M params), which produced unusable
     output for non-English languages.
+
+    ``progress_cb`` emits ``transcribing`` events on a wallclock timer
+    while Whisper runs. CPU-bound Whisper has no per-segment hook, so
+    we estimate progress from elapsed seconds against an assumed
+    realtime multiplier (~1.0x for turbo on Apple Silicon CPU).
     """
     import whisper
+    import threading
+
+    def _emit(phase, pct, **extra):
+        if progress_cb is None:
+            return
+        try:
+            event = {"phase": phase, "pct": int(pct), "engine": "whisper", "slow_mode": True}
+            event.update(extra)
+            progress_cb(event)
+        except Exception:
+            pass
 
     # Try turbo first (best quality/speed balance, matches MacWhisper)
     # Fall back to large-v3 or base if turbo unavailable (older whisper versions)
@@ -463,7 +609,52 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
     transcribe_kwargs = {"word_timestamps": True}
     if language != 'auto':
         transcribe_kwargs["language"] = language
-    result = model.transcribe(audio_path, **transcribe_kwargs)
+
+    # Whisper-CPU has no per-segment progress hook. Wall-clock estimator
+    # thread: ticks every 2s, bumps pct toward 88 based on elapsed time
+    # vs the audio duration's assumed realtime multiplier. Caps at 88
+    # so the bar visibly nudges forward even if Whisper takes longer
+    # than estimated, but doesn't claim "Done!" before model.transcribe
+    # actually returns.
+    audio_duration_sec = 0
+    try:
+        import soundfile as _sf
+        _info = _sf.info(audio_path)
+        audio_duration_sec = max(1.0, float(_info.frames) / max(1, _info.samplerate))
+    except Exception:
+        audio_duration_sec = 60.0  # safe baseline
+
+    _stop_estimator = threading.Event()
+
+    def _estimator():
+        import time as _t
+        # Whisper turbo on Apple Silicon CPU runs at ~1.0x realtime in
+        # FP32. A 10-min interview takes ~10 min. We aim the bar at the
+        # estimated finish but cap at 88 so it never claims completion.
+        REALTIME_MULTIPLIER = 1.0
+        start = _t.time()
+        estimated_total = audio_duration_sec * REALTIME_MULTIPLIER
+        _emit("transcribing", 10, audio_sec=int(audio_duration_sec))
+        last_pct = 10
+        while not _stop_estimator.wait(2.0):
+            elapsed = _t.time() - start
+            ratio = min(1.0, elapsed / max(1.0, estimated_total))
+            pct = min(88, int(10 + 78 * ratio))
+            if pct > last_pct:
+                _emit("transcribing", pct, audio_sec=int(audio_duration_sec))
+                last_pct = pct
+
+    estimator_thread = threading.Thread(target=_estimator, daemon=True)
+    estimator_thread.start()
+    try:
+        result = model.transcribe(audio_path, **transcribe_kwargs)
+    finally:
+        _stop_estimator.set()
+        try:
+            estimator_thread.join(timeout=1.0)
+        except Exception:
+            pass
+    _emit("finalize", 90)
 
     # Default speaker name
     default_speaker = 'Speaker'

@@ -1383,7 +1383,8 @@ def serve_media_audio(project_id):
         from transcribe import extract_audio
         try:
             wav_path = extract_audio(source_path, project_dir=project_dir)
-            return send_file(wav_path, mimetype='audio/wav')
+            mime = 'audio/wav' if wav_path.lower().endswith('.wav') else 'audio/mpeg'
+            return send_file(wav_path, mimetype=mime)
         except Exception:
             pass
 
@@ -1505,9 +1506,216 @@ def install_whisper_status():
     return jsonify(state)
 
 
+@app.route('/project/<project_id>/audio-duration', methods=['GET'])
+def project_audio_duration(project_id):
+    """Return the audio/video file's duration in seconds via ffprobe.
+
+    Called by the transcribe-progress UI BEFORE starting transcription so
+    the progress bar can pace itself against real audio length instead of
+    a wildly-wrong file-size heuristic. 0.7.0 estimated transcription as
+    ``fileSizeGB * 3 + 2`` seconds — for typical podcast mp3s that gives
+    2-5 seconds, so the bar raced to 90% and stalled for the rest of
+    actual transcription (which takes minutes). With real duration we
+    estimate transcription as ~0.1x realtime — close to Parakeet MLX's
+    measured pace on Apple Silicon, and within an order of magnitude
+    for the Whisper / WhisperX fallback paths.
+
+    Returns ``{"duration_seconds": <float>}`` on success, or
+    ``{"duration_seconds": null}`` when ffprobe is unavailable / fails.
+    Never raises — a probe failure shouldn't block transcription itself.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if not source_path or not os.path.exists(source_path):
+        return jsonify({'duration_seconds': None}), 200
+    # Locate ffprobe — same resolution order as transcribe.py uses for
+    # ffmpeg, but probing a different binary. The 0.7.x+ bundle ships
+    # ffprobe alongside ffmpeg under DOZA_FFMPEG_DIR.
+    ffprobe = None
+    bundled_dir = os.environ.get('DOZA_FFMPEG_DIR')
+    if bundled_dir:
+        candidate = os.path.join(bundled_dir, 'ffprobe')
+        if os.path.isfile(candidate):
+            ffprobe = candidate
+    if not ffprobe:
+        for candidate in ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe'):
+            if os.path.isfile(candidate):
+                ffprobe = candidate
+                break
+    if not ffprobe:
+        return jsonify({'duration_seconds': None}), 200
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                source_path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            seconds = float(result.stdout.strip())
+            return jsonify({'duration_seconds': seconds})
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return jsonify({'duration_seconds': None}), 200
+
+
+# ── Transcription job tracking ───────────────────────────────────────
+# Background-thread transcription. POST /transcribe kicks off a thread
+# and returns immediately; the frontend polls /transcribe/status for
+# real progress (phase, pct, engine) emitted from transcribe.py via
+# the progress_cb. Replaces a synchronous request that could block the
+# UI for 15-25 min on slow paths (Whisper-CPU fallback) with no
+# user-visible signal.
+
+_transcribe_jobs: dict = {}
+_transcribe_jobs_lock = threading.Lock()
+
+
+def _transcribe_status_path(project_id):
+    return os.path.join(app.config['PROJECTS_DIR'], project_id, 'transcribe_status.json')
+
+
+def _write_transcribe_status(project_id, data):
+    path = _transcribe_status_path(project_id)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[transcribe] could not write status for {project_id}: {e}", flush=True)
+
+
+def _make_transcribe_progress_writer(project_id):
+    """Return a ``progress_cb(event)`` that persists transcription
+    progress to disk for the frontend status poll to read.
+
+    ``event`` is the dict emitted by ``transcribe.transcribe_file`` —
+    ``{"phase": str, "pct": int, "engine": str, ...}``. We merge it
+    into a session dict with started_at + updated_at timestamps so the
+    UI can tell when transcription has stalled (no updates for >2 min
+    likely means a hung model load).
+    """
+    started_at = datetime.now().isoformat()
+
+    def writer(event):
+        snapshot = {
+            "started_at": started_at,
+            "updated_at": datetime.now().isoformat(),
+            "phase": event.get("phase", "transcribing"),
+            "pct": int(event.get("pct", 0)),
+            "engine": event.get("engine"),
+            "slow_mode": bool(event.get("slow_mode")),
+            "audio_sec": event.get("audio_sec"),
+        }
+        with _transcribe_jobs_lock:
+            _transcribe_jobs[project_id] = snapshot
+        _write_transcribe_status(project_id, snapshot)
+    return writer
+
+
+def _run_transcribe_job(project_id, source_path, num_speakers, language,
+                       interviewer_name, subject_name):
+    """Background worker that runs transcribe_file under a per-project
+    progress writer. Final state (done / error) lands in
+    transcribe_status.json so the frontend can stop polling."""
+    from transcribe import transcribe_file
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    progress_cb = _make_transcribe_progress_writer(project_id)
+    try:
+        result = transcribe_file(
+            source_path,
+            project_dir=project_dir,
+            speaker_labels={
+                'SPEAKER_00': interviewer_name,
+                'SPEAKER_01': subject_name,
+            },
+            num_speakers=num_speakers,
+            language=language,
+            progress_cb=progress_cb,
+        )
+        # Persist to the project as before.
+        project = get_project(project_id) or {}
+        project['transcript'] = result
+        project['status'] = 'transcribed'
+        save_project(project_id, project)
+        seg_count = len((result or {}).get('segments', []))
+        log_activity(project_id, 'transcribed',
+                     f"{project.get('name', 'Project')} transcribed · {seg_count} segments")
+        # Auto-build the TF-IDF paragraph index (same as the synchronous
+        # path used to do).
+        try:
+            idx_path = _paragraph_index_path(project_id)
+            if not os.path.exists(idx_path):
+                from doza_assist.retrieval import build_paragraph_index, save_index
+                idx = build_paragraph_index(result)
+                save_index(idx, idx_path)
+                print(f"[transcribe] auto-built paragraph_index for {project_id}")
+        except Exception as e:
+            print(f"[transcribe] paragraph_index auto-build failed for {project_id}: {e}")
+        # Auto-enqueue speaker diarization. The Pro extension installs an
+        # @after_app_request hook on the /transcribe endpoint that used to
+        # do this, but it only fires on a 200 response — and the new
+        # background-thread architecture (0.8.10+) returns 202 from the
+        # /transcribe route and finishes the actual work here in the
+        # worker thread. The hook never sees a 200, so the enqueue
+        # silently never ran. Doing it explicitly from the worker's
+        # completion path is the canonical hook anyway: at this point we
+        # know the transcript landed on disk and is ready to diarize.
+        try:
+            from diarization import get_worker as _get_diar_worker
+            projects_dir = app.config['PROJECTS_DIR']
+            _get_diar_worker(projects_dir).enqueue(project_id)
+            print(f"[transcribe] diarization queued for {project_id}", flush=True)
+        except ImportError:
+            # OSS / no diarization extension on this build.
+            pass
+        except Exception as e:
+            # Non-fatal; transcription still completes. Surface so the
+            # support flow doesn't have to guess.
+            print(f"[transcribe] diarization enqueue failed for {project_id}: {e}", flush=True)
+        # Terminal status: done. Frontend stops polling when it sees this.
+        final = {
+            "started_at": _transcribe_jobs.get(project_id, {}).get("started_at"),
+            "updated_at": datetime.now().isoformat(),
+            "phase": "done",
+            "pct": 100,
+            "engine": _transcribe_jobs.get(project_id, {}).get("engine"),
+            "segments": seg_count,
+        }
+        with _transcribe_jobs_lock:
+            _transcribe_jobs[project_id] = final
+        _write_transcribe_status(project_id, final)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        err_payload = {
+            "started_at": _transcribe_jobs.get(project_id, {}).get("started_at"),
+            "updated_at": datetime.now().isoformat(),
+            "phase": "error",
+            "pct": _transcribe_jobs.get(project_id, {}).get("pct", 0),
+            "message": str(e),
+        }
+        with _transcribe_jobs_lock:
+            _transcribe_jobs[project_id] = err_payload
+        _write_transcribe_status(project_id, err_payload)
+        try:
+            project = get_project(project_id) or {}
+            project['status'] = 'error'
+            project['error'] = str(e)
+            save_project(project_id, project)
+        except Exception:
+            pass
+
+
 @app.route('/project/<project_id>/transcribe', methods=['POST'])
 def transcribe(project_id):
-    """Run transcription on the source file."""
+    """Kick off a background transcription job. Returns immediately
+    with the started phase; the frontend polls /transcribe/status."""
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
@@ -1518,9 +1726,6 @@ def transcribe(project_id):
         return jsonify({'error': 'Source file not found. It may have been moved or deleted.'}), 404
 
     # Guard non-English requests when only Parakeet (English-only) is installed.
-    # Without this we'd kick off the full transcribe pipeline only to fail
-    # with a generic "no engine" error after the audio extraction. The frontend
-    # uses needs_whisper_install to render an inline install prompt.
     requested_language = project.get('language', 'en')
     if requested_language not in ('en', 'auto') and not _engine_available('whisper'):
         project['status'] = 'error'
@@ -1532,62 +1737,64 @@ def transcribe(project_id):
             'requested_language': requested_language,
         }), 400
 
+    # Refuse to start a second job for the same project while one is in
+    # flight — protects against a double-click on the Transcribe button
+    # spawning two concurrent jobs that overwrite each other's results.
+    with _transcribe_jobs_lock:
+        existing = _transcribe_jobs.get(project_id)
+        if existing and existing.get("phase") not in ("done", "error", None):
+            return jsonify({
+                'status': 'transcribing',
+                'message': 'Transcription already in progress.',
+                'state': existing,
+            }), 202
+
     project['status'] = 'transcribing'
     save_project(project_id, project)
 
-    try:
-        from transcribe import transcribe_file
+    started = {
+        "started_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+        "phase": "extract_audio",
+        "pct": 0,
+        "engine": None,
+    }
+    with _transcribe_jobs_lock:
+        _transcribe_jobs[project_id] = started
+    _write_transcribe_status(project_id, started)
 
-        # Pass both source path and project directory for audio extraction
-        project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
-        num_speakers = project.get('num_speakers', 2)
-        language = project.get('language', 'en')
-        result = transcribe_file(
-            source_path,
-            project_dir=project_dir,
-            speaker_labels={
-                'SPEAKER_00': project.get('interviewer_name', 'Interviewer'),
-                'SPEAKER_01': project.get('subject_name', 'Subject'),
-            },
-            num_speakers=num_speakers,
-            language=language,
-        )
-        project['transcript'] = result
-        project['status'] = 'transcribed'
-        save_project(project_id, project)
-        seg_count = len((result or {}).get('segments', []))
-        log_activity(project_id, 'transcribed',
-                     f"{project.get('name', 'Project')} transcribed · {seg_count} segments")
+    num_speakers = project.get('num_speakers', 2)
+    language = project.get('language', 'en')
+    interviewer_name = project.get('interviewer_name', 'Interviewer')
+    subject_name = project.get('subject_name', 'Subject')
 
-        # Auto-build the TF-IDF paragraph index so chat retrieval immediately
-        # works against semantic ranking instead of substring matching only.
-        # This is a pure-Python pass (no LLM call), runs in seconds, and
-        # transforms chat output quality on a fresh project — without it the
-        # chat falls back to literal-keyword matching and produces vague or
-        # un-clip-cited responses (this was the laptop bug).
-        # Idempotent: skip if already on disk so re-transcription doesn't
-        # rebuild needlessly. The full /analyze endpoint still rebuilds it
-        # alongside segment_vectors when the user runs AI Analysis.
-        try:
-            idx_path = _paragraph_index_path(project_id)
-            if not os.path.exists(idx_path):
-                from doza_assist.retrieval import build_paragraph_index, save_index
-                idx = build_paragraph_index(result)
-                save_index(idx, idx_path)
-                print(f"[transcribe] auto-built paragraph_index for {project_id}")
-        except Exception as e:
-            # Non-fatal — chat will fall back to substring matching. Log and
-            # let the response succeed; a missing index never breaks chat,
-            # just degrades retrieval.
-            print(f"[transcribe] paragraph_index auto-build failed for {project_id}: {e}")
+    thread = threading.Thread(
+        target=_run_transcribe_job,
+        args=(project_id, source_path, num_speakers, language, interviewer_name, subject_name),
+        daemon=True,
+    )
+    thread.start()
 
-        return jsonify({'status': 'transcribed', 'transcript': result})
+    return jsonify({'status': 'started', 'state': started}), 202
 
-    except Exception as e:
-        project['status'] = 'error'
-        project['error'] = str(e)
-        save_project(project_id, project)
-        return jsonify({'error': str(e)}), 500
+
+@app.route('/project/<project_id>/transcribe/status', methods=['GET'])
+def transcribe_status(project_id):
+    """Poll endpoint for the background transcription job. Returns the
+    in-memory snapshot if available, otherwise reads transcribe_status.json
+    from disk (covers the case where the Flask process restarted while a
+    transcription was running — the frontend sees the last known phase)."""
+    with _transcribe_jobs_lock:
+        snap = _transcribe_jobs.get(project_id)
+    if snap is None:
+        path = _transcribe_status_path(project_id)
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    snap = json.load(f)
+            except Exception:
+                snap = None
+    return jsonify({'state': snap or {"phase": "idle", "pct": 0}})
 
 
 def _analyze_status_path(project_id):
@@ -1733,6 +1940,43 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
                 },
             }
         }
+        # Re-read on-disk meta right before save so we pick up any
+        # changes that concurrent writers (most importantly the Pro
+        # diarization worker) made to fields this worker does not own.
+        #
+        # Without this merge, the analyze worker's save_project clobbers
+        # the SPEAKER_NN labels and the meta["diarization"] block that
+        # diarization wrote while the LLM analysis was running. The
+        # symptom: a freshly-built collection shows all segments with
+        # the interviewer's name (e.g. "Chris") even though
+        # diarization_segments.json on disk has the real per-speaker
+        # boundaries and diarization_status.json says "done". (Verified
+        # in production on 0.8.14 with a 2-project collection that
+        # diarized correctly to 12 + 3 speakers respectively, but
+        # meta.json segments stayed pinned at the OSS Parakeet
+        # default-speaker label.)
+        try:
+            on_disk = get_project(project_id) or {}
+            if on_disk.get('transcript'):
+                # Take the LIVE transcript (with diarization's SPEAKER_NN
+                # labels) over the stale one we loaded at the top of
+                # this worker. Other transcript fields (text, timing,
+                # words) are also LIVE; they only change when
+                # transcribe re-runs, which would not happen during
+                # the analyze window anyway.
+                project['transcript'] = on_disk['transcript']
+            if on_disk.get('diarization'):
+                project['diarization'] = on_disk['diarization']
+            if on_disk.get('speaker_names'):
+                project['speaker_names'] = on_disk['speaker_names']
+        except Exception as merge_err:
+            # Non-fatal — analysis still completes. Surface it so the
+            # support flow doesn't have to guess.
+            print(
+                f"[analyze worker] merge-before-save failed for "
+                f"{project_id}: {merge_err}",
+                flush=True,
+            )
         save_project(project_id, project)
         title = result.get('suggested_title') or project.get('name', 'Project')
         log_activity(project_id, 'analyzed', f'AI analysis run · "{title}"')
@@ -2391,30 +2635,112 @@ NLE_DISPLAY_NAMES = {
 }
 
 
+# CFBundleIdentifier for each NLE. Spotlight indexes apps by bundle ID
+# regardless of install path, so mdfind is the canonical way to locate an
+# NLE on macOS (vs. guessing /Applications/<Name>.app, which breaks for
+# users who install to ~/Applications, Setapp, external volumes, or
+# year-versioned Adobe directories).
+_NLE_BUNDLE_IDS = {
+    'fcp':      ('com.apple.FinalCut',),
+    'premiere': ('com.adobe.PremierePro',),
+    # Free and Studio variants of Resolve register different bundle IDs.
+    'resolve':  ('com.blackmagic-design.DaVinciResolveStudio',
+                 'com.blackmagic-design.DaVinciResolve'),
+}
+
+# Hardcoded fallback paths for the (rare) case where Spotlight is
+# disabled on the volume the NLE lives on, or mdfind isn't on PATH.
+_NLE_FALLBACK_PATHS = {
+    'fcp': ('/Applications/Final Cut Pro.app',),
+    'resolve': ('/Applications/DaVinci Resolve/DaVinci Resolve.app',
+                '/Applications/DaVinci Resolve Studio/DaVinci Resolve Studio.app'),
+    'premiere': (
+        '/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app',
+        '/Applications/Adobe Premiere Pro 2025/Adobe Premiere Pro 2025.app',
+        '/Applications/Adobe Premiere Pro 2024/Adobe Premiere Pro 2024.app',
+        '/Applications/Adobe Premiere Pro.app',
+    ),
+}
+
+# Per-process cache. Paths don't change while we're running.
+_nle_path_cache: dict[str, str | None] = {}
+
+
+def _mdfind_app_by_bundle_id(bundle_id: str) -> list[str]:
+    """Return all .app paths whose CFBundleIdentifier matches ``bundle_id``.
+
+    Empty list on no match or if mdfind fails (Spotlight off, sandbox, …).
+    Filters out stale hits — Spotlight occasionally returns indexed paths
+    that no longer exist on disk.
+    """
+    try:
+        out = subprocess.check_output(
+            ['mdfind', f"kMDItemCFBundleIdentifier == '{bundle_id}'"],
+            text=True,
+            timeout=3,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return []
+    return [line for line in out.strip().splitlines() if line and os.path.isdir(line)]
+
+
+def _rank_app_paths(paths: list[str]) -> list[str]:
+    """Order discovered .app paths most-preferred first.
+
+    Heuristic: a copy under /Applications beats one under ~/Applications,
+    which beats anything else (Setapp subdirs, external volumes). Users
+    who keep multiple copies typically want the system-wide one driven.
+    """
+    def rank(p: str) -> int:
+        if p.startswith('/Applications/'):
+            return 0
+        if '/Applications/' in p and 'Setapp' not in p:
+            return 1
+        if 'Setapp' in p:
+            return 3
+        return 2
+    return sorted(paths, key=rank)
+
+
 def _find_nle_app_path(nle: str):
     """Return the on-disk .app path for the chosen NLE, or ``None`` if not installed.
 
-    Premiere ships under a year-suffixed directory (``Adobe Premiere Pro 2026/``,
-    ``2025/``, etc.) so we probe the recent versions in newest-first order and
-    fall back to the unversioned bundle.
+    Locates the app by CFBundleIdentifier via mdfind so users who install
+    FCP/Premiere/Resolve outside /Applications (~/Applications, Setapp,
+    external volumes, year-versioned Adobe dirs) still get a working
+    export. Falls back to a known-path list if Spotlight returns nothing.
+    Result is cached per process — these paths don't move at runtime.
     """
-    if nle == 'fcp':
-        path = '/Applications/Final Cut Pro.app'
-        return path if os.path.isdir(path) else None
-    if nle == 'resolve':
-        path = '/Applications/DaVinci Resolve/DaVinci Resolve.app'
-        return path if os.path.isdir(path) else None
-    if nle == 'premiere':
-        for candidate in (
-            '/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app',
-            '/Applications/Adobe Premiere Pro 2025/Adobe Premiere Pro 2025.app',
-            '/Applications/Adobe Premiere Pro 2024/Adobe Premiere Pro 2024.app',
-            '/Applications/Adobe Premiere Pro.app',
-        ):
+    if nle in _nle_path_cache:
+        return _nle_path_cache[nle]
+
+    found: str | None = None
+    for bundle_id in _NLE_BUNDLE_IDS.get(nle, ()):
+        hits = _mdfind_app_by_bundle_id(bundle_id)
+        if hits:
+            found = _rank_app_paths(hits)[0]
+            break
+
+    if found is None:
+        for candidate in _NLE_FALLBACK_PATHS.get(nle, ()):
             if os.path.isdir(candidate):
-                return candidate
-        return None
-    return None
+                found = candidate
+                break
+
+    if found is None:
+        app.logger.warning(
+            "NLE %r not found. bundle_ids=%s fallback_paths=%s",
+            nle, _NLE_BUNDLE_IDS.get(nle, ()), _NLE_FALLBACK_PATHS.get(nle, ()),
+        )
+
+    _nle_path_cache[nle] = found
+    return found
+
+
+def _nle_bundle_id(nle: str) -> str | None:
+    """Return the primary CFBundleIdentifier for ``nle``, or None if unknown."""
+    ids = _NLE_BUNDLE_IDS.get(nle)
+    return ids[0] if ids else None
 
 
 def _hand_file_to_nle(file_path: str, nle: str, *,
@@ -2445,7 +2771,7 @@ def _hand_file_to_nle(file_path: str, nle: str, *,
     """
     app_path = _find_nle_app_path(nle)
     if not app_path:
-        return None, {'error': f'{NLE_DISPLAY_NAMES[nle]} not found at expected location'}
+        return None, {'error': f"{NLE_DISPLAY_NAMES[nle]} not found on this Mac. If it is installed, try moving it to /Applications and re-launching, or contact support."}
     try:
         if nle == 'premiere':
             subprocess.Popen(['open', '-R', file_path])
@@ -2458,7 +2784,15 @@ def _hand_file_to_nle(file_path: str, nle: str, *,
                 project_name=project_name,
                 timeline_name=timeline_name,
             )
-        subprocess.Popen(['open', '-a', app_path, file_path])
+        # FCP: prefer launching by bundle ID so Launch Services resolves
+        # the install location (works even if the user has FCP outside
+        # /Applications, or has multiple copies). Falls back to -a <path>
+        # if the bundle ID isn't mapped (shouldn't happen for fcp).
+        bundle_id = _nle_bundle_id(nle)
+        if bundle_id:
+            subprocess.Popen(['open', '-b', bundle_id, file_path])
+        else:
+            subprocess.Popen(['open', '-a', app_path, file_path])
         return 'app', {}
     except Exception as e:
         return None, {'error': f'Could not launch {NLE_DISPLAY_NAMES[nle]}: {e}'}
@@ -2558,7 +2892,7 @@ def send_to_nle():
     app_path = _find_nle_app_path(nle)
     if not app_path:
         return jsonify({
-            'error': f'{NLE_DISPLAY_NAMES[nle]} not found at expected location'
+            'error': f"{NLE_DISPLAY_NAMES[nle]} not found on this Mac. If it is installed, try moving it to /Applications and re-launching, or contact support."
         }), 404
 
     file_path = None
@@ -3082,10 +3416,33 @@ def rename_project(project_id):
 
 @app.route('/project/<project_id>/update-speakers', methods=['POST'])
 def update_speakers(project_id):
-    """Update speaker label assignments after transcription (bulk rename)."""
+    """Update speaker label assignments after transcription (bulk rename).
+
+    On projects that have been diarized, the canonical rename surface is
+    the diarization speakers sidebar (writes to ``meta["speaker_names"]``,
+    leaves the raw SPEAKER_NN labels on the segments untouched). The OSS
+    rename collapses segments by raw label, which silently destroys the
+    diarization assignment when multiple renames target the same string
+    (we hit this in production: five SPEAKER_NN labels collapsed to one
+    name across all 1167 segments). Defense-in-depth: refuse the write
+    server-side so the bad state cannot be reached even if the
+    front-end lockout races. Returns 409 with a message the renderer
+    surfaces as a toast.
+    """
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
+
+    diarization_status = (project.get('diarization') or {}).get('status')
+    if diarization_status == 'done':
+        return jsonify({
+            'error': 'diarization_active',
+            'message': (
+                'This project has been diarized. Rename speakers from the '
+                'Speakers sidebar (the rows under "Speakers") instead of the '
+                'transcript labels.'
+            ),
+        }), 409
 
     mapping = request.json.get('mapping', {})
     transcript = project.get('transcript', {})
@@ -3107,6 +3464,19 @@ def update_speaker_range(project_id):
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
+
+    # Same reasoning as update_speakers above: on a diarized project the
+    # raw SPEAKER_NN labels are the canonical assignment and must not be
+    # overwritten by per-range click-to-assign.
+    diarization_status = (project.get('diarization') or {}).get('status')
+    if diarization_status == 'done':
+        return jsonify({
+            'error': 'diarization_active',
+            'message': (
+                'This project has been diarized. Rename speakers from the '
+                'Speakers sidebar instead of clicking the transcript.'
+            ),
+        }), 409
 
     data = request.json or {}
     range_start = float(data.get('start', 0))

@@ -139,7 +139,15 @@
         </div>
     </div>
 
-    {% if project.status == 'uploaded' %}
+    {# Show the transcribe-progress card whenever there's no transcript yet,
+       not only when status is exactly 'uploaded'. The previous condition left
+       a UX gap for status == 'transcribing' (set the moment the user starts
+       transcribing a freshly-created project) — neither the progress card
+       nor the tabs/page-two-col rendered, leaving the page blank below the
+       project header. The auto-start script is gated on status == 'uploaded'
+       so we don't fire startTranscription() again for projects already
+       transcribing in the background. #}
+    {% if not project.transcript %}
     <!-- Auto-transcription state -->
     <div class="card">
         <div id="transcribeProgress" style="padding: 2rem; text-align:center;">
@@ -150,9 +158,67 @@
             <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;" id="transcribeTimeText"></p>
         </div>
     </div>
+    {% if project.status == 'uploaded' %}
     <script>
-        // Auto-start transcription when page loads
+        // Auto-start transcription only when the project is in the 'uploaded'
+        // (just-imported) state. If status is already 'transcribing', a worker
+        // is mid-flight and we just need to let the polling pick up progress.
         window.addEventListener('DOMContentLoaded', () => startTranscription());
+    </script>
+    {% endif %}
+    <script>
+        // Poll the transcribe-status endpoint while the project doesn't have
+        // a transcript yet. Reload the page when the worker reports done so
+        // the user lands on the full tabs/transcript UI without manually
+        // refreshing. Covers two cases:
+        //   1. status == 'uploaded' — startTranscription() kicked off the job
+        //   2. status == 'transcribing' — worker was already running when the
+        //      user opened the project (e.g. they navigated away + back, or
+        //      the app restarted mid-transcribe).
+        (function() {
+            const POLL_MS = 2000;
+            const statusText = document.getElementById('transcribeStatusText');
+            const timeText = document.getElementById('transcribeTimeText');
+            const fill = document.getElementById('transcribeProgressFill');
+            let elapsedAtFirstUpdate = null;
+            async function tick() {
+                try {
+                    const res = await fetch(`/project/${PROJECT_ID}/transcribe/status`);
+                    if (!res.ok) return setTimeout(tick, POLL_MS);
+                    const data = await res.json();
+                    const state = (data && data.state) || {};
+                    const phase = state.phase || 'idle';
+                    const pct = Number.isFinite(state.pct) ? state.pct : null;
+                    if (statusText && phase !== 'idle') {
+                        statusText.textContent = state.label || (phase.charAt(0).toUpperCase() + phase.slice(1)) + '…';
+                    }
+                    if (fill && pct !== null) {
+                        fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+                    }
+                    if (phase === 'done' || state.transcribed) {
+                        if (fill) fill.style.width = '100%';
+                        if (statusText) statusText.textContent = 'Done!';
+                        if (typeof reloadAndKeepTab === 'function') {
+                            setTimeout(() => reloadAndKeepTab('transcript'), 800);
+                        } else {
+                            setTimeout(() => location.reload(), 800);
+                        }
+                        return;
+                    }
+                    if (phase === 'error') {
+                        if (statusText) statusText.textContent = 'Error';
+                        if (timeText)   timeText.textContent = state.error || 'Transcription failed';
+                        return;
+                    }
+                    setTimeout(tick, POLL_MS);
+                } catch (_) {
+                    setTimeout(tick, POLL_MS);
+                }
+            }
+            // Small initial delay so startTranscription() (when status == uploaded)
+            // has time to register the job before we poll.
+            window.addEventListener('DOMContentLoaded', () => setTimeout(tick, 1500));
+        })();
     </script>
     {% endif %}
 

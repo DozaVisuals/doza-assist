@@ -82,6 +82,68 @@ os.makedirs(app.config['PROJECTS_DIR'], exist_ok=True)
 os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
 
 
+# ── project_id safety (SEC-02) ────────────────────────────────────────────
+# Every /project/<project_id>/... route turns an editor-supplied project_id
+# into a path under PROJECTS_DIR. Real ids are uuid4 hex slices
+# (str(uuid.uuid4())[:8]); folder/collection slugs use a separate <slug> param.
+# We reject anything that isn't a plain id token so a crafted value (``../``,
+# an absolute path, or a symlinked project dir pointing outside) can never
+# escape PROJECTS_DIR — most importantly before it reaches the shutil.rmtree
+# in delete_project. One shared helper, enforced once for every <project_id>
+# route by the before_request guard below, with safe_project_dir() used at the
+# filesystem chokepoints (get_project/save_project/delete) for defense in depth
+# and to cover the few non-URL project_id sources (e.g. /export/send-to-nle).
+_PROJECT_ID_RE = _re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
+
+def validate_project_id(project_id):
+    """True if ``project_id`` is a safe single path segment — no separators,
+    no ``..``, not absolute, reasonable length."""
+    return isinstance(project_id, str) and bool(_PROJECT_ID_RE.match(project_id))
+
+
+def safe_project_dir(project_id):
+    """Resolve ``project_id`` to its absolute project directory, or return
+    ``None`` if the id is malformed or would resolve outside PROJECTS_DIR.
+
+    The realpath + direct-child check also rejects a project_id whose dir is a
+    symlink pointing outside PROJECTS_DIR. Single source of truth for turning a
+    project_id into a filesystem path.
+    """
+    if not validate_project_id(project_id):
+        return None
+    base = os.path.realpath(app.config['PROJECTS_DIR'])
+    candidate = os.path.realpath(os.path.join(base, project_id))
+    # Must be a *direct* child of PROJECTS_DIR — no nesting, no escape.
+    if os.path.dirname(candidate) != base:
+        return None
+    return candidate
+
+
+@app.before_request
+def _guard_project_id():
+    """Reject any request whose matched route carries a malformed ``project_id``
+    before the view (and its filesystem access) runs. One enforcement point for
+    every /project/<project_id>/... route, including delete_project whose
+    rmtree was the path-traversal sink (SEC-02).
+
+    The URL <project_id> may be a single id OR a comma-separated list — several
+    routes (multi-project chat, the multi-project workspace view) accept
+    ``a,b,c`` and split it themselves. We mirror that split/strip and require
+    *every* component to be a valid id, so ``a,b`` is allowed but ``a,../etc``
+    is not. The single-id sinks (get_project/save_project/delete) re-validate
+    each id strictly, so a comma-joined value can never reach a filesystem path
+    intact.
+    """
+    raw = (request.view_args or {}).get('project_id')
+    if raw is not None:
+        parts = [p.strip() for p in raw.split(',') if p.strip()]
+        if not parts or not all(validate_project_id(p) for p in parts):
+            # Return a response (not abort()) so we short-circuit cleanly — the
+            # app's global @errorhandler(Exception) would turn abort() into a 500.
+            return jsonify({'error': 'Not found'}), 404
+
+
 @app.context_processor
 def inject_brand():
     """Make the user-visible app brand and logo configurable from the
@@ -230,9 +292,12 @@ def get_project(project_id):
     to raise JSONDecodeError here and 500 every page that touched the
     project; treating it as missing keeps the rest of the app usable while
     the corrupt project surfaces as "not found" instead of taking the whole
-    dashboard down.
+    dashboard down. Also None for a malformed project_id (SEC-02): the id
+    must resolve to a direct child of PROJECTS_DIR.
     """
-    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    project_dir = safe_project_dir(project_id)
+    if project_dir is None:
+        return None
     meta_path = os.path.join(project_dir, 'meta.json')
     if not os.path.exists(meta_path):
         return None
@@ -291,8 +356,14 @@ def project_lock(project_id):
 
 
 def save_project(project_id, data):
-    """Save a project's metadata (atomic temp-file + rename)."""
-    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    """Save a project's metadata (atomic temp-file + rename).
+
+    Raises ValueError for a malformed project_id (SEC-02) so a crafted id
+    can never create or write a meta.json outside PROJECTS_DIR.
+    """
+    project_dir = safe_project_dir(project_id)
+    if project_dir is None:
+        raise ValueError(f'Invalid project_id: {project_id!r}')
     atomic_write_json(os.path.join(project_dir, 'meta.json'), data)
 
 
@@ -2905,6 +2976,10 @@ def send_to_nle():
     """
     body = request.json or {}
     project_id = body.get('project_id')
+    # project_id arrives in the JSON body here (not the URL), so the
+    # before_request guard doesn't see it — validate explicitly (SEC-02).
+    if not validate_project_id(project_id):
+        return jsonify({'error': 'Invalid project_id'}), 400
     export_type = str(body.get('export_type') or 'selects').strip().lower()
 
     # Multicam round-trip is FCP-specific (it preserves FCP's multicam /
@@ -3335,8 +3410,14 @@ def retranscribe(project_id):
 @app.route('/project/<project_id>/delete', methods=['POST'])
 def delete_project(project_id):
     """Delete a project and its files."""
-    import shutil
-    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    # Resolve + confine the path before rmtree: safe_project_dir rejects a
+    # malformed id and any path that escapes PROJECTS_DIR (incl. via symlink),
+    # so the rmtree below can only ever target a direct child of PROJECTS_DIR.
+    # (The before_request guard already 404s a malformed URL id; this is the
+    # belt-and-suspenders check at the destructive sink itself — SEC-02.)
+    project_dir = safe_project_dir(project_id)
+    if project_dir is None:
+        return jsonify({'error': 'Project not found'}), 404
     if os.path.exists(project_dir):
         shutil.rmtree(project_dir)
     return jsonify({'status': 'deleted'})

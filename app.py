@@ -15,6 +15,7 @@ import hashlib
 import re as _re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, Response, stream_with_context
 from werkzeug.utils import secure_filename
 
@@ -132,6 +133,58 @@ def _guard_project_id():
             # Return a response (not abort()) so we short-circuit cleanly — the
             # app's global @errorhandler(Exception) would turn abort() into a 500.
             return jsonify({'error': 'Not found'}), 404
+
+
+# ── Cross-origin write protection (SEC-01) ────────────────────────────────
+# The API binds to 127.0.0.1 only, but loopback binding does NOT stop a web
+# page the editor visits from issuing cross-origin *state-changing* requests to
+# http://127.0.0.1:<port>/... (CSRF), nor a DNS-rebinding attack. There is no
+# CORS policy and no auth, so we require state-changing requests to look
+# same-origin to the loopback app:
+#   - if an Origin header is present it must be loopback, AND
+#   - the Host must be loopback (this second check defeats DNS rebinding, where
+#     the page's Host is the attacker's domain that resolves to 127.0.0.1).
+# Same-origin browser writes and the app's own fetches send a loopback Origin;
+# non-browser callers (no Origin) are allowed only when the Host is loopback.
+# Safe methods (GET/HEAD/OPTIONS) are never blocked, so page loads — including
+# the shared client portal at GET /share/<id> — are unaffected.
+#
+# Exception: the client review/share portal is reached cross-origin through a
+# Cloudflare tunnel, so its Origin is the tunnel URL (not loopback). Its two
+# documented client write actions — saving selects and adding comments — are
+# exempted so the portal keeps working. They are low-impact and the portal is
+# public-by-design (the URL is the only barrier). The editor's sensitive
+# mutating endpoints (delete/clear/retranscribe/rename/move/create/upload,
+# provider + share settings, find-file, browse, …) stay protected.
+_STATE_CHANGING_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+_LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+# View-function names the cross-origin client portal legitimately POSTs to.
+_PORTAL_WRITE_ENDPOINTS = {'save_selects', 'add_comment'}
+
+
+def _is_loopback_netloc(value):
+    """True if a Host header or Origin URL points at the loopback interface."""
+    if not value:
+        return False
+    netloc = value if '//' in value else '//' + value
+    return urlparse(netloc).hostname in _LOOPBACK_HOSTS
+
+
+@app.before_request
+def _guard_cross_origin_writes():
+    """Block cross-origin state-changing requests (CSRF / DNS-rebinding) to the
+    loopback API. See the note above for the threat model and the narrow
+    client-portal exception (SEC-01)."""
+    if request.method not in _STATE_CHANGING_METHODS:
+        return None
+    if request.endpoint in _PORTAL_WRITE_ENDPOINTS:
+        return None  # client review portal — intentionally cross-origin
+    origin = request.headers.get('Origin')
+    if origin is not None and not _is_loopback_netloc(origin):
+        return jsonify({'error': 'Cross-origin request blocked'}), 403
+    if not _is_loopback_netloc(request.host):
+        return jsonify({'error': 'Cross-origin request blocked'}), 403
+    return None
 
 
 @app.context_processor

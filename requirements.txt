@@ -5,6 +5,12 @@ requests
 certifi
 lxml
 
+# PDF + DOCX generation (pro/quote_sheet exporter). Pure Python, no
+# native deps — safe to bundle inside the .app via the existing
+# site-packages tree.
+reportlab>=4.0
+python-docx>=1.1
+
 # AI providers
 # - Ollama is local; no package needed (install separately: https://ollama.com)
 # - BYO API key support: official SDKs for Anthropic and OpenAI

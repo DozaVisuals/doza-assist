@@ -73,6 +73,7 @@ When you suggest a clip, emit a single-line marker the app parses into a playabl
 
 Rules:
 - start and end are HH:MM:SS timecodes copied from the transcript segment headers (e.g. [00:05:12-00:05:28]). Decimal seconds are not accepted.
+- ACCURACY IS NON-NEGOTIABLE — the title and note must describe what is ACTUALLY SAID between start and end, not a different moment and not the interview's general theme. Before emitting a clip, re-read the transcript lines that fall inside [start, end] and make the title summarize THOSE words. If your title is about something said at 00:12:34, then start IS 00:12:34 — never the timecode of an unrelated earlier segment. A clip whose title doesn't match its timecodes is worse than no clip; if you're unsure where a moment is, leave it out.
 - title is a 2-6 word card headline in sentence case (capital first letter), no quotes inside it.
 - note is your editorial justification — one sentence explaining why this moment matters. The card displays it under the title.
 - Do NOT include a verbatim transcript quote in the marker. The frontend pulls the exact words from the timecode range automatically; duplicating them in your output is wasted tokens and risks paraphrasing errors.

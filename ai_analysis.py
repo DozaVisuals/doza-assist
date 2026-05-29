@@ -1634,8 +1634,10 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
 
     # Collect transcript bounds + per-segment ranges. Total bounds let us
     # short-circuit obvious off-the-end timecodes; the per-segment list is
-    # used for "is this start time inside any segment" checks.
+    # used for "is this start time inside any segment" checks. We also keep
+    # each segment's text (lowercased) for the title-anchor check below.
     seg_ranges = []
+    seg_text_ranges = []  # (start, end, text_lower)
     for s in segments:
         try:
             seg_start = float(s.get('start', 0) or 0)
@@ -1644,10 +1646,12 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
             continue
         if seg_end >= seg_start:
             seg_ranges.append((seg_start, seg_end))
+            seg_text_ranges.append((seg_start, seg_end, (s.get('text') or '').lower()))
     if not seg_ranges:
         return text
     transcript_start = seg_ranges[0][0]
     transcript_end = max(end for _, end in seg_ranges)
+    _full_text_lower = ' '.join(t for _s, _e, t in seg_text_ranges)
 
     def _start_in_transcript(start_sec):
         # Outside the whole-transcript window? Drop.
@@ -1665,12 +1669,83 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
 
     marker_re = re.compile(r'\[CLIP:[^\]]*?start=([^\s\]]+)[^\]]*\]')
 
+    # ── Title-anchor check ────────────────────────────────────────────
+    # The model sometimes copies a valid timecode from one segment but
+    # titles the clip from a DIFFERENT moment. The timecode check above
+    # can't catch that (the start is in-bounds). This conservative pass
+    # drops a clip only when its title clearly belongs elsewhere:
+    # a distinctive title word is absent from the clip's own window but
+    # present somewhere else in the transcript. Purely interpretive
+    # titles (no distinctive word, or words that appear nowhere) are
+    # kept — we never drop on abstraction, only on demonstrable
+    # cross-reference.
+    _STOPWORDS = {
+        'the', 'and', 'for', 'with', 'that', 'this', 'from', 'about', 'into',
+        'what', 'when', 'where', 'which', 'while', 'their', 'there', 'them',
+        'they', 'have', 'has', 'his', 'her', 'him', 'she', 'are', 'was', 'were',
+        'you', 'your', 'our', 'out', 'not', 'but', 'how', 'why', 'who', 'all',
+        'one', 'its', 'his', 'than', 'then', 'over', 'just', 'more', 'most',
+        'some', 'such', 'only', 'very', 'will', 'would', 'could', 'should',
+        'been', 'being', 'after', 'before', 'because', 'on', 'in', 'of', 'to',
+        'a', 'an', 'is', 'it', 'as', 'at', 'by', 'be', 'or', 'so', 'we', 'i',
+    }
+    title_re = re.compile(r'title\s*=\s*(["\'“‘])(.*?)(["\'”’])', re.I)
+
+    def _distinctive_tokens(title):
+        toks = re.findall(r"[A-Za-z][A-Za-z'\-]+", title or '')
+        out = []
+        for i, t in enumerate(toks):
+            low = t.lower().strip("'-")
+            if len(low) < 4 or low in _STOPWORDS:
+                # Keep mid-title capitalized words (proper nouns) even if short.
+                if not (i > 0 and t[:1].isupper() and len(low) >= 3):
+                    continue
+            out.append(low)
+        return out
+
+    def _window_text(start_sec, end_sec):
+        lo = start_sec - grace_seconds
+        hi = end_sec + grace_seconds if end_sec else start_sec + 60
+        parts = [t for (ss, se, t) in seg_text_ranges if se >= lo and ss <= hi]
+        return ' '.join(parts)
+
+    def _title_anchored(start_sec, end_sec, title):
+        """False => the title clearly describes a different moment (drop)."""
+        tokens = _distinctive_tokens(title)
+        if not tokens:
+            return True  # nothing distinctive to judge — keep
+        window = _window_text(start_sec, end_sec)
+        if any(tok in window for tok in tokens):
+            return True  # title relates to its own window — keep
+        # No distinctive token in the window. Drop ONLY if at least one
+        # appears elsewhere in the transcript (proof it belongs to another
+        # moment). If it appears nowhere, the title is interpretive — keep.
+        if any(tok in _full_text_lower for tok in tokens):
+            return False
+        return True
+
     def _is_valid(match):
         start_str = match.group(1).strip().strip('"\'')
         try:
-            return _start_in_transcript(_tc_to_seconds(start_str))
+            start_sec = _tc_to_seconds(start_str)
         except Exception:
             return True  # if we can't parse, leave it for the renderer to sort out
+        if not _start_in_transcript(start_sec):
+            return False
+        # Title-anchor check (best-effort; never raises).
+        try:
+            full = match.group(0)
+            tm = title_re.search(full)
+            if tm:
+                em = re.search(r'end=([^\s\]]+)', full)
+                end_sec = _tc_to_seconds(em.group(1).strip().strip('"\'')) if em else start_sec
+                if not _title_anchored(start_sec, end_sec, tm.group(2)):
+                    print(f"[clip-validate] dropping misanchored clip: "
+                          f"start={start_str} title={tm.group(2)!r}", flush=True)
+                    return False
+        except Exception:
+            pass
+        return True
 
     # Walk lines so we strip both the marker AND the editorial sentence that
     # rides along with it. A "moment doesn't exist" line with explanatory

@@ -53,6 +53,7 @@ class BaseExporter(ABC):
         exports_dir: str,
         export_mode: str = "cuts",
         total_clips: int = 0,
+        start_tc_frames: int = 0,  # media's embedded start timecode, in frames
     ) -> ExportResult:
         """Export a flat list of marker/clip dicts."""
 
@@ -69,5 +70,6 @@ class BaseExporter(ABC):
         width: int,
         height: int,
         exports_dir: str,
+        start_tc_frames: int = 0,  # media's embedded start timecode, in frames
     ) -> ExportResult:
         """Export an assembled story builder sequence as a timeline."""

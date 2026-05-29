@@ -7,6 +7,7 @@ two places; now it lives here and both routes call into it.
 """
 
 import os
+import re
 import shutil
 import subprocess
 
@@ -88,3 +89,64 @@ def get_video_framerate(path: str) -> float | None:
     except Exception:
         pass
     return None
+
+
+_TIMECODE_RE = re.compile(r"^(\d+):(\d+):(\d+)([:;])(\d+)$")
+
+
+def timecode_to_frames(tc: str, framerate: float) -> int | None:
+    """Convert an SMPTE timecode string ("HH:MM:SS:FF", or ";"/"." for
+    drop-frame) to a whole-frame count on the framerate's grid. Returns None if
+    the string isn't a timecode.
+
+    Frames are counted at the nominal integer rate (29.97 -> 30, 23.976 -> 24).
+    Drop-frame (`;`) drops 2 frames per minute except every tenth minute (4 at
+    59.94). This frame index is exactly what FCP stores as an asset's source
+    timecode: asset.start = frames * frameDuration."""
+    m = _TIMECODE_RE.match((tc or "").strip())
+    if not m:
+        return None
+    hh, mm, ss, sep, ff = (int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                           m.group(4), int(m.group(5)))
+    nominal = int(round(framerate))
+    if nominal <= 0:
+        return None
+    total = ((hh * 3600 + mm * 60 + ss) * nominal) + ff
+    if sep == ";" and nominal % 30 == 0:
+        drop_per_min = 2 * (nominal // 30)
+        minutes = hh * 60 + mm
+        total -= drop_per_min * (minutes - minutes // 10)
+    return total
+
+
+def get_video_start_timecode_frames(path: str, framerate: float) -> int:
+    """Return the media's embedded start timecode in whole frames (0 if none).
+
+    DJI, Sony, and many cameras stamp time-of-day timecode. Final Cut keys an
+    asset's source timecode off it, so an FCPXML that exports 0-based edits
+    against such media is rejected with "Invalid edit with no respective media"
+    — the edits fall outside the media's real timecode range. Reads the
+    `timecode` tag from the format or any stream (e.g. a `tmcd` track)."""
+    if not path or not os.path.exists(path):
+        return 0
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return 0
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-show_entries", "format_tags=timecode:stream_tags=timecode",
+                "-of", "default=nw=1:nk=1",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                frames = timecode_to_frames(line.strip(), framerate)
+                if frames:
+                    return frames
+    except Exception:
+        pass
+    return 0

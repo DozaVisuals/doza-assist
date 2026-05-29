@@ -19,7 +19,9 @@ from flask import Flask, render_template, request, jsonify, send_file, redirect,
 from werkzeug.utils import secure_filename
 
 from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
-from exporters.media_probe import get_video_resolution, get_video_framerate
+from exporters.media_probe import (
+    get_video_resolution, get_video_framerate, get_video_start_timecode_frames,
+)
 from doza_assist.fcpxml import (
     parse_fcpxml, ParseError, Select, WriterError,
     write_selects_as_new_project, write_markers_on_timeline,
@@ -2188,6 +2190,9 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
     framerate = detected_fps or body.get('framerate', 23.976)
     export_mode = body.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
     width, height = get_video_resolution(source_path)
+    # Embedded start timecode (DJI/Sony stamp time-of-day TC); FCP rejects edits
+    # exported as 0-based against such media.
+    start_tc_frames = get_video_start_timecode_frames(source_path, framerate)
     total_clips = body.get('total_clips', len(markers)) or len(markers)
 
     if force_platform and force_platform in PLATFORMS:
@@ -2210,6 +2215,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         exports_dir=app.config['EXPORTS_DIR'],
         export_mode=export_mode,
         total_clips=total_clips,
+        start_tc_frames=start_tc_frames,
     )
     return result, exporter
 
@@ -3062,6 +3068,7 @@ def _build_nle_story_export(project, body, force_platform=None):
     width, height = get_video_resolution(source_path)
     detected_fps = get_video_framerate(source_path)
     framerate = detected_fps or body.get('framerate', 23.976)
+    start_tc_frames = get_video_start_timecode_frames(source_path, framerate)
 
     if force_platform and force_platform in PLATFORMS:
         platform = force_platform
@@ -3080,6 +3087,7 @@ def _build_nle_story_export(project, body, force_platform=None):
         width=width,
         height=height,
         exports_dir=app.config['EXPORTS_DIR'],
+        start_tc_frames=start_tc_frames,
     )
     return result, exporter
 

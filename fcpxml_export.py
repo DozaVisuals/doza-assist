@@ -88,7 +88,7 @@ MARKER_COLORS = {
 
 def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
                     source_path=None, media_duration=None, mode="cuts",
-                    width=1920, height=1080):
+                    width=1920, height=1080, start_tc_frames=0):
     """
     Generate an FCPXML file.
 
@@ -111,12 +111,22 @@ def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
         return _generate_markers_only(markers, project_name, framerate, width, height)
 
     return _generate_cuts_timeline(markers, project_name, framerate,
-                                   source_path, media_duration, mode, width, height)
+                                   source_path, media_duration, mode, width, height,
+                                   start_tc_frames)
 
 
 def _generate_cuts_timeline(markers, project_name, framerate, source_path,
-                            media_duration, mode, width=1920, height=1080):
-    """Generate FCPXML with actual cuts on the timeline referencing source media."""
+                            media_duration, mode, width=1920, height=1080,
+                            start_tc_frames=0):
+    """Generate FCPXML with actual cuts on the timeline referencing source media.
+
+    ``start_tc_frames`` is the media's embedded start timecode in whole frames.
+    Final Cut keys an asset's source timecode off the media's real timecode, so
+    every source-side time (the asset ``start`` and each clip/keyword ``start``)
+    must be expressed relative to it. Cameras like DJI and Sony stamp
+    time-of-day timecode; exporting 0-based edits against such media makes FCP
+    reject every clip with "Invalid edit with no respective media."
+    """
     frame_dur = get_frame_duration(framerate)
     safe_name = _escape_xml(project_name)
     uid = f"doza-{uuid.uuid4().hex[:8]}"
@@ -161,7 +171,9 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
             continue
 
         offset_str = frames_to_fcpxml_time(offset_frames, framerate)
-        src_start_str = frames_to_fcpxml_time(start_f, framerate)
+        # Source-side times are absolute in the asset's timecode space:
+        # embedded start TC + the in-point offset into the media.
+        src_start_str = frames_to_fcpxml_time(start_tc_frames + start_f, framerate)
         dur_str = frames_to_fcpxml_time(dur_f, framerate)
 
         clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
@@ -212,13 +224,17 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
     timeline_dur_str = frames_to_fcpxml_time(offset_frames or media_frames, framerate)
 
+    # The asset's source-timecode origin = the media's embedded start TC. FCP
+    # validates every clip start against [asset.start, asset.start+duration].
+    asset_start_str = frames_to_fcpxml_time(start_tc_frames, framerate) if start_tc_frames else "0/1s"
+
     fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 
 <fcpxml version="1.11">
     <resources>
         <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
-        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="0/1s" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
+        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
     </resources>
@@ -240,7 +256,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
 def generate_story_fcpxml(markers, project_name="Interview", story_title="Story",
                           framerate=23.976, source_path=None, media_duration=None,
-                          width=1920, height=1080):
+                          width=1920, height=1080, start_tc_frames=0):
     """
     Generate FCPXML for a Story Builder sequence.
     Creates a single timeline with clips in narrative order as actual edits.
@@ -287,7 +303,9 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
             continue
 
         offset_str = frames_to_fcpxml_time(offset_frames, framerate)
-        src_start_str = frames_to_fcpxml_time(start_f, framerate)
+        # Source-side times are absolute in the asset's timecode space:
+        # embedded start TC + the in-point offset into the media.
+        src_start_str = frames_to_fcpxml_time(start_tc_frames + start_f, framerate)
         dur_str = frames_to_fcpxml_time(dur_f, framerate)
 
         clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
@@ -325,13 +343,17 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 
     timeline_dur_str = frames_to_fcpxml_time(offset_frames or media_frames, framerate)
 
+    # The asset's source-timecode origin = the media's embedded start TC. FCP
+    # validates every clip start against [asset.start, asset.start+duration].
+    asset_start_str = frames_to_fcpxml_time(start_tc_frames, framerate) if start_tc_frames else "0/1s"
+
     fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 
 <fcpxml version="1.11">
     <resources>
         <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
-        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="0/1s" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
+        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
     </resources>

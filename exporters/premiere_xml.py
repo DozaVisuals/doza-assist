@@ -297,6 +297,7 @@ class PremiereXMLExporter(BaseExporter):
         exports_dir,
         export_mode="cuts",
         total_clips=0,
+        start_tc_frames=0,  # accepted for interface parity; Premiere uses 0-based file in/out
     ) -> ExportResult:
         if export_type == "labels" and len(markers) == 1:
             suffix = (markers[0].get("text") or "Clip")[:40].strip()
@@ -360,6 +361,7 @@ class PremiereXMLExporter(BaseExporter):
         width,
         height,
         exports_dir,
+        start_tc_frames=0,  # accepted for interface parity; Premiere uses 0-based file in/out
     ) -> ExportResult:
         ordered = sorted(
             (m for m in markers if (m.get("end") or 0) > (m.get("start") or 0)),

@@ -144,6 +144,7 @@ class EDLExporter(BaseExporter):
         exports_dir,
         export_mode="cuts",
         total_clips=0,
+        start_tc_frames=0,  # accepted for interface parity; source TC handling is a TODO for EDL
     ) -> ExportResult:
         if export_type == "labels" and len(markers) == 1:
             suffix = (markers[0].get("text") or "Clip")[:40].strip()
@@ -205,6 +206,7 @@ class EDLExporter(BaseExporter):
         width,
         height,
         exports_dir,
+        start_tc_frames=0,  # accepted for interface parity; source TC handling is a TODO for EDL
     ) -> ExportResult:
         # Story markers may carry an _order field; preserve it the way the
         # FCPXML story exporter does.

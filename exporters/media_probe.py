@@ -10,7 +10,20 @@ import os
 import shutil
 import subprocess
 
-STANDARD_FRAMERATES = [23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0]
+STANDARD_FRAMERATES = [
+    23.976, 24.0, 25.0, 29.97, 30.0,
+    48.0, 50.0, 59.94, 60.0,
+    100.0, 120.0,
+]
+
+
+def snap_framerate(fps: float) -> float:
+    """Snap a raw probed fps to the nearest supported standard rate.
+
+    Exact-rate footage (24/25/30/48/50/60/100/120 and their NTSC pulldowns)
+    snaps to itself. Without 48/50/100/120 in the table a 50fps clip used to
+    snap to 59.94, which exported on the wrong frame grid."""
+    return min(STANDARD_FRAMERATES, key=lambda s: abs(s - fps))
 
 
 def _find_ffprobe() -> str | None:
@@ -71,7 +84,7 @@ def get_video_framerate(path: str) -> float | None:
         if result.returncode == 0 and result.stdout.strip():
             num, den = result.stdout.strip().split("/")
             fps = float(num) / float(den)
-            return min(STANDARD_FRAMERATES, key=lambda s: abs(s - fps))
+            return snap_framerate(fps)
     except Exception:
         pass
     return None

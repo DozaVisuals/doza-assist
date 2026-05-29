@@ -21,59 +21,56 @@ from fractions import Fraction
 from urllib.parse import quote
 
 
+def _timebase(framerate=23.976):
+    """Return (timebase, frame_dur) for a framerate. Fractional NTSC rates use a
+    1001 frame duration; integer rates reduce to 1/N. Unknown rates fall back to
+    23.976 (24000/1001)."""
+    table = {
+        23.976: (24000, 1001),
+        24.0:   (24, 1),
+        25.0:   (25, 1),
+        29.97:  (30000, 1001),
+        30.0:   (30, 1),
+        48.0:   (48, 1),
+        50.0:   (50, 1),
+        59.94:  (60000, 1001),
+        60.0:   (60, 1),
+        100.0:  (100, 1),
+        120.0:  (120, 1),
+    }
+    return table.get(framerate, (24000, 1001))
+
+
+def seconds_to_frames(seconds, framerate=23.976):
+    """Snap a time in seconds to the nearest whole frame on the timebase grid."""
+    timebase, frame_dur = _timebase(framerate)
+    return round(seconds * timebase / frame_dur)
+
+
+def frames_to_fcpxml_time(frames, framerate=23.976):
+    """Render a whole-frame count as an FCPXML rational time, e.g. '48048/24000s'.
+    The numerator is always a multiple of frame_dur, so the value lands exactly on
+    the format's frame grid — which is what FCP requires for a valid edit."""
+    timebase, frame_dur = _timebase(framerate)
+    return f"{frames * frame_dur}/{timebase}s"
+
+
 def seconds_to_fcpxml_time(seconds, framerate=23.976):
     """
     Convert seconds to FCPXML rational time format.
     FCPXML uses rational numbers like '48048/24000s' for frame-accurate timing.
     """
-    if framerate == 23.976:
-        timebase = 24000
-        frame_dur = 1001
-    elif framerate == 29.97:
-        timebase = 30000
-        frame_dur = 1001
-    elif framerate == 24.0:
-        timebase = 24
-        frame_dur = 1
-    elif framerate == 25.0:
-        timebase = 25
-        frame_dur = 1
-    elif framerate == 30.0:
-        timebase = 30
-        frame_dur = 1
-    elif framerate == 59.94:
-        timebase = 60000
-        frame_dur = 1001
-    elif framerate == 60.0:
-        timebase = 60
-        frame_dur = 1
-    else:
-        timebase = 24000
-        frame_dur = 1001
-
-    total_frames = round(seconds * timebase / frame_dur)
-    rational_time = total_frames * frame_dur
-
-    return f"{rational_time}/{timebase}s"
+    return frames_to_fcpxml_time(seconds_to_frames(seconds, framerate), framerate)
 
 
 def get_frame_duration(framerate=23.976):
-    """Get the frame duration string for FCPXML.
+    """Get the frame duration string for FCPXML, e.g. '1001/24000s' or '1/50s'.
 
-    Integer frame rates use reduced fractions (1/N) to match the timebase
-    used by seconds_to_fcpxml_time, avoiding denominator mismatches that
-    cause FCP to reject clips as invalid edits.
+    Derived from the single _timebase() table (one frame = frames_to_fcpxml_time(1))
+    so the format's frameDuration can never drift from the grid the edit times are
+    snapped to — a denominator mismatch there makes FCP reject clips as invalid edits.
     """
-    rates = {
-        23.976: "1001/24000s",
-        24.0: "1/24s",
-        25.0: "1/25s",
-        29.97: "1001/30000s",
-        30.0: "1/30s",
-        59.94: "1001/60000s",
-        60.0: "1/60s",
-    }
-    return rates.get(framerate, "1001/24000s")
+    return frames_to_fcpxml_time(1, framerate)
 
 
 # FCPXML marker colors
@@ -133,7 +130,12 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     elif not media_duration:
         media_duration = 60.0
 
-    media_dur_str = seconds_to_fcpxml_time(media_duration, framerate)
+    # The asset advertises media for the range [0, media_frames]. Every edit
+    # below is clamped and frame-snapped against this same grid so FCP can always
+    # resolve it — an edit that reaches past the asset is rejected on import as
+    # "Invalid edit with no respective media."
+    media_frames = seconds_to_frames(media_duration, framerate)
+    media_dur_str = frames_to_fcpxml_time(media_frames, framerate)
 
     # File reference — use file:// URL for the source media
     file_url = 'file://' + quote(source_path, safe='/')
@@ -144,18 +146,23 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
     # Build the spine — each marker becomes an asset-clip on the timeline
     spine_clips = []
-    timeline_offset = 0.0
+    offset_frames = 0
 
     for i, m in enumerate(markers):
-        clip_start = m['start']
-        clip_end = m['end']
-        clip_dur = clip_end - clip_start
-        if clip_dur <= 0:
+        # Snap in/out to whole frames first, then derive duration as (out - in).
+        # Rounding start and duration independently can make start + duration land
+        # a frame past the source out point — and past the asset — which FCP
+        # rejects. Clamp the range into [0, media_frames] so the edit never
+        # references media the asset doesn't have.
+        start_f = max(0, min(seconds_to_frames(m['start'], framerate), media_frames))
+        end_f = max(start_f, min(seconds_to_frames(m['end'], framerate), media_frames))
+        dur_f = end_f - start_f
+        if dur_f <= 0:
             continue
 
-        offset_str = seconds_to_fcpxml_time(timeline_offset, framerate)
-        src_start_str = seconds_to_fcpxml_time(clip_start, framerate)
-        dur_str = seconds_to_fcpxml_time(clip_dur, framerate)
+        offset_str = frames_to_fcpxml_time(offset_frames, framerate)
+        src_start_str = frames_to_fcpxml_time(start_f, framerate)
+        dur_str = frames_to_fcpxml_time(dur_f, framerate)
 
         clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
         note = _escape_xml(m.get('note', ''))
@@ -184,12 +191,14 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
             f'\n                        </asset-clip>'
         )
 
-        timeline_offset += clip_dur
+        # Accumulate the timeline offset in whole frames so each clip butts
+        # exactly against the previous one — summing rounded seconds drifts and
+        # leaves sub-frame gaps/overlaps on the spine.
+        offset_frames += dur_f
 
     spine_block = '\n'.join(spine_clips)
 
-    total_timeline = timeline_offset if timeline_offset > 0 else media_duration
-    timeline_dur_str = seconds_to_fcpxml_time(total_timeline, framerate)
+    timeline_dur_str = frames_to_fcpxml_time(offset_frames or media_frames, framerate)
 
     fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
@@ -239,25 +248,28 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
     elif not media_duration:
         media_duration = 60.0
 
-    media_dur_str = seconds_to_fcpxml_time(media_duration, framerate)
+    # See _generate_cuts_timeline: edits are frame-snapped and clamped to the
+    # asset's [0, media_frames] range so FCP can always resolve them.
+    media_frames = seconds_to_frames(media_duration, framerate)
+    media_dur_str = frames_to_fcpxml_time(media_frames, framerate)
 
     file_url = 'file://' + quote(source_path, safe='/')
     ext = os.path.splitext(source_path)[1].lower()
     is_video = ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
 
     spine_clips = []
-    timeline_offset = 0.0
+    offset_frames = 0
 
     for i, m in enumerate(markers):
-        clip_start = m['start']
-        clip_end = m['end']
-        clip_dur = clip_end - clip_start
-        if clip_dur <= 0:
+        start_f = max(0, min(seconds_to_frames(m['start'], framerate), media_frames))
+        end_f = max(start_f, min(seconds_to_frames(m['end'], framerate), media_frames))
+        dur_f = end_f - start_f
+        if dur_f <= 0:
             continue
 
-        offset_str = seconds_to_fcpxml_time(timeline_offset, framerate)
-        src_start_str = seconds_to_fcpxml_time(clip_start, framerate)
-        dur_str = seconds_to_fcpxml_time(clip_dur, framerate)
+        offset_str = frames_to_fcpxml_time(offset_frames, framerate)
+        src_start_str = frames_to_fcpxml_time(start_f, framerate)
+        dur_str = frames_to_fcpxml_time(dur_f, framerate)
 
         clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
         note = _escape_xml(m.get('note', ''))
@@ -275,12 +287,11 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
             f'\n                        </asset-clip>'
         )
 
-        timeline_offset += clip_dur
+        offset_frames += dur_f
 
     spine_block = '\n'.join(spine_clips)
 
-    total_timeline = timeline_offset if timeline_offset > 0 else media_duration
-    timeline_dur_str = seconds_to_fcpxml_time(total_timeline, framerate)
+    timeline_dur_str = frames_to_fcpxml_time(offset_frames or media_frames, framerate)
 
     fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
@@ -390,8 +401,12 @@ def _framerate_label(framerate):
         25.0: "25",
         29.97: "2997",
         30.0: "30",
+        48.0: "48",
+        50.0: "50",
         59.94: "5994",
         60.0: "60",
+        100.0: "100",
+        120.0: "120",
     }
     return labels.get(framerate, "2398")
 

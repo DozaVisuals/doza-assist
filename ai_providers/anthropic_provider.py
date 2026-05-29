@@ -2,8 +2,14 @@
 
 Model selection is hard-coded by ``task_type`` and never exposed to the user:
 
-  - ``profile_creation``  → claude-opus-4-20250514 (My Style synthesis)
-  - everything else       → claude-sonnet-4-20250514
+  - ``analysis``          → claude-opus-4-8 (deep story / Story Brief analysis)
+  - ``profile_creation``  → claude-opus-4-8 (My Style synthesis)
+  - everything else       → claude-sonnet-4-6 (chat, selects, general)
+
+Opus 4.8's adaptive thinking is intentionally left OFF (we send no
+``thinking`` field), so calls behave like a fast non-thinking model.
+Sampling params (temperature/top_p/top_k) are never set — Opus 4.7+
+rejects any non-default value with a 400.
 
 The SDK manages SSE streaming, retry/backoff, and typed error classes that
 we map to clear user-facing messages.
@@ -15,19 +21,27 @@ from .base import BaseProvider
 from . import ProviderError
 
 
-MODEL_DEFAULT = "claude-sonnet-4-20250514"
-MODEL_PROFILE = "claude-opus-4-20250514"
+MODEL_DEFAULT = "claude-sonnet-4-6"     # chat, selects, general
+MODEL_FLAGSHIP = "claude-opus-4-8"      # analysis (incl. Story Brief) + My Style
+
+# Task types routed to the flagship Opus model. "analysis" also covers the
+# single-project Story Brief and Collection passes — both route through it.
+_FLAGSHIP_TASKS = {"analysis", "profile_creation"}
 
 
 def _model_for_task(task_type: str) -> str:
-    return MODEL_PROFILE if task_type == "profile_creation" else MODEL_DEFAULT
+    return MODEL_FLAGSHIP if task_type in _FLAGSHIP_TASKS else MODEL_DEFAULT
 
 
 def _max_tokens_for_task(task_type: str) -> int:
+    # Headroom widened for Opus 4.8's tokenizer (up to ~1.35x the token
+    # count of Opus 4 for the same text) so analysis JSON doesn't truncate.
     if task_type == "profile_creation":
+        return 16384
+    if task_type == "analysis":
         return 8192
     if task_type == "chat":
-        return 2048
+        return 4096
     return 4096
 
 

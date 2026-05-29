@@ -1,7 +1,19 @@
 """OpenAI provider via the official SDK.
 
-Uses gpt-4o for every ``task_type`` (Sonnet/Opus tiering is an Anthropic
-concept; OpenAI's equivalent balance point is gpt-4o for everything).
+Model selection mirrors the Anthropic tiering, keyed by ``task_type``:
+
+  - ``analysis``          → gpt-5.4 (deep story / Story Brief analysis)
+  - ``profile_creation``  → gpt-5.4 (My Style synthesis)
+  - everything else       → gpt-5.4-mini (chat, selects, general)
+
+gpt-5.4 / gpt-5.4-mini are reasoning models, which changes two things vs.
+the former gpt-4o path:
+  - the output cap is ``max_completion_tokens`` (``max_tokens`` is rejected
+    with a 400);
+  - hidden reasoning tokens are spent from that same budget, so a too-small
+    cap returns an empty answer. We floor the cap well above the requested
+    value and set ``reasoning_effort`` per task.
+``temperature`` is never set — reasoning models reject non-default values.
 
 The SDK manages SSE streaming, retries, and typed error classes that we
 map to clear user-facing messages.
@@ -13,15 +25,35 @@ from .base import BaseProvider
 from . import ProviderError
 
 
-MODEL = "gpt-4o"
+MODEL_DEFAULT = "gpt-5.4-mini"      # chat, selects, general
+MODEL_FLAGSHIP = "gpt-5.4"          # analysis (incl. Story Brief) + My Style
+
+# Task types routed to the flagship model — mirrors anthropic_provider.
+_FLAGSHIP_TASKS = {"analysis", "profile_creation"}
+
+# Reasoning models spend part of the output budget on hidden reasoning
+# tokens; if max_completion_tokens is too small the visible answer comes
+# back empty. Floor every request above this (also covers test_connection,
+# which asks for max_tokens=20).
+_MIN_COMPLETION_TOKENS = 2048
+
+
+def _model_for_task(task_type: str) -> str:
+    return MODEL_FLAGSHIP if task_type in _FLAGSHIP_TASKS else MODEL_DEFAULT
+
+
+def _reasoning_effort_for_task(task_type: str) -> str:
+    # Balanced reasoning for flagship analysis/synthesis; low effort for
+    # interactive/cheap tasks to keep latency and cost down.
+    return "medium" if task_type in _FLAGSHIP_TASKS else "low"
 
 
 def _max_tokens_for_task(task_type: str) -> int:
-    if task_type == "profile_creation":
-        return 8192
+    if task_type in ("profile_creation", "analysis"):
+        return 16384
     if task_type == "chat":
-        return 2048
-    return 4096
+        return 8192
+    return 8192
 
 
 def _to_openai_messages(system_prompt: str, user_or_messages: Union[str, list]) -> list:
@@ -48,10 +80,17 @@ class OpenAIProvider(BaseProvider):
         self._client = OpenAI(api_key=api_key)
 
     def _build_body(self, system_prompt, user_or_messages, task_type, kwargs):
+        requested = kwargs.get("max_tokens")
+        if requested:
+            max_out = max(int(requested), _MIN_COMPLETION_TOKENS)
+        else:
+            max_out = _max_tokens_for_task(task_type)
         body = {
-            "model": MODEL,
-            "max_tokens": kwargs.get("max_tokens", _max_tokens_for_task(task_type)),
+            "model": _model_for_task(task_type),
+            # Reasoning models use max_completion_tokens, not max_tokens.
+            "max_completion_tokens": max_out,
             "messages": _to_openai_messages(system_prompt, user_or_messages),
+            "reasoning_effort": _reasoning_effort_for_task(task_type),
         }
         stop = kwargs.get("stop")
         if stop:

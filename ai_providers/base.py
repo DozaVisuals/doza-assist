@@ -8,16 +8,17 @@ received using the appropriate native format.
 
 ``task_type`` selects the model when the provider has tiered options:
 
-  - "analysis"          — story/social/soundbite analysis chunks
+  - "analysis"          — story/social/soundbite analysis chunks (flagship)
   - "chat"              — interactive AI chat
   - "story_builder"     — Story Builder timeline assembly
   - "selects"           — clip selection / labeling
-  - "profile_creation"  — My Style synthesis (Anthropic uses Opus here)
+  - "profile_creation"  — My Style synthesis (flagship)
   - "general"           — anything else / test connection
 
 Ollama ignores ``task_type`` entirely — the user picks one local model.
-Anthropic uses Opus for ``profile_creation`` and Sonnet for everything
-else. OpenAI uses gpt-4o for everything.
+Anthropic and OpenAI route the flagship model (Opus 4.8 / gpt-5.4) to
+``analysis`` and ``profile_creation``, and a faster, cheaper model
+(Sonnet 4.6 / gpt-5.4-mini) to everything else.
 """
 from abc import ABC, abstractmethod
 from typing import Iterator, Union

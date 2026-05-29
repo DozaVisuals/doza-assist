@@ -191,6 +191,12 @@ body {
     cursor: pointer;
     transition: all 0.15s ease;
     text-decoration: none;
+    /* Don't break button labels across lines. Without this, a button
+       sitting next to a long page title in a flex row (page-title-area
+       on project.html) gets shrunk and renders e.g. "AI / Analysis"
+       stacked on two lines. */
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .btn:hover {
@@ -2337,32 +2343,6 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     cursor: pointer;
 }
 
-/* ── Project Selector ── */
-
-.project-selector {
-    position: relative;
-}
-
-.project-selector-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.75rem;
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    background: var(--bg-card);
-    color: var(--text-secondary);
-    font-family: var(--font);
-    font-size: 0.85rem;
-    cursor: pointer;
-    transition: all 0.15s;
-}
-
-.project-selector-btn:hover {
-    border-color: var(--border-light);
-    color: var(--text-primary);
-}
-
 /* ── Editing Platform (NLE) Selector ── */
 
 .platform-selector {
@@ -2408,74 +2388,6 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     background: var(--accent);
     color: var(--bg-card);
     border-color: var(--accent);
-}
-
-.project-dropdown {
-    display: none;
-    position: absolute;
-    top: calc(100% + 0.5rem);
-    left: 0;
-    min-width: 300px;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    z-index: 200;
-    overflow: hidden;
-}
-
-.project-dropdown.open {
-    display: block;
-}
-
-.project-dropdown-header {
-    padding: 0.75rem 1rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-muted);
-    border-bottom: 1px solid var(--border);
-}
-
-.project-dropdown-item {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.6rem 1rem;
-    cursor: pointer;
-    transition: background 0.1s;
-    font-size: 0.85rem;
-}
-
-.project-dropdown-item:hover {
-    background: var(--bg-hover);
-}
-
-.project-dropdown-item input[type="checkbox"] {
-    accent-color: var(--accent);
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-}
-
-.project-dropdown-name {
-    font-weight: 500;
-    color: var(--text-primary);
-    flex: 1;
-}
-
-.project-dropdown-detail {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    font-family: var(--mono);
-}
-
-.project-dropdown-footer {
-    padding: 0.6rem 1rem;
-    border-top: 1px solid var(--border);
-    display: flex;
-    justify-content: flex-end;
 }
 
 /* ── Project Badge in Paragraphs ── */

@@ -60,34 +60,6 @@
             <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
                 <h1 class="page-title">{% if is_multi %}Workspace{% else %}{{ project.name }}{% endif %}</h1>
                 {% if not is_shared %}
-                <!-- Project Selector -->
-                <div class="project-selector" id="projectSelector">
-                    <button class="project-selector-btn" onclick="toggleProjectDropdown()">
-                        {% if is_multi %}
-                            {{ projects | length }} projects
-                        {% else %}
-                            {{ project.name }}
-                        {% endif %}
-                        <svg viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M6 8L1 3h10z"/></svg>
-                    </button>
-                    <div class="project-dropdown" id="projectDropdown">
-                        <div class="project-dropdown-header">Select Projects</div>
-                        {% for p in all_projects %}
-                        <label class="project-dropdown-item">
-                            <input type="checkbox" value="{{ p.id }}"
-                                   {% if p.id in active_ids %}checked{% endif %}
-                                   onchange="updateProjectSelection()">
-                            <span class="project-dropdown-name">{{ p.name }}</span>
-                            <span class="project-dropdown-detail">{{ p.filename }}</span>
-                        </label>
-                        {% endfor %}
-                        <div class="project-dropdown-footer">
-                            <button class="btn btn-sm btn-primary" onclick="applyProjectSelection()">Apply</button>
-                        </div>
-                    </div>
-                </div>
-                {% endif %}
-                {% if not is_shared %}
                 <!-- Editing Platform (NLE) Selector -->
                 <div class="platform-selector" id="platformSelector" data-platform="{{ editing_platform or 'fcp' }}">
                     <span class="platform-selector-label">Edit in:</span>
@@ -464,6 +436,43 @@
         </div>
         {% endif %}
 
+        <!-- Soundbites -->
+        {% if project.analysis.get('strongest_soundbites', []) %}
+        <div class="analysis-section-header">
+            <span>Soundbites</span>
+            <button class="analysis-section-export" onclick="exportFCPXML('soundbites')"
+                    data-export-label-key="section" data-export-label-tooltip="soundbites">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span data-export-label-text>FCPX</span>
+            </button>
+        </div>
+        <div class="analysis-list">
+            {% for sb in project.analysis.strongest_soundbites %}
+            <div class="analysis-item" data-clip-start="{{ sb.start }}" data-clip-end="{{ sb.start }}">
+                <div style="flex:1; min-width:0;">
+                    <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;">
+                        <div class="analysis-item-left">
+                            <button class="analysis-play" onclick="playAnalysisItem(this)" title="Play / Pause">
+                                <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                                <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                            </button>
+                            <div>
+                                <div class="analysis-item-title" style="font-style: italic;">"{{ sb.text }}"</div>
+                                <div class="analysis-item-desc">{{ sb.why }}</div>
+                            </div>
+                        </div>
+                        <div class="analysis-item-right">
+                            <span class="analysis-item-tc">{{ sb.start }}</span>
+                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}',this)">+ Clip</button>
+                        </div>
+                    </div>
+                    <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
         <!-- Story Beats -->
         {% if project.analysis.get('story_beats', []) %}
         <div class="analysis-section-header">
@@ -530,43 +539,6 @@
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ clip.start }} – {{ clip.end }}</span>
                             <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ clip.start }}'), parseTc('{{ clip.end }}'), '{{ clip.title | replace("'", "") }}',this)">+ Clip</button>
-                        </div>
-                    </div>
-                    <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
-                </div>
-            </div>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        <!-- Soundbites -->
-        {% if project.analysis.get('strongest_soundbites', []) %}
-        <div class="analysis-section-header">
-            <span>Soundbites</span>
-            <button class="analysis-section-export" onclick="exportFCPXML('soundbites')"
-                    data-export-label-key="section" data-export-label-tooltip="soundbites">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                <span data-export-label-text>FCPX</span>
-            </button>
-        </div>
-        <div class="analysis-list">
-            {% for sb in project.analysis.strongest_soundbites %}
-            <div class="analysis-item" data-clip-start="{{ sb.start }}" data-clip-end="{{ sb.start }}">
-                <div style="flex:1; min-width:0;">
-                    <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;">
-                        <div class="analysis-item-left">
-                            <button class="analysis-play" onclick="playAnalysisItem(this)" title="Play / Pause">
-                                <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
-                                <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
-                            </button>
-                            <div>
-                                <div class="analysis-item-title" style="font-style: italic;">"{{ sb.text }}"</div>
-                                <div class="analysis-item-desc">{{ sb.why }}</div>
-                            </div>
-                        </div>
-                        <div class="analysis-item-right">
-                            <span class="analysis-item-tc">{{ sb.start }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -1100,24 +1072,8 @@ if (IS_SHARED && Object.keys(SHARED_TABS).length > 0) {
     }
 }
 
-// Project selector
-function toggleProjectDropdown() {
-    document.getElementById('projectDropdown').classList.toggle('open');
-}
-
-function applyProjectSelection() {
-    const checks = document.querySelectorAll('#projectDropdown input[type=checkbox]:checked');
-    const ids = Array.from(checks).map(c => c.value);
-    if (ids.length === 0) { showToast('Select at least one project'); return; }
-    window.location.href = '/project/' + ids.join(',');
-}
-
-// Close dropdown when clicking outside
+// Close gear menu when clicking outside
 document.addEventListener('click', (e) => {
-    const sel = document.getElementById('projectSelector');
-    if (sel && !sel.contains(e.target)) {
-        document.getElementById('projectDropdown').classList.remove('open');
-    }
     const gear = document.getElementById('gearMenuWrap');
     if (gear && !gear.contains(e.target)) {
         const menu = document.getElementById('gearMenu');

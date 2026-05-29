@@ -39,7 +39,7 @@ from typing import Iterable, List, Optional, Tuple
 from lxml import etree
 
 from .parser import ParsedFCPXML, SpineSegment
-from .timecode import seconds_to_rational, timeline_to_segment
+from .timecode import parse_rational, seconds_to_rational, timeline_to_segment
 
 
 # ---------- public data types -----------------------------------------------
@@ -211,25 +211,51 @@ def _format_suffix(original: Optional[str], suffix: str) -> str:
     return f"{base} - {suffix}"
 
 
+def _snap_clip_times(
+    container_start: Fraction, container_end: Fraction, fd: Fraction
+) -> Tuple[str, str, Fraction]:
+    """Snap a select's in/out to the frame grid and derive duration from the
+    *snapped* endpoints.
+
+    ``start`` and ``duration`` are separate FCPXML attributes. Rounding each to
+    the nearest frame independently lets ``start + duration`` land one frame past
+    the snapped out point — and therefore past the source media — which FCP
+    rejects on import as "Invalid edit with no respective media". Taking
+    ``duration = snapped_end - snapped_start`` keeps the edit's out point exactly
+    on the snapped end, so it can never overshoot.
+
+    Returns ``(start_str, duration_str, duration_fraction)``. The fraction is an
+    exact multiple of ``fd``, so the caller advances the timeline cursor with it
+    and the new spine stays frame-contiguous (no sub-frame gaps/overlaps).
+    """
+    start_frac = parse_rational(seconds_to_rational(container_start, fd))
+    end_frac = parse_rational(seconds_to_rational(container_end, fd))
+    if end_frac - start_frac < fd:
+        end_frac = start_frac + fd        # never emit a zero / sub-frame edit
+    dur_frac = end_frac - start_frac
+    return (
+        seconds_to_rational(start_frac, fd),
+        seconds_to_rational(dur_frac, fd),
+        dur_frac,
+    )
+
+
 # ---------- Mode A: selects as a new project --------------------------------
 
 def _build_mc_clip_node(
     parsed: ParsedFCPXML,
     select: Select,
     segment: SpineSegment,
-    container_start: Fraction,
-    container_end: Fraction,
-    timeline_offset: Fraction,
+    start_str: str,
+    duration_str: str,
+    offset_str: str,
 ) -> etree._Element:
-    fd = parsed.sequence_frame_duration
-    duration = container_end - container_start
-
     mc = etree.Element("mc-clip")
     mc.set("ref", segment.ref)
-    mc.set("offset", seconds_to_rational(timeline_offset, fd))
+    mc.set("offset", offset_str)
     mc.set("name", select.label or "Select")
-    mc.set("start", seconds_to_rational(container_start, fd))
-    mc.set("duration", seconds_to_rational(duration, fd))
+    mc.set("start", start_str)
+    mc.set("duration", duration_str)
 
     # FCPXML 1.13/1.14 DTD requires children in order:
     #   (note?, timing-params, intrinsic-params-audio, mc-source*, anchor_items*, ...)
@@ -264,9 +290,9 @@ def _build_sync_clip_node(
     select: Select,
     segment: SpineSegment,
     original_element: etree._Element,
-    container_start: Fraction,
-    container_end: Fraction,
-    timeline_offset: Fraction,
+    start_str: str,
+    duration_str: str,
+    offset_str: str,
 ) -> etree._Element:
     """Emit a full ``<sync-clip>`` for a select — video + audio reattached.
 
@@ -283,13 +309,10 @@ def _build_sync_clip_node(
     chosen audio asset (angle offsets collapse to zero during parse), so it
     maps directly to the sync-clip's new ``start`` attribute.
     """
-    fd = parsed.sequence_frame_duration
-    duration = container_end - container_start
-
     new_clip = copy.deepcopy(original_element)
-    new_clip.set("offset", seconds_to_rational(timeline_offset, fd))
-    new_clip.set("start", seconds_to_rational(container_start, fd))
-    new_clip.set("duration", seconds_to_rational(duration, fd))
+    new_clip.set("offset", offset_str)
+    new_clip.set("start", start_str)
+    new_clip.set("duration", duration_str)
     new_clip.set("name", select.label or "Select")
 
     # Per the FCPXML DTD, <note> must be the first child of <sync-clip>.
@@ -324,9 +347,10 @@ def _build_selects_spine(
     parsed: ParsedFCPXML,
     selects: List[Select],
     skipped: Optional[List[Select]] = None,
-) -> etree._Element:
+) -> Tuple[etree._Element, Fraction]:
     spine = etree.Element("spine")
     timeline_cursor = Fraction(0)
+    fd = parsed.sequence_frame_duration
     original_spine_clips = _index_original_spine(parsed)
     for s in selects:
         try:
@@ -337,10 +361,13 @@ def _build_selects_spine(
                 continue
             raise
         seg_idx = parsed.spine_segments.index(segment)
+        # Snap once: start/duration share the same snapped endpoints (so the edit
+        # can't overshoot the source) and the cursor advances by the same snapped
+        # duration (so the new spine stays frame-contiguous).
+        start_str, dur_str, dur_frac = _snap_clip_times(container_start, container_end, fd)
+        offset_str = seconds_to_rational(timeline_cursor, fd)
         if segment.kind == "mc-clip":
-            node = _build_mc_clip_node(
-                parsed, s, segment, container_start, container_end, timeline_cursor
-            )
+            node = _build_mc_clip_node(parsed, s, segment, start_str, dur_str, offset_str)
         else:
             if seg_idx >= len(original_spine_clips):
                 if skipped is not None:
@@ -348,11 +375,11 @@ def _build_selects_spine(
                 continue
             node = _build_sync_clip_node(
                 parsed, s, segment, original_spine_clips[seg_idx],
-                container_start, container_end, timeline_cursor,
+                start_str, dur_str, offset_str,
             )
         spine.append(node)
-        timeline_cursor += (container_end - container_start)
-    return spine
+        timeline_cursor += dur_frac
+    return spine, timeline_cursor
 
 
 def write_selects_as_new_project(
@@ -380,24 +407,16 @@ def write_selects_as_new_project(
     event_title = event_name or (parsed.event_name or "Doza Selects")
 
     skipped: List[Select] = []
-    spine_el = _build_selects_spine(parsed, selects, skipped=skipped)
+    spine_el, total_duration = _build_selects_spine(parsed, selects, skipped=skipped)
 
     if len(skipped) == len(selects):
         raise WriterError(
             "all selects fall outside the timeline segments — nothing to export"
         )
 
-    # Total duration on the new timeline is the sum of per-select container
-    # durations for selects that were actually placed.
-    total_duration = Fraction(0)
-    for s in selects:
-        if s in skipped:
-            continue
-        try:
-            _, cstart, cend = _locate_select_range(parsed, s)
-            total_duration += (cend - cstart)
-        except WriterError:
-            pass
+    # Total timeline duration is the sum of the per-clip snapped durations that
+    # were actually placed — frame-aligned, so the sequence duration butts
+    # exactly against the last clip's out point.
     fd = parsed.sequence_frame_duration
 
     sequence = etree.Element("sequence")

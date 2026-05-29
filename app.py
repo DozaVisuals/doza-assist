@@ -15,6 +15,7 @@ import hashlib
 import re as _re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, Response, stream_with_context
 from werkzeug.utils import secure_filename
 
@@ -70,6 +71,179 @@ ALLOWED_EXTENSIONS = {'wav', 'mp3', 'mp4', 'mov', 'aac', 'm4a', 'flac', 'aif', '
 
 os.makedirs(app.config['PROJECTS_DIR'], exist_ok=True)
 os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
+
+
+# ── project_id safety (SEC-02) ────────────────────────────────────────────
+# Every /project/<project_id>/... route turns an editor-supplied project_id
+# into a path under PROJECTS_DIR. Real ids are uuid4 hex slices
+# (str(uuid.uuid4())[:8]); folder/collection slugs use a separate <slug> param.
+# We reject anything that isn't a plain id token so a crafted value (``../``,
+# an absolute path, or a symlinked project dir pointing outside) can never
+# escape PROJECTS_DIR — most importantly before it reaches the shutil.rmtree
+# in delete_project. One shared helper, enforced once for every <project_id>
+# route by the before_request guard below, with safe_project_dir() used at the
+# filesystem chokepoints (get_project/save_project/delete) for defense in depth
+# and to cover the few non-URL project_id sources (e.g. /export/send-to-nle).
+_PROJECT_ID_RE = _re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
+
+def validate_project_id(project_id):
+    """True if ``project_id`` is a safe single path segment — no separators,
+    no ``..``, not absolute, reasonable length."""
+    return isinstance(project_id, str) and bool(_PROJECT_ID_RE.match(project_id))
+
+
+def safe_project_dir(project_id):
+    """Resolve ``project_id`` to its absolute project directory, or return
+    ``None`` if the id is malformed or would resolve outside PROJECTS_DIR.
+
+    The realpath + direct-child check also rejects a project_id whose dir is a
+    symlink pointing outside PROJECTS_DIR. Single source of truth for turning a
+    project_id into a filesystem path.
+    """
+    if not validate_project_id(project_id):
+        return None
+    base = os.path.realpath(app.config['PROJECTS_DIR'])
+    candidate = os.path.realpath(os.path.join(base, project_id))
+    # Must be a *direct* child of PROJECTS_DIR — no nesting, no escape.
+    if os.path.dirname(candidate) != base:
+        return None
+    return candidate
+
+
+@app.before_request
+def _guard_project_id():
+    """Reject any request whose matched route carries a malformed ``project_id``
+    before the view (and its filesystem access) runs. One enforcement point for
+    every /project/<project_id>/... route, including delete_project whose
+    rmtree was the path-traversal sink (SEC-02).
+
+    The URL <project_id> may be a single id OR a comma-separated list — several
+    routes (multi-project chat, the multi-project workspace view) accept
+    ``a,b,c`` and split it themselves. We mirror that split/strip and require
+    *every* component to be a valid id, so ``a,b`` is allowed but ``a,../etc``
+    is not. The single-id sinks (get_project/save_project/delete) re-validate
+    each id strictly, so a comma-joined value can never reach a filesystem path
+    intact.
+    """
+    raw = (request.view_args or {}).get('project_id')
+    if raw is not None:
+        parts = [p.strip() for p in raw.split(',') if p.strip()]
+        if not parts or not all(validate_project_id(p) for p in parts):
+            # Return a response (not abort()) so we short-circuit cleanly — the
+            # app's global @errorhandler(Exception) would turn abort() into a 500.
+            return jsonify({'error': 'Not found'}), 404
+
+
+# ── Cross-origin write protection (SEC-01) ────────────────────────────────
+# The API binds to 127.0.0.1 only, but loopback binding does NOT stop a web
+# page the editor visits from issuing cross-origin *state-changing* requests to
+# http://127.0.0.1:<port>/... (CSRF), nor a DNS-rebinding attack. There is no
+# CORS policy and no auth, so state-changing requests must look same-origin to
+# the loopback app:
+#   - if an Origin header is present it must be loopback, AND
+#   - the Host must be loopback (this second check defeats DNS rebinding, where
+#     the page's Host is the attacker's domain that resolves to 127.0.0.1).
+# Same-origin editor writes and the app's own fetches send a loopback Origin;
+# non-browser callers (no Origin) are allowed only when the Host is loopback.
+# Safe methods (GET/HEAD/OPTIONS) are never blocked, so page loads — including
+# the shared client portal at GET /share/<id> — are unaffected.
+#
+# Client portal exception: the review/share portal is reached cross-origin
+# through a Cloudflare tunnel, so its Origin is the tunnel URL (not loopback).
+# A reviewing client may, cross-origin:
+#   - add a comment and send chat messages (_PORTAL_WRITE_ENDPOINTS) — these
+#     don't remove anything (clear_chat is a separate DELETE that stays blocked);
+#   - ADD clips/selects but NOT remove, shrink, edit, or reorder existing ones
+#     (_PORTAL_APPEND_ONLY) — save_selects and save_labels replace the whole
+#     list, so for cross-origin callers we allow the write only when the
+#     submitted list is a pure addition to what's stored (every stored item
+#     still present, unchanged, in the same order, and the list is longer).
+# Everything else stays blocked cross-origin: clip/select removal-via-shrink,
+# story_update (PUT list-replace), clear_chat, delete/clear/retranscribe/rename/
+# move/create/upload, provider + share settings, find-file, browse, export, etc.
+# Same-origin editor requests are never subject to the append-only rule — the
+# editor keeps full add/remove/edit/reorder.
+_STATE_CHANGING_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+_LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+# Endpoints the cross-origin client portal may call freely (no list-shrink risk).
+_PORTAL_WRITE_ENDPOINTS = {'add_comment', 'chat', 'chat_stream'}
+# Endpoints the portal may call cross-origin ONLY when the submitted list purely
+# extends the stored list. Maps view function -> (stored project key, body key).
+_PORTAL_APPEND_ONLY = {
+    'save_selects': ('client_selects', 'selects'),
+    'save_labels':  ('labeled_sections', 'labeled_sections'),
+}
+
+
+def _is_loopback_netloc(value):
+    """True if a Host header or Origin URL points at the loopback interface."""
+    if not value:
+        return False
+    netloc = value if '//' in value else '//' + value
+    return urlparse(netloc).hostname in _LOOPBACK_HOSTS
+
+
+def _request_is_cross_origin():
+    """True if this request is NOT same-origin to the loopback app — i.e. it
+    carries a non-loopback Origin, or its Host isn't loopback (rebinding)."""
+    origin = request.headers.get('Origin')
+    if origin is not None and not _is_loopback_netloc(origin):
+        return True
+    return not _is_loopback_netloc(request.host)
+
+
+def _is_pure_addition(stored, submitted):
+    """True iff ``submitted`` keeps every item of ``stored`` unchanged and in the
+    same relative order (a subsequence) and is strictly longer — items were only
+    added, never removed, edited, or reordered. Anything else returns False."""
+    if not isinstance(stored, list) or not isinstance(submitted, list):
+        return False
+    if len(submitted) <= len(stored):
+        return False
+    i = 0
+    for item in submitted:
+        if i < len(stored) and item == stored[i]:
+            i += 1
+    return i == len(stored)
+
+
+def _portal_append_only_ok(endpoint):
+    """Append-only gate for cross-origin save_selects/save_labels: the submitted
+    list must purely extend the stored list. For save_labels the color-label map
+    must also be unchanged (no renaming labels cross-origin)."""
+    stored_key, body_key = _PORTAL_APPEND_ONLY[endpoint]
+    project_id = (request.view_args or {}).get('project_id')
+    project = get_project(project_id) if project_id else None
+    body = request.get_json(silent=True) or {}
+    if not _is_pure_addition((project or {}).get(stored_key, []) or [],
+                             body.get(body_key, [])):
+        return False
+    if endpoint == 'save_labels':
+        # color_labels is the label-name map, not a clip list — it must not be
+        # edited cross-origin (an omitted/changed map would wipe or rename it).
+        if body.get('color_labels', {}) != (project or {}).get('color_labels', {}):
+            return False
+    return True
+
+
+@app.before_request
+def _guard_cross_origin_writes():
+    """Block cross-origin state-changing requests (CSRF / DNS-rebinding) to the
+    loopback API, with the narrow client-portal exceptions noted above (SEC-01)."""
+    if request.method not in _STATE_CHANGING_METHODS:
+        return None
+    if not _request_is_cross_origin():
+        return None  # same-origin editor — full add/remove/edit/reorder
+    endpoint = request.endpoint
+    if endpoint in _PORTAL_WRITE_ENDPOINTS:
+        return None  # add comment / chat send — intentionally cross-origin
+    if endpoint in _PORTAL_APPEND_ONLY:
+        if _portal_append_only_ok(endpoint):
+            return None  # pure addition of clips/selects — allowed
+        return jsonify({'error': 'Cross-origin request may only add items, '
+                                 'not remove, edit, or reorder them'}), 403
+    return jsonify({'error': 'Cross-origin request blocked'}), 403
 
 
 @app.context_processor
@@ -225,7 +399,9 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
 
 def get_project(project_id):
     """Load a project's metadata."""
-    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    project_dir = safe_project_dir(project_id)
+    if project_dir is None:
+        return None
     meta_path = os.path.join(project_dir, 'meta.json')
     if not os.path.exists(meta_path):
         return None
@@ -261,7 +437,9 @@ def load_paragraph_index(project_id):
 
 def save_project(project_id, data):
     """Save a project's metadata."""
-    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    project_dir = safe_project_dir(project_id)
+    if project_dir is None:
+        raise ValueError(f'Invalid project_id: {project_id!r}')
     os.makedirs(project_dir, exist_ok=True)
     with open(os.path.join(project_dir, 'meta.json'), 'w') as f:
         json.dump(data, f, indent=2)
@@ -2872,6 +3050,10 @@ def send_to_nle():
     """
     body = request.json or {}
     project_id = body.get('project_id')
+    # project_id arrives in the JSON body here (not the URL), so the
+    # before_request guard doesn't see it — validate explicitly (SEC-02).
+    if not validate_project_id(project_id):
+        return jsonify({'error': 'Invalid project_id'}), 400
     export_type = str(body.get('export_type') or 'selects').strip().lower()
 
     # Multicam round-trip is FCP-specific (it preserves FCP's multicam /
@@ -3388,8 +3570,14 @@ def retranscribe(project_id):
 @app.route('/project/<project_id>/delete', methods=['POST'])
 def delete_project(project_id):
     """Delete a project and its files."""
-    import shutil
-    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    # Resolve + confine the path before rmtree: safe_project_dir rejects a
+    # malformed id and any path that escapes PROJECTS_DIR (incl. via symlink),
+    # so the rmtree below can only ever target a direct child of PROJECTS_DIR.
+    # (The before_request guard already 404s a malformed URL id; this is the
+    # belt-and-suspenders check at the destructive sink itself — SEC-02.)
+    project_dir = safe_project_dir(project_id)
+    if project_dir is None:
+        return jsonify({'error': 'Project not found'}), 404
     if os.path.exists(project_dir):
         shutil.rmtree(project_dir)
     return jsonify({'status': 'deleted'})

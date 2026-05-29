@@ -1765,6 +1765,141 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
     return cleaned
 
 
+def _validate_clip_timecodes(clips, segments, *, text_key=None,
+                             grace_seconds=5.0, kind="clip"):
+    """Validate (and where safe, repair) the HH:MM:SS ``start``/``end`` of
+    structured-analysis clips against real transcript segments — the
+    structured-output counterpart to :func:`_validate_clip_markers_in_text`.
+
+    Mirrors that function's anchoring rule: a ``start`` is valid when it lies
+    inside the whole-transcript window AND within ``grace_seconds`` of some
+    segment's ``[start, end]`` (``_tc_to_seconds`` parses the timecode).
+    Decision per clip:
+
+      * **Anchored start** -> KEEP. If ``end`` overran the transcript it is
+        clamped back to the last segment's end.
+      * **Unanchored start, ``text_key`` given** (soundbites / social clips,
+        which carry a verbatim transcript quote) -> REPAIR: snap ``start``/
+        ``end`` to the contiguous segment run whose text matches the quote.
+        The quote tells us where the clip actually belongs. No confident
+        match -> DROP.
+      * **Unanchored start, no ``text_key``** (story beats / b-roll, only an
+        interpretive label) -> DROP. We never relocate to a guessed segment;
+        a confidently-wrong interpretive clip is worse than a missing one.
+
+    Clips with no ``start`` at all are left untouched (a missing timecode is a
+    separate concern from a hallucinated one). Each keep-clamp / repair / drop
+    is logged to stderr so the rates are observable. Returns the validated
+    list; returns ``clips`` unchanged when ``segments`` is empty.
+    """
+    import re
+    import sys
+
+    if not isinstance(clips, list) or not clips or not segments:
+        return clips if isinstance(clips, list) else []
+
+    def _tokens(s):
+        return re.findall(r'[a-z0-9]+', (s or '').lower())
+
+    seg_ranges = []   # (start, end)
+    seg_norm = []     # (start, end, joined_text, token_set)
+    for s in segments:
+        try:
+            ss = float(s.get('start', 0) or 0)
+            se = float(s.get('end', ss) or ss)
+        except (TypeError, ValueError):
+            continue
+        if se >= ss:
+            toks = _tokens(s.get('text'))
+            seg_ranges.append((ss, se))
+            seg_norm.append((ss, se, ' '.join(toks), set(toks)))
+    if not seg_ranges:
+        return clips
+    t_start = seg_ranges[0][0]
+    t_end = max(e for _, e in seg_ranges)
+
+    def _anchored(sec):
+        if sec < t_start - grace_seconds or sec > t_end + grace_seconds:
+            return False
+        return any(a - grace_seconds <= sec <= b + grace_seconds
+                   for a, b in seg_ranges)
+
+    def _text_anchor(quote):
+        """Snap to the contiguous segment run best matching the verbatim
+        quote. Returns (start_sec, end_sec), or None when no confident match."""
+        qtoks = _tokens(quote)
+        if len(qtoks) < 3:
+            return None
+        qjoined = ' '.join(qtoks)
+        qset = set(qtoks)
+        scores = []
+        for (_ss, _se, sj, sset) in seg_norm:
+            if len(sset) < 3:
+                scores.append(0.0)
+            elif sj and sj in qjoined:
+                scores.append(1.0)  # segment text appears verbatim in the quote
+            else:
+                scores.append(len(sset & qset) / len(sset))
+        if not scores:
+            return None
+        best = max(range(len(scores)), key=lambda i: scores[i])
+        if scores[best] < 0.6:
+            return None
+        lo = hi = best
+        while lo - 1 >= 0 and scores[lo - 1] >= 0.6:
+            lo -= 1
+        while hi + 1 < len(scores) and scores[hi + 1] >= 0.6:
+            hi += 1
+        return seg_norm[lo][0], seg_norm[hi][1]
+
+    out = []
+    kept = clamped = repaired = dropped = 0
+    for c in clips:
+        if not isinstance(c, dict):
+            dropped += 1
+            print(f"[analysis-validate] {kind} dropped (not an object)", file=sys.stderr)
+            continue
+        raw_start = c.get('start')
+        if not str(raw_start or '').strip():
+            out.append(c)  # no timecode to validate — leave as-is
+            kept += 1
+            continue
+        start_sec = _tc_to_seconds(raw_start)
+        if _anchored(start_sec):
+            nc = dict(c)
+            if _tc_to_seconds(c.get('end')) > t_end + grace_seconds:
+                nc['end'] = _seconds_to_tc(t_end)
+                clamped += 1
+                print(f"[analysis-validate] {kind} end clamped "
+                      f"{c.get('end')}->{nc['end']} (start={raw_start})",
+                      file=sys.stderr)
+            else:
+                kept += 1
+            out.append(nc)
+            continue
+        # Unanchored start.
+        anchor = _text_anchor(c.get(text_key)) if text_key else None
+        if anchor:
+            nc = dict(c)
+            nc['start'] = _seconds_to_tc(anchor[0])
+            nc['end'] = _seconds_to_tc(anchor[1])
+            repaired += 1
+            print(f"[analysis-validate] {kind} repaired start "
+                  f"{raw_start}->{nc['start']} (verbatim-text match)",
+                  file=sys.stderr)
+            out.append(nc)
+        else:
+            dropped += 1
+            reason = ("no verbatim-text match" if text_key
+                      else "unanchored, no verbatim text to re-anchor")
+            print(f"[analysis-validate] {kind} dropped start={raw_start} ({reason})",
+                  file=sys.stderr)
+    if clamped or repaired or dropped:
+        print(f"[analysis-validate] {kind}: kept={kept} clamped={clamped} "
+              f"repaired={repaired} dropped={dropped}", file=sys.stderr)
+    return out
+
+
 def _strip_trailing_repetition(text):
     """Remove degenerate trailing repetition from model output."""
     if len(text) < 30:
@@ -4017,7 +4152,7 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         formatted = _format_transcript_for_ai(transcript)
         return _analyze_transcript_single(
             formatted, project_name, analysis_type, segment_vectors=segment_vectors,
-            progress_emit=_emit,
+            progress_emit=_emit, segments=segments,
         )
 
     # Chunked path: walk 15-minute slices and merge.
@@ -4124,11 +4259,13 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
     normalized = normalize_analysis(accum)
     return _cap_and_rank_analysis(
         normalized, segment_vectors=segment_vectors, cap=ANALYSIS_PER_CATEGORY_CAP,
+        segments=segments,
     )
 
 
 def _analyze_transcript_single(formatted_text, project_name, analysis_type,
-                                segment_vectors=None, progress_emit=None):
+                                segment_vectors=None, progress_emit=None,
+                                segments=None):
     """One-shot analysis path for short interviews."""
     types_count = (1 if analysis_type in ('story', 'all') else 0) + \
                   (1 if analysis_type in ('social', 'all') else 0)
@@ -4200,6 +4337,7 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type,
     normalized = normalize_analysis(result)
     return _cap_and_rank_analysis(
         normalized, segment_vectors=segment_vectors, cap=ANALYSIS_PER_CATEGORY_CAP,
+        segments=segments,
     )
 
 
@@ -4304,7 +4442,7 @@ def _normalize_soundbite(sb: dict) -> dict:
     return out
 
 
-def _cap_and_rank_analysis(accum, segment_vectors=None, cap=7):
+def _cap_and_rank_analysis(accum, segment_vectors=None, cap=7, segments=None):
     """Trim each analysis list to ``cap`` items, preferring strong candidates.
 
     Three passes per clip-bearing list:
@@ -4339,6 +4477,26 @@ def _cap_and_rank_analysis(accum, segment_vectors=None, cap=7):
     if not isinstance(warnings, list):
         warnings = []
         out['analysis_warnings'] = warnings
+
+    # BUG-01: validate every emitted timecode against the real transcript
+    # segments BEFORE we dedupe/rank/cap, so hallucinated timecodes are
+    # repaired (soundbites/social clips, via verbatim-text match) or dropped
+    # (story beats/b-roll, which carry no quote to re-anchor) instead of
+    # reaching the editor. Running before the cap means dropped clips don't
+    # consume cap slots. Only fires when the caller threaded ``segments`` in.
+    if isinstance(segments, list) and segments:
+        out['strongest_soundbites'] = _validate_clip_timecodes(
+            out.get('strongest_soundbites') or [], segments,
+            text_key='text', kind='soundbite')
+        out['social_clips'] = _validate_clip_timecodes(
+            out.get('social_clips') or [], segments,
+            text_key='text', kind='social clip')
+        out['story_beats'] = _validate_clip_timecodes(
+            out.get('story_beats') or [], segments,
+            text_key=None, kind='story beat')
+        out['broll_suggestions'] = _validate_clip_timecodes(
+            out.get('broll_suggestions') or [], segments,
+            text_key=None, kind='b-roll')
 
     def _ts(val):
         try:

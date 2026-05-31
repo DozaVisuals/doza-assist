@@ -1755,6 +1755,18 @@ def project_audio_duration(project_id):
 _transcribe_jobs: dict = {}
 _transcribe_jobs_lock = threading.Lock()
 
+# Process-global "only one transcription at a time" gate. Transcription
+# engines share a single in-process model singleton (Parakeet/WhisperX/
+# Whisper, cached behind transcribe._model_lock) and a single Metal GPU.
+# Running two transcriptions concurrently means two threads driving the
+# same MLX model object on the same GPU command queue — which deadlocks
+# (the symptom users hit when adding a folder of clips via the import
+# queue: every clip's background thread launches at once, piles onto the
+# model load, and they all freeze at the "load_model" phase forever).
+# Serializing here means a second job parks at phase="queued" until the
+# first finishes, then runs cleanly. A single clip is unaffected.
+_transcribe_run_lock = threading.Lock()
+
 
 def _transcribe_status_path(project_id):
     return os.path.join(app.config['PROJECTS_DIR'], project_id, 'transcribe_status.json')
@@ -1806,6 +1818,15 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
     from transcribe import transcribe_file
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     progress_cb = _make_transcribe_progress_writer(project_id)
+
+    # Serialize against any other in-flight transcription. If the gate is
+    # already held (another clip is transcribing — e.g. a folder import
+    # fired several jobs at once), park here at phase="queued" so the
+    # frontend poll shows a clear "Queued…" state instead of a frozen
+    # "Load_model…", then proceed once the engine is free.
+    if not _transcribe_run_lock.acquire(blocking=False):
+        progress_cb({"phase": "queued", "pct": 0})
+        _transcribe_run_lock.acquire()
     try:
         result = transcribe_file(
             source_path,
@@ -1890,6 +1911,8 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             save_project(project_id, project)
         except Exception:
             pass
+    finally:
+        _transcribe_run_lock.release()
 
 
 @app.route('/project/<project_id>/transcribe', methods=['POST'])

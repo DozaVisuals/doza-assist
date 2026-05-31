@@ -4769,13 +4769,22 @@ def _format_transcript_paragraphs_for_ai(transcript, max_paragraph_seconds=60):
     return _format_paragraphs_as_lines(paragraphs)
 
 
-def _call_ai(prompt, system_prompt="", task_type="analysis"):
+def _call_ai(prompt, system_prompt="", task_type="analysis", force_json=True):
     """Single-prompt generation through the active provider.
 
     ``task_type`` selects the model when the provider tiers (Anthropic uses
     Opus for ``profile_creation``, Sonnet otherwise; Ollama ignores it).
     Editorial DNA's classifier passes ``"analysis"``; My Style synthesis
     passes ``"profile_creation"``.
+
+    ``force_json`` (Ollama-only) toggles the ``format='json'`` decoding
+    grammar on the local ``/api/generate`` path. It defaults to True (the
+    normal structured-output behavior). Set it False to let the model
+    answer in free form — the escape hatch for larger local models
+    (e.g. gemma4:26b) that degenerate under the strict JSON grammar and
+    return an empty/``{}`` body; in free form they emit usable JSON (often
+    wrapped in prose) that the tolerant parser then salvages. Cloud
+    providers ignore the flag.
 
     Raises ``RuntimeError`` on provider error so the caller can surface a
     clear message to the user instead of silently falling back.
@@ -4795,7 +4804,7 @@ def _call_ai(prompt, system_prompt="", task_type="analysis"):
         system_prompt = inject_storytelling_foundation(system_prompt)
     provider = get_active_provider(model_resolver=_get_ollama_model)
     return provider.generate(
-        system_prompt, prompt, task_type=task_type,
+        system_prompt, prompt, task_type=task_type, force_json=force_json,
     )
 
 
@@ -5614,7 +5623,7 @@ Return ONLY valid JSON, nothing else."""
         return parsed
     retry = _parse_json_response(_call_ai(
         prompt + '\n\nNO MARKDOWN. JSON ONLY. Fill the strongest_soundbites array with real quotes from the transcript.',
-        system_prompt,
+        system_prompt, force_json=False,
     ))
     return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
@@ -5660,7 +5669,7 @@ Return ONLY valid JSON, nothing else."""
         return parsed
     retry = _parse_json_response(_call_ai(
         prompt + '\n\nNO MARKDOWN. JSON ONLY. FILL BOTH LISTS — story_beats and broll_suggestions.',
-        system_prompt,
+        system_prompt, force_json=False,
     ))
     return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
@@ -5695,9 +5704,12 @@ Return ONLY valid JSON, nothing else."""
         or parsed.get('overview') or parsed.get('synopsis')
     ):
         return parsed
-    # Retry with even harder prompt
+    # Retry in free-form mode — see _analyze_story_soundbites for why the
+    # grammar-free path rescues larger local models that blank out under
+    # format='json'.
     retry = _parse_json_response(_call_ai(
-        prompt + '\n\nNO MARKDOWN. NO PROSE. JSON ONLY.', system_prompt
+        prompt + '\n\nNO MARKDOWN. NO PROSE. JSON ONLY.', system_prompt,
+        force_json=False,
     ))
     return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 

@@ -70,42 +70,56 @@ class OllamaProvider(BaseProvider):
         # and wants JSON-shaped output. /api/generate with format='json'
         # constrains decoding to a valid JSON token tree.
         if task_type == "analysis" and not isinstance(user_or_messages, list):
+            # Larger local models (gemma4:26b/31b) can degenerate under the
+            # strict format='json' grammar — they emit an empty or ``{}``
+            # body and the whole analysis comes back blank ("Analysis
+            # incomplete…"). When the caller asks for free-form output
+            # (force_json=False) we drop the grammar and add the
+            # reasoning-suppression stop tokens; the model then answers
+            # normally and the caller's tolerant parser extracts the JSON.
+            force_json = kwargs.get("force_json", True)
+            payload = {
+                "model": model,
+                "prompt": str(user_or_messages),
+                "system": system_prompt,
+                "stream": False,
+                "keep_alive": _KEEP_ALIVE,
+                "options": {
+                    "temperature": kwargs.get("temperature", 0.1),
+                    # Bumped from 768 → 4096. The story-analyze schema
+                    # (7 beats + 7 soundbites + 5 themes + 5 b-roll +
+                    # summary + title) easily needs 1k+ output tokens;
+                    # 768 was forcing format='json' to close the JSON
+                    # early, producing syntactically valid but mostly
+                    # empty dicts. That masked the truncation as
+                    # "Gemma returned content-free response" — the
+                    # AI Analysis tab would show only a summary or
+                    # only social clips with no story beats. 4096
+                    # gives every realistic schema room to finish.
+                    "num_predict": kwargs.get("num_predict", 4096),
+                    # Bumped 12288 → 32768 to match the chat path.
+                    # The previous 12288 left only ~8192 input tokens
+                    # after num_predict was reserved. With the
+                    # storytelling foundation (~7K tokens) prepended
+                    # to the system prompt, barely 1K remained for
+                    # the transcript — Ollama silently truncated the
+                    # overflow and the model hallucinated timecodes.
+                    # Even with the foundation now skipped for analysis
+                    # calls, a generous context window prevents
+                    # truncation on long transcripts (25-min Gemma
+                    # chunk ≈ 5K tokens of transcript text alone).
+                    "num_ctx": kwargs.get("num_ctx", 32768),
+                },
+            }
+            if force_json:
+                payload["format"] = "json"
+            else:
+                # Free-form fallback: no grammar, so suppress any reasoning
+                # preamble the model would otherwise stream before the JSON.
+                payload["options"]["stop"] = DEFAULT_STOP_TOKENS
             response = requests.post(
                 f"{self.base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": str(user_or_messages),
-                    "system": system_prompt,
-                    "stream": False,
-                    "format": "json",
-                    "keep_alive": _KEEP_ALIVE,
-                    "options": {
-                        "temperature": kwargs.get("temperature", 0.1),
-                        # Bumped from 768 → 4096. The story-analyze schema
-                        # (7 beats + 7 soundbites + 5 themes + 5 b-roll +
-                        # summary + title) easily needs 1k+ output tokens;
-                        # 768 was forcing format='json' to close the JSON
-                        # early, producing syntactically valid but mostly
-                        # empty dicts. That masked the truncation as
-                        # "Gemma returned content-free response" — the
-                        # AI Analysis tab would show only a summary or
-                        # only social clips with no story beats. 4096
-                        # gives every realistic schema room to finish.
-                        "num_predict": kwargs.get("num_predict", 4096),
-                        # Bumped 12288 → 32768 to match the chat path.
-                        # The previous 12288 left only ~8192 input tokens
-                        # after num_predict was reserved. With the
-                        # storytelling foundation (~7K tokens) prepended
-                        # to the system prompt, barely 1K remained for
-                        # the transcript — Ollama silently truncated the
-                        # overflow and the model hallucinated timecodes.
-                        # Even with the foundation now skipped for analysis
-                        # calls, a generous context window prevents
-                        # truncation on long transcripts (25-min Gemma
-                        # chunk ≈ 5K tokens of transcript text alone).
-                        "num_ctx": kwargs.get("num_ctx", 32768),
-                    },
-                },
+                json=payload,
                 timeout=kwargs.get("timeout", 180),
             )
             if response.status_code != 200:

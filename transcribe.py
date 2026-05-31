@@ -341,13 +341,24 @@ def _transcribe_parakeet(filepath, speaker_labels=None, progress_cb=None):
         _emit("transcribing", pct, audio_sec=int(total_duration))
         print(f"Transcribing chunk {chunk_idx} ({time_offset:.0f}s - {chunk_end/sr:.0f}s)...", flush=True)
 
-        # Save chunk as temp WAV (parakeet.transcribe expects a file path)
+        # Save chunk as temp WAV (parakeet.transcribe expects a file path).
+        # Unique per call — a fixed name like ``parakeet_chunk_1.wav`` is
+        # shared across every transcription on the machine, so two runs (or
+        # a stale file left by a crashed run) would read each other's audio.
         import soundfile as sf
-        tmp_path = os.path.join(tempfile.gettempdir(), f'parakeet_chunk_{chunk_idx}.wav')
+        import uuid
+        tmp_path = os.path.join(
+            tempfile.gettempdir(), f'parakeet_chunk_{uuid.uuid4().hex}_{chunk_idx}.wav'
+        )
         sf.write(tmp_path, np.array(chunk), sr)
 
-        result = model.transcribe(tmp_path)
-        os.remove(tmp_path)
+        try:
+            result = model.transcribe(tmp_path)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
         for sent in result.sentences:
             if not sent.text.strip():

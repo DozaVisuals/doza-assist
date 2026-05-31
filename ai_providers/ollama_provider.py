@@ -117,11 +117,30 @@ class OllamaProvider(BaseProvider):
                 # Free-form fallback: no grammar, so suppress any reasoning
                 # preamble the model would otherwise stream before the JSON.
                 payload["options"]["stop"] = DEFAULT_STOP_TOKENS
+
+            # Suppress model-side "thinking" on analysis. A reasoning-capable
+            # local model (gemma4:26b/31b) otherwise burns its num_predict
+            # budget on a hidden reasoning pass and returns an empty/truncated
+            # body — the "Analysis incomplete" blank-out, attacked at the
+            # source rather than only salvaged by the force_json fallback.
+            # `think` is a recent Ollama field; older daemons (and some
+            # non-thinking models) reject the request with a non-200, so on
+            # failure we retry once without it. That keeps the default
+            # gemma4:e4b path identical to before whenever `think` isn't
+            # accepted — this can only help, never regress.
+            payload["think"] = False
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
                 timeout=kwargs.get("timeout", 180),
             )
+            if response.status_code != 200 and "think" in payload:
+                payload.pop("think", None)
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    timeout=kwargs.get("timeout", 180),
+                )
             if response.status_code != 200:
                 return ""
             return response.json().get("response", "")

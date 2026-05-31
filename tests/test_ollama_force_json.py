@@ -19,8 +19,8 @@ from ai_providers.ollama_provider import OllamaProvider  # noqa: E402
 
 
 class _FakeResp:
-    def __init__(self, payload):
-        self.status_code = 200
+    def __init__(self, payload, status_code=200):
+        self.status_code = status_code
         self._payload = payload
 
     def json(self):
@@ -45,6 +45,43 @@ def test_analysis_default_uses_json_grammar(monkeypatch):
     body = captured[-1]
     assert body["format"] == "json", "default analysis call must use format='json'"
     assert "stop" not in body["options"]
+
+
+def test_analysis_sends_think_false(monkeypatch):
+    # Reasoning-capable local models otherwise spend the output budget on a
+    # hidden thinking pass and blank out — analysis must explicitly disable it.
+    import ai_providers.ollama_provider as op
+    captured = []
+    monkeypatch.setattr(op.requests, "post", _capture_post(captured, '{"ok":1}'))
+    provider = OllamaProvider(model_resolver=lambda: "gemma4:26b")
+
+    provider.generate("sys", "prompt", task_type="analysis")
+
+    assert captured[-1].get("think") is False
+
+
+def test_analysis_retries_without_think_on_non_200(monkeypatch):
+    # Older Ollama (or a model that doesn't support thinking on some
+    # versions) rejects the `think` field with a non-200. We must retry once
+    # WITHOUT it so the default path can never regress — and use the retry's
+    # response.
+    import ai_providers.ollama_provider as op
+    captured = []
+
+    def fake_post(url, json=None, timeout=None, **kwargs):
+        captured.append(json)
+        if "think" in json:
+            return _FakeResp({"error": "model does not support thinking"}, status_code=400)
+        return _FakeResp({"response": '{"ok":1}'})
+
+    monkeypatch.setattr(op.requests, "post", fake_post)
+    provider = OllamaProvider(model_resolver=lambda: "gemma4:e4b")
+
+    out = provider.generate("sys", "prompt", task_type="analysis")
+
+    assert len(captured) == 2, "must retry exactly once after the think rejection"
+    assert "think" not in captured[-1], "retry payload must drop the think field"
+    assert out == '{"ok":1}', "must return the successful retry's response"
 
 
 def test_analysis_force_json_false_drops_grammar_and_adds_stops(monkeypatch):

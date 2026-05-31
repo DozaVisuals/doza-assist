@@ -24,9 +24,22 @@ def _capture_system_prompt(transcript, message, **kwargs):
     """Run chat_about_transcript with _call_ai_chat stubbed, capture the system prompt."""
     captured = {}
 
-    def fake_call(prompt, system_prompt=""):
-        captured['system'] = system_prompt
-        captured['user'] = prompt
+    def fake_call(system_message, messages=None, **kwargs):
+        # Matches the current _call_ai_chat(system_message, messages,
+        # num_ctx=...) contract. The chat prompt was refactored from a
+        # single combined string into a system message (which holds the
+        # CHAT_SYSTEM_PROMPT + FINAL REMINDER contract) plus a messages
+        # array (which holds the transcript / PRE-ANALYZED MOMENTS /
+        # RELEVANT EXCERPTS in a user-role turn). These tests assert on the
+        # whole prompt the model sees, so capture the concatenation —
+        # system first, then each message's content in order.
+        parts = [system_message or '']
+        for m in (messages or []):
+            if isinstance(m, dict) and m.get('content'):
+                parts.append(m['content'])
+        captured['system'] = '\n'.join(parts)
+        captured['system_only'] = system_message or ''
+        captured['messages'] = messages
         return "stub reply"
 
     with patch.object(ai_analysis, '_call_ai_chat', side_effect=fake_call):
@@ -49,48 +62,47 @@ def _make_transcript(n_segments=3):
     return {'segments': segments}
 
 
-class TestEndOfPromptReminder:
-    def test_final_reminder_section_is_present(self):
-        out = _capture_system_prompt(_make_transcript(), "what did they say?")
-        assert 'FINAL REMINDER' in out['system']
+class TestClipContractInSystemPrompt:
+    """The clip-output contract must reach the model on every chat call.
 
-    def test_final_reminder_appears_AFTER_transcript(self):
-        # This is the whole point — recency bias only works if the rule
-        # sits below the transcript, not above it.
-        sys_prompt = _capture_system_prompt(_make_transcript(), "x")['system']
-        transcript_idx = sys_prompt.index('TRANSCRIPT:')
-        reminder_idx = sys_prompt.index('FINAL REMINDER')
-        assert reminder_idx > transcript_idx, (
-            "FINAL REMINDER must appear AFTER the transcript so Gemma-4-style "
-            "recency bias reinforces the [CLIP:] contract at generation time. "
-            "If this assertion fails, the long-FCPXML chat bug will regress."
-        )
+    History: the original fix restated the contract in a trailing "FINAL
+    REMINDER" section placed AFTER the transcript, to beat Gemma 4's recency
+    bias on long FCPXML projects. The chat prompt was since refactored — the
+    transcript moved into a user-role message and the full contract now lives
+    in the dedicated ``CHAT_SYSTEM_PROMPT`` (``prompts/chat-system-prompt.md``)
+    rather than a duplicated reminder block. These tests track the same
+    anti-regression intent against the current structure: the system prompt
+    must still (1) name the exact [CLIP:] marker syntax, (2) steer away from
+    defaulting to prose, and (3) tell the model how to handle question types
+    so synthesis/abstract questions don't lose their clip markers.
+    """
 
-    def test_final_reminder_names_the_clip_marker_format(self):
-        # The reminder's job is to put the exact marker syntax back in the
-        # model's working memory right before it generates. If the marker
-        # shape isn't in the reminder, the reminder is toothless.
-        sys_prompt = _capture_system_prompt(_make_transcript(), "x")['system']
-        tail = sys_prompt.split('FINAL REMINDER')[1]
-        assert '[CLIP:' in tail
-        assert 'start=' in tail
-        assert 'end=' in tail
-        assert 'title=' in tail
+    def _system(self, **kw):
+        return _capture_system_prompt(_make_transcript(), "what did they say?", **kw)['system_only']
 
-    def test_reminder_forbids_prose_summary(self):
-        # Specifically the behavior we saw on the Trustees FCPXML project:
-        # model paraphrased instead of citing. Reminder must call that out.
-        sys_prompt = _capture_system_prompt(_make_transcript(), "x")['system']
-        tail = sys_prompt.split('FINAL REMINDER')[1].lower()
-        assert 'prose' in tail or 'summary' in tail or 'paragraph' in tail
+    def test_clip_marker_format_is_named(self):
+        # The exact marker syntax must be in the model's working memory or it
+        # can't emit parseable clips.
+        sys_prompt = self._system()
+        assert '[CLIP:' in sys_prompt
+        assert 'start=' in sys_prompt
+        assert 'end=' in sys_prompt
+        assert 'title=' in sys_prompt
 
-    def test_reminder_covers_synthesis_questions(self):
-        # The bug surfaced on "what's the most revealing thing" — a synthesis
-        # question. The reminder must explicitly tell the model those still
-        # need [CLIP:] markers, not a free-form paragraph.
-        sys_prompt = _capture_system_prompt(_make_transcript(), "x")['system']
-        tail = sys_prompt.split('FINAL REMINDER')[1].lower()
-        assert 'synthesis' in tail or 'revealing' in tail or 'every question' in tail
+    def test_prompt_steers_away_from_prose_default(self):
+        # The Trustees FCPXML symptom: model paraphrased instead of citing.
+        # The prompt must distinguish prose answers from clip output.
+        sys_prompt = self._system().lower()
+        assert 'prose' in sys_prompt or 'paragraph' in sys_prompt
+
+    def test_prompt_covers_question_type_handling(self):
+        # The bug surfaced on synthesis/abstract questions ("what's the most
+        # revealing thing"). The current prompt handles this via explicit
+        # conversational / extractive / hybrid orientation rather than a
+        # "synthesis" keyword — verify that orientation is present.
+        sys_prompt = self._system().lower()
+        assert 'conversational' in sys_prompt
+        assert 'hybrid' in sys_prompt or 'extractive' in sys_prompt
 
 
 class TestTranscriptStaysInPrompt:
@@ -121,9 +133,8 @@ class TestTranscriptStaysInPrompt:
             _make_transcript(), "x", analysis=None
         )['system']
         assert 'PRE-ANALYZED MOMENTS (real timecodes' not in sys_prompt
-        # But the transcript and the final reminder must still be there.
+        # The transcript must still reach the model even with no analysis.
         assert 'TRANSCRIPT:' in sys_prompt
-        assert 'FINAL REMINDER' in sys_prompt
 
 
 def _make_monologue_transcript(duration_seconds, segment_seconds=5.0, speaker='Chris'):

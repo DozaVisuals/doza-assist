@@ -342,8 +342,10 @@ class TestSyncClip:
 
 class TestParseErrors:
     def test_rejects_unsupported_version(self, tmp_path):
+        # 1.8–1.14 are supported now (FCP + Resolve span). Use a version
+        # below that floor so the rejection path is actually exercised.
         p = tmp_path / "old.fcpxml"
-        p.write_text('<?xml version="1.0"?><fcpxml version="1.9"><resources/></fcpxml>')
+        p.write_text('<?xml version="1.0"?><fcpxml version="1.5"><resources/></fcpxml>')
         with pytest.raises(ParseError, match="unsupported FCPXML version"):
             parse_fcpxml(p)
 

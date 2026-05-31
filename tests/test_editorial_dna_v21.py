@@ -58,7 +58,9 @@ def fake_llm(monkeypatch):
         'uses_narration': False,
     }
 
-    def fake(prompt):
+    # Accept the full _call_ai(prompt, system_prompt="", task_type=...,
+    # force_json=...) contract — callers pass system_prompt/task_type now.
+    def fake(prompt, *args, **kwargs):
         return json.dumps(canned)
 
     import ai_analysis
@@ -67,7 +69,10 @@ def fake_llm(monkeypatch):
     import editorial_dna.analysis as ea
     monkeypatch.setattr(ea, '_call_ai', fake)
     import editorial_dna.summarizer as es
-    monkeypatch.setattr(es, '_call_ai', lambda p: 'A calm, observational editor who lets subjects breathe.')
+    monkeypatch.setattr(
+        es, '_call_ai',
+        lambda prompt, *args, **kwargs: 'A calm, observational editor who lets subjects breathe.',
+    )
     return canned
 
 
@@ -118,12 +123,21 @@ def test_delete_profile_clears_active_when_empty():
     assert edp.list_profiles() == []
 
 
-def test_delete_profile_promotes_next_when_others_exist():
+def test_delete_active_profile_clears_active_without_auto_promote():
+    # v2.2 moved to an explicit multi-active SET model: the user chooses
+    # which profiles are active. Deleting the active profile drops it from
+    # the set and does NOT silently promote another (that would be the old
+    # v2.1 single-active behavior). The surviving profile still exists and
+    # can be activated explicitly.
     from editorial_dna import profiles as edp
     pid1 = edp.create_profile('First')
     pid2 = edp.create_profile('Second')
     edp.set_active(pid1)
     edp.delete_profile(pid1)
+    assert edp.get_active_profile_id() is None
+    # The other profile survives and is still activatable.
+    assert pid2 in {p['id'] for p in edp.list_profiles()}
+    edp.set_active(pid2)
     assert edp.get_active_profile_id() == pid2
 
 
@@ -269,8 +283,13 @@ def test_injector_skipped_when_profile_toggled_off(fake_llm):
     edp.save_system_prompt(pid, 'DOC-MARKER')
     edp.set_profile_active_toggle(pid, False)
     result = inject_my_style('BASE SYSTEM PROMPT')
+    # The toggled-off profile must not be injected.
     assert 'DOC-MARKER' not in result
-    assert result == 'BASE SYSTEM PROMPT'
+    # With no profile active, the injector now prepends a generic default
+    # editor identity (rather than returning the base prompt verbatim), but
+    # the caller's base prompt must still be carried through intact.
+    assert 'BASE SYSTEM PROMPT' in result
+    assert 'DEFAULT EDITOR IDENTITY' in result
 
 
 # ---------------------------------------------------------------------------

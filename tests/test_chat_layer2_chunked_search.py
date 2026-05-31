@@ -364,7 +364,11 @@ class TestLayer2Integration:
             return '{"candidates": [{"title": "X", "start": "00:05:00", "end": "00:06:00", "score": 7, "why": "y"}]}'
 
         with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json):
-            reply = ai_analysis.chat_about_transcript(t, "what's the best moment?")
+            # Extractive phrasing ("find …") routes to the chunked-search
+            # path under test. (A conversational query like "what's the best
+            # moment?" now diverts to the Layer 2 synthesis path, which uses
+            # _call_ai_chat instead — covered elsewhere.)
+            reply = ai_analysis.chat_about_transcript(t, "find the best moments")
 
         # At least one per-chunk call happened.
         assert len(json_calls) >= 1
@@ -415,7 +419,8 @@ class TestLayer2Integration:
             return '{"candidates": []}'
 
         with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json):
-            ai_analysis.chat_about_transcript(t, "what about moose hill?")
+            # Extractive query so it exercises the chunked-search path.
+            ai_analysis.chat_about_transcript(t, "find moose hill moments")
 
         assert all('moose hill' in p.lower() for p in captured_prompts)
         # Non-strict mode when no chunk anchors — model is told keywords are a
@@ -441,7 +446,9 @@ class TestLayer2Integration:
 
         start = time.time()
         with patch.object(ai_analysis, '_call_ai_json', side_effect=slow_json):
-            ai_analysis.chat_about_transcript(t, "x")
+            # Extractive query → chunked-search path (the one that fans out
+            # across chunks concurrently).
+            ai_analysis.chat_about_transcript(t, "find the best moments")
         elapsed = time.time() - start
 
         # With concurrency=4 and N chunks, wall time ≈ ceil(N/4) × 0.1 + overhead.
@@ -475,7 +482,7 @@ class TestLayer2Integration:
             json_calls.append(1)
             return '{"candidates": []}'
 
-        def fake_chat(prompt, system_prompt=""):
+        def fake_chat(system_message, messages=None, **kwargs):
             return 'stub'
 
         with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json), \
@@ -603,7 +610,7 @@ class TestKeywordAnchoringInLayer2:
             return '{"candidates": []}'
 
         with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json):
-            ai_analysis.chat_about_transcript(t, 'what about moose hill?')
+            ai_analysis.chat_about_transcript(t, 'find moose hill moments')
 
         # Every prompt must be for a chunk that actually contains the phrase.
         assert len(captured_prompts) >= 1
@@ -622,7 +629,7 @@ class TestKeywordAnchoringInLayer2:
             return '{"candidates": []}'
 
         with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json):
-            ai_analysis.chat_about_transcript(t, 'what about moose hill?')
+            ai_analysis.chat_about_transcript(t, 'find moose hill moments')
 
         # Strict prompt tells the model the excerpt contains the terms and
         # it should return at least one candidate — not default to empty.
@@ -643,7 +650,7 @@ class TestKeywordAnchoringInLayer2:
             return '{"candidates": []}'
 
         with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json):
-            ai_analysis.chat_about_transcript(t, 'tell me about zebras')
+            ai_analysis.chat_about_transcript(t, 'find zebra moments')
 
         # No anchor found → full scan over multiple chunks.
         assert chunk_count[0] >= 2

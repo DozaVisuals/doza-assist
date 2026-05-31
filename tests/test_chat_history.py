@@ -54,7 +54,9 @@ def transcribed_project(client, tmp_path, monkeypatch):
 
     # Stub the AI call — this test is about persistence, not model output.
     def _fake_chat(transcript, message, history=None, project_name="", analysis=None,
-                   profile_id=None, segment_vectors=None, paragraph_index=None):
+                   profile_id=None, segment_vectors=None, paragraph_index=None, **kwargs):
+        # **kwargs absorbs newer call-site args (labeled_sections,
+        # speaker_names, …) so the stub doesn't break when the route grows.
         return f"You said: {message}"
 
     monkeypatch.setattr("ai_analysis.chat_about_transcript", _fake_chat)
@@ -148,7 +150,7 @@ class TestChatHistoryMultiProject:
             pids.append(pid)
 
         def _fake_chat(transcript, message, history=None, project_name="", analysis=None,
-                   profile_id=None, segment_vectors=None, paragraph_index=None):
+                   profile_id=None, segment_vectors=None, paragraph_index=None, **kwargs):
             return "multi reply"
         monkeypatch.setattr("ai_analysis.chat_about_transcript", _fake_chat)
 

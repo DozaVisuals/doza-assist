@@ -172,6 +172,11 @@ def test_progress_callback_invoked_during_analyze(client, project_dir, monkeypat
 
     resp = client.post(f'/project/{pid}/analyze', json={'type': 'all'})
     assert resp.status_code == 200
+    # /analyze detaches to a background worker now — wait for it to finish
+    # before asserting on the (post-completion) status file.
+    t = app_module._analysis_threads.get(pid)
+    if t is not None:
+        t.join(timeout=10)
     # The route augments the analyzer's total with 2 finalization steps.
     # After completion, _clear_analyze_status removes the file.
     status_resp = client.get(f'/project/{pid}/analyze/status')

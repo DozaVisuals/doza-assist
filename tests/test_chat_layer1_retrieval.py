@@ -36,9 +36,18 @@ import ai_analysis  # noqa: E402
 def _capture_system_prompt(transcript, message, **kwargs):
     captured = {}
 
-    def fake_call(prompt, system_prompt=""):
-        captured['system'] = system_prompt
-        captured['user'] = prompt
+    def fake_call(system_message, messages=None, **kwargs):
+        # _call_ai_chat(system_message, messages, num_ctx=...). The chat
+        # prompt is split into a system message plus a messages array (the
+        # transcript + RELEVANT EXCERPTS block live in a user-role turn now),
+        # so capture the full prompt the model sees — system then messages.
+        parts = [system_message or '']
+        for m in (messages or []):
+            if isinstance(m, dict) and m.get('content'):
+                parts.append(m['content'])
+        captured['system'] = '\n'.join(parts)
+        captured['system_only'] = system_message or ''
+        captured['messages'] = messages
         return "stub reply"
 
     with patch.object(ai_analysis, '_call_ai_chat', side_effect=fake_call):
@@ -225,17 +234,20 @@ class TestLayer1IntegrationIntoPrompt:
         sys_prompt = _capture_system_prompt(t, "what did they say about moose hill?")['system']
         assert 'RELEVANT EXCERPTS' in sys_prompt
 
-    def test_excerpts_block_lands_after_transcript_before_reminder(self):
-        # Whole point of Layer 1: recency bias. Block MUST sit between the
-        # transcript and the final reminder, not above the transcript.
+    def test_excerpts_block_lands_after_transcript(self):
+        # Whole point of Layer 1: recency bias. The block MUST sit AFTER the
+        # full transcript so the matched moments are freshest in context.
+        # (The chat prompt no longer carries a trailing "FINAL REMINDER"
+        # block — the contract moved into the system prompt — so this only
+        # checks the transcript→excerpts ordering, which is what Layer 1
+        # actually controls.)
         t = _make_short_transcript_with_topic(
             "Moose Hill", topic_positions={40, 41, 42}, total_segments=80
         )
         sys_prompt = _capture_system_prompt(t, "what did they say about moose hill?")['system']
         transcript_idx = sys_prompt.index('TRANSCRIPT:')
         excerpts_idx = sys_prompt.index('RELEVANT EXCERPTS')
-        reminder_idx = sys_prompt.index('FINAL REMINDER')
-        assert transcript_idx < excerpts_idx < reminder_idx
+        assert transcript_idx < excerpts_idx
 
     def test_excerpts_block_omitted_when_no_keyword_match_short(self):
         # Vague questions (no concrete terms) on short interviews yield no
@@ -280,11 +292,15 @@ class TestLayer1IntegrationIntoPrompt:
         )
 
     def test_long_interview_bypasses_layer1_single_prompt_path(self):
-        # Long interviews route to Layer 2. The single-prompt stub we install
-        # on _call_ai_chat therefore never fires — instead _call_ai_json gets
-        # the calls. This test locks in the routing so a future change that
-        # accidentally sent long interviews back through _call_ai_chat would
-        # be caught.
+        # Long interviews route to Layer 2. For an EXTRACTIVE query
+        # ("find … moments") that means the chunked-search path, which runs
+        # per-chunk _call_ai_json calls and never touches the single-prompt
+        # _call_ai_chat path. (A conversational query on a long interview
+        # routes to the Layer 2 *synthesis* path, which legitimately does use
+        # _call_ai_chat — so we use an extractive query here to lock in the
+        # chunked routing specifically.) This catches a future change that
+        # accidentally sent long interviews back through the single-prompt
+        # full-transcript path.
         from unittest.mock import patch
 
         segs = []
@@ -311,7 +327,7 @@ class TestLayer1IntegrationIntoPrompt:
 
         with patch.object(ai_analysis, '_call_ai_chat', side_effect=fake_chat), \
              patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json):
-            ai_analysis.chat_about_transcript({'segments': segs}, "moose hill?")
+            ai_analysis.chat_about_transcript({'segments': segs}, "find the moose hill moments")
 
         # Long interview → Layer 2 only. Zero _call_ai_chat invocations.
         assert chat_calls == [], (

@@ -21,6 +21,7 @@ from exporters import get_exporter, PLATFORMS  # noqa: E402
 from exporters.fcpxml import FCPXMLExporter  # noqa: E402
 from exporters.premiere_xml import PremiereXMLExporter, _seconds_to_frames  # noqa: E402
 from exporters.edl import EDLExporter, _seconds_to_timecode, _sanitize_reel_name  # noqa: E402
+from exporters.resolve_xml import ResolveFCPXMLExporter  # noqa: E402
 import preferences  # noqa: E402
 
 
@@ -36,7 +37,10 @@ SAMPLE_MARKERS = [
 def test_router_returns_correct_exporter():
     assert isinstance(get_exporter("fcp"), FCPXMLExporter)
     assert isinstance(get_exporter("premiere"), PremiereXMLExporter)
-    assert isinstance(get_exporter("resolve"), EDLExporter)
+    # "resolve" now defaults to the FCPXML-based Resolve exporter (richer
+    # round-trip than EDL). EDL is still available under "resolve-edl".
+    assert isinstance(get_exporter("resolve"), ResolveFCPXMLExporter)
+    assert isinstance(get_exporter("resolve-edl"), EDLExporter)
 
 
 def test_router_rejects_unknown_platform():

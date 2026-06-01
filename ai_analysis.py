@@ -4803,8 +4803,19 @@ def _call_ai(prompt, system_prompt="", task_type="analysis", force_json=True):
     if task_type != "analysis":
         system_prompt = inject_storytelling_foundation(system_prompt)
     provider = get_active_provider(model_resolver=_get_ollama_model)
+    # Size the HTTP timeout to the active model. The old fixed 180s ceiling
+    # (in the Ollama provider) cut off the large variants mid-generation —
+    # gemma4:26b/31b need minutes to emit a full analysis JSON — leaving the
+    # AI Analysis tab and the collection dashboard empty. Local Ollama honors
+    # this; cloud providers ignore it.
+    try:
+        from model_config import recommended_analysis_timeout
+        timeout = recommended_analysis_timeout()
+    except Exception:
+        timeout = 600
     return provider.generate(
         system_prompt, prompt, task_type=task_type, force_json=force_json,
+        timeout=timeout,
     )
 
 

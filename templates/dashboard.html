@@ -72,7 +72,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
     </div>
 
     <!-- Drop Zone + File Path Input -->
-    <div class="card" id="dropCard" style="margin-bottom: 2rem; position: relative; transition: border-color 0.2s, box-shadow 0.2s;">
+    <div class="card" id="dropCard" style="margin-bottom: 2rem; position: relative; border: 2px dashed var(--border-light); transition: border-color 0.2s, box-shadow 0.2s;">
         <div style="display: flex; gap: 0.75rem; align-items: flex-end;">
             <div style="flex: 1;">
                 <label class="form-label">Source File Path</label>
@@ -106,7 +106,10 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                 Searching your drives for <strong id="findingFileName"></strong>...
             </p>
         </div>
-        <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+        <style>@keyframes spin { to { transform: rotate(360deg); } }
+        /* Dashed drop-zone affordance: the card accepts drag-and-drop, so it
+           reads as a drop target at rest and brightens on hover/drag. */
+        #dropCard:hover { border-color: var(--accent); }</style>
 
         <!-- Multiple matches selector -->
         <div id="multipleMatches" style="display: none; margin-top: 0.75rem; padding: 0.75rem; background: var(--bg-input); border-radius: var(--radius);">
@@ -473,6 +476,27 @@ async function openNativeFilePicker() {
     // getElementById, finds an empty value, and returns immediately.
     // Fresh lookups here ensure the path reaches whichever handler is
     // active (OSS modal or Pro import queue).
+    // Pro import queue active → multi-select Browse: pick a whole batch of
+    // interviews at once and enqueue them all into the staging queue.
+    if (window.dozaBatch && typeof window.dozaBatch.openFilesDialog === 'function'
+            && typeof window.dozaImportQueueAddPaths === 'function') {
+        let paths = [];
+        try {
+            paths = await window.dozaBatch.openFilesDialog({ title: 'Select media files' });
+        } catch (err) {
+            console.error('[browse] openFilesDialog threw', err);
+            paths = [];
+        }
+        console.log('[browse] paths after multi-select dialog:', paths);
+        if (paths && paths.length) {
+            try {
+                window.dozaImportQueueAddPaths(paths);
+            } catch (err) {
+                console.error('[browse] dozaImportQueueAddPaths threw', err);
+            }
+        }
+        return;
+    }
     if (window.dozaBatch && typeof window.dozaBatch.openFileDialog === 'function') {
         let absPath = null;
         try {

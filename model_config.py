@@ -457,6 +457,39 @@ def _full_analysis_seconds(duration_seconds: float, tokens_per_sec: float) -> in
     return int(round(calls * per_call))
 
 
+def recommended_analysis_timeout(hw_info: dict = None, num_predict: int = None) -> int:
+    """Per-call HTTP timeout (seconds) for an analysis LLM request, sized to
+    the *active* model variant and this hardware.
+
+    The fixed 180s ceiling that used to live in the Ollama provider was fine
+    for gemma4:e4b but far too short for the large variants: a 32B model at
+    ~7 tok/s needs several minutes to emit a full analysis JSON, so its calls
+    were cut off mid-generation ("Read timed out (180)") and the AI Analysis /
+    collection dashboard came back empty. We size the ceiling off the variant's
+    decode rate (prefill + decode + overhead, with a 1.5x safety margin) and
+    clamp to a sane band. It's a ceiling, not the expected time — generous on
+    purpose so a healthy-but-slow call is never killed.
+    """
+    if hw_info is None:
+        try:
+            hw_info = detect_hardware_tier()
+        except Exception:
+            hw_info = {}
+    arch_class = _classify_arch(hw_info.get('arch', ''))
+    ram_class = _classify_ram(float(hw_info.get('ram_gb', 8.0) or 8.0))
+    speeds = _SPEED_TABLE.get((arch_class, ram_class), _SPEED_TABLE[('apple_silicon', 'mid')])
+    try:
+        tier = (load_model_config() or {}).get('tier') or 'medium'
+    except Exception:
+        tier = 'medium'
+    tps = speeds.get(tier) or speeds.get('medium') or 12.0
+    out_tokens = num_predict if num_predict else _REPRESENTATIVE_OUTPUT_TOKENS
+    prefill = _ANALYSIS_INPUT_TOKENS_PER_CALL / (tps * _PREFILL_VS_DECODE_RATIO)
+    decode = out_tokens / float(tps)
+    est = (prefill + decode + _OVERHEAD_SECONDS_PER_CALL) * 1.5
+    return int(max(180, min(1200, est)))
+
+
 def get_variant_estimates(hw_info: dict = None, total_seconds: float = None) -> list:
     """Return per-variant info for the AI Model picker UI.
 

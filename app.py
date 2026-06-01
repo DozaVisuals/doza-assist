@@ -2056,6 +2056,16 @@ def _clear_analyze_status(project_id):
 _analysis_threads = {}
 _analysis_threads_lock = threading.Lock()
 
+# Process-global "one analysis at a time" gate. The collection flow fires a
+# /analyze for every interview; each detaches a worker thread, so without this
+# they all hammer the single local Ollama at once — which doesn't go faster,
+# it makes every call slower and pushes the big models (gemma4:26b/31b) past
+# their HTTP timeout, so analyses error out and the collection dashboard comes
+# back empty. Serializing means each analysis gets the full model and finishes
+# well inside the (now model-aware) timeout. A queued job parks at
+# current="queued" so the polling UI shows it waiting rather than stalled.
+_analysis_run_lock = threading.Lock()
+
 
 def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snapshot):
     """Background-thread worker for /analyze.
@@ -2077,6 +2087,14 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
     concurrently.
     """
     progress = _make_progress_writer(project_id)
+    # Serialize against any other in-flight analysis (see _analysis_run_lock).
+    # If the gate is held, park at current="queued" so the UI shows the wait.
+    if not _analysis_run_lock.acquire(blocking=False):
+        try:
+            progress(step=0, total=1, current="queued")
+        except Exception:
+            pass
+        _analysis_run_lock.acquire()
     try:
         project = get_project(project_id)
         if not project or not project.get('transcript'):
@@ -2219,6 +2237,7 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         except Exception as inner:
             print(f"[analyze worker] could not persist error: {inner}")
     finally:
+        _analysis_run_lock.release()
         with _analysis_threads_lock:
             _analysis_threads.pop(project_id, None)
 

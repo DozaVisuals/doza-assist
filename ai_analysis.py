@@ -2875,7 +2875,7 @@ EXCERPT:
     return system_prompt, user_prompt
 
 
-def _call_ai_json(system_prompt, user_prompt, timeout=180, model_override=None):
+def _call_ai_json(system_prompt, user_prompt, timeout=None, model_override=None):
     """Low-temperature Ollama call optimized for structured output.
 
     Uses a smaller num_ctx than chat because each chunk fits comfortably
@@ -2904,6 +2904,16 @@ def _call_ai_json(system_prompt, user_prompt, timeout=180, model_override=None):
     text changes (re-analysis produces different sha1s).
     """
     from ai_providers import get_active_provider
+    # Size the HTTP timeout to the active model when the caller didn't pin one
+    # (mirrors _call_ai). The old fixed 180s cut off long-interview chat
+    # chunked-search calls on the big local models (gemma4:26b/31b). Explicit
+    # callers (e.g. timeout=90) keep their value.
+    if timeout is None:
+        try:
+            from model_config import recommended_analysis_timeout
+            timeout = recommended_analysis_timeout()
+        except Exception:
+            timeout = 600
     system_prompt = inject_storytelling_foundation(system_prompt)
     provider = get_active_provider(model_resolver=_get_ollama_model)
     model_name = model_override or (

@@ -87,10 +87,12 @@ class OllamaProvider(BaseProvider):
             return override
         if self._model_resolver:
             try:
-                return self._model_resolver()
+                resolved = self._model_resolver()
+                if resolved:
+                    return resolved
             except Exception:
                 pass
-        return "gemma3:4b"  # last-resort default
+        return "gemma4:e4b"  # last-resort default — Gemma 4 only, NEVER Gemma 3
 
     def generate(self, system_prompt, user_or_messages, task_type="general", **kwargs):
         model = self._resolve_model(kwargs.get("model_override"))

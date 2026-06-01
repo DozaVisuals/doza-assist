@@ -10,6 +10,7 @@ user has configured (the ``model_resolver`` callable resolves it lazily so
 this module doesn't import ``model_config`` at load time).
 """
 import json
+import os
 import time
 
 import requests
@@ -92,7 +93,11 @@ class OllamaProvider(BaseProvider):
                     return resolved
             except Exception:
                 pass
-        return "gemma4:e4b"  # last-resort default — Gemma 4 only, NEVER Gemma 3
+        # Single source of truth: the Electron wrapper passes the tag it
+        # downloaded + blocked startup on (DOZA_OLLAMA_MODEL=gemma4:e4b).
+        # Trust it as the last-resort default so the wrapper, not the core,
+        # owns which model ships. Gemma 4 only — NEVER Gemma 3.
+        return os.environ.get("DOZA_OLLAMA_MODEL") or "gemma4:e4b"
 
     def generate(self, system_prompt, user_or_messages, task_type="general", **kwargs):
         model = self._resolve_model(kwargs.get("model_override"))

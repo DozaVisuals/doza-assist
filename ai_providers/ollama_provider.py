@@ -10,12 +10,41 @@ user has configured (the ``model_resolver`` callable resolves it lazily so
 this module doesn't import ``model_config`` at load time).
 """
 import json
+import time
+
 import requests
 
 from .base import BaseProvider
 
 
 _KEEP_ALIVE = "30m"
+
+# Connection-refused recovery. The bundled Ollama can die mid-batch (an OOM
+# on a heavy model load is the usual culprit on lower-RAM machines); the
+# Electron supervisor relaunches it on the same port, but that leaves a few
+# seconds where the socket is refused. Without this, the in-flight analyze
+# call would fail the whole interview with "[Errno 61] Connection refused".
+# We retry ONLY connection errors (read timeouts are deliberately left to the
+# caller's model-aware timeout) with backoff, bridging the restart window.
+_CONNECT_BACKOFF = (2, 4, 6, 8)  # seconds between attempts → ~20s total bridge
+
+
+def _post_with_reconnect(url, *, json=None, timeout=None, stream=False):
+    """``requests.post`` that survives a brief Ollama restart.
+
+    Retries on ``ConnectionError`` only (a refused socket while the supervisor
+    relaunches Ollama), never on read timeouts. Re-raises the last connection
+    error if Ollama never comes back within the backoff budget.
+    """
+    last_err = None
+    for attempt in range(len(_CONNECT_BACKOFF) + 1):
+        try:
+            return requests.post(url, json=json, timeout=timeout, stream=stream)
+        except requests.exceptions.ConnectionError as e:
+            last_err = e
+            if attempt < len(_CONNECT_BACKOFF):
+                time.sleep(_CONNECT_BACKOFF[attempt])
+    raise last_err
 
 # Reasoning-suppression markers — we don't want models to emit these
 # verbatim. All three providers honor stop sequences, so this list is
@@ -129,14 +158,14 @@ class OllamaProvider(BaseProvider):
             # gemma4:e4b path identical to before whenever `think` isn't
             # accepted — this can only help, never regress.
             payload["think"] = False
-            response = requests.post(
+            response = _post_with_reconnect(
                 f"{self.base_url}/api/generate",
                 json=payload,
                 timeout=kwargs.get("timeout", 180),
             )
             if response.status_code != 200 and "think" in payload:
                 payload.pop("think", None)
-                response = requests.post(
+                response = _post_with_reconnect(
                     f"{self.base_url}/api/generate",
                     json=payload,
                     timeout=kwargs.get("timeout", 180),
@@ -147,7 +176,7 @@ class OllamaProvider(BaseProvider):
 
         # Chat / general path: /api/chat with messages array.
         messages = _ollama_messages(system_prompt, user_or_messages)
-        response = requests.post(
+        response = _post_with_reconnect(
             f"{self.base_url}/api/chat",
             json={
                 "model": model,

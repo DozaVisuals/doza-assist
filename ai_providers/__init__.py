@@ -58,8 +58,9 @@ def get_provider(
     """Build a fresh provider instance by name. Raises on unknown name."""
     if name == "ollama":
         from .ollama_provider import OllamaProvider
+        from ollama_url import ollama_base_url
         return OllamaProvider(
-            base_url=base_url or "http://localhost:11434",
+            base_url=base_url or ollama_base_url(),
             model_resolver=model_resolver,
         )
     if name == "anthropic":
@@ -81,9 +82,14 @@ def get_active_provider(model_resolver=None) -> BaseProvider:
     cfg = load_provider_config()
     name = cfg.get("active_provider") or "ollama"
     sub = cfg.get(name) or {}
+    base = sub.get("base_url") or ""
+    # Legacy/default literal — fall through to the wrapper's OLLAMA_HOST so the
+    # bundled Ollama (dynamic port) is reached, not the unbundled default :11434.
+    if base in ("http://localhost:11434", "http://127.0.0.1:11434"):
+        base = ""
     return get_provider(
         name,
         api_key=sub.get("api_key") or "",
-        base_url=sub.get("base_url") or "",
+        base_url=base,
         model_resolver=model_resolver,
     )

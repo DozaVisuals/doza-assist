@@ -780,7 +780,8 @@ def save_provider_settings():
         cfg.setdefault(target, {})['api_key'] = (body.get('api_key') or '').strip()
 
     if 'base_url' in body:
-        cfg.setdefault('ollama', {})['base_url'] = body['base_url'] or 'http://localhost:11434'
+        # Empty -> resolve via OLLAMA_HOST at runtime (don't pin to :11434).
+        cfg.setdefault('ollama', {})['base_url'] = (body['base_url'] or '').strip()
 
     try:
         save_provider_config(cfg)
@@ -857,12 +858,14 @@ def set_ai_model():
     new_variant = info['variant']
     try:
         import requests as _req
-        ps = _req.get('http://127.0.0.1:11434/api/ps', timeout=2).json()
+        from ollama_url import ollama_base_url
+        _base = ollama_base_url()
+        ps = _req.get(f'{_base}/api/ps', timeout=2).json()
         for m in ps.get('models', []):
             name = m.get('name')
             if name and name != new_variant:
                 _req.post(
-                    'http://127.0.0.1:11434/api/generate',
+                    f'{_base}/api/generate',
                     json={'model': name, 'keep_alive': 0, 'prompt': ''},
                     timeout=2,
                 )
@@ -907,8 +910,9 @@ def pull_ai_model():
 
     def generate():
         try:
+            from ollama_url import ollama_base_url
             upstream = _requests.post(
-                'http://localhost:11434/api/pull',
+                f'{ollama_base_url()}/api/pull',
                 json={'name': variant, 'stream': True},
                 stream=True,
                 timeout=None,
@@ -925,7 +929,7 @@ def pull_ai_model():
                 if line:
                     yield line + b'\n'
         except _requests.exceptions.ConnectionError:
-            yield _err_event('Could not reach Ollama at localhost:11434. Is the Ollama app running?')
+            yield _err_event('Could not reach the bundled Ollama. Is it running?')
         except Exception as e:
             yield _err_event(str(e))
 

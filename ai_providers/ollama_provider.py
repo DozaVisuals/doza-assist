@@ -76,8 +76,9 @@ def _ollama_messages(system_prompt, user_or_messages):
 class OllamaProvider(BaseProvider):
     name = "ollama"
 
-    def __init__(self, base_url: str = "http://localhost:11434", model_resolver=None):
-        self.base_url = (base_url or "http://localhost:11434").rstrip("/")
+    def __init__(self, base_url: str = "", model_resolver=None):
+        from ollama_url import ollama_base_url
+        self.base_url = (base_url or ollama_base_url()).rstrip("/")
         # ``model_resolver`` is a zero-arg callable returning the Ollama
         # model tag. Injected so this provider stays decoupled from
         # ``model_config`` at import time.

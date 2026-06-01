@@ -42,7 +42,7 @@ _PROVIDERS_WITH_KEYS = ("anthropic", "openai")
 
 _DEFAULT_CONFIG = {
     "active_provider": "ollama",
-    "ollama":    {"model": "", "base_url": "http://localhost:11434"},
+    "ollama":    {"model": "", "base_url": ""},  # empty -> resolve via OLLAMA_HOST at runtime
     "anthropic": {"api_key": ""},
     "openai":    {"api_key": ""},
 }

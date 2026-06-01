@@ -4881,7 +4881,8 @@ def get_effective_ollama_model():
         # systems where Ollama is mid-boot, hiding the variant list. With
         # 2s we fail fast and the modal renders the hardware-derived
         # variants while marking effective.model = None.
-        response = requests.get('http://localhost:11434/api/tags', timeout=2)
+        from ollama_url import ollama_base_url
+        response = requests.get(f'{ollama_base_url()}/api/tags', timeout=2)
         if response.status_code == 200:
             models = response.json().get('models', [])
             available = [m['name'] for m in models]
@@ -4970,7 +4971,8 @@ def _get_fast_chunk_model():
     if _FAST_CHUNK_MODEL_CACHE is not None:
         return _FAST_CHUNK_MODEL_CACHE if _FAST_CHUNK_MODEL_CACHE else main_model
     try:
-        response = requests.get('http://localhost:11434/api/tags', timeout=2)
+        from ollama_url import ollama_base_url
+        response = requests.get(f'{ollama_base_url()}/api/tags', timeout=2)
         if response.status_code == 200:
             available = [m.get('name', '') for m in (response.json() or {}).get('models', [])]
             for name in available:
@@ -5032,8 +5034,9 @@ def warmup_ollama():
     if not _ollama_is_active():
         return
     try:
+        from ollama_url import ollama_base_url
         requests.post(
-            'http://localhost:11434/api/generate',
+            f'{ollama_base_url()}/api/generate',
             json={
                 'model': _get_ollama_model(),
                 'prompt': 'ok',

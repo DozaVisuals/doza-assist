@@ -304,8 +304,9 @@ def _ollama_installed_models() -> set:
     # Primary: HTTP API. Stdlib-only per the module-level contract.
     try:
         import urllib.request
+        from ollama_url import ollama_base_url
         req = urllib.request.Request(
-            'http://localhost:11434/api/tags',
+            f'{ollama_base_url()}/api/tags',
             headers={'Accept': 'application/json'},
         )
         with urllib.request.urlopen(req, timeout=3) as resp:

@@ -718,10 +718,21 @@ def _provider_error_response(e):
 
 @app.errorhandler(Exception)
 def _handle_provider_error(e):
+    from werkzeug.exceptions import HTTPException
     from ai_providers import ProviderError
-    if not isinstance(e, ProviderError):
-        raise e
-    return _provider_error_response(e)
+    if isinstance(e, ProviderError):
+        return _provider_error_response(e)
+    # Let real HTTP errors keep their own status. Re-raising an HTTPException
+    # from inside an errorhandler makes Flask emit a 500 + full traceback —
+    # which is why a harmless poll of a non-existent route (e.g. the setup
+    # assistant's /api/status hitting the main app after setup) was logging
+    # scary 500 tracebacks for what is really a clean 404. HTTPException
+    # instances are valid WSGI responses, so returning one preserves the
+    # correct status (404/405/…) with no traceback.
+    if isinstance(e, HTTPException):
+        return e
+    # Genuinely unexpected error → re-raise so Flask logs it and returns 500.
+    raise e
 
 
 # ── BYO API key: provider settings ──────────────────────────────────

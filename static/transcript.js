@@ -198,6 +198,7 @@ function commitSelection(startWord, endWord, color) {
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
+    _notifyCollectionClip('add', { start: startTime, end: endTime, color, text: text.substring(0, 200) });
 }
 
 function findSectionAt(time) {
@@ -206,10 +207,35 @@ function findSectionAt(time) {
 
 function removeSection(id) {
     _snapshotForUndo();
+    const removed = labelSections.find(s => s.id === id);
     labelSections = labelSections.filter(s => s.id !== id);
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
+    if (removed) {
+        _notifyCollectionClip('remove', { start: removed.start, end: removed.end, color: removed.color });
+    }
+}
+
+// Optional hook for host pages (Pro Collections) to mirror transcript
+// highlights into a higher-level clip library. No-op on the standalone
+// single-project page, where window.onTranscriptClip is undefined — so this
+// can never regress the project transcript. The host receives the section's
+// time span + color plus the source interview id (PROJECT_ID) so it can
+// attribute the clip to the right file inside the collection.
+function _notifyCollectionClip(action, section) {
+    if (typeof window === 'undefined' || typeof window.onTranscriptClip !== 'function') return;
+    try {
+        window.onTranscriptClip(action, {
+            start: section.start,
+            end: section.end,
+            color: section.color,
+            text: section.text || '',
+            projectId: (typeof PROJECT_ID !== 'undefined') ? PROJECT_ID : null,
+        });
+    } catch (e) {
+        console.error('[transcript] onTranscriptClip hook failed:', e);
+    }
 }
 
 function renderAllHighlights() {

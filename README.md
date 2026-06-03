@@ -4,6 +4,8 @@
 
 ### Find the story inside your footage, not just the clips.
 
+> *Doza Assist is free and open source. [Doza Assist Pro](https://doza.ai) adds multi-interview and press-ready workflow features for documentary and series work.*
+
 [![Doza Assist Demo](https://img.youtube.com/vi/VDJN8pzdLq0/maxresdefault.jpg)](https://www.youtube.com/watch?v=VDJN8pzdLq0)
 
 An AI editor's assistant that learns *your* style from your own cuts, then does the first pass for you. Not a generic model. Not trained on someone else's taste. Yours.
@@ -249,6 +251,22 @@ export ANTHROPIC_API_KEY=sk-ant-your-key-here
 # Add to ~/.zshrc to persist
 ```
 The app automatically tries Ollama first and falls back to Claude if configured.
+
+---
+
+## Doza Assist Pro
+
+Everything in this repository is the complete free tier — full transcription, AI analysis, clip-library-aware chat, My Style, Story Builder, and FCPXML round-trip. [Doza Assist Pro](https://doza.ai) adds higher-level workflow features on top of the same local-first engine:
+
+| | Free / OSS (this repo) | Doza Assist Pro |
+|---|---|---|
+| **Transcription, Analysis, Chat, Story Builder, My Style, FCPXML export** | Full | Full |
+| **Speaker labels (diarization)** | — | Included |
+| **Collections** (cross-interview analysis) | — | Included |
+| **Story Brief** | — | Included |
+| **Quote Sheets** | — | Included |
+
+Learn more at [doza.ai](https://doza.ai).
 
 ---
 

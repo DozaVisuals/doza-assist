@@ -284,7 +284,7 @@ def inject_brand():
         _pro_sibling = os.path.join(_here, '..', 'pro')
         if os.path.isdir(_pro_sibling):
             if not brand:
-                brand = 'Doza Assist Pro'
+                brand = 'Doza Assist'
             if not logo:
                 # Pro overlay's collection blueprint serves the
                 # branded logo at /collection/static/logo-pro.png.

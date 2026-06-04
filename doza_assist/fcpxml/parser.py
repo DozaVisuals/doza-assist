@@ -567,15 +567,29 @@ def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
     if asset_el is None or asset_el.tag != "asset":
         raise ParseError(f"sync-clip asset-clip ref {asset_ref!r} does not resolve to an <asset>")
 
+    # Where the chosen dialogue clip sits inside the sync-clip's internal
+    # timeline (the coordinate sync-clip@start is measured in). For a camera/
+    # dialogue clip on the sync-clip's main spine this is its own offset: 0 in
+    # the common "video at the top" shape (behavior unchanged), but non-zero
+    # when FCP places the camera below a leading gap — e.g. a continuous
+    # external-audio recording the camera was synced to. Carrying that offset
+    # is what stops every select from landing earlier by exactly that amount
+    # (and from being dropped when source_time < the gap length). Lane-attached
+    # connected audio keeps the prior zero baseline — its source mapping is
+    # resolved separately and isn't part of this fix. tcStart/asset-start stay
+    # zero: the inner spine is zero-based and the asset-clip's own start already
+    # expresses the media in-point.
+    if dialogue is primary and not primary_muted:
+        angle_offset = parse_rational(dialogue.get("offset"))
+        angle_start = parse_rational(dialogue.get("start"))
+    else:
+        angle_offset = Fraction(0)
+        angle_start = Fraction(0)
     return {
         "path": _resolve_asset_path(asset_el),
         "asset_id": asset_ref,
-        # Sync-clip@start maps directly to source time; collapse the angle
-        # offsets so downstream math reduces to source_time = segment.start.
-        # tcStart and asset-start are similarly zeroed so the seek formula
-        # reduces identically — sync-clip seek behavior is unchanged.
-        "angle_offset": Fraction(0),
-        "angle_start": Fraction(0),
+        "angle_offset": angle_offset,
+        "angle_start": angle_start,
         "container_tc_start": Fraction(0),
         "asset_start": Fraction(0),
         "is_muted": is_muted,

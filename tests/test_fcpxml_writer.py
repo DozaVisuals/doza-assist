@@ -394,6 +394,79 @@ class TestSyncClipLeadingGap:
         assert abs(start - 10.0) < 0.05
 
 
+# ---------- sync-clip with lane-attached external audio (the Interview shape) -
+
+# Regression for the second round-trip mis-placement bug. Here the camera's own
+# mic is muted (<audio-role-source active="0">) and the dialogue Doza transcribed
+# is the EXTERNAL recorder (r3) nested on lane -1 *inside* the camera asset-clip,
+# anchored at offset 10s. So the dialogue clip's offset within the sync-clip is
+# 10s, and a select at source time T must export at start = T + 10. The first
+# fix only handled a primary/camera source; this asserts the general parent-chain
+# offset handles the lane-nested case too.
+SYNC_LANE_NESTED_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.14">
+        <resources>
+            <format id="r1" name="FFVideoFormat1080p24" frameDuration="100/2400s" width="1920" height="1080"/>
+            <asset id="r2" name="cam" start="0s" duration="2400/24s" hasVideo="1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/cam.mp4"/>
+            </asset>
+            <asset id="r3" name="ext_audio" start="0s" duration="2400/24s" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/ext.wav"/>
+            </asset>
+        </resources>
+        <library location="file:///tmp/Lib.fcpbundle/">
+            <event name="E">
+                <project name="Lane Sync">
+                    <sequence format="r1" duration="2400/24s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                        <spine>
+                            <sync-clip offset="0s" name="cam - Synchronized Clip" start="240/24s" duration="1200/24s" tcFormat="NDF">
+                                <asset-clip ref="r2" offset="0s" name="cam" duration="2400/24s" tcFormat="NDF" audioRole="dialogue">
+                                    <asset-clip ref="r3" lane="-1" offset="240/24s" name="ext_audio" duration="2400/24s" audioRole="dialogue"/>
+                                </asset-clip>
+                                <sync-source sourceID="storyline">
+                                    <audio-role-source role="dialogue.dialogue-1" active="0"/>
+                                </sync-source>
+                            </sync-clip>
+                        </spine>
+                    </sequence>
+                </project>
+            </event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestSyncClipLaneNestedAudio:
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "sync_lane.fcpxml"
+        p.write_text(SYNC_LANE_NESTED_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_dialogue_resolves_to_external_recorder(self, parsed):
+        # Camera mic muted -> the transcribed dialogue is the lane-nested .wav.
+        assert parsed.audio_file_path.endswith("ext.wav")
+
+    def test_lane_clip_offset_carried(self, parsed):
+        # The .wav is anchored 10s into the sync-clip (nested in the camera clip).
+        assert parsed.audio_angle_offset_fraction == Fraction(10)
+        assert parsed.audio_angle_start_fraction == Fraction(0)
+
+    def test_select_start_includes_lane_offset(self, parsed):
+        out = write_selects_as_new_project(parsed, [
+            Select(start_seconds=5.0, end_seconds=8.0, label="quote"),
+        ])
+        root = etree.fromstring(out)
+        sync_clips = root.findall(".//spine/sync-clip")
+        assert len(sync_clips) == 1
+        start = float(parse_rational(sync_clips[0].get("start")))
+        assert abs(start - 15.0) < 0.05          # source 5 -> 5 + 10
+        inner_refs = {ac.get("ref") for ac in sync_clips[0].iter("asset-clip")}
+        assert {"r2", "r3"} <= inner_refs        # camera + external audio preserved
+
+
 # ---------- mixed-container spines (multi-source) ---------------------------
 
 # Mixed spine: mc-clip on [0,100), sync-clip on [100,150) both with resolvable

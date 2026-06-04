@@ -491,6 +491,30 @@ def _pick_dialogue_asset_clip(clips, resource_by_id):
     return clips[0]
 
 
+def _offset_within_sync_clip(clip_el, sync_clip_el) -> Fraction:
+    """Absolute offset of ``clip_el`` within ``sync_clip_el``'s internal
+    timeline — the coordinate the sync-clip's ``start`` attribute is measured
+    in. A select's source time is shifted by this so the emitted clip lands on
+    the right footage.
+
+    Walks up the parent chain. A clip directly on the sync-clip's inner
+    ``<spine>`` (or a direct child of the sync-clip) contributes its own
+    ``offset``. A connected/nested clip (``lane != 0`` — external audio nested
+    inside the camera asset-clip, or attached in a ``<gap>``) is anchored in
+    its parent's local timeline, so its position is the parent's position plus
+    ``(offset - parent.start)``. Covers every FCP sync shape: camera-on-spine
+    (Meeting), external-recorder-nested-in-camera (Interview), lane-in-gap.
+    """
+    if clip_el is None or clip_el is sync_clip_el:
+        return Fraction(0)
+    parent = clip_el.getparent()
+    off = parse_rational(clip_el.get("offset"))
+    if parent is None or parent is sync_clip_el or parent.tag == "spine":
+        return off
+    parent_start = parse_rational(parent.get("start"))
+    return _offset_within_sync_clip(parent, sync_clip_el) + (off - parent_start)
+
+
 def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
     """Resolve the dialogue audio FCP actually plays for a ``<sync-clip>``.
 
@@ -568,23 +592,19 @@ def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
         raise ParseError(f"sync-clip asset-clip ref {asset_ref!r} does not resolve to an <asset>")
 
     # Where the chosen dialogue clip sits inside the sync-clip's internal
-    # timeline (the coordinate sync-clip@start is measured in). For a camera/
-    # dialogue clip on the sync-clip's main spine this is its own offset: 0 in
-    # the common "video at the top" shape (behavior unchanged), but non-zero
-    # when FCP places the camera below a leading gap — e.g. a continuous
-    # external-audio recording the camera was synced to. Carrying that offset
-    # is what stops every select from landing earlier by exactly that amount
-    # (and from being dropped when source_time < the gap length). Lane-attached
-    # connected audio keeps the prior zero baseline — its source mapping is
-    # resolved separately and isn't part of this fix. tcStart/asset-start stay
-    # zero: the inner spine is zero-based and the asset-clip's own start already
-    # expresses the media in-point.
-    if dialogue is primary and not primary_muted:
-        angle_offset = parse_rational(dialogue.get("offset"))
-        angle_start = parse_rational(dialogue.get("start"))
-    else:
-        angle_offset = Fraction(0)
-        angle_start = Fraction(0)
+    # timeline (the coordinate sync-clip@start is measured in). Selects are in
+    # the transcribed source's time, so shifting by this offset is what makes
+    # the emitted clip land on the right footage. Works for every sync shape:
+    #   - camera/dialogue clip on the sync-clip's main spine: its own offset
+    #     (0 for "video at the top"; non-zero when FCP places it below a
+    #     leading gap — the Meeting case);
+    #   - external recorder nested inside the camera clip on a lane (the
+    #     Interview case) or attached in a <gap> — composed via the parent
+    #     chain by _offset_within_sync_clip.
+    # tcStart/asset-start stay zero: the inner spine is zero-based and the
+    # chosen clip's own start already expresses its media in-point.
+    angle_offset = _offset_within_sync_clip(dialogue, sync_clip_el)
+    angle_start = parse_rational(dialogue.get("start"))
     return {
         "path": _resolve_asset_path(asset_el),
         "asset_id": asset_ref,

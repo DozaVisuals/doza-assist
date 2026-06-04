@@ -304,6 +304,96 @@ class TestSyncClipWriter:
         assert markers[0].get("value") == "pickup"
 
 
+# ---------- sync-clip with a leading gap (continuous external audio) --------
+
+# Regression for the round-trip "Doza Selects" mis-placement bug. When FCP syncs
+# a camera clip to a *continuous* external audio recording, it positions the
+# camera below a leading <gap> inside the sync-clip — so the camera (the source
+# Doza transcribes against) sits at a non-zero internal offset. A select at
+# camera source time T must therefore export at sync-clip start = T + offset.
+# The parser used to hardcode that offset to 0, which pulled every exported clip
+# earlier by the gap length and dropped any select whose source time was shorter
+# than the gap. Here the camera (r2) starts 10s into the sync-clip.
+SYNC_GAP_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.14">
+        <resources>
+            <format id="r1" name="FFVideoFormat1080p24" frameDuration="100/2400s" width="1920" height="1080"/>
+            <asset id="r2" name="cam" start="0s" duration="2400/24s" hasVideo="1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/cam.mp4"/>
+            </asset>
+            <asset id="r3" name="ext_audio" start="0s" duration="9600/24s" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/ext.wav"/>
+            </asset>
+        </resources>
+        <library location="file:///tmp/Lib.fcpbundle/">
+            <event name="E">
+                <project name="Gap Sync">
+                    <sequence format="r1" duration="2400/24s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                        <spine>
+                            <sync-clip offset="0s" name="Cam - Synchronized Clip" start="240/24s" duration="2400/24s" tcFormat="NDF">
+                                <spine>
+                                    <gap name="Gap" offset="0s" start="3600s" duration="240/24s">
+                                        <asset-clip ref="r3" lane="-1" offset="3600s" duration="9600/24s" audioRole="dialogue"/>
+                                    </gap>
+                                    <asset-clip ref="r2" offset="240/24s" name="cam" duration="2400/24s" audioRole="dialogue"/>
+                                </spine>
+                                <sync-source sourceID="storyline">
+                                    <audio-role-source role="dialogue.dialogue-1"/>
+                                </sync-source>
+                            </sync-clip>
+                        </spine>
+                    </sequence>
+                </project>
+            </event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestSyncClipLeadingGap:
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "sync_gap.fcpxml"
+        p.write_text(SYNC_GAP_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_parser_carries_camera_internal_offset(self, parsed):
+        # The camera (resolved dialogue, what Doza transcribes) sits 10s into the
+        # sync-clip. The parser must report that offset, not 0.
+        assert parsed.is_multi_source is False
+        assert parsed.audio_angle_offset_fraction == Fraction(10)
+        assert parsed.audio_angle_start_fraction == Fraction(0)
+
+    def test_select_start_includes_gap_offset(self, parsed):
+        # Select at camera source 5s -> sync-clip start 5 + 10 = 15s. Pre-fix it
+        # emitted 5s, so FCP played the camera 10s too early.
+        out = write_selects_as_new_project(parsed, [
+            Select(start_seconds=5.0, end_seconds=8.0, label="quote"),
+        ])
+        root = etree.fromstring(out)
+        sync_clips = root.findall(".//spine/sync-clip")
+        assert len(sync_clips) == 1
+        start = float(parse_rational(sync_clips[0].get("start")))
+        assert abs(start - 15.0) < 0.05
+        # Camera (r2) + external audio (r3) preserved so both reattach on import.
+        inner_refs = {ac.get("ref") for ac in sync_clips[0].iter("asset-clip")}
+        assert {"r2", "r3"} <= inner_refs
+
+    def test_early_select_not_dropped(self, parsed):
+        # A select at source 0 (earlier than the 10s gap) used to map below the
+        # sync-clip's start and be silently dropped; now it lands at the offset.
+        out = write_selects_as_new_project(parsed, [
+            Select(start_seconds=0.0, end_seconds=4.0, label="open"),
+        ])
+        root = etree.fromstring(out)
+        sync_clips = root.findall(".//spine/sync-clip")
+        assert len(sync_clips) == 1
+        start = float(parse_rational(sync_clips[0].get("start")))
+        assert abs(start - 10.0) < 0.05
+
+
 # ---------- mixed-container spines (multi-source) ---------------------------
 
 # Mixed spine: mc-clip on [0,100), sync-clip on [100,150) both with resolvable

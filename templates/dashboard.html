@@ -178,7 +178,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                     </div>
                     <div class="form-group">
                         <label class="form-label">Language</label>
-                        <select class="form-input" id="language">
+                        <select class="form-input" id="language" onchange="updateLanguageHint()">
                             <option value="en" selected>English</option>
                             <option value="auto">Auto-detect</option>
                             <option disabled>──────────</option>
@@ -212,6 +212,9 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                             <option value="uk">Ukrainian</option>
                             <option value="vi">Vietnamese</option>
                         </select>
+                        <p id="languageHint" style="display:none; font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
+                            Non-English uses the Whisper engine. If it isn't installed yet, you'll be prompted to add it (~200&nbsp;MB, one time) when transcription starts.
+                        </p>
                     </div>
                 </div>
                 <div id="selectedFile" style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;"></div>
@@ -291,6 +294,17 @@ filePathInput.addEventListener('keydown', (e) => {
         selectFilePath();
     }
 });
+
+// ── Language hint ──
+// Non-English transcription uses Whisper, which installs on demand the first
+// time it's needed. Flag that upfront so a non-English pick isn't a surprise.
+function updateLanguageHint() {
+    const sel = document.getElementById('language');
+    const hint = document.getElementById('languageHint');
+    if (!sel || !hint) return;
+    hint.style.display = (sel.value !== 'en') ? 'block' : 'none';
+}
+updateLanguageHint();
 
 // ── File Path Selection ──
 function selectFilePath() {

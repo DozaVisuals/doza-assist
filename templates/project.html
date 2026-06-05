@@ -148,6 +148,7 @@
                 <div class="progress-fill" id="transcribeProgressFill" style="width: 0%; transition: width 1s linear;"></div>
             </div>
             <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;" id="transcribeTimeText"></p>
+            <div id="transcribeWhisperBanner" style="display:none; max-width: 380px; margin: 1.25rem auto 0; padding: 0.85rem; text-align: left; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
         </div>
     </div>
     <script>
@@ -2669,6 +2670,34 @@ async function startTranscription() {
             timeText.textContent = `Completed in ${elapsed}s`;
             showToast('Transcription complete!');
             setTimeout(() => reloadAndKeepTab('transcript'), 3000);
+        } else if (data.needs_whisper_install) {
+            // Non-English was requested but the Whisper engine isn't installed.
+            // Surface the same on-demand installer the Retranscribe modal uses,
+            // right here at the first wall the user hits, then auto-retry once
+            // the engine is ready (issue #36).
+            fill.style.width = '0%';
+            statusText.textContent = 'Non-English transcription needs an extra engine';
+            timeText.textContent = '';
+            const banner = document.getElementById('transcribeWhisperBanner');
+            if (banner) {
+                const lang = (data.requested_language || '').toUpperCase();
+                banner.style.display = 'block';
+                banner.innerHTML = `
+                    <div style="color: var(--text-secondary); margin-bottom: 0.6rem;">
+                        <strong style="color: var(--text-primary);">Whisper engine required.</strong><br>
+                        Transcribing non-English audio${lang ? ` (${lang})` : ''} uses the Whisper engine, which isn't installed yet — about 200&nbsp;MB, 5–10 minutes on a typical connection. It installs once.
+                    </div>
+                    <button class="btn btn-sm btn-purple" id="firstRunInstallWhisper">Install non-English support</button>
+                `;
+                const ib = document.getElementById('firstRunInstallWhisper');
+                if (ib) ib.onclick = () => runWhisperInstall(banner, () => {
+                    banner.style.display = 'none';
+                    statusText.textContent = 'Transcribing...';
+                    startTranscription();
+                });
+            } else {
+                showToast('Error: ' + (data.error || 'Whisper not installed'), true);
+            }
         } else {
             statusText.textContent = 'Error';
             timeText.textContent = data.error || 'Unknown error';
@@ -3294,7 +3323,10 @@ function updateWhisperBanner() {
     const btn = document.getElementById('retranscribeBtn');
     if (!sel || !banner || !btn) return;
 
-    const engines = window._transcriptionEngines || { parakeet: true, whisper: true };
+    // Assume Whisper is MISSING if we couldn't read engine state — better to
+    // show the (idempotent) install prompt than to hide it and let a non-English
+    // transcription fail later with no recourse.
+    const engines = window._transcriptionEngines || { parakeet: true, whisper: false };
     const lang = sel.value;
     // 'auto' uses Whisper internally, so it also needs the engine.
     const needsWhisper = (lang !== 'en') && !engines.whisper;
@@ -3311,33 +3343,39 @@ function updateWhisperBanner() {
             <strong style="color: var(--text-primary);">Non-English requires the Whisper engine.</strong><br>
             Not installed yet — about 200&nbsp;MB, 5–10 minutes on a typical connection.
         </div>
-        <button class="btn btn-sm btn-purple" id="installWhisperBtn" onclick="startWhisperInstall()">
+        <button class="btn btn-sm btn-purple" id="installWhisperBtn">
             Install non-English support
         </button>
     `;
     btn.disabled = true;
+    const installBtn = document.getElementById('installWhisperBtn');
+    if (installBtn) installBtn.onclick = () => runWhisperInstall(banner, () => {
+        const rbtn = document.getElementById('retranscribeBtn');
+        if (rbtn) rbtn.disabled = false;
+    });
 }
 
 let _whisperPollTimer = null;
 
-async function startWhisperInstall() {
-    const banner = document.getElementById('whisperBanner');
-    if (!banner) return;
-    banner.innerHTML = '<div style="color: var(--text-secondary);">Starting install…</div>';
+// Drive the on-demand Whisper install inside `container`, polling
+// /api/install-whisper/status every 2s and showing the worker's live `detail`.
+// Calls onDone() once the engine is available. Shared by the Retranscribe modal
+// and the first-run transcribe error so there's a single install code path.
+async function runWhisperInstall(container, onDone) {
+    if (!container) return;
+    container.innerHTML = '<div style="color: var(--text-secondary);">Starting install…</div>';
 
     try {
         const res = await fetch('/api/install-whisper', { method: 'POST' });
         if (!res.ok) {
-            banner.innerHTML = '<div style="color: var(--danger, #f85149);">Failed to start install. Check the server log.</div>';
+            container.innerHTML = '<div style="color: var(--danger, #f85149);">Failed to start install. Check the server log.</div>';
             return;
         }
     } catch (err) {
-        banner.innerHTML = `<div style="color: var(--danger, #f85149);">Network error: ${err.message}</div>`;
+        container.innerHTML = `<div style="color: var(--danger, #f85149);">Network error: ${err.message}</div>`;
         return;
     }
 
-    // Poll every 2s until done or error. Banner shows live `detail` from the
-    // worker so the user sees `Installing OpenAI Whisper (~200MB)…` etc.
     if (_whisperPollTimer) clearInterval(_whisperPollTimer);
     _whisperPollTimer = setInterval(async () => {
         let state;
@@ -3350,20 +3388,21 @@ async function startWhisperInstall() {
             clearInterval(_whisperPollTimer);
             _whisperPollTimer = null;
             window._transcriptionEngines = { ...(window._transcriptionEngines || {}), whisper: true };
-            banner.innerHTML = '<div style="color: var(--success, #3fb950);">Done. You can transcribe in any language now.</div>';
-            const btn = document.getElementById('retranscribeBtn');
-            if (btn) btn.disabled = false;
+            container.innerHTML = '<div style="color: var(--success, #3fb950);">Done. Non-English transcription is ready.</div>';
+            if (onDone) onDone();
         } else if (state.status === 'error') {
             clearInterval(_whisperPollTimer);
             _whisperPollTimer = null;
-            banner.innerHTML = `
+            container.innerHTML = `
                 <div style="color: var(--danger, #f85149); margin-bottom: 0.5rem;">
                     Install failed: ${(state.detail || 'unknown error').replace(/</g, '&lt;')}
                 </div>
-                <button class="btn btn-sm btn-purple" onclick="startWhisperInstall()">Try again</button>
+                <button class="btn btn-sm btn-purple" id="retryWhisperBtn">Try again</button>
             `;
+            const retry = document.getElementById('retryWhisperBtn');
+            if (retry) retry.onclick = () => runWhisperInstall(container, onDone);
         } else {
-            banner.innerHTML = `
+            container.innerHTML = `
                 <div style="color: var(--text-secondary);">
                     ${(state.detail || 'Installing…').replace(/</g, '&lt;')}
                 </div>

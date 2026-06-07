@@ -4,11 +4,14 @@ Two output modes:
 
 - **Mode A (``write_selects_as_new_project``)**: emits a fresh project whose
   spine contains one clip per select, routed by the owning spine segment's
-  kind — ``<mc-clip>`` for mc-clip segments (preserving the multicam angle
-  enablement) and ``<asset-clip>`` for sync-clip segments (targeting the
-  resolved dialogue asset). The original ``<resources>`` block is spliced in
-  byte-for-byte from the source FCPXML so that asset IDs and bookmark base64
-  blobs survive untouched — FCP is strict about bookmark mismatch on import.
+  kind — a fresh ``<mc-clip>`` for mc-clip segments (preserving the multicam
+  angle enablement), or a deep copy of the original ``<sync-clip>`` /
+  ``<asset-clip>`` for sync-clip / plain single-cam segments (so the source's
+  format, conform-rate, audio role, and any reattached audio survive verbatim;
+  only the in/out/position attributes are rewritten). The original
+  ``<resources>`` block is spliced in byte-for-byte from the source FCPXML so
+  that asset IDs and bookmark base64 blobs survive untouched — FCP is strict
+  about bookmark mismatch on import.
 
 - **Mode B (``write_markers_on_timeline``)**: emits the original project
   structure with ``<marker>`` elements injected into the existing spine clips
@@ -38,7 +41,7 @@ from typing import Iterable, List, Optional, Tuple
 
 from lxml import etree
 
-from .parser import ParsedFCPXML, SpineSegment
+from .parser import ParsedFCPXML, SpineSegment, SPINE_SEGMENT_TAGS
 from .timecode import parse_rational, seconds_to_rational, timeline_to_segment
 
 
@@ -99,9 +102,13 @@ def _locate_select_start(
 
     For multi-source projects, ``select_seconds`` is a timeline time; find the
     segment whose timeline range covers it and translate to container time.
-    For single-source projects, ``select_seconds`` is audio-source time;
-    convert via the representative audio angle offsets, then find the covering
-    segment.
+    For single-source projects, ``select_seconds`` is audio-source time (0-based
+    into the file the transcription ran against); convert to container time by
+    inverting the renderer's source-seek formula, then find the covering
+    segment. Adding the representative's container-tc / asset start is what keeps
+    selects landing correctly when the media carries embedded timecode (pro
+    cameras, time-of-day TC) — both terms are zero for sync-clips and ordinary
+    tcStart-zero footage, so this is a no-op there.
 
     Returns ``(None, None)`` if the time falls outside any spine segment.
     """
@@ -110,7 +117,13 @@ def _locate_select_start(
         return seg, container_time
 
     t = Fraction(select_seconds).limit_denominator(10_000_000)
-    container_time = t + parsed.audio_angle_offset_fraction - parsed.audio_angle_start_fraction
+    container_time = (
+        t
+        + parsed.audio_angle_offset_fraction
+        - parsed.audio_angle_start_fraction
+        + parsed.audio_container_tc_start_fraction
+        + parsed.audio_asset_start_fraction
+    )
     for seg in parsed.spine_segments:
         if seg.start_fraction <= container_time < seg.start_fraction + seg.duration_fraction:
             return seg, container_time
@@ -285,7 +298,32 @@ def _build_mc_clip_node(
     return mc
 
 
-def _build_sync_clip_node(
+def _set_clip_note(clip_el: etree._Element, note_text: str) -> None:
+    """Put our select note on a deep-copied clip at a DTD-valid position.
+
+    ``<note>`` is a 0-or-1 child in the FCPXML DTD, so any note inherited from
+    the source clip is dropped first (two notes would fail import). It then
+    belongs at the front for ``<sync-clip>`` / ``<mc-clip>``, but after the
+    required-leading ``<conform-rate>`` / ``<timeMap>`` for ``<asset-clip>`` —
+    skipping those lands the note in the first slot the DTD allows for every
+    clip kind.
+    """
+    for existing in clip_el.findall("note"):
+        clip_el.remove(existing)
+    if not note_text:
+        return
+    idx = 0
+    for child in clip_el:
+        if child.tag in ("conform-rate", "timeMap"):
+            idx += 1
+        else:
+            break
+    note = etree.Element("note")
+    note.text = note_text
+    clip_el.insert(idx, note)
+
+
+def _build_copied_clip_node(
     parsed: ParsedFCPXML,
     select: Select,
     segment: SpineSegment,
@@ -294,53 +332,55 @@ def _build_sync_clip_node(
     duration_str: str,
     offset_str: str,
 ) -> etree._Element:
-    """Emit a full ``<sync-clip>`` for a select — video + audio reattached.
+    """Emit a select by deep-copying its source spine clip and rewriting only
+    the positioning attributes. Used for ``<sync-clip>`` and ``<asset-clip>``
+    segments (mc-clips are rebuilt fresh — see :func:`_build_mc_clip_node`).
 
-    Deep-copies the corresponding original spine sync-clip and rewrites only
-    the top-level positioning attributes (``offset`` on the new timeline,
-    ``start`` at the source time of the select, ``duration`` matching the
-    select's length, fresh ``name``). The inner ``<spine>`` — the camera
-    asset-clip on the main spine plus any lane-attached external audio
-    recorder, color filters, sync-source role config — is preserved
-    byte-for-byte. FCP re-imports the result with video and audio reattached,
-    same as the original multicam path.
+    Deep-copying keeps everything FCP needs to re-import the select exactly as
+    the source played it: ``ref`` / ``format`` / ``conform-rate`` / audio role,
+    a sync-clip's inner camera+audio ``<spine>``, an asset-clip's
+    audio-channel config and filters. We rewrite ``offset`` (the select's slot
+    on the new timeline), ``start`` (its source in-point), ``duration`` (its
+    length) and ``name``.
 
-    For our sync-clip math ``container_start`` is the source time into the
-    chosen audio asset (angle offsets collapse to zero during parse), so it
-    maps directly to the sync-clip's new ``start`` attribute.
+    For sync-clips ``container_start`` is the source time into the chosen audio
+    asset (angle offsets collapse to zero during parse). For asset-clips it is
+    the in-point in the asset's own timeline. Either way it maps directly to the
+    copied clip's ``start``. Any stale ``audioStart`` / ``audioDuration`` (a
+    source J/L split) is dropped so the select's audio follows its new range
+    instead of pointing at the original clip's audio window.
     """
     new_clip = copy.deepcopy(original_element)
     new_clip.set("offset", offset_str)
     new_clip.set("start", start_str)
     new_clip.set("duration", duration_str)
     new_clip.set("name", select.label or "Select")
+    for attr in ("audioStart", "audioDuration"):
+        if attr in new_clip.attrib:
+            del new_clip.attrib[attr]
 
-    # Per the FCPXML DTD, <note> must be the first child of <sync-clip>.
     note_text = select.note
     if select.speaker:
         note_text = f"{note_text} — {select.speaker}" if note_text else select.speaker
-    if note_text:
-        note = etree.Element("note")
-        note.text = note_text
-        new_clip.insert(0, note)
+    _set_clip_note(new_clip, note_text)
 
     return new_clip
 
 
 def _index_original_spine(parsed: ParsedFCPXML) -> List[etree._Element]:
-    """Parse ``parsed.original_fcpxml_bytes`` and return the main-spine
-    ``<mc-clip>`` / ``<sync-clip>`` elements in document order.
+    """Parse ``parsed.original_fcpxml_bytes`` and return the main-spine clip
+    elements (``mc-clip`` / ``sync-clip`` / ``asset-clip``) in document order.
 
     Mirrors ``parsed.spine_segments`` one-for-one — the parser and this walker
-    both visit direct children of ``<project>/<sequence>/<spine>`` that are
-    ``mc-clip`` or ``sync-clip``, so index N in the returned list corresponds
+    both visit direct children of ``<project>/<sequence>/<spine>`` whose tag is
+    in :data:`SPINE_SEGMENT_TAGS`, so index N in the returned list corresponds
     to ``parsed.spine_segments[N]``.
     """
     root = etree.fromstring(parsed.original_fcpxml_bytes)
     spine = root.find(".//sequence/spine")
     if spine is None:
         return []
-    return [c for c in spine if c.tag in ("mc-clip", "sync-clip")]
+    return [c for c in spine if c.tag in SPINE_SEGMENT_TAGS]
 
 
 def _build_selects_spine(
@@ -369,11 +409,13 @@ def _build_selects_spine(
         if segment.kind == "mc-clip":
             node = _build_mc_clip_node(parsed, s, segment, start_str, dur_str, offset_str)
         else:
+            # sync-clip and asset-clip both round-trip by deep-copying their
+            # source spine element, so both need that original element on hand.
             if seg_idx >= len(original_spine_clips):
                 if skipped is not None:
                     skipped.append(s)
                 continue
-            node = _build_sync_clip_node(
+            node = _build_copied_clip_node(
                 parsed, s, segment, original_spine_clips[seg_idx],
                 start_str, dur_str, offset_str,
             )
@@ -516,7 +558,7 @@ def write_markers_on_timeline(
     # The parser's SpineSegment list is in document order, so we can zip them up
     # with spine children of the right tags.
     spine_clip_elements: List[etree._Element] = [
-        c for c in spine if c.tag in ("mc-clip", "sync-clip")
+        c for c in spine if c.tag in SPINE_SEGMENT_TAGS
     ]
     if len(spine_clip_elements) != len(parsed.spine_segments):
         raise WriterError(

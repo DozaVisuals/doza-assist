@@ -3443,7 +3443,9 @@ def export_fcpxml_multicam(project_id):
     ``fcpxml_source`` metadata block). Two modes:
 
       - ``selects_project``: emits a new project whose spine is the selects
-        laid end-to-end as mc-clips (multicam) or asset-clips (sync-clip).
+        laid end-to-end, each routed by its source segment kind — a fresh
+        mc-clip for multicam, or a deep copy of the original sync-clip /
+        asset-clip for synced / plain single-cam footage.
       - ``markers_timeline``: emits the original timeline with markers injected
         at each select's in-point.
 

@@ -23,14 +23,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from doza_assist.fcpxml import (  # noqa: E402
     ParseError,
+    Select,
     audio_source_to_timeline,
     parse_fcpxml,
     parse_rational,
     rational_to_seconds,
     seconds_to_rational,
     timeline_to_segment,
+    write_markers_on_timeline,
+    write_selects_as_new_project,
 )
 from doza_assist.fcpxml.parser import SpineSegment, _resolve_asset_path, strip_file_url  # noqa: E402
+from doza_assist.fcpxml.timeline_audio import plan_render  # noqa: E402
+from doza_assist.fcpxml.writer import re_parse  # noqa: E402
 
 
 ELLA_FCPXML = Path("/Users/dozavisuals/Downloads/Ella Interview.fcpxmld/Info.fcpxml")
@@ -814,3 +819,376 @@ class TestSyncClipNestedLaneAudio:
             "Nested lane=-1 external audio must rescue the muted-camera segment "
             "from is_muted=True (which would drop it from the timeline-audio plan)"
         )
+
+
+# ---------- asset-clip: plain single-camera spine (the reported bug) --------
+#
+# Single-cam footage (Meta Glasses, a mirrorless body, a screen capture, a
+# drone) imports into FCP as plain <asset-clip> elements on the spine — no
+# multicam, no sync-clip. A "rush" timeline laying many such clips end-to-end is
+# exactly what the tester (Larry) dragged in; before the fix the parser skipped
+# every spine child and raised "spine contains no <mc-clip> or <sync-clip>
+# elements". 30 fps so whole-second times are frame-aligned (Meta Glasses rate).
+
+META_RUSH_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FFVideoFormat1080p30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="r2" name="meta_001" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///Volumes/MyDrive/Meta/meta_001.mp4"/>
+            </asset>
+            <asset id="r3" name="meta_002" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///Volumes/MyDrive/Meta/meta_002.mp4"/>
+            </asset>
+            <asset id="r4" name="meta_003" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///Volumes/MyDrive/Meta/meta_003.mp4"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/larry/Movies/Meta.fcpbundle/">
+            <event name="Meta Glasses">
+                <project name="Rush Full Unedited">
+                    <sequence format="r1" duration="300s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                        <spine>
+                            <asset-clip ref="r2" offset="0s" name="meta_001" start="0s" duration="100s" tcFormat="NDF" audioRole="dialogue"/>
+                            <asset-clip ref="r3" offset="100s" name="meta_002" start="0s" duration="100s" tcFormat="NDF" audioRole="dialogue"/>
+                            <asset-clip ref="r4" offset="200s" name="meta_003" start="0s" duration="100s" tcFormat="NDF" audioRole="dialogue"/>
+                        </spine>
+                    </sequence>
+                </project>
+            </event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestAssetClipSpine:
+    """A spine of plain single-cam <asset-clip>s (Meta Glasses rush). Before the
+    fix this raised ParseError; now each clip becomes a segment with its own
+    resolved audio source."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "rush.fcpxml"
+        p.write_text(META_RUSH_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_all_three_clips_become_segments(self, parsed):
+        assert len(parsed.spine_segments) == 3
+        assert [s.kind for s in parsed.spine_segments] == ["asset-clip"] * 3
+
+    def test_each_segment_resolves_its_own_asset(self, parsed):
+        s0, s1, s2 = parsed.spine_segments
+        assert (s0.audio_source.asset_id, s0.audio_source.path) == (
+            "r2", "/Volumes/MyDrive/Meta/meta_001.mp4")
+        assert (s1.audio_source.asset_id, s1.audio_source.path) == (
+            "r3", "/Volumes/MyDrive/Meta/meta_002.mp4")
+        assert (s2.audio_source.asset_id, s2.audio_source.path) == (
+            "r4", "/Volumes/MyDrive/Meta/meta_003.mp4")
+
+    def test_distinct_assets_are_multi_source(self, parsed):
+        # Each clip is a different file → ingest renders a composed timeline WAV.
+        assert parsed.is_multi_source is True
+
+    def test_container_type_is_asset_clip(self, parsed):
+        assert parsed.container_type == "asset-clip"
+        assert parsed.container_ref == "r2"
+
+    def test_representative_audio_is_first_clip(self, parsed):
+        assert parsed.audio_file_path == "/Volumes/MyDrive/Meta/meta_001.mp4"
+        assert parsed.audio_asset_id == "r2"
+        assert parsed.active_audio_angle_id is None
+
+    def test_project_and_event_names(self, parsed):
+        assert parsed.project_name == "Rush Full Unedited"
+        assert parsed.event_name == "Meta Glasses"
+
+    def test_metadata_dict_is_json_serializable(self, parsed):
+        import json
+        data = parsed.to_metadata_dict()
+        json.dumps(data)  # must not raise
+        assert data["container_type"] == "asset-clip"
+        assert len(data["spine_segments"]) == 3
+
+    def test_timeline_audio_plan_one_entry_per_clip(self, parsed):
+        plan = plan_render(parsed)
+        assert len(plan) == 3
+        # Untrimmed (start=0, asset.start=0) → seek 0 into each file, placed at
+        # 0/100/200s on the timeline.
+        assert [round(p["source_start_seconds"], 3) for p in plan] == [0.0, 0.0, 0.0]
+        assert [p["timeline_offset_ms"] for p in plan] == [0, 100000, 200000]
+        assert [p["input_path"] for p in plan] == [
+            "/Volumes/MyDrive/Meta/meta_001.mp4",
+            "/Volumes/MyDrive/Meta/meta_002.mp4",
+            "/Volumes/MyDrive/Meta/meta_003.mp4",
+        ]
+
+
+SINGLE_ASSET_CLIP_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="r2" name="solo" start="0s" duration="60s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/solo.mp4"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="Solo">
+                <sequence format="r1" duration="60s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="r2" offset="0s" name="solo" start="0s" duration="60s" audioRole="dialogue"/>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestSingleAssetClip:
+    """One plain asset-clip → single-source: transcription runs against the file
+    directly (no composed timeline WAV)."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "solo.fcpxml"
+        p.write_text(SINGLE_ASSET_CLIP_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_single_source_uses_the_file_directly(self, parsed):
+        assert parsed.is_multi_source is False
+        assert parsed.audio_file_path == "/tmp/solo.mp4"
+        assert len(parsed.spine_segments) == 1
+        assert parsed.spine_segments[0].kind == "asset-clip"
+
+    def test_single_source_select_round_trips(self, parsed):
+        # Single-source → select time is audio-source (file) seconds. A 10–30s
+        # select rebuilds as an asset-clip starting 10s into r2, length 20s.
+        out = write_selects_as_new_project(parsed, [Select(10, 30, label="Bit")])
+        root = etree.fromstring(out)
+        clip = root.find(".//sequence/spine/asset-clip")
+        assert clip is not None and clip.get("ref") == "r2"
+        assert parse_rational(clip.get("start")) == 10
+        assert parse_rational(clip.get("duration")) == 20
+
+
+ASSET_CLIP_TOD_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="r2" name="tod_cam" start="3600s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/tod.mov"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="TOD">
+                <sequence format="r1" duration="20s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="r2" offset="0s" name="tod_cam" start="3610s" duration="20s" audioRole="dialogue"/>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestAssetClipTimecodeOffset:
+    """An asset whose media carries embedded start timecode (asset@start != 0).
+    The renderer must seek to ``asset-clip.start - asset.start`` so the audio
+    pulled for the segment is the right slice of the file."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "tod.fcpxml"
+        p.write_text(ASSET_CLIP_TOD_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_asset_start_carried_through(self, parsed):
+        src = parsed.spine_segments[0].audio_source
+        assert src.asset_start_fraction == Fraction(3600)
+        assert src.angle_offset_fraction == 0
+        assert src.angle_start_fraction == 0
+
+    def test_source_seek_subtracts_asset_start(self, parsed):
+        plan = plan_render(parsed)
+        assert len(plan) == 1
+        # start 3610s into an asset whose media TC starts at 3600s → 10s in.
+        assert round(plan[0]["source_start_seconds"], 3) == 10.0
+
+    def test_representative_carries_asset_start(self, parsed):
+        # The single-source locate inverts the seek using these.
+        assert parsed.audio_asset_start_fraction == Fraction(3600)
+        assert parsed.audio_container_tc_start_fraction == 0
+
+    def test_single_source_tod_select_round_trips(self, parsed):
+        # The clip (asset@start=3600, clip start=3610) occupies file/player time
+        # [10s, 30s). A select at file time 15–25s must locate (container time
+        # 15 + 3600 = 3615s, inside the clip's [3610s, 3630s) range) and rebuild
+        # as an asset-clip starting at 3615s. Without adding asset_start in the
+        # single-source locate this select falls outside every segment and the
+        # export aborts with "all selects fall outside" — so this guards the fix.
+        out = write_selects_as_new_project(parsed, [Select(15, 25, label="TOD bit")])
+        root = etree.fromstring(out)
+        clip = root.find(".//sequence/spine/asset-clip")
+        assert clip is not None and clip.get("ref") == "r2"
+        assert parse_rational(clip.get("start")) == 3615
+        assert parse_rational(clip.get("duration")) == 10
+
+
+VIDEO_ONLY_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="r2" name="talker" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/has_audio.mp4"/>
+            </asset>
+            <asset id="r3" name="broll" start="0s" duration="100s" hasVideo="1" hasAudio="0" videoSources="1">
+                <media-rep kind="original-media" src="file:///tmp/silent_broll.mp4"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="With B-roll">
+                <sequence format="r1" duration="200s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="r2" offset="0s" name="talker" start="0s" duration="100s" audioRole="dialogue"/>
+                        <asset-clip ref="r3" offset="100s" name="broll" start="0s" duration="100s"/>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestAssetClipVideoOnly:
+    """A silent b-roll asset-clip (hasAudio='0') occupies timeline space but
+    contributes silence — it must be marked muted and dropped from the render
+    plan, never sent to ffmpeg as a missing audio stream."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "broll.fcpxml"
+        p.write_text(VIDEO_ONLY_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_video_only_clip_is_muted(self, parsed):
+        s0, s1 = parsed.spine_segments
+        assert s0.audio_source.is_muted is False
+        assert s1.audio_source.is_muted is True
+
+    def test_muted_clip_dropped_from_plan(self, parsed):
+        plan = plan_render(parsed)
+        assert len(plan) == 1
+        assert plan[0]["input_path"] == "/tmp/has_audio.mp4"
+
+
+GAP_ONLY_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+        </resources>
+        <library>
+            <event name="E"><project name="Empty">
+                <sequence format="r1" duration="300s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <gap offset="0s" name="Gap" duration="300s"/>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestUnsupportedSpineError:
+    """A spine with no readable clips must fail with a message that names what
+    it actually found — so the next unsupported shape (e.g. compound clips)
+    points us straight at what to support next, instead of a dead end."""
+
+    def test_error_is_diagnostic(self, tmp_path):
+        p = tmp_path / "gap.fcpxml"
+        p.write_text(GAP_ONLY_FIXTURE)
+        with pytest.raises(ParseError, match="no clips Doza Assist can read"):
+            parse_fcpxml(p)
+
+    def test_error_names_present_tags(self, tmp_path):
+        p = tmp_path / "gap.fcpxml"
+        p.write_text(GAP_ONLY_FIXTURE)
+        with pytest.raises(ParseError) as ei:
+            parse_fcpxml(p)
+        assert "gap" in str(ei.value)
+
+
+class TestAssetClipRoundTrip:
+    """Selects on a single-cam rush round-trip back to FCP-importable
+    <asset-clip>s (Mode A) and as markers on the original spine (Mode B).
+    META_RUSH is multi-source, so Select times are TIMELINE seconds."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "rush.fcpxml"
+        p.write_text(META_RUSH_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_selects_export_as_asset_clips(self, parsed):
+        selects = [
+            Select(start_seconds=10, end_seconds=30, label="Intro"),     # clip 0 (r2)
+            Select(start_seconds=120, end_seconds=160, label="Middle"),  # clip 1 (r3)
+        ]
+        out = write_selects_as_new_project(parsed, selects)
+        reparsed = re_parse(out)
+        assert [s.kind for s in reparsed.spine_segments] == ["asset-clip", "asset-clip"]
+        # Sorted chronologically by source in-point; each keeps its own asset.
+        assert reparsed.spine_segments[0].audio_source.asset_id == "r2"
+        assert reparsed.spine_segments[1].audio_source.asset_id == "r3"
+
+    def test_select_source_in_point_and_placement(self, parsed):
+        # 120–160s on the timeline lands 20s into clip 1 (offset 100s) → start
+        # 20s into asset r3, length 40s, placed first on the new timeline.
+        selects = [Select(start_seconds=120, end_seconds=160, label="Middle")]
+        out = write_selects_as_new_project(parsed, selects)
+        root = etree.fromstring(out)
+        clips = root.findall(".//sequence/spine/asset-clip")
+        assert len(clips) == 1
+        assert clips[0].get("ref") == "r3"
+        assert parse_rational(clips[0].get("start")) == 20
+        assert parse_rational(clips[0].get("duration")) == 40
+        assert parse_rational(clips[0].get("offset")) == 0
+        # audioRole survives the deep copy; the source's name is overwritten.
+        assert clips[0].get("audioRole") == "dialogue"
+        assert clips[0].get("name") == "Middle"
+
+    def test_label_and_speaker_become_name_and_note(self, parsed):
+        selects = [Select(start_seconds=10, end_seconds=30, label="Intro", speaker="Larry")]
+        out = write_selects_as_new_project(parsed, selects)
+        root = etree.fromstring(out)
+        clip = root.find(".//sequence/spine/asset-clip")
+        assert clip.get("name") == "Intro"
+        note = clip.find("note")
+        assert note is not None and "Larry" in note.text
+
+    def test_original_resources_preserved_verbatim(self, parsed):
+        selects = [Select(start_seconds=10, end_seconds=30, label="Intro")]
+        out = write_selects_as_new_project(parsed, selects)
+        assert b'src="file:///Volumes/MyDrive/Meta/meta_001.mp4"' in out
+
+    def test_markers_mode_attaches_to_the_right_clip(self, parsed):
+        selects = [Select(start_seconds=150, end_seconds=151, label="Beat", kind="strong")]
+        out = write_markers_on_timeline(parsed, selects)
+        root = etree.fromstring(out)
+        spine_clips = root.findall(".//sequence/spine/asset-clip")
+        assert len(spine_clips) == 3
+        # timeline 150s → clip 1 (100–200s) at container time 50s.
+        markers = [c.findall("marker") for c in spine_clips]
+        assert [len(m) for m in markers] == [0, 1, 0]
+        assert parse_rational(markers[1][0].get("start")) == 50

@@ -284,7 +284,7 @@ def inject_brand():
         _pro_sibling = os.path.join(_here, '..', 'pro')
         if os.path.isdir(_pro_sibling):
             if not brand:
-                brand = 'Doza Assist Pro'
+                brand = 'Doza Assist'
             if not logo:
                 # Pro overlay's collection blueprint serves the
                 # branded logo at /collection/static/logo-pro.png.
@@ -1481,6 +1481,14 @@ def project_view(project_id):
                 pass
 
     project['editing_platform'] = get_project_platform(project)
+
+    # Seed the client-feedback "pending" store for the template's clientPending
+    # JS array. This is a render-only default (do NOT save_project here): after a
+    # successful Pull, meta.json already carries client_pending written by
+    # pro/share/cloud.py's _merge_client_feedback. This setdefault only covers the
+    # pre-pull case so the template seed is always a list (missing key => []),
+    # which is a zero-visual-change no-op for normal projects.
+    project.setdefault('client_pending', [])
 
     # Recent activity across all active projects, merged and sorted by time.
     recent_activity = []

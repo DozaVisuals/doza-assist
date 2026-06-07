@@ -7,6 +7,95 @@
     <link rel="icon" href="{{ logo_url }}">
     <link rel="apple-touch-icon" href="{{ logo_url }}">
     <link rel="stylesheet" href="/static/style.css?v={{ range(10000,99999) | random }}">
+    <style>
+    /* ── Client feedback: pending (proposed, not-yet-accepted) styling ──
+       Additive only. Distinct from .tw-labeled (solid tint) and .tw-commented
+       (yellow tint). Reads as "client suggestion, not committed". When
+       client_pending is empty none of these classes are ever emitted, so
+       normal projects render identically. */
+
+    /* Proposed highlight word run — accent-tinted with a dashed outline. */
+    .tw-pending {
+        border-radius: 3px;
+        background: rgba(74, 158, 255, 0.10);
+        box-shadow: 3px 0 0 rgba(74, 158, 255, 0.10), -3px 0 0 rgba(74, 158, 255, 0.10);
+        outline: 1px dashed var(--accent);
+        outline-offset: -1px;
+    }
+
+    /* Hollow accent ring on the paragraph header — opens the accept/dismiss popover. */
+    .pending-marker {
+        display: inline-flex;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: transparent;
+        border: 2px solid var(--accent);
+        cursor: pointer;
+        margin-left: 0.5rem;
+        flex-shrink: 0;
+        vertical-align: middle;
+        transition: transform 0.15s;
+    }
+    .pending-marker:hover { transform: scale(1.3); }
+
+    /* Proposed clip card — dashed border + accent left rule so it reads as a proposal. */
+    .clip-card.pending {
+        border: 1px dashed var(--border-light);
+        border-left: 3px solid var(--accent);
+        background: var(--accent-dim);
+    }
+    .clip-card.pending:hover { border-color: var(--accent); }
+
+    .clip-pending-badge {
+        display: inline-block;
+        font-size: 0.6rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        padding: 0.08rem 0.4rem;
+        border-radius: 10px;
+        background: var(--accent);
+        color: #fff;
+        margin-right: 0.4rem;
+        vertical-align: middle;
+        text-transform: uppercase;
+    }
+    .clip-pending-client {
+        font-size: 0.72rem;
+        color: var(--text-muted);
+        margin-right: 0.4rem;
+        vertical-align: middle;
+    }
+    .clip-pending-actions {
+        display: flex;
+        gap: 0.4rem;
+        flex-shrink: 0;
+    }
+    /* Footer row: play + progress on the left, Accept/Dismiss pushed right. */
+    .clip-pending-footer {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-top: 0.6rem;
+    }
+    .clip-pending-footer .clip-card-player { flex: 1; margin: 0; min-width: 0; }
+    .clip-pending-footer .clip-pending-actions { margin-left: auto; }
+
+    /* Pending clips render in their own grid above the accepted grid. */
+    #clipsPendingGrid { margin-bottom: 0.75rem; }
+    #clipsPendingGrid:empty { display: none; margin-bottom: 0; }
+
+    /* All / Mine / Client segmented filter — mirrors .view-toggle. */
+    #clipsFilter { display: inline-flex; gap: 2px; }
+    #clipsFilter button {
+        display: flex; align-items: center; justify-content: center;
+        padding: 0 0.6rem; height: 28px; border-radius: 4px; border: none;
+        background: transparent; color: var(--text-muted); cursor: pointer;
+        font-size: 0.78rem; font-family: var(--font); transition: all 0.15s;
+    }
+    #clipsFilter button:hover { color: var(--text-primary); background: var(--bg-hover); }
+    #clipsFilter button.active { color: var(--accent); background: var(--accent-dim); }
+    </style>
 </head>
 <body>
 
@@ -128,6 +217,7 @@
                 <div class="progress-fill" id="transcribeProgressFill" style="width: 0%; transition: width 1s linear;"></div>
             </div>
             <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;" id="transcribeTimeText"></p>
+            <div id="transcribeWhisperBanner" style="display:none; max-width: 380px; margin: 1.25rem auto 0; padding: 0.85rem; text-align: left; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
         </div>
     </div>
     {% if project.status == 'uploaded' %}
@@ -380,8 +470,8 @@
                 <div class="my-style-banner my-style-banner-warn">
                     <strong>Trial limit:</strong> only the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} of this file {{ 'were' if trial_mins != 1 else 'was' }} transcribed.
                     <div style="margin-top: 6px;">
-                        Activate Doza Assist Pro to transcribe full-length files.
-                        <a href="{{ activate_url }}" target="_blank" rel="noopener" style="margin-left: 6px; font-weight: 600; color: var(--accent);">Activate Pro</a>
+                        Activate Doza Assist to transcribe full-length files.
+                        <a href="{{ activate_url }}" target="_blank" rel="noopener" style="margin-left: 6px; font-weight: 600; color: var(--accent);">Activate</a>
                     </div>
                 </div>
                 {% endif %}
@@ -399,6 +489,12 @@
                         <span id="clipsSelectedCount" style="font-size: 0.8rem; color: var(--accent); display: none;"></span>
                     </div>
                     <div class="btn-group">
+                        <div id="clipsFilter" title="Filter clips by source">
+                            <button data-filter="all" class="active" onclick="setClipsFilter('all')">All</button>
+                            <button data-filter="mine" onclick="setClipsFilter('mine')">Mine</button>
+                            <button data-filter="client" onclick="setClipsFilter('client')">Collab</button>
+                        </div>
+                        <button class="btn btn-sm btn-primary" id="clipsAcceptAllBtn" onclick="acceptAllPending()" style="display:none;">Accept all</button>
                         <div class="view-toggle">
                             <button class="view-toggle-btn" data-view="grid" onclick="setClipsView('grid')" title="Grid view">
                                 <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
@@ -413,6 +509,7 @@
                         <button class="btn btn-sm" onclick="exportClips()">Export</button>
                     </div>
                 </div>
+                <div class="clips-grid" id="clipsPendingGrid"></div>
                 <div class="clips-grid" id="clipsGrid">
                     <div class="empty-state" id="clipsEmpty">
                         <h3>No clips yet</h3>
@@ -1850,6 +1947,18 @@ transcriptInit({
 });
 transcriptSearchInit(transcriptContainer);
 
+// ── Client feedback (pending) state ──
+// Items the client proposed (clips + highlights) that the editor hasn't
+// accepted/dismissed yet. Each item: {pid, kind:'clip'|'hl', src_id, start,
+// end, color, text, client_name, created_at, source}. Seeded from meta.json
+// (written by pro/share/cloud.py _merge_client_feedback) and re-fetched after
+// a pull via window.refreshClientFeedback(). Empty on normal projects, so all
+// the pending UI below renders nothing and behavior is unchanged.
+let clientPending = {{ (project.client_pending or [])|tojson }};
+// Clips-tab filter: 'all' (accepted + pending), 'mine' (accepted only),
+// 'client' (pending only).
+let clipsFilter = 'all';
+
 // ── Chat ──
 // Preloaded from meta.json on render so the conversation survives reloads
 // and app restarts. Falls back to empty array on new projects. Multi-project
@@ -2974,8 +3083,20 @@ function renderClipsTab() {
     if (!grid) return;
     const total = document.getElementById('clipsTotal');
 
+    // Paint client-proposed clip cards (pending) into their own grid above,
+    // and sync the Accept-all button. No-op when clientPending is empty.
+    renderPendingClips();
+
     // Sort by start time
     const sorted = [...labelSections].sort((a, b) => a.start - b.start);
+
+    // 'client' filter shows ONLY pending cards — clear the accepted grid and stop.
+    if (clipsFilter === 'client') {
+        if (total) total.textContent = clientPending.length + ' pending';
+        grid.className = 'clips-grid';
+        grid.innerHTML = '';
+        return;
+    }
 
     if (total) total.textContent = sorted.length + ' clip' + (sorted.length !== 1 ? 's' : '');
 
@@ -3064,6 +3185,283 @@ function setClipsView(mode) {
     renderClipsTab();
 }
 
+// ── Client-proposed clips (pending) ──────────────────────────────────
+// Renders ALL pending clientPending items (clips AND highlights) as PENDING
+// cards in #clipsPendingGrid, with a "Collaborator" badge, optional name, and
+// Accept/Dismiss buttons. Editor-only — the shared/public viewer never
+// shows these. Empty clientPending => grid cleared, Accept-all hidden =>
+// zero visual change on normal projects.
+// Returns a real collaborator name, or '' for the generic/empty defaults
+// (so we show the "Collaborator" badge alone instead of a redundant name).
+function collabWho(item) {
+    const n = ((item && item.client_name) || '').trim();
+    return (n && !['client', 'collaborator', 'anonymous'].includes(n.toLowerCase())) ? n : '';
+}
+
+function renderPendingClips() {
+    if (IS_SHARED) return;
+    const grid = document.getElementById('clipsPendingGrid');
+    if (!grid) return;
+    const acceptAllBtn = document.getElementById('clipsAcceptAllBtn');
+
+    const pending = clientPending.slice();
+
+    // 'mine' filter hides the pending grid entirely.
+    const showPending = clipsFilter !== 'mine';
+
+    // Accept-all button only appears when there ARE pending clips and we're
+    // not in the 'mine' view.
+    if (acceptAllBtn) {
+        acceptAllBtn.style.display = (showPending && pending.length > 0) ? '' : 'none';
+    }
+
+    if (!showPending || pending.length === 0) {
+        grid.innerHTML = '';
+        return;
+    }
+
+    const viewMode = localStorage.getItem('clips-view') || 'grid';
+    grid.className = viewMode === 'list' ? 'clips-list' : 'clips-grid';
+
+    const sorted = [...pending].sort((a, b) => a.start - b.start);
+
+    grid.innerHTML = sorted.map(item => {
+        const duration = (item.end || 0) - (item.start || 0);
+        // Match the accepted-card color mapping (blue -> accent var).
+        const colorVar = item.color === 'blue' ? 'accent' : (item.color || 'green');
+        const safeTitle = escapeHtml(item.text || 'Collaborator clip');
+        const who = escapeHtml(collabWho(item));
+        const whoSpan = who ? `<span class="clip-pending-client">${who}</span>` : '';
+        const safePid = escapeHtml(item.pid);
+        let excerpt = '';
+        const words = allWords.filter(w => parseFloat(w.dataset.s) >= item.start && parseFloat(w.dataset.s) < item.end);
+        excerpt = words.map(w => w.textContent).join('').trim();
+        if (excerpt.length > 200) excerpt = excerpt.substring(0, 200) + '...';
+
+        if (viewMode === 'list') {
+            return `<div class="clip-row clip-card pending" data-pid="${safePid}" data-clip-id="${safePid}" data-start="${item.start}" data-end="${item.end}">
+                <button class="clip-row-play" onclick="playClip('${safePid}', ${item.start}, ${item.end})">
+                    <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg>
+                    <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                </button>
+                <span class="clip-pending-badge">Collaborator</span>
+                <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
+                <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
+                ${whoSpan}
+                <span class="clip-row-tc">${fmtTime(item.start)} – ${fmtTime(item.end)}</span>
+                <span class="clip-row-dur">${formatDuration(duration)}</span>
+                <button class="btn btn-sm btn-primary" onclick="acceptPending('${safePid}')">Accept</button>
+                <button class="btn btn-sm" onclick="dismissPending('${safePid}')">Dismiss</button>
+            </div>`;
+        }
+
+        return `<div class="clip-card pending" data-pid="${safePid}" data-clip-id="${safePid}" data-start="${item.start}" data-end="${item.end}">
+            <div class="clip-card-head">
+                <span class="clip-pending-badge">Collaborator</span>
+                <span class="clip-card-title" title="${safeTitle}">${safeTitle}</span>
+                <span class="clip-card-duration">${formatDuration(duration)}</span>
+            </div>
+            <div class="clip-card-meta">
+                <span class="clip-card-dot" style="background: var(--${colorVar});"></span>
+                ${whoSpan}
+                <span class="clip-card-tc">${fmtTime(item.start)} – ${fmtTime(item.end)}</span>
+            </div>
+            <div class="clip-card-excerpt" style="display:block;">${escapeHtml(excerpt)}</div>
+            <div class="clip-pending-footer">
+                <div class="clip-card-player">
+                    <button class="clip-play-btn" onclick="playClip('${safePid}', ${item.start}, ${item.end})">
+                        <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
+                        <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="14" height="14" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
+                    </button>
+                    <div class="clip-card-progress" id="clipProgress-${safePid}" onclick="scrubClip(event, '${safePid}', ${item.start}, ${item.end})">
+                        <div class="clip-card-progress-fill" id="clipFill-${safePid}"></div>
+                    </div>
+                </div>
+                <div class="clip-pending-actions">
+                    <button class="btn btn-sm btn-primary" onclick="acceptPending('${safePid}')">Accept</button>
+                    <button class="btn btn-sm" onclick="dismissPending('${safePid}')">Dismiss</button>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ── Client-proposed highlights (pending) ─────────────────────────────
+// Paints kind==='hl' items onto the transcript with a distinct pending
+// style (.tw-pending dashed accent) plus a hollow .pending-marker dot on
+// the paragraph header that opens an Accept/Dismiss popover. Mirrors
+// renderCommentMarkers. Editor-only; cleared + repainted each call.
+function renderPendingHighlights() {
+    if (IS_SHARED) return;
+    // Clear previous pending paint + markers first (idempotent re-render).
+    document.querySelectorAll('.pending-marker').forEach(el => el.remove());
+    document.querySelectorAll('.tw-pending').forEach(el => {
+        el.classList.remove('tw-pending');
+        delete el.dataset.pendingPid;
+    });
+
+    // 'mine' filter hides client highlights on the transcript too.
+    if (clipsFilter === 'mine') return;
+
+    clientPending.filter(it => it.kind === 'hl').forEach(item => {
+        const startTime = item.start;
+        const endTime = item.end;
+
+        // Tint overlapping words.
+        allWords.forEach(w => {
+            const ws = parseFloat(w.dataset.s);
+            const we = parseFloat(w.dataset.e);
+            if (we > startTime && ws < endTime) {
+                w.classList.add('tw-pending');
+                if (!w.dataset.pendingPid) w.dataset.pendingPid = item.pid;
+            }
+        });
+
+        // Marker dot on the paragraph that contains the start.
+        const paraBlocks = document.querySelectorAll('.para-block');
+        for (const block of paraBlocks) {
+            const blockStart = parseFloat(block.dataset.start);
+            const words = block.querySelectorAll('.tw[data-s]');
+            if (words.length === 0) continue;
+            const blockEnd = parseFloat(words[words.length - 1].dataset.e);
+            if (startTime >= blockStart && startTime < blockEnd) {
+                const marker = document.createElement('div');
+                marker.className = 'pending-marker';
+                marker.dataset.pendingPid = item.pid;
+                marker.title = (collabWho(item) || 'A collaborator') + ' suggested a highlight';
+                marker.onclick = (e) => { e.stopPropagation(); showPendingPopover(item, marker); };
+                const header = block.querySelector('.para-header');
+                if (header) header.appendChild(marker);
+                break;
+            }
+        }
+    });
+}
+
+// Accept/Dismiss popover for a pending highlight (reuses comment-popover styling).
+function showPendingPopover(item, anchor) {
+    closeCommentPopover();
+    const pop = document.createElement('div');
+    pop.className = 'comment-popover';
+    const safePid = escapeHtml(item.pid);
+    pop.innerHTML = `<div class="comment-pop-inner">
+        <div class="comment-pop-name"><span class="clip-pending-badge">Collaborator</span>${escapeHtml(collabWho(item))}</div>
+        <div class="comment-pop-time">Suggested highlight</div>
+        <div class="comment-pop-quote">"${escapeHtml(item.text || '')}"</div>
+        <div class="comment-pop-actions">
+            <button class="btn btn-sm" onclick="jumpTo(${item.start})">Play</button>
+            <button class="btn btn-sm btn-primary" onclick="acceptPending('${safePid}')">Accept</button>
+            <button class="btn btn-sm" onclick="dismissPending('${safePid}')">Dismiss</button>
+            <button class="btn btn-sm" onclick="closeCommentPopover()">Close</button>
+        </div>
+    </div>`;
+    document.body.appendChild(pop);
+    commentPopover = pop;
+    const rect = anchor.getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.top = (rect.bottom + 8) + 'px';
+    pop.style.left = Math.min(rect.left, window.innerWidth - 320) + 'px';
+    pop.style.zIndex = '500';
+}
+
+function setClipsFilter(f) {
+    clipsFilter = f;
+    document.querySelectorAll('#clipsFilter button').forEach(b => {
+        b.classList.toggle('active', b.dataset.filter === f);
+    });
+    renderClipsTab();
+    renderPendingHighlights();
+}
+
+// ── Accept / Dismiss / Accept-all (pending → labeled_sections) ───────
+// Accept moves a pending item into the transcript.js labelSections global
+// (the app's accepted-clip store) and persists via saveLabels(); the server
+// also writes labeled_sections on its side (idempotent double-write). The
+// item is then removed from clientPending and the UI re-rendered.
+async function acceptPending(pid) {
+    try {
+        const res = await fetch('/cloud-share/accept', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: PROJECT_ID, pid }),
+        });
+        const data = await res.json();
+        if (data && data.ok) {
+            if (data.accepted && data.clip) {
+                const c = data.clip;
+                // Guard against a duplicate within 0.5s (matches addClipFromChat rule).
+                if (!labelSections.some(s => Math.abs(s.start - c.start) < 0.5)) {
+                    labelSections.push({ id: ++sectionIdCounter, start: c.start, end: c.end, color: c.color, text: c.text });
+                    renderAllHighlights();
+                    updateSelectCount();
+                    saveLabels();
+                }
+            }
+            clientPending = clientPending.filter(it => it.pid !== pid);
+            renderPendingClips();
+            renderPendingHighlights();
+            renderClipsTab();
+            renderStoryClipLibrary();
+            closeCommentPopover();
+            showToast(data.kind === 'hl' ? 'Highlight accepted' : 'Clip accepted');
+        } else {
+            showToast('Could not accept', true);
+        }
+    } catch (err) { showToast('Error: ' + err.message, true); }
+}
+
+async function dismissPending(pid) {
+    try {
+        const res = await fetch('/cloud-share/dismiss', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: PROJECT_ID, pid }),
+        });
+        const data = await res.json();
+        if (data && data.ok) {
+            clientPending = clientPending.filter(it => it.pid !== pid);
+            renderPendingClips();
+            renderPendingHighlights();
+            renderClipsTab();
+            closeCommentPopover();
+            showToast('Dismissed');
+        } else {
+            showToast('Could not dismiss', true);
+        }
+    } catch (err) { showToast('Error: ' + err.message, true); }
+}
+
+async function acceptAllPending(filter) {
+    try {
+        const body = { project_id: PROJECT_ID };
+        if (filter) body.filter = filter;
+        const res = await fetch('/cloud-share/accept-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data && data.ok) {
+            (data.clips || []).forEach(c => {
+                if (!labelSections.some(s => Math.abs(s.start - c.start) < 0.5)) {
+                    labelSections.push({ id: ++sectionIdCounter, start: c.start, end: c.end, color: c.color, text: c.text });
+                }
+            });
+            renderAllHighlights();
+            updateSelectCount();
+            saveLabels();
+            // Resync pending from the server WITHOUT a toast (we toast below),
+            // so accept-all doesn't double-toast.
+            await refreshClientFeedback();
+            renderClipsTab();
+            const n = data.accepted_count || 0;
+            showToast('Accepted ' + n + ' item' + (n !== 1 ? 's' : ''));
+        } else {
+            showToast('Could not accept all', true);
+        }
+    } catch (err) { showToast('Error: ' + err.message, true); }
+}
+
 // Init view toggle state
 (function() {
     const v = localStorage.getItem('clips-view') || 'grid';
@@ -3082,8 +3480,10 @@ function formatDuration(secs) {
 function updateClipIcons() {
     // Reset all clip icons to play
     document.querySelectorAll('.clip-card').forEach(card => {
-        card.querySelector('.clip-icon-play').style.display = '';
-        card.querySelector('.clip-icon-pause').style.display = 'none';
+        const _p = card.querySelector('.clip-icon-play');
+        const _q = card.querySelector('.clip-icon-pause');
+        if (_p) _p.style.display = '';
+        if (_q) _q.style.display = 'none';
     });
     // Set active playing card to pause icon
     if (clipPlaying && !audio.paused) {
@@ -3356,6 +3756,32 @@ async function startTranscription() {
             timeText.textContent = `Completed in ${elapsed}s`;
             showToast('Transcription complete!');
             setTimeout(() => reloadAndKeepTab('transcript'), 3000);
+        } else if (data.needs_whisper_install) {
+            // Non-English requested but Whisper isn't installed. Surface the same
+            // on-demand installer the Retranscribe modal uses, then auto-retry. (#36)
+            fill.style.width = '0%';
+            statusText.textContent = 'Non-English transcription needs an extra engine';
+            timeText.textContent = '';
+            const banner = document.getElementById('transcribeWhisperBanner');
+            if (banner) {
+                const lang = (data.requested_language || '').toUpperCase();
+                banner.style.display = 'block';
+                banner.innerHTML = `
+                    <div style="color: var(--text-secondary); margin-bottom: 0.6rem;">
+                        <strong style="color: var(--text-primary);">Whisper engine required.</strong><br>
+                        Transcribing non-English audio${lang ? ` (${lang})` : ''} uses the Whisper engine, which isn't installed yet — about 200&nbsp;MB, 5–10 minutes on a typical connection. It installs once.
+                    </div>
+                    <button class="btn btn-sm btn-purple" id="firstRunInstallWhisper">Install non-English support</button>
+                `;
+                const ib = document.getElementById('firstRunInstallWhisper');
+                if (ib) ib.onclick = () => runWhisperInstall(banner, () => {
+                    banner.style.display = 'none';
+                    statusText.textContent = 'Transcribing...';
+                    startTranscription();
+                });
+            } else {
+                showToast('Error: ' + (data.error || 'Whisper not installed'), true);
+            }
         } else {
             statusText.textContent = 'Error';
             timeText.textContent = data.error || 'Unknown error';
@@ -4196,7 +4622,9 @@ function updateWhisperBanner() {
     const btn = document.getElementById('retranscribeBtn');
     if (!sel || !banner || !btn) return;
 
-    const engines = window._transcriptionEngines || { parakeet: true, whisper: true };
+    // Default to whisper:false on a failed engine probe — show the idempotent
+    // install prompt rather than letting non-English fail later. (#36)
+    const engines = window._transcriptionEngines || { parakeet: true, whisper: false };
     const lang = sel.value;
     // 'auto' uses Whisper internally, so it also needs the engine.
     const needsWhisper = (lang !== 'en') && !engines.whisper;
@@ -4213,28 +4641,35 @@ function updateWhisperBanner() {
             <strong style="color: var(--text-primary);">Non-English requires the Whisper engine.</strong><br>
             Not installed yet — about 200&nbsp;MB, 5–10 minutes on a typical connection.
         </div>
-        <button class="btn btn-sm btn-purple" id="installWhisperBtn" onclick="startWhisperInstall()">
+        <button class="btn btn-sm btn-purple" id="installWhisperBtn">
             Install non-English support
         </button>
     `;
     btn.disabled = true;
+    const installBtn = document.getElementById('installWhisperBtn');
+    if (installBtn) installBtn.onclick = () => runWhisperInstall(banner, () => {
+        const rbtn = document.getElementById('retranscribeBtn');
+        if (rbtn) rbtn.disabled = false;
+    });
 }
 
 let _whisperPollTimer = null;
 
-async function startWhisperInstall() {
-    const banner = document.getElementById('whisperBanner');
-    if (!banner) return;
-    banner.innerHTML = '<div style="color: var(--text-secondary);">Starting install…</div>';
+// Drive the on-demand Whisper install inside `container`, polling
+// /api/install-whisper/status every 2s. Calls onDone() once available.
+// Shared by the first-run transcribe banner (#36) and the Retranscribe modal.
+async function runWhisperInstall(container, onDone) {
+    if (!container) return;
+    container.innerHTML = '<div style="color: var(--text-secondary);">Starting install…</div>';
 
     try {
         const res = await fetch('/api/install-whisper', { method: 'POST' });
         if (!res.ok) {
-            banner.innerHTML = '<div style="color: var(--danger, #f85149);">Failed to start install. Check the server log.</div>';
+            container.innerHTML = '<div style="color: var(--danger, #f85149);">Failed to start install. Check the server log.</div>';
             return;
         }
     } catch (err) {
-        banner.innerHTML = `<div style="color: var(--danger, #f85149);">Network error: ${err.message}</div>`;
+        container.innerHTML = `<div style="color: var(--danger, #f85149);">Network error: ${err.message}</div>`;
         return;
     }
 
@@ -4252,20 +4687,21 @@ async function startWhisperInstall() {
             clearInterval(_whisperPollTimer);
             _whisperPollTimer = null;
             window._transcriptionEngines = { ...(window._transcriptionEngines || {}), whisper: true };
-            banner.innerHTML = '<div style="color: var(--success, #3fb950);">Done. You can transcribe in any language now.</div>';
-            const btn = document.getElementById('retranscribeBtn');
-            if (btn) btn.disabled = false;
+            container.innerHTML = '<div style="color: var(--success, #3fb950);">Done. Non-English transcription is ready.</div>';
+            if (onDone) onDone();
         } else if (state.status === 'error') {
             clearInterval(_whisperPollTimer);
             _whisperPollTimer = null;
-            banner.innerHTML = `
+            container.innerHTML = `
                 <div style="color: var(--danger, #f85149); margin-bottom: 0.5rem;">
                     Install failed: ${(state.detail || 'unknown error').replace(/</g, '&lt;')}
                 </div>
-                <button class="btn btn-sm btn-purple" onclick="startWhisperInstall()">Try again</button>
+                <button class="btn btn-sm btn-purple" id="retryWhisperBtn">Try again</button>
             `;
+            const retry = document.getElementById('retryWhisperBtn');
+            if (retry) retry.onclick = () => runWhisperInstall(container, onDone);
         } else {
-            banner.innerHTML = `
+            container.innerHTML = `
                 <div style="color: var(--text-secondary);">
                     ${(state.detail || 'Installing…').replace(/</g, '&lt;')}
                 </div>
@@ -4309,6 +4745,8 @@ function showToast(msg, isError = false) {
     toast.classList.add('show');
     setTimeout(() => toast.classList.remove('show'), 5000);
 }
+// Expose so inject-cloud-share.js can call it as a fallback after a pull.
+window.showToast = showToast;
 
 // Compose an NLE-export toast that's honest about what actually happened.
 // FCP auto-imports on Finder-open via file association; Premiere and Resolve
@@ -5291,7 +5729,7 @@ function renderClientNotesPanel() {
     const sorted = [...clientComments].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
     panel.innerHTML = `<div class="client-notes-header">
-        <span class="card-title">Client Notes</span>
+        <span class="card-title">Collaborator Notes</span>
         <span class="client-notes-count">${sorted.length}</span>
         <button class="btn btn-sm" onclick="document.getElementById('clientNotesPanel').classList.toggle('collapsed')" style="margin-left:auto;">Toggle</button>
     </div>
@@ -5323,6 +5761,41 @@ function renderClientNotesPanel() {
 
 // Load comments on page load
 loadComments();
+// Paint any client-proposed highlights seeded from meta.json. (Pending clip
+// cards are already rendered by the renderClipsTab() initial call above.)
+renderPendingHighlights();
+
+// ── Client feedback refresh (single post-pull entry point) ───────────
+// inject-cloud-share.js calls this after a successful POST /cloud-share/
+// pull-feedback. It re-fetches BOTH pending items and comments from
+// GET /cloud-share/feedback, refreshes every dependent surface, and (if a
+// summary string is passed) shows a toast. Editor-only: early-returns when
+// IS_SHARED so the public viewer never hits the loopback-only endpoint.
+window.refreshClientFeedback = async function(summary) {
+    if (IS_SHARED) return;
+    try {
+        const res = await fetch('/cloud-share/feedback?project_id=' + encodeURIComponent(PROJECT_ID));
+        if (res.ok) {
+            const data = await res.json();
+            clientPending = data.pending || [];
+            clientComments = data.comments || [];
+            renderPendingClips();
+            renderPendingHighlights();
+            renderClipsTab();
+            renderCommentMarkers();
+            updateCommentBadge();
+            renderClientNotesPanel();
+        }
+    } catch (err) {
+        console.error('refreshClientFeedback failed:', err);
+    }
+    if (summary && typeof showToast === 'function') showToast(summary);
+};
+
+// Expose pending action handlers for inline onclick + inject consistency.
+window.acceptPending = acceptPending;
+window.dismissPending = dismissPending;
+window.acceptAllPending = acceptAllPending;
 
 // "Add to Story Builder" function for clips in other tabs
 function renderStoryClipLibrary() {

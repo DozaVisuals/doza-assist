@@ -1394,13 +1394,22 @@ def serve_media_audio(project_id):
 
 
 # ── Optional non-English (Whisper) engine, installed on demand ─────────────
-# Default install ships only Parakeet MLX (English). Whisper is the gateway
-# to 99-language support but adds ~200MB of PyTorch+cmake to setup, so it's
-# moved behind this on-demand install. The Retranscribe modal calls these
-# endpoints when the user picks a non-English language and Whisper is missing.
+# Default install ships only Parakeet MLX (English). Whisper is the gateway to
+# 99-language support. Pulling it in on demand keeps the base setup small, but
+# the real cost is bigger than it looks: `pip install openai-whisper` drags in
+# PyTorch and friends (~500 MB), and the first non-English transcription then
+# downloads the large-v3-turbo speech model (~1.5 GB) on top. We do BOTH here,
+# with live streamed progress, so "Install non-English support" genuinely means
+# ready-to-go and the first German transcription doesn't stall on a silent
+# multi-GB download behind a fake progress bar (issue #36).
 
 import importlib.util as _impu
 import sys as _sys
+
+# The speech model _transcribe_whisper loads first (transcribe.py). Pre-fetching
+# this during install — instead of lazily mid-transcription — is what turns a
+# silent "hang" into visible progress.
+_WHISPER_MODEL = 'turbo'
 
 _whisper_install_state = {
     'status': 'idle',  # idle | running | done | error
@@ -1419,9 +1428,81 @@ def _engine_available(name):
         return False
 
 
+def _whisper_cache_dir():
+    """Where whisper.load_model caches weights (mirrors whisper's own default)."""
+    base = os.environ.get('XDG_CACHE_HOME') or os.path.join(os.path.expanduser('~'), '.cache')
+    return os.path.join(base, 'whisper')
+
+
+def _whisper_model_cached():
+    """True if the turbo weights are already on disk, so a re-run / second
+    project can skip the ~1.5 GB download."""
+    try:
+        return any(
+            f.startswith('large-v3-turbo') and f.endswith('.pt')
+            for f in os.listdir(_whisper_cache_dir())
+        )
+    except OSError:
+        return False
+
+
+def _whisper_ready():
+    """Non-English is truly ready only when BOTH the package is importable and
+    its speech model is downloaded. The frontend polls on this so 'done' means
+    the next transcription runs immediately rather than kicking off a hidden
+    multi-GB model download."""
+    return _engine_available('whisper') and _whisper_model_cached()
+
+
+def _stream_subprocess(cmd, set_detail, prefix='', timeout=3600):
+    """Run cmd, streaming combined stdout/stderr, pushing the freshest progress
+    line into the install banner via set_detail(). Handles tqdm's \\r-rewritten
+    progress bars (the model download) as well as pip's newline output. A
+    watchdog kills the process after `timeout` s so a stalled network can't wedge
+    the worker forever. Returns (returncode, tail) — tail is the last ~25 lines
+    for error reporting."""
+    import collections
+    import re as _re
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+    killer = threading.Timer(timeout, proc.kill)
+    killer.start()
+    tail = collections.deque(maxlen=25)
+    buf = ''
+    try:
+        assert proc.stdout is not None
+        while True:
+            chunk = proc.stdout.read(128)
+            if not chunk:
+                break
+            buf += chunk
+            # tqdm rewrites the current line with '\r'; pip uses '\n'. Split on
+            # both so we always surface the latest progress fragment.
+            parts = _re.split(r'[\r\n]', buf)
+            buf = parts.pop()
+            for line in parts:
+                line = line.strip()
+                if line:
+                    tail.append(line)
+                    set_detail(prefix + line)
+        if buf.strip():
+            tail.append(buf.strip())
+            set_detail(prefix + buf.strip())
+        proc.wait()
+    finally:
+        killer.cancel()
+    return proc.returncode, '\n'.join(tail)
+
+
 def _install_whisper_worker():
-    """Background install of openai-whisper into the running venv. Updates
-    _whisper_install_state so the frontend can poll for progress."""
+    """Background, on-demand prep of non-English support into the running venv:
+    pip-install openai-whisper (if missing), then pre-download the turbo speech
+    model (if missing). Both steps stream live progress into
+    _whisper_install_state so the banner shows real movement instead of a static
+    'this takes a few minutes' string (issue #36)."""
     global _whisper_install_state
 
     def set_state(status, detail):
@@ -1429,70 +1510,78 @@ def _install_whisper_worker():
             _whisper_install_state['status'] = status
             _whisper_install_state['detail'] = detail
 
+    def set_detail(detail):
+        with _whisper_install_lock:
+            _whisper_install_state['detail'] = detail
+
     try:
-        # cmake is a transitive build-time dep of some whisper sub-packages on
-        # certain Python versions. Best-effort install — if brew isn't present
-        # or the install fails, pip will tell us when it actually needs cmake.
-        set_state('running', 'Installing cmake (build dependency)...')
-        for brew_path in ('/opt/homebrew/bin/brew', '/usr/local/bin/brew'):
-            if os.path.isfile(brew_path):
-                subprocess.run(
-                    [brew_path, 'install', 'cmake'],
-                    capture_output=True, timeout=600,
-                )
-                break
+        # Step 1 — the package (+ PyTorch). All deps ship as binary wheels on the
+        # Python versions we support, so there's no source build and no cmake;
+        # the old proactive `brew install cmake` was pure latency with no UI
+        # feedback, so it's gone. pip installs into THIS venv because
+        # sys.executable is the venv python (launcher.sh sources the venv first).
+        if not _engine_available('whisper'):
+            set_state('running', 'Downloading the Whisper engine (~500 MB, includes PyTorch)…')
+            rc, tail = _stream_subprocess(
+                [_sys.executable, '-m', 'pip', 'install', '--progress-bar', 'on', 'openai-whisper'],
+                set_detail, prefix='pip · ',
+            )
+            if rc != 0:
+                set_state('error', f'Engine install failed: …{tail[-400:]}')
+                return
+            import importlib
+            importlib.invalidate_caches()
+            if not _engine_available('whisper'):
+                set_state('error', 'Install completed but the whisper module is not importable.')
+                return
 
-        # pip install into the same venv this Flask process is running from.
-        # sys.executable resolves to venv/bin/python3 because launcher.sh
-        # sources the venv before exec'ing app.py.
-        set_state('running', 'Installing OpenAI Whisper (~200MB) — this takes a few minutes...')
-        proc = subprocess.run(
-            [_sys.executable, '-m', 'pip', 'install', 'openai-whisper'],
-            capture_output=True, text=True, timeout=1800,
-        )
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or '')[-400:]
-            set_state('error', f'pip install failed: {tail}')
-            return
+        # Step 2 — the speech model (the big one). Done here, with progress, so
+        # the first German transcription is instant instead of stalling on a
+        # silent ~1.5 GB download.
+        if not _whisper_model_cached():
+            set_state('running', 'Downloading the speech model (~1.5 GB, one time)…')
+            rc, tail = _stream_subprocess(
+                # import transcribe first so its certifi SSL patch is applied —
+                # the weights are fetched over HTTPS and macOS framework Python
+                # otherwise fails certificate verification.
+                [_sys.executable, '-c',
+                 f'import transcribe, whisper; whisper.load_model("{_WHISPER_MODEL}")'],
+                set_detail, prefix='model · ',
+            )
+            if rc != 0 or not _whisper_model_cached():
+                set_state('error', f'Speech-model download failed: …{tail[-400:]}')
+                return
 
-        # Force a re-scan of the import system so transcribe.py picks up the
-        # new package without restarting Flask.
-        import importlib
-        importlib.invalidate_caches()
+        set_state('done', 'Done — non-English transcription is ready.')
 
-        if _engine_available('whisper'):
-            set_state('done', 'Done — non-English transcription is now available.')
-        else:
-            set_state('error', 'Install completed but whisper module is not importable.')
-
-    except subprocess.TimeoutExpired:
-        set_state('error', 'Install timed out after 30 minutes. Check your internet connection.')
     except Exception as e:
         set_state('error', f'Install failed: {e}')
 
 
 @app.route('/api/transcription-engines', methods=['GET'])
 def transcription_engines():
-    """Report which transcription engines are currently installed."""
+    """Report which transcription engines are ready to use. 'whisper' means
+    fully ready (package + speech model) so the install banner doesn't hide
+    itself while the ~1.5 GB model is still missing."""
     return jsonify({
         'parakeet': _engine_available('parakeet_mlx'),
-        'whisper': _engine_available('whisper'),
+        'whisper': _whisper_ready(),
     })
 
 
 @app.route('/api/install-whisper', methods=['POST'])
 def install_whisper():
-    """Kick off a background install of openai-whisper. Idempotent — returns
-    immediately if already installed or already running."""
+    """Kick off a background install of openai-whisper + speech model. Idempotent
+    — returns immediately if already fully ready or already running."""
     with _whisper_install_lock:
-        if _engine_available('whisper'):
+        if _whisper_ready():
             _whisper_install_state['status'] = 'done'
             _whisper_install_state['detail'] = 'Already installed.'
             return jsonify({'status': 'done'})
         if _whisper_install_state['status'] == 'running':
             return jsonify({'status': 'running'})
         _whisper_install_state['status'] = 'running'
-        _whisper_install_state['detail'] = 'Starting install...'
+        _whisper_install_state['detail'] = 'Starting…'
         _whisper_install_state['started_at'] = time.time()
 
     threading.Thread(target=_install_whisper_worker, daemon=True).start()
@@ -1504,7 +1593,7 @@ def install_whisper_status():
     """Poll endpoint for the frontend install banner."""
     with _whisper_install_lock:
         state = dict(_whisper_install_state)
-    state['available'] = _engine_available('whisper')
+    state['available'] = _whisper_ready()
     return jsonify(state)
 
 
@@ -1525,9 +1614,22 @@ def transcribe(project_id):
     # with a generic "no engine" error after the audio extraction. The frontend
     # uses needs_whisper_install to render an inline install prompt.
     requested_language = project.get('language', 'en')
-    if requested_language not in ('en', 'auto') and not _engine_available('whisper'):
-        project['status'] = 'error'
-        project['error'] = 'whisper_not_installed'
+    # 'auto' is NOT English-safe: transcribe.py skips Parakeet for anything that
+    # isn't literally 'en' and routes to Whisper, so Auto-detect needs the engine
+    # exactly like German does. The old guard whitelisted 'auto', so picking
+    # Auto-detect on a fresh install sailed past here and then hard-crashed
+    # downstream with a bare "No transcription engine found" 500 and no installer
+    # (issue #36). Treat every non-'en' language the same.
+    if requested_language != 'en' and not _engine_available('whisper'):
+        # Do NOT persist status='error' here. The transcribe card — which holds
+        # the on-demand installer banner and auto-retry — only renders while
+        # status == 'uploaded'. Flipping to 'error' hid that whole card on the
+        # next page load, so the install button the user was told about
+        # disappeared after a single attempt and left them dead-ended (issue
+        # #36). Keep the project in its pre-transcribe state so the banner
+        # reliably reappears on every visit until Whisper is installed.
+        project['status'] = 'uploaded'
+        project.pop('error', None)
         save_project(project_id, project)
         return jsonify({
             'error': f'Non-English transcription ({requested_language}) requires the Whisper engine, which is not installed.',
@@ -1587,6 +1689,21 @@ def transcribe(project_id):
         return jsonify({'status': 'transcribed', 'transcript': result})
 
     except Exception as e:
+        # Defense in depth for the guard above: if transcription still blew up
+        # on a non-English job because the Whisper engine isn't importable
+        # (e.g. it was uninstalled between the guard check and load_model, or a
+        # routing change slips a non-'en' job past the guard), surface the
+        # installer instead of a dead-end 500 — and keep the project renderable
+        # so the banner survives a reload (issue #36).
+        if requested_language != 'en' and not _engine_available('whisper'):
+            project['status'] = 'uploaded'
+            project.pop('error', None)
+            save_project(project_id, project)
+            return jsonify({
+                'error': f'Non-English transcription ({requested_language}) requires the Whisper engine, which is not installed.',
+                'needs_whisper_install': True,
+                'requested_language': requested_language,
+            }), 400
         project['status'] = 'error'
         project['error'] = str(e)
         save_project(project_id, project)

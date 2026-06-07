@@ -2685,7 +2685,7 @@ async function startTranscription() {
                 banner.innerHTML = `
                     <div style="color: var(--text-secondary); margin-bottom: 0.6rem;">
                         <strong style="color: var(--text-primary);">Whisper engine required.</strong><br>
-                        Transcribing non-English audio${lang ? ` (${lang})` : ''} uses the Whisper engine, which isn't installed yet — about 200&nbsp;MB, 5–10 minutes on a typical connection. It installs once.
+                        Transcribing non-English audio${lang ? ` (${lang})` : ''} uses the Whisper engine, which isn't installed yet. It downloads the engine and a speech model (~2&nbsp;GB total) one time — you'll see live progress below, and it can take 10–20&nbsp;minutes on a slower connection.
                     </div>
                     <button class="btn btn-sm btn-purple" id="firstRunInstallWhisper">Install non-English support</button>
                 `;
@@ -3341,7 +3341,7 @@ function updateWhisperBanner() {
     banner.innerHTML = `
         <div style="color: var(--text-secondary); margin-bottom: 0.5rem;">
             <strong style="color: var(--text-primary);">Non-English requires the Whisper engine.</strong><br>
-            Not installed yet — about 200&nbsp;MB, 5–10 minutes on a typical connection.
+            Not installed yet — downloads the engine and a speech model (~2&nbsp;GB total) one time, with live progress. Allow 10–20&nbsp;minutes on a slower connection.
         </div>
         <button class="btn btn-sm btn-purple" id="installWhisperBtn">
             Install non-English support

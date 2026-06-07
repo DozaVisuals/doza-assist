@@ -1,8 +1,9 @@
-"""FCPXML parser for multicam and sync-clip containers.
+"""FCPXML parser for multicam, sync-clip, and plain asset-clip spines.
 
 Walks an FCPXML document to:
 
-- Identify every ``<mc-clip>`` or ``<sync-clip>`` element on the main spine.
+- Identify every ``<mc-clip>``, ``<sync-clip>``, or ``<asset-clip>`` element on
+  the main spine.
 - For each segment, resolve the audio source:
   - mc-clip → find the angle enabled by ``<mc-source srcEnable="audio">`` on
     that segment, locate it in the referenced ``<media>/<multicam>``, and
@@ -11,6 +12,11 @@ Walks an FCPXML document to:
     direct child of ``<sync-clip>`` or nested in ``<sync-clip>/<spine>``) and
     resolve it to a filesystem path. Also read
     ``<sync-source>/<audio-role-source@active>`` to detect FCP-muted segments.
+  - asset-clip → a plain single-camera clip on the spine (Meta Glasses, a
+    mirrorless body, a screen capture, a drone — anything that isn't a multicam
+    or a synced pair). Resolve its ``ref`` straight to the ``<asset>`` and use
+    that file as both video and audio. A spine of these laid end-to-end (a
+    "rush" timeline) is the common single-cam case.
 - Preserve the verbatim ``<resources>`` block and full source bytes so the
   writer module can round-trip output without regenerating asset IDs or
   bookmark data.
@@ -49,6 +55,12 @@ SUPPORTED_VERSIONS = {
 NLE_FCP = "fcp"
 NLE_RESOLVE = "resolve"
 NLE_UNKNOWN = "unknown"
+
+# The spine child tags this parser turns into :class:`SpineSegment` entries, in
+# the order it visits them (document order). The writer's original-spine walker
+# MUST filter on this exact tuple so its element index lines up one-for-one with
+# ``ParsedFCPXML.spine_segments`` — keep them sourced from here, never inline.
+SPINE_SEGMENT_TAGS = ("mc-clip", "sync-clip", "asset-clip")
 
 _log = logging.getLogger(__name__)
 
@@ -138,18 +150,18 @@ class SegmentAudioSource:
 
 @dataclass
 class SpineSegment:
-    """One ``<mc-clip>`` or ``<sync-clip>`` entry in the sequence spine.
+    """One ``<mc-clip>``, ``<sync-clip>``, or ``<asset-clip>`` entry in the spine.
 
     ``mc_sources`` captures the full ``<mc-source>`` enablement on this spine
     mc-clip (typically one audio + one video angle). The writer replays these
     verbatim on each emitted select so the new project shows the same angle
-    mix as the source timeline.
+    mix as the source timeline. Empty for sync-clip and asset-clip segments.
 
     ``audio_source`` is the resolved audio for this segment specifically.
     """
 
-    kind: str                     # 'mc-clip' | 'sync-clip'
-    ref: str                      # reference into <resources> (mc-clip) or "" (inline sync-clip)
+    kind: str                     # 'mc-clip' | 'sync-clip' | 'asset-clip'
+    ref: str                      # <resources> id (mc-clip/asset-clip) or "" (inline sync-clip)
     name: str
     offset_fraction: Fraction
     start_fraction: Fraction
@@ -196,7 +208,7 @@ class ParsedFCPXML:
     version: str
     source_path: str
 
-    container_type: str                           # 'mc-clip' | 'sync-clip' (first segment's kind)
+    container_type: str                           # first segment's kind: mc-clip | sync-clip | asset-clip
     container_ref: str                            # first segment's ref ("" for inline sync-clip)
 
     audio_file_path: str                          # first non-muted segment's audio path
@@ -223,6 +235,14 @@ class ParsedFCPXML:
 
     original_resources_xml: bytes = b""           # verbatim byte-slice from the source
     original_fcpxml_bytes: bytes = b""
+
+    # Representative segment's container / asset timecode origins. Needed to
+    # invert the source→container mapping when locating selects on a SINGLE-
+    # source spine (multi-source spines locate via timeline offsets instead).
+    # Zero for sync-clips and tcStart-zero media; non-zero only for embedded /
+    # jam-synced timecode (pro cameras, time-of-day TC). Mirror audio_angle_*.
+    audio_container_tc_start_fraction: Fraction = Fraction(0)
+    audio_asset_start_fraction: Fraction = Fraction(0)
 
     @property
     def timeline_duration_seconds(self) -> float:
@@ -265,6 +285,8 @@ class ParsedFCPXML:
             "active_audio_angle_id": self.active_audio_angle_id,
             "audio_angle_offset_fraction": _frac(self.audio_angle_offset_fraction),
             "audio_angle_start_fraction": _frac(self.audio_angle_start_fraction),
+            "audio_container_tc_start_fraction": _frac(self.audio_container_tc_start_fraction),
+            "audio_asset_start_fraction": _frac(self.audio_asset_start_fraction),
             "sequence_format_id": self.sequence_format_id,
             "sequence_frame_duration": _frac(self.sequence_frame_duration),
             "sequence_framerate": self.sequence_framerate,
@@ -616,6 +638,48 @@ def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
     }
 
 
+def _resolve_asset_clip_audio(asset_clip_el, resource_by_id: dict) -> dict:
+    """Resolve the audio source for a plain spine ``<asset-clip>``.
+
+    A single-camera clip on the main spine references one ``<asset>`` directly;
+    that asset's media file carries both the video and the audio. So the
+    "audio source" is simply that asset's media-rep path — no multicam angle or
+    sync pairing to disambiguate.
+
+    The asset-clip's ``start`` (carried on the :class:`SpineSegment`) is measured
+    in the asset's local timeline, whose origin is the asset's own ``start``.
+    That is non-zero only for media with embedded start timecode (rare on
+    single-cam consumer footage like Meta Glasses, but real for pro cameras), so
+    we surface it as ``asset_start`` and let the timeline-audio renderer subtract
+    it to seek to the right place in the file. There is no container indirection,
+    so ``angle_offset`` / ``angle_start`` / ``container_tc_start`` are all zero —
+    the same convention sync-clips use.
+
+    ``is_muted`` is True when the asset declares ``hasAudio="0"`` (a video-only
+    clip — silent b-roll): it still occupies timeline space but contributes
+    silence, which is exactly what FCP plays there.
+    """
+    asset_ref = asset_clip_el.get("ref")
+    asset_el = resource_by_id.get(asset_ref)
+    if asset_el is None or asset_el.tag != "asset":
+        raise ParseError(
+            f"asset-clip ref {asset_ref!r} does not resolve to an <asset> "
+            "(compound clips / <ref-clip> are not supported)"
+        )
+    asset_start = _safe_parse_rational(
+        asset_el.get("start"), what=f"asset {asset_ref!r} start",
+    )
+    return {
+        "path": _resolve_asset_path(asset_el),
+        "asset_id": asset_ref,
+        "angle_offset": Fraction(0),
+        "angle_start": Fraction(0),
+        "container_tc_start": Fraction(0),
+        "asset_start": asset_start,
+        "is_muted": asset_el.get("hasAudio") == "0",
+    }
+
+
 def _resolve_segment_audio(
     child, resource_by_id: dict, mc_sources: List[dict]
 ) -> SegmentAudioSource:
@@ -640,6 +704,18 @@ def _resolve_segment_audio(
             angle_start_fraction=info["angle_start"],
             active_audio_angle_id=angle_id,
             is_muted=False,
+            container_tc_start_fraction=info["container_tc_start"],
+            asset_start_fraction=info["asset_start"],
+        )
+    elif child.tag == "asset-clip":
+        info = _resolve_asset_clip_audio(child, resource_by_id)
+        return SegmentAudioSource(
+            path=info["path"],
+            asset_id=info["asset_id"],
+            angle_offset_fraction=info["angle_offset"],
+            angle_start_fraction=info["angle_start"],
+            active_audio_angle_id=None,
+            is_muted=info["is_muted"],
             container_tc_start_fraction=info["container_tc_start"],
             asset_start_fraction=info["asset_start"],
         )
@@ -722,7 +798,7 @@ def parse_fcpxml(path) -> ParsedFCPXML:
     segments: List[SpineSegment] = []
 
     for child in spine:
-        if child.tag not in ("mc-clip", "sync-clip"):
+        if child.tag not in SPINE_SEGMENT_TAGS:
             continue
 
         mc_sources: List[dict] = []
@@ -753,7 +829,24 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         segments.append(seg)
 
     if not segments:
-        raise ParseError("spine contains no <mc-clip> or <sync-clip> elements")
+        # Report what the spine *did* contain so the message is actionable —
+        # e.g. a compound-clip ("<ref-clip>") or titles-only timeline tells us
+        # exactly which shape to support next, instead of a dead-end error.
+        present = sorted({
+            c.tag for c in spine if isinstance(c.tag, str)
+        })
+        found = f" (spine contains: {', '.join(present)})" if present else " (spine is empty)"
+        hint = ""
+        if "ref-clip" in present:
+            # Compound clips wrap their real clips a level down; flattening on
+            # export turns them back into the asset-/mc-/sync-clips we read.
+            hint = (" — this looks like a compound-clip timeline; in Final Cut "
+                    "choose Clip ▸ Break Apart Clip Items (or flatten compound "
+                    "clips) before exporting XML")
+        raise ParseError(
+            "spine has no clips Doza Assist can read — expected one or more "
+            "<asset-clip>, <mc-clip>, or <sync-clip> elements" + found + hint
+        )
 
     # Representative source: first non-muted segment, else first segment.
     representative = next(
@@ -790,6 +883,8 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         active_audio_angle_id=rep_audio.active_audio_angle_id,
         audio_angle_offset_fraction=rep_audio.angle_offset_fraction,
         audio_angle_start_fraction=rep_audio.angle_start_fraction,
+        audio_container_tc_start_fraction=rep_audio.container_tc_start_fraction,
+        audio_asset_start_fraction=rep_audio.asset_start_fraction,
         sequence_format_id=sequence_format_id,
         sequence_frame_duration=frame_duration,
         timeline_duration_fraction=sequence_duration,

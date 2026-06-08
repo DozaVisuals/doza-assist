@@ -323,6 +323,61 @@ def _set_clip_note(clip_el: etree._Element, note_text: str) -> None:
     clip_el.insert(idx, note)
 
 
+# Direct-child elements that carry their own position inside the clip's (asset)
+# timeline. When a select trims the source clip to a sub-range, these can fall
+# outside the kept range; FCP still imports the clip but silently clips
+# out-of-range markers and ignores overshooting durations, leaving stale,
+# misleading metadata on the select. Structure-critical children (conform-rate,
+# format, audio-channel-source config, the sync-clip inner <spine>, and filters
+# with no explicit range — which apply to the whole clip) are NOT in this set
+# and are preserved verbatim.
+_TRIMMABLE_TIMED_TAGS = (
+    "marker", "chapter-marker", "keyword", "rating", "analysis-marker",
+    "filter-video", "filter-audio",
+)
+
+
+def _trim_nested_timing(
+    clip_el: etree._Element,
+    new_start: Fraction,
+    new_end: Fraction,
+    frame_duration: Fraction,
+) -> None:
+    """Drop / clamp inherited timed children that fall outside a trimmed select.
+
+    Only DIRECT children are touched — a sync-clip's inner ``<spine>`` and the
+    camera/audio clips nested within it are part of the source structure and are
+    preserved verbatim. A child's ``start`` / ``duration`` is in the clip's own
+    (asset) timeline, the same coordinate as the clip's rewritten ``start``, so
+    the range comparison is direct. Children fully outside ``[new_start,
+    new_end)`` are removed; those that partially overlap are clamped to it and
+    re-snapped to the frame grid.
+    """
+    for child in list(clip_el):
+        if child.tag not in _TRIMMABLE_TIMED_TAGS:
+            continue
+        start_attr = child.get("start")
+        if start_attr is None:
+            continue  # no position of its own (e.g. a whole-clip filter) — keep
+        a_start = parse_rational(start_attr)
+        dur_attr = child.get("duration")
+        if dur_attr is not None:
+            a_end = a_start + parse_rational(dur_attr)
+            outside = a_end <= new_start or a_start >= new_end
+        else:
+            a_end = a_start
+            outside = a_start < new_start or a_start >= new_end
+        if outside:
+            clip_el.remove(child)
+            continue
+        clamped_start = max(a_start, new_start)
+        if clamped_start != a_start:
+            child.set("start", seconds_to_rational(clamped_start, frame_duration))
+        if dur_attr is not None:
+            clamped_end = min(a_end, new_end)
+            child.set("duration", seconds_to_rational(clamped_end - clamped_start, frame_duration))
+
+
 def _build_copied_clip_node(
     parsed: ParsedFCPXML,
     select: Select,
@@ -348,7 +403,9 @@ def _build_copied_clip_node(
     the in-point in the asset's own timeline. Either way it maps directly to the
     copied clip's ``start``. Any stale ``audioStart`` / ``audioDuration`` (a
     source J/L split) is dropped so the select's audio follows its new range
-    instead of pointing at the original clip's audio window.
+    instead of pointing at the original clip's audio window. Inherited timed
+    children (markers, keyword / rating ranges) that fall outside the trimmed
+    range are dropped or clamped — see :func:`_trim_nested_timing`.
     """
     new_clip = copy.deepcopy(original_element)
     new_clip.set("offset", offset_str)
@@ -358,6 +415,14 @@ def _build_copied_clip_node(
     for attr in ("audioStart", "audioDuration"):
         if attr in new_clip.attrib:
             del new_clip.attrib[attr]
+
+    # The select keeps only its slice of the source clip, so prune inherited
+    # annotations/effects that now sit outside that slice.
+    sel_start = parse_rational(start_str)
+    _trim_nested_timing(
+        new_clip, sel_start, sel_start + parse_rational(duration_str),
+        parsed.sequence_frame_duration,
+    )
 
     note_text = select.note
     if select.speaker:

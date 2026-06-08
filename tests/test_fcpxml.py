@@ -1192,3 +1192,71 @@ class TestAssetClipRoundTrip:
         markers = [c.findall("marker") for c in spine_clips]
         assert [len(m) for m in markers] == [0, 1, 0]
         assert parse_rational(markers[1][0].get("start")) == 50
+
+
+# A single-cam asset-clip carrying inherited annotations: a marker before the
+# select, one inside, one after, and a keyword range that straddles the select.
+ANNOTATED_ASSET_CLIP_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="r2" name="cam" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/cam.mp4"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="Annotated">
+                <sequence format="r1" duration="100s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="r2" offset="0s" name="cam" start="0s" duration="100s" audioRole="dialogue">
+                            <marker start="5s" duration="1/30s" value="before"/>
+                            <marker start="25s" duration="1/30s" value="inside"/>
+                            <marker start="60s" duration="1/30s" value="after"/>
+                            <keyword start="10s" duration="40s" value="spanning"/>
+                        </asset-clip>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestSelectTrimsStaleAnnotations:
+    """A select keeps only a sub-range of its source clip. Inherited markers /
+    keyword ranges that fall outside that sub-range must be dropped (and
+    straddling ranges clamped) — otherwise the round-tripped select carries
+    metadata pointing at footage it no longer contains."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "annotated.fcpxml"
+        p.write_text(ANNOTATED_ASSET_CLIP_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_out_of_range_markers_dropped_and_keyword_clamped(self, parsed):
+        # Single-source → select time is file seconds. Keep 20–40s.
+        out = write_selects_as_new_project(parsed, [Select(20, 40, label="Mid")])
+        clip = etree.fromstring(out).find(".//sequence/spine/asset-clip")
+        # Only the marker inside [20s, 40s) survives.
+        markers = clip.findall("marker")
+        assert [m.get("value") for m in markers] == ["inside"]
+        assert parse_rational(markers[0].get("start")) == 25
+        # The keyword [10s, 50s) is clamped to the kept range [20s, 40s).
+        kws = clip.findall("keyword")
+        assert len(kws) == 1
+        assert parse_rational(kws[0].get("start")) == 20
+        assert parse_rational(kws[0].get("duration")) == 20
+
+    def test_no_annotation_escapes_the_clip_bounds(self, parsed):
+        out = write_selects_as_new_project(parsed, [Select(20, 40, label="Mid")])
+        clip = etree.fromstring(out).find(".//sequence/spine/asset-clip")
+        clip_start = parse_rational(clip.get("start"))
+        clip_end = clip_start + parse_rational(clip.get("duration"))
+        for child in clip:
+            if child.tag in ("marker", "keyword"):
+                s = parse_rational(child.get("start"))
+                e = s + parse_rational(child.get("duration") or "0s")
+                assert clip_start <= s < clip_end and e <= clip_end

@@ -188,6 +188,10 @@ function commitSelection(startWord, endWord, color) {
         }
     }
 
+    // Clips require at least 2 words. A single-word selection (e.g. a click while
+    // reading through the transcript) must NOT create a clip.
+    if (range.length < 2) return;
+
     // Snapshot BEFORE the mutation so Undo restores the pre-add state.
     _snapshotForUndo();
 

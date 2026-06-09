@@ -15,6 +15,7 @@ When imported into FCPX, the editor gets:
 """
 
 import os
+import re
 import math
 import uuid
 from fractions import Fraction
@@ -269,7 +270,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
     safe_title = _escape_xml(story_title)
     uid = f"doza-story-{uuid.uuid4().hex[:8]}"
 
-    markers = sorted(markers, key=lambda m: m.get('_order', markers.index(m)))
+    markers = [m for _, m in sorted(enumerate(markers), key=lambda iv: iv[1].get('_order', iv[0]))]
 
     if not media_duration and markers:
         media_duration = max(m['end'] for m in markers) + 10.0
@@ -418,7 +419,7 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
     </resources>
     <library>
         <event name="{_escape_xml(project_name)} Markers">
-            <project name="{_escape_xml(project_name)}" uid="doza-{project_name.replace(' ', '-').lower()}">
+            <project name="{_escape_xml(project_name)}" uid="doza-{re.sub(r'[^a-z0-9]+', '-', project_name.lower()).strip('-') or 'project'}">
                 <sequence format="r1" duration="{total_dur_str}" tcStart="0/1s" tcFormat="NDF">
                     <spine>
                         <gap name="Gap" offset="0/1s" duration="{total_dur_str}" start="0/1s">

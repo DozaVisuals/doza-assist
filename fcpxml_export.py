@@ -16,6 +16,7 @@ When imported into FCPX, the editor gets:
 
 import os
 import math
+import re
 import uuid
 from fractions import Fraction
 from urllib.parse import quote
@@ -257,7 +258,13 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
     safe_title = _escape_xml(story_title)
     uid = f"doza-story-{uuid.uuid4().hex[:8]}"
 
-    markers = sorted(markers, key=lambda m: m.get('_order', markers.index(m)))
+    # Stable order: _order when stamped, original position otherwise.
+    # (list.index() as the fallback was O(n²) and aliased equal-dict
+    # duplicates to the first occurrence, interleaving wrongly with real
+    # _order values when a caller passed a mixed list.)
+    markers = [m for _, m in sorted(
+        enumerate(markers), key=lambda iv: iv[1].get('_order', iv[0]),
+    )]
 
     if not media_duration and markers:
         media_duration = max(m['end'] for m in markers) + 10.0
@@ -370,6 +377,12 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
 
     markers_block = '\n'.join(markers_xml)
 
+    # uid must be XML-attribute safe. This was the one place project_name was
+    # interpolated unescaped — a name like "Tom & Jerry" emitted a raw '&'
+    # and FCP rejected the whole file at parse. The uid is an opaque token,
+    # so reduce the name to [a-z0-9-] rather than entity-escaping it.
+    uid_token = re.sub(r'[^a-z0-9]+', '-', project_name.lower()).strip('-') or 'project'
+
     fcpxml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 
@@ -379,7 +392,7 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
     </resources>
     <library>
         <event name="{_escape_xml(project_name)} Markers">
-            <project name="{_escape_xml(project_name)}" uid="doza-{project_name.replace(' ', '-').lower()}">
+            <project name="{_escape_xml(project_name)}" uid="doza-{uid_token}">
                 <sequence format="r1" duration="{total_dur_str}" tcStart="0/1s" tcFormat="NDF">
                     <spine>
                         <gap name="Gap" offset="0/1s" duration="{total_dur_str}" start="0/1s">

@@ -475,7 +475,7 @@ class TestLayer2Integration:
             json_calls.append(1)
             return '{"candidates": []}'
 
-        def fake_chat(prompt, system_prompt=""):
+        def fake_chat(system_message, messages, num_ctx=32768, call_site=None):
             return 'stub'
 
         with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json), \

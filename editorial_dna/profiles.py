@@ -95,10 +95,10 @@ def _normalize_index(index):
 
 
 def _save_index(index):
+    from doza_assist.jsonio import atomic_write_json
     _ensure_dirs()
     index = _normalize_index(index)
-    with open(INDEX_PATH, 'w') as f:
-        json.dump(index, f, indent=2)
+    atomic_write_json(INDEX_PATH, index)
 
 
 def _index_entry(profile_id, name, created_at):
@@ -120,9 +120,8 @@ def _read_json(path, default=None):
 
 
 def _write_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+    from doza_assist.jsonio import atomic_write_json
+    atomic_write_json(path, data)
 
 
 def _write_text(path, text):
@@ -390,7 +389,9 @@ def set_profile_active_toggle(profile_id, active):
 
 def delete_profile(profile_id):
     """Remove a profile folder + index entry. Drop it from the active set if
-    present.
+    present. If that empties the active set while other profiles remain,
+    promote the first remaining profile — deleting your active style should
+    never silently leave you with NO active style when others exist.
     """
     pd = _profile_dir(profile_id)
     if os.path.isdir(pd):
@@ -400,6 +401,8 @@ def delete_profile(profile_id):
     index['active_profile_ids'] = [
         pid for pid in (index.get('active_profile_ids') or []) if pid != profile_id
     ]
+    if not index['active_profile_ids'] and index['profiles']:
+        index['active_profile_ids'] = [index['profiles'][0]['id']]
     _save_index(index)
     return True
 

@@ -139,8 +139,12 @@
         </div>
     </div>
 
-    {% if project.status == 'uploaded' %}
-    <!-- Auto-transcription state -->
+    {% if not project.transcript and project.status in ('uploaded', 'transcribing', 'error') %}
+    <!-- Pre-transcript states: auto-transcription, resume-after-reload, and
+         error recovery. This card used to render only for 'uploaded', so a
+         reload mid-transcription or a crashed run ('transcribing'/'error' on
+         disk, no transcript) showed a page with no progress, no retry, no
+         way out. -->
     <div class="card">
         <div id="transcribeProgress" style="padding: 2rem; text-align:center;">
             <p style="font-weight: 500;" id="transcribeStatusText">Transcribing...</p>
@@ -149,11 +153,25 @@
             </div>
             <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;" id="transcribeTimeText"></p>
             <div id="transcribeWhisperBanner" style="display:none; max-width: 380px; margin: 1.25rem auto 0; padding: 0.85rem; text-align: left; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
+            <div id="transcribeRecovery" style="display:none; margin-top: 1.25rem;">
+                <button class="btn btn-purple" onclick="retryTranscription()">Retry transcription</button>
+            </div>
         </div>
     </div>
     <script>
-        // Auto-start transcription when page loads
-        window.addEventListener('DOMContentLoaded', () => startTranscription());
+        window.addEventListener('DOMContentLoaded', () => {
+            {% if project.status == 'uploaded' %}
+            // Fresh project: kick off transcription automatically.
+            startTranscription();
+            {% elif project.status == 'transcribing' %}
+            // Reload landed mid-run (or after a crash). Ask the server
+            // whether a job is actually still running before deciding
+            // between "keep waiting" and "offer retry".
+            resumeOrRecoverTranscription();
+            {% else %}
+            showTranscribeError({{ (project.error or 'Transcription failed.') | tojson }});
+            {% endif %}
+        });
     </script>
     {% endif %}
 
@@ -1568,6 +1586,21 @@ async function sendChat() {
         });
         if (streamed.ok) {
             const finalReply = streamed.reply || '';
+            if (!finalReply.trim()) {
+                // Hard failure path: the stream completed but delivered no
+                // reply (backend yields ('done', '') when every AI backend
+                // failed). The bubble used to keep its "Thinking…" spinner
+                // forever and an empty assistant turn polluted the history.
+                if (streamed.bubble) {
+                    streamed.bubble.textContent =
+                        'The AI returned no reply. Check that your AI model is running (AI Model settings), then try again.';
+                }
+                if (progressTimer) clearTimeout(progressTimer);
+                input.disabled = false;
+                btn.disabled = false;
+                input.focus();
+                return;
+            }
             chatHistory.push({ role: 'assistant', content: finalReply });
             // Replace the streaming bubble's plain text with the rendered
             // version (clip cards instead of raw [CLIP:] markers).
@@ -1583,6 +1616,11 @@ async function sendChat() {
                     streamed.bubble.appendChild(pullPrompt);
                 }
             }
+        } else if (streamed.error) {
+            // Server-reported error: show it, don't re-run the query.
+            if (progressTimer) clearTimeout(progressTimer);
+            typing.remove();
+            appendChatMessage('assistant', 'Error: ' + streamed.error);
         } else if (streamed.fallback) {
             // Streaming endpoint failed — try the original /chat endpoint.
             const res = await fetch(`/project/${COMBINED_ID}/chat`, {
@@ -1692,8 +1730,12 @@ async function streamChatReply({ message, typing, progressTimer }) {
                     finalReply = String(payload.data || '');
                     sawDone = true;
                 } else if (ev === 'error') {
+                    // The backend reported a real exception. Surface it —
+                    // the old silent fallback re-POSTed the whole query to
+                    // /chat, doubling an expensive Layer-2 search just to
+                    // (usually) hit the same error again.
                     bubble.classList.remove('chat-streaming');
-                    return { ok: false, fallback: true };
+                    return { ok: false, error: String(payload.data || 'Chat failed') };
                 }
             }
         }
@@ -2656,7 +2698,10 @@ async function startTranscription() {
         if (remaining > 0) {
             timeText.textContent = `About ${remaining}s remaining`;
         } else {
-            timeText.textContent = 'Almost done...';
+            // Past the estimate. Don't claim "almost done" — Whisper jobs
+            // and long interviews can run many minutes past the size-based
+            // guess, and that copy read as a hang.
+            timeText.textContent = 'Still transcribing — long files and the Whisper engine can take a while…';
         }
     }, 1000);
 
@@ -2664,6 +2709,12 @@ async function startTranscription() {
         const res = await fetch(`/project/${PROJECT_ID}/transcribe`, { method: 'POST' });
         clearInterval(progressInterval);
         const data = await res.json();
+        if (res.status === 409 && data.already_running) {
+            // Another request (second tab, double-submit) already owns this
+            // run — don't show an error, just track the live job instead.
+            resumeOrRecoverTranscription();
+            return;
+        }
         if (data.status === 'transcribed') {
             fill.style.width = '100%';
             statusText.textContent = 'Done!';
@@ -2716,7 +2767,86 @@ async function startTranscription() {
         statusText.textContent = 'Error';
         timeText.textContent = err.message;
         showToast('Error: ' + err.message, true);
+        showTranscribeRetry();
     }
+}
+
+// ── Pre-transcript recovery states ──
+// A reload during transcription (or after a crash) used to render a page
+// with no progress, no error, and no retry. These three helpers drive the
+// transcribe card for the 'transcribing' and 'error' on-disk states.
+
+function showTranscribeRetry() {
+    const rec = document.getElementById('transcribeRecovery');
+    if (rec) rec.style.display = 'block';
+}
+
+function showTranscribeError(message) {
+    const statusText = document.getElementById('transcribeStatusText');
+    const timeText = document.getElementById('transcribeTimeText');
+    const fill = document.getElementById('transcribeProgressFill');
+    if (statusText) statusText.textContent = 'Transcription failed';
+    if (timeText) timeText.textContent = message || 'Unknown error';
+    if (fill) fill.style.width = '0%';
+    showTranscribeRetry();
+}
+
+function retryTranscription() {
+    const rec = document.getElementById('transcribeRecovery');
+    if (rec) rec.style.display = 'none';
+    const statusText = document.getElementById('transcribeStatusText');
+    const timeText = document.getElementById('transcribeTimeText');
+    if (statusText) statusText.textContent = 'Transcribing...';
+    if (timeText) timeText.textContent = '';
+    startTranscription();
+}
+
+async function resumeOrRecoverTranscription() {
+    const statusText = document.getElementById('transcribeStatusText');
+    const timeText = document.getElementById('transcribeTimeText');
+    const fill = document.getElementById('transcribeProgressFill');
+    if (statusText) statusText.textContent = 'Checking transcription status…';
+
+    let pollFails = 0;
+    const poll = async () => {
+        let data;
+        try {
+            const res = await fetch(`/project/${PROJECT_ID}/transcribe/status`);
+            data = await res.json();
+            pollFails = 0;
+        } catch (err) {
+            // Tolerate a few missed polls (server busy under a heavy job)
+            // before declaring the run lost.
+            if (++pollFails >= 5) {
+                showTranscribeError('Lost contact with the server. The run may still finish — reload in a minute, or retry.');
+                return;
+            }
+            setTimeout(poll, 3000);
+            return;
+        }
+        if (data.has_transcript || data.status === 'transcribed') {
+            window.location.reload();
+            return;
+        }
+        if (data.running) {
+            if (statusText) statusText.textContent = 'Transcribing…';
+            if (timeText) timeText.textContent = 'A transcription started earlier is still running. This page will refresh when it finishes.';
+            if (fill) fill.style.width = '90%';
+            setTimeout(poll, 3000);
+            return;
+        }
+        // Nothing is running and there's no transcript: the previous run
+        // was interrupted (crash/force-quit) or failed.
+        if (data.status === 'error') {
+            showTranscribeError(data.error || 'Transcription failed.');
+        } else {
+            if (statusText) statusText.textContent = 'Transcription was interrupted';
+            if (timeText) timeText.textContent = 'The app closed before this file finished transcribing. Nothing was lost — retry below.';
+            if (fill) fill.style.width = '0%';
+            showTranscribeRetry();
+        }
+    };
+    poll();
 }
 
 // ── AI Analysis ──
@@ -2757,6 +2887,11 @@ async function runAnalysis() {
             const isCached = data.status === 'cached';
             showToast(isCached ? 'Loaded cached analysis' : 'Analysis complete!');
             setTimeout(() => reloadAndKeepTab('analysis'), isCached ? 800 : 3000);
+        } else if (res.status === 409 && data.already_running) {
+            // Another request (other tab, pre-reload run) owns this analysis.
+            // Watch it instead of erroring — the watcher reloads on finish.
+            showToast('Analysis is already running — reconnecting to it');
+            maybeResumeAnalysisWatch();
         } else {
             showToast('Error: ' + (data.error || 'Unknown error'), true);
             resetAnalyzeBtn();
@@ -2791,6 +2926,57 @@ function stopAnalyzeProgressPoll() {
         clearInterval(analyzeProgressTimer);
         analyzeProgressTimer = null;
     }
+}
+
+async function maybeResumeAnalysisWatch() {
+    // Reload-during-analysis recovery. The page used to come back showing
+    // the idle "Run AI Analysis" card with the button enabled while a
+    // backend run was still grinding — inviting a duplicate run and hiding
+    // all progress. If a run is in flight, re-enter the progress UI and
+    // reload when it completes.
+    let data;
+    try {
+        const r = await fetch(`/project/${PROJECT_ID}/analyze/status`, { cache: 'no-store' });
+        if (!r.ok) return;
+        data = await r.json();
+    } catch (e) { return; }
+    if (data.idle || data.done) return;  // nothing in flight
+
+    const btn = document.getElementById('analyzeBtn');
+    if (btn) {
+        btn.disabled = true;
+        btn.classList.add('is-analyzing');
+        const label = btn.querySelector('.btn-label');
+        if (label) label.textContent = 'Analyzing…';
+    }
+    const runBtn = document.getElementById('runAnalysisBtn');
+    if (runBtn) runBtn.disabled = true;
+    if (document.getElementById('preAnalysis')) {
+        document.getElementById('preAnalysis').style.display = 'none';
+    }
+    if (document.getElementById('analysisProgress')) {
+        document.getElementById('analysisProgress').style.display = 'block';
+    }
+    startAnalyzeProgressPoll();
+
+    // Completion watcher: the run's own request reloads its tab; this tab
+    // learns completion when the status file clears (idle) or flips done.
+    const watch = setInterval(async () => {
+        try {
+            const r = await fetch(`/project/${PROJECT_ID}/analyze/status`, { cache: 'no-store' });
+            if (!r.ok) return;
+            const d = await r.json();
+            if (d.idle || d.done) {
+                clearInterval(watch);
+                stopAnalyzeProgressPoll();
+                reloadAndKeepTab('analysis');
+            }
+        } catch (e) { /* keep watching */ }
+    }, 2000);
+}
+
+if (PROJECT && PROJECT.transcript) {
+    window.addEventListener('DOMContentLoaded', () => maybeResumeAnalysisWatch());
 }
 
 function renderAnalyzeProgress(data) {

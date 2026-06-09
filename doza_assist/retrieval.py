@@ -148,11 +148,11 @@ def build_paragraph_index(transcript, max_paragraph_seconds=60):
 
 
 def save_index(index, path):
-    """Persist ``index`` as JSON. Caller owns directory creation."""
+    """Persist ``index`` as JSON (atomic temp-file + rename)."""
+    from doza_assist.jsonio import atomic_write_json
     if not isinstance(index, TfidfIndex):
         return False
-    with open(path, 'w') as f:
-        json.dump(index.to_dict(), f)
+    atomic_write_json(path, index.to_dict(), indent=None)
     return True
 
 

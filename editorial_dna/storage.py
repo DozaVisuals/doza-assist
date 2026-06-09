@@ -24,10 +24,9 @@ def load_profile():
 
 
 def save_profile(profile):
-    """Write the style profile to disk."""
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-    with open(PROFILE_PATH, 'w') as f:
-        json.dump(profile, f, indent=2)
+    """Write the style profile to disk (atomic temp-file + rename)."""
+    from doza_assist.jsonio import atomic_write_json
+    atomic_write_json(PROFILE_PATH, profile)
 
 
 def delete_profile():

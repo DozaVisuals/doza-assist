@@ -71,10 +71,31 @@ def test_status_endpoint_returns_latest_snapshot(client, project_dir):
     write = app_module._make_progress_writer(pid)
     write(step=1, total=5, current="starting")
     write(step=3, total=5, current="halfway")
+    # A live /analyze holds the in-process job claim for its whole run; the
+    # endpoint treats an unclaimed status file as a stale leftover from a
+    # crashed server (see test_status_endpoint_self_heals_stale_file).
+    assert app_module._claim_job(pid, 'analyze')
+    try:
+        resp = client.get(f'/project/{pid}/analyze/status')
+        body = resp.get_json()
+        assert body['step'] == 3
+        assert body['current'] == "halfway"
+        assert body['running'] is True
+    finally:
+        app_module._release_job(pid, 'analyze')
+
+
+def test_status_endpoint_self_heals_stale_file(client, project_dir):
+    # A status file with NO claimed in-process job is a leftover from a
+    # crashed/restarted server. The endpoint must clear it and report idle
+    # so a reloaded page doesn't re-attach to a frozen progress bar.
+    pid, d = project_dir
+    write = app_module._make_progress_writer(pid)
+    write(step=2, total=5, current="orphaned")
+    assert (d / 'analyze_status.json').exists()
     resp = client.get(f'/project/{pid}/analyze/status')
-    body = resp.get_json()
-    assert body['step'] == 3
-    assert body['current'] == "halfway"
+    assert resp.get_json() == {'idle': True}
+    assert not (d / 'analyze_status.json').exists()
 
 
 def test_clear_status_removes_file(client, project_dir):
@@ -165,7 +186,12 @@ def test_progress_callback_invoked_during_analyze(client, project_dir, monkeypat
             cb(step=1, total=3, current="story beats")
             cb(step=2, total=3, current="ranking")
         captured.append(k)
-        return {'summary': 's', 'story_beats': []}
+        # Must return at least one beat/clip/soundbite — the route treats an
+        # all-empty analysis as a failed run and returns 500 instead of
+        # finishing the progress flow.
+        return {'summary': 's', 'story_beats': [
+            {'start': '00:00:00', 'end': '00:00:05', 'label': 'Beat'},
+        ]}
 
     monkeypatch.setattr('ai_analysis.analyze_transcript', _spy_analyze)
     monkeypatch.setattr('ai_analysis.generate_segment_vectors', lambda *a, **k: [])

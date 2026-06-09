@@ -21,25 +21,52 @@ def _timebase(framerate: float) -> int:
     return int(round(framerate + 0.001))  # +0.001 nudges 23.976 to 24 cleanly
 
 
-def _seconds_to_timecode(seconds: float, framerate: float) -> str:
-    """
-    HH:MM:SS:FF strict 8-character format, non-drop frame.
+# True frame cadence for the NTSC family. The frame INDEX of a moment t
+# seconds into the media is round(t * actual_fps); the integer timebase is
+# only how that index is rendered as HH:MM:SS:FF (non-drop).
+_NTSC_ACTUAL_FPS = {
+    23.976: 24000.0 / 1001.0,
+    29.97: 30000.0 / 1001.0,
+    59.94: 60000.0 / 1001.0,
+}
 
-    CMX 3600 stores integer frames at the integer timebase (24, 25, 30). For
-    NTSC-rate content (23.976, 29.97, 59.94) we use the same integer timebase
-    so the timecode walks consistently — Resolve treats this as 1:1 frame
-    mapping with the source media on import.
+
+def _actual_fps(framerate: float) -> float:
+    return _NTSC_ACTUAL_FPS.get(framerate, float(framerate))
+
+
+def _seconds_to_frames(seconds: float, framerate: float) -> int:
+    """Media frame index of the moment ``seconds`` into the file.
+
+    Must be computed at the media's ACTUAL rate: counting at the integer
+    rate for NTSC media (the old behavior, seconds*24 for 23.976) overshot
+    the real frame index by 1/1000 — ~86 frames (3.6s) of drift per hour,
+    so selects late in a long interview landed seconds off in Resolve.
+    This mirrors the (correct) Premiere exporter's actual_fps handling.
     """
     if seconds < 0:
         seconds = 0.0
-    fps_int = _timebase(framerate)
-    total_frames = int(round(seconds * fps_int))
+    return int(round(seconds * _actual_fps(framerate)))
+
+
+def _frames_to_timecode(total_frames: int, fps_int: int) -> str:
+    """Render a whole-frame count as strict 8-char non-drop HH:MM:SS:FF
+    at the integer timebase (24, 25, 30) — CMX 3600's TC convention."""
+    if total_frames < 0:
+        total_frames = 0
     frames = total_frames % fps_int
     total_seconds = total_frames // fps_int
     secs = total_seconds % 60
     mins = (total_seconds // 60) % 60
     hours = total_seconds // 3600
     return f"{hours:02d}:{mins:02d}:{secs:02d}:{frames:02d}"
+
+
+def _seconds_to_timecode(seconds: float, framerate: float) -> str:
+    """Convenience: media moment -> NDF timecode string."""
+    return _frames_to_timecode(
+        _seconds_to_frames(seconds, framerate), _timebase(framerate),
+    )
 
 
 def _sanitize_reel_name(source_path: str) -> str:
@@ -78,7 +105,13 @@ def _build_edl(
 
     lines = [f"TITLE: {title}", "FCM: NON-DROP FRAME", ""]
 
-    record_offset = 3600.0  # 01:00:00:00
+    # All arithmetic in whole frames: source positions are converted once
+    # (at the actual NTSC rate — see _seconds_to_frames), and record TC is
+    # accumulated in frames from exactly one TC-hour so the conventional
+    # 01:00:00:00 record start holds on every framerate.
+    fps_int = _timebase(framerate)
+    hour_frames = 3600 * fps_int  # 01:00:00:00 on the TC grid
+    record_offset_frames = hour_frames
     edit_num = 0
     for m in markers:
         try:
@@ -86,20 +119,26 @@ def _build_edl(
             src_out = float(m.get("end", 0) or 0)
         except (TypeError, ValueError):
             continue
-        dur = src_out - src_in
-        if dur <= 0:
+        src_in_f = _seconds_to_frames(src_in, framerate)
+        src_out_f = _seconds_to_frames(src_out, framerate)
+        dur_f = src_out_f - src_in_f
+        if dur_f <= 0:
             continue
         edit_num += 1
 
-        rec_in = record_offset
-        rec_out = record_offset + dur
         if sequential_record:
-            record_offset += dur
+            rec_in_f = record_offset_frames
+            rec_out_f = record_offset_frames + dur_f
+            record_offset_frames += dur_f
+        else:
+            # Record mirrors source TC + 1 hour (markers keep positions).
+            rec_in_f = hour_frames + src_in_f
+            rec_out_f = hour_frames + src_out_f
 
-        src_in_tc = _seconds_to_timecode(src_in, framerate)
-        src_out_tc = _seconds_to_timecode(src_out, framerate)
-        rec_in_tc = _seconds_to_timecode(rec_in, framerate)
-        rec_out_tc = _seconds_to_timecode(rec_out, framerate)
+        src_in_tc = _frames_to_timecode(src_in_f, fps_int)
+        src_out_tc = _frames_to_timecode(src_out_f, fps_int)
+        rec_in_tc = _frames_to_timecode(rec_in_f, fps_int)
+        rec_out_tc = _frames_to_timecode(rec_out_f, fps_int)
 
         lines.append(
             f"{edit_num:03d}  {reel:<8} AA/V  C        "

@@ -20,17 +20,37 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import ai_analysis  # noqa: E402
 
 
-def _capture_system_prompt(transcript, message, **kwargs):
-    """Run chat_about_transcript with _call_ai_chat stubbed, capture the system prompt."""
+def _capture_chat_prompt(transcript, message, **kwargs):
+    """Run chat_about_transcript with _call_ai_chat stubbed, capture the prompt.
+
+    The chat path now sends a (system_message, messages_array) pair instead of
+    a single flattened system prompt — see _build_chat_messages. Only the FIRST
+    call is captured: the stub's marker-free reply triggers the clip-salvage
+    extractor, whose follow-up _call_ai_chat must not clobber the main prompt.
+
+    Returns 'system' (the system message), 'messages' (the raw array), and
+    'full' — every prompt part concatenated in the order the provider sees it
+    (system first, then each message's content, cache sentinels stripped, the
+    same inline view a non-Anthropic provider gets). Position-sensitive
+    assertions run against 'full'.
+    """
     captured = {}
 
-    def fake_call(prompt, system_prompt=""):
-        captured['system'] = system_prompt
-        captured['user'] = prompt
+    def fake_call(system_message, messages, num_ctx=32768, call_site=None):
+        if 'system' not in captured:
+            captured['system'] = system_message
+            captured['messages'] = messages
         return "stub reply"
 
     with patch.object(ai_analysis, '_call_ai_chat', side_effect=fake_call):
         ai_analysis.chat_about_transcript(transcript, message, **kwargs)
+
+    parts = [captured.get('system') or '']
+    for m in captured.get('messages') or []:
+        content = m.get('content') if isinstance(m, dict) else None
+        if isinstance(content, str):
+            parts.append(ai_analysis._strip_cache_sentinels(content))
+    captured['full'] = '\n'.join(parts)
     return captured
 
 
@@ -50,16 +70,24 @@ def _make_transcript(n_segments=3):
 
 
 class TestEndOfPromptReminder:
+    # HISTORY: the messages-array refactor (commit 23e6f99) dropped the
+    # post-transcript FINAL REMINDER block and these tests failed for a
+    # while. The protection was deliberately restored in the 2026-06 audit
+    # cleanup as ai_analysis._FINAL_REMINDER, appended to the final user
+    # message — after the transcript AND history, so recency bias
+    # reinforces the [CLIP:] contract at generation time. These tests lock
+    # that invariant; if they fail again, the long-FCPXML prose-summary
+    # chat bug is coming back.
     def test_final_reminder_section_is_present(self):
-        out = _capture_system_prompt(_make_transcript(), "what did they say?")
-        assert 'FINAL REMINDER' in out['system']
+        out = _capture_chat_prompt(_make_transcript(), "what did they say?")
+        assert 'FINAL REMINDER' in out['full']
 
     def test_final_reminder_appears_AFTER_transcript(self):
         # This is the whole point — recency bias only works if the rule
         # sits below the transcript, not above it.
-        sys_prompt = _capture_system_prompt(_make_transcript(), "x")['system']
-        transcript_idx = sys_prompt.index('TRANSCRIPT:')
-        reminder_idx = sys_prompt.index('FINAL REMINDER')
+        full = _capture_chat_prompt(_make_transcript(), "x")['full']
+        transcript_idx = full.index('TRANSCRIPT:')
+        reminder_idx = full.index('FINAL REMINDER')
         assert reminder_idx > transcript_idx, (
             "FINAL REMINDER must appear AFTER the transcript so Gemma-4-style "
             "recency bias reinforces the [CLIP:] contract at generation time. "
@@ -70,8 +98,8 @@ class TestEndOfPromptReminder:
         # The reminder's job is to put the exact marker syntax back in the
         # model's working memory right before it generates. If the marker
         # shape isn't in the reminder, the reminder is toothless.
-        sys_prompt = _capture_system_prompt(_make_transcript(), "x")['system']
-        tail = sys_prompt.split('FINAL REMINDER')[1]
+        full = _capture_chat_prompt(_make_transcript(), "x")['full']
+        tail = full.split('FINAL REMINDER')[1]
         assert '[CLIP:' in tail
         assert 'start=' in tail
         assert 'end=' in tail
@@ -80,25 +108,25 @@ class TestEndOfPromptReminder:
     def test_reminder_forbids_prose_summary(self):
         # Specifically the behavior we saw on the Trustees FCPXML project:
         # model paraphrased instead of citing. Reminder must call that out.
-        sys_prompt = _capture_system_prompt(_make_transcript(), "x")['system']
-        tail = sys_prompt.split('FINAL REMINDER')[1].lower()
+        full = _capture_chat_prompt(_make_transcript(), "x")['full']
+        tail = full.split('FINAL REMINDER')[1].lower()
         assert 'prose' in tail or 'summary' in tail or 'paragraph' in tail
 
     def test_reminder_covers_synthesis_questions(self):
         # The bug surfaced on "what's the most revealing thing" — a synthesis
         # question. The reminder must explicitly tell the model those still
         # need [CLIP:] markers, not a free-form paragraph.
-        sys_prompt = _capture_system_prompt(_make_transcript(), "x")['system']
-        tail = sys_prompt.split('FINAL REMINDER')[1].lower()
+        full = _capture_chat_prompt(_make_transcript(), "x")['full']
+        tail = full.split('FINAL REMINDER')[1].lower()
         assert 'synthesis' in tail or 'revealing' in tail or 'every question' in tail
 
 
 class TestTranscriptStaysInPrompt:
     def test_transcript_segments_are_rendered_with_timecodes(self):
-        sys_prompt = _capture_system_prompt(_make_transcript(3), "x")['system']
+        full = _capture_chat_prompt(_make_transcript(3), "x")['full']
         # At least one formatted segment line should make it in.
-        assert '[00:00:00-00:00:25]' in sys_prompt
-        assert 'Sample segment 0 text.' in sys_prompt
+        assert '[00:00:00-00:00:25]' in full
+        assert 'Sample segment 0 text.' in full
 
     def test_analysis_block_is_appended_when_provided(self):
         analysis = {
@@ -106,24 +134,24 @@ class TestTranscriptStaysInPrompt:
                 {'start': '00:01:00', 'end': '00:01:30', 'label': 'Anchor Beat'}
             ]
         }
-        sys_prompt = _capture_system_prompt(
+        full = _capture_chat_prompt(
             _make_transcript(), "x", analysis=analysis
-        )['system']
-        assert 'PRE-ANALYZED MOMENTS' in sys_prompt
-        assert 'Anchor Beat' in sys_prompt
+        )['full']
+        assert 'PRE-ANALYZED MOMENTS' in full
+        assert 'Anchor Beat' in full
 
     def test_analysis_block_is_omitted_when_absent(self):
         # When analysis is None the chat still works — the prompt just
-        # skips the PRE-ANALYZED MOMENTS *list* cleanly. (The phrase itself
-        # appears in the grounding rule, which is fine — we only care that
-        # no stale/empty anchor list gets injected.)
-        sys_prompt = _capture_system_prompt(
+        # skips the PRE-ANALYZED MOMENTS *list* cleanly. We only care that
+        # no stale/empty anchor list gets injected.
+        full = _capture_chat_prompt(
             _make_transcript(), "x", analysis=None
-        )['system']
-        assert 'PRE-ANALYZED MOMENTS (real timecodes' not in sys_prompt
-        # But the transcript and the final reminder must still be there.
-        assert 'TRANSCRIPT:' in sys_prompt
-        assert 'FINAL REMINDER' in sys_prompt
+        )['full']
+        assert 'PRE-ANALYZED MOMENTS (real timecodes' not in full
+        # But the rest of the prompt must stay intact: the transcript block
+        # and the system prompt's [CLIP:] output contract.
+        assert 'TRANSCRIPT:' in full
+        assert '[CLIP:' in full
 
 
 def _make_monologue_transcript(duration_seconds, segment_seconds=5.0, speaker='Chris'):
@@ -164,12 +192,12 @@ class TestParagraphGroupingOnLongTranscripts:
         # clip cards. The per-segment format must be preserved there so we
         # don't change behavior on working projects.
         t = _make_monologue_transcript(30 * 60, segment_seconds=5.0)
-        sys_prompt = _capture_system_prompt(t, "x")['system']
+        full = _capture_chat_prompt(t, "x")['full']
         # Every segment should get its own line — look for several adjacent
         # timecode starts that the paragraph-grouping pass would have merged.
-        assert '[00:00:00-00:00:05]' in sys_prompt
-        assert '[00:00:05-00:00:10]' in sys_prompt
-        assert '[00:00:10-00:00:15]' in sys_prompt
+        assert '[00:00:00-00:00:05]' in full
+        assert '[00:00:05-00:00:10]' in full
+        assert '[00:00:10-00:00:15]' in full
 
     def test_long_transcript_collapses_adjacent_same_speaker_segments(self):
         # 90-minute monologue → one paragraph per 60-second window, not one

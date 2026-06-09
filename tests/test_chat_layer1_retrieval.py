@@ -8,16 +8,16 @@ was attention/recency bias against middle-of-context tokens.
 
 Layer 1 fix: when the user's question contains concrete keywords, extract
 the matching paragraphs from the structured transcript and inject them in a
-RELEVANT EXCERPTS block placed AFTER the full transcript (but before the
-FINAL REMINDER). Recency bias then works FOR the answer.
+RELEVANT EXCERPTS block placed AFTER the full transcript. Recency bias then
+works FOR the answer.
 
 These tests lock in:
   * keyword extraction drops stopwords, keeps topical terms, preserves
     multi-word phrases
   * phrase matches take priority over individual words
   * matched paragraphs include ±1 context
-  * the RELEVANT EXCERPTS block lands AFTER the transcript, BEFORE the
-    FINAL REMINDER, so recency bias lines up with the answer
+  * the RELEVANT EXCERPTS block lands AFTER the transcript, so recency
+    bias lines up with the answer
   * Layer 1 never triggers on short transcripts — the current working path
     must not change
   * no keyword matches means no block at all (not an empty block with a
@@ -33,16 +33,35 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import ai_analysis  # noqa: E402
 
 
-def _capture_system_prompt(transcript, message, **kwargs):
+def _capture_chat_prompt(transcript, message, **kwargs):
+    """Run chat_about_transcript with _call_ai_chat stubbed, capture the prompt.
+
+    The chat path now sends a (system_message, messages_array) pair instead of
+    a single flattened system prompt — see _build_chat_messages. Only the FIRST
+    call is captured: the stub's marker-free reply triggers the clip-salvage
+    extractor, whose follow-up _call_ai_chat must not clobber the main prompt.
+
+    'full' is every prompt part concatenated in the order the provider sees it
+    (system first, then each message's content, cache sentinels stripped) so
+    position-sensitive assertions keep working against one ordered string.
+    """
     captured = {}
 
-    def fake_call(prompt, system_prompt=""):
-        captured['system'] = system_prompt
-        captured['user'] = prompt
+    def fake_call(system_message, messages, num_ctx=32768, call_site=None):
+        if 'system' not in captured:
+            captured['system'] = system_message
+            captured['messages'] = messages
         return "stub reply"
 
     with patch.object(ai_analysis, '_call_ai_chat', side_effect=fake_call):
         ai_analysis.chat_about_transcript(transcript, message, **kwargs)
+
+    parts = [captured.get('system') or '']
+    for m in captured.get('messages') or []:
+        content = m.get('content') if isinstance(m, dict) else None
+        if isinstance(content, str):
+            parts.append(ai_analysis._strip_cache_sentinels(content))
+    captured['full'] = '\n'.join(parts)
     return captured
 
 
@@ -222,20 +241,27 @@ class TestLayer1IntegrationIntoPrompt:
         t = _make_short_transcript_with_topic(
             "Moose Hill", topic_positions={40, 41, 42}, total_segments=80
         )
-        sys_prompt = _capture_system_prompt(t, "what did they say about moose hill?")['system']
-        assert 'RELEVANT EXCERPTS' in sys_prompt
+        full = _capture_chat_prompt(t, "what did they say about moose hill?")['full']
+        assert 'RELEVANT EXCERPTS' in full
 
-    def test_excerpts_block_lands_after_transcript_before_reminder(self):
-        # Whole point of Layer 1: recency bias. Block MUST sit between the
-        # transcript and the final reminder, not above the transcript.
+    def test_excerpts_block_lands_after_transcript(self):
+        # Whole point of Layer 1: recency bias. Block MUST sit below the
+        # transcript, not above it. (The FINAL REMINDER it used to sit in
+        # front of was retired in the messages-array refactor — the excerpts
+        # block is now the tail of the transcript message itself.)
         t = _make_short_transcript_with_topic(
             "Moose Hill", topic_positions={40, 41, 42}, total_segments=80
         )
-        sys_prompt = _capture_system_prompt(t, "what did they say about moose hill?")['system']
-        transcript_idx = sys_prompt.index('TRANSCRIPT:')
-        excerpts_idx = sys_prompt.index('RELEVANT EXCERPTS')
-        reminder_idx = sys_prompt.index('FINAL REMINDER')
-        assert transcript_idx < excerpts_idx < reminder_idx
+        full = _capture_chat_prompt(t, "what did they say about moose hill?")['full']
+        transcript_idx = full.index('TRANSCRIPT:')
+        excerpts_idx = full.index('RELEVANT EXCERPTS')
+        assert transcript_idx < excerpts_idx
+        # And the block sits AFTER the final transcript segment line (80
+        # segments × 30s → the last one spans 39:30–40:00; it's far from the
+        # matches so it never re-appears inside the excerpts block), so
+        # recency bias still lines up with the answer.
+        last_segment_idx = full.index('[00:39:30-00:40:00]')
+        assert excerpts_idx > last_segment_idx
 
     def test_excerpts_block_omitted_when_no_keyword_match_short(self):
         # Vague questions (no concrete terms) on short interviews yield no
@@ -243,8 +269,8 @@ class TestLayer1IntegrationIntoPrompt:
         t = _make_short_transcript_with_topic(
             "Moose Hill", topic_positions={40, 41, 42}, total_segments=80
         )
-        sys_prompt = _capture_system_prompt(t, "what do you think?")['system']
-        assert 'RELEVANT EXCERPTS' not in sys_prompt
+        full = _capture_chat_prompt(t, "what do you think?")['full']
+        assert 'RELEVANT EXCERPTS' not in full
 
     def test_excerpts_block_contains_matched_timecodes(self):
         # Segments 40, 41, 42 at 30s/segment → 20:00, 20:30, 21:00.
@@ -252,8 +278,8 @@ class TestLayer1IntegrationIntoPrompt:
         t = _make_short_transcript_with_topic(
             "Moose Hill", topic_positions={40, 41, 42}, total_segments=80
         )
-        sys_prompt = _capture_system_prompt(t, "moose hill moments please")['system']
-        block = sys_prompt.split('RELEVANT EXCERPTS')[1].split('FINAL REMINDER')[0]
+        full = _capture_chat_prompt(t, "moose hill moments please")['full']
+        block = full.split('RELEVANT EXCERPTS')[1]
         # Matched hits themselves.
         assert '[00:20:00-00:20:30]' in block
         assert '[00:20:30-00:21:00]' in block
@@ -265,8 +291,8 @@ class TestLayer1IntegrationIntoPrompt:
         t = _make_short_transcript_with_topic(
             "Moose Hill", topic_positions={40}, total_segments=80
         )
-        sys_prompt = _capture_system_prompt(t, "moose hill?")['system']
-        transcript_block = sys_prompt.split(
+        full = _capture_chat_prompt(t, "moose hill?")['full']
+        transcript_block = full.split(
             'TRANSCRIPT:', 1
         )[1].split('RELEVANT EXCERPTS', 1)[0]
         # 80 segments on a short interview → 80 per-segment lines.

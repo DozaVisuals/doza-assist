@@ -186,7 +186,12 @@ def test_progress_callback_invoked_during_analyze(client, project_dir, monkeypat
             cb(step=1, total=3, current="story beats")
             cb(step=2, total=3, current="ranking")
         captured.append(k)
-        return {'summary': 's', 'story_beats': []}
+        # Must return at least one beat/clip/soundbite — the route treats an
+        # all-empty analysis as a failed run and returns 500 instead of
+        # finishing the progress flow.
+        return {'summary': 's', 'story_beats': [
+            {'start': '00:00:00', 'end': '00:00:05', 'label': 'Beat'},
+        ]}
 
     monkeypatch.setattr('ai_analysis.analyze_transcript', _spy_analyze)
     monkeypatch.setattr('ai_analysis.generate_segment_vectors', lambda *a, **k: [])

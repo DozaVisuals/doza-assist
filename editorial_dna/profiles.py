@@ -389,7 +389,9 @@ def set_profile_active_toggle(profile_id, active):
 
 def delete_profile(profile_id):
     """Remove a profile folder + index entry. Drop it from the active set if
-    present.
+    present. If that empties the active set while other profiles remain,
+    promote the first remaining profile — deleting your active style should
+    never silently leave you with NO active style when others exist.
     """
     pd = _profile_dir(profile_id)
     if os.path.isdir(pd):
@@ -399,6 +401,8 @@ def delete_profile(profile_id):
     index['active_profile_ids'] = [
         pid for pid in (index.get('active_profile_ids') or []) if pid != profile_id
     ]
+    if not index['active_profile_ids'] and index['profiles']:
+        index['active_profile_ids'] = [index['profiles'][0]['id']]
     _save_index(index)
     return True
 

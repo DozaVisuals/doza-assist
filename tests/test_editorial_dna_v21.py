@@ -269,8 +269,13 @@ def test_injector_skipped_when_profile_toggled_off(fake_llm):
     edp.save_system_prompt(pid, 'DOC-MARKER')
     edp.set_profile_active_toggle(pid, False)
     result = inject_my_style('BASE SYSTEM PROMPT')
+    # The toggled-off profile's style must not be injected. With no usable
+    # profile the injector prepends the generic default editor identity
+    # (v2.2 no-profile fallback) — the base prompt is preserved, not
+    # returned verbatim.
     assert 'DOC-MARKER' not in result
-    assert result == 'BASE SYSTEM PROMPT'
+    assert 'MY STYLE CONTEXT' not in result
+    assert 'BASE SYSTEM PROMPT' in result
 
 
 # ---------------------------------------------------------------------------

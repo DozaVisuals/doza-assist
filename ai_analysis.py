@@ -206,6 +206,28 @@ def _build_transcript_ack(project_name):
     return f"Transcript loaded for '{project_name}'. What would you like to find?"
 
 
+# Post-transcript contract restatement, appended to every final user turn.
+# The clip-marker contract lives in the system prompt, which on a long
+# transcript sits tens of thousands of tokens above the generation point —
+# small local models (Gemma 4B especially) have strong recency bias and
+# drift back to prose summaries, which was the original long-FCPXML chat
+# bug. The messages-array refactor dropped the old FINAL REMINDER block;
+# this restores it in the recency-correct position (after the transcript
+# AND after history, immediately before generation). Constant text on the
+# final message keeps the Ollama KV prefix stable across turns. The raw
+# user message (without this tail) is what gets persisted to chat_history.
+_FINAL_REMINDER = (
+    'FINAL REMINDER (the full project transcript is above): when I ask you '
+    'to find, pick, rank, or recommend moments — including synthesis '
+    'questions like "what\'s the most revealing thing here" — answer with '
+    '[CLIP: start=HH:MM:SS end=HH:MM:SS title="short headline" note="why '
+    'it works"] markers built from the transcript, one per line. Do not '
+    'substitute a prose summary or paraphrased paragraph for the markers; '
+    'brief prose around them is fine. For purely conversational questions '
+    'with no moments to point at, answer normally.'
+)
+
+
 def _build_chat_messages(message, history, project_name, segments,
                         formatted, analysis_block, relevant_excerpts_block,
                         profile_id):
@@ -217,7 +239,7 @@ def _build_chat_messages(message, history, project_name, segments,
       user (opt.)   : STYLE CONTEXT — only when a My Style profile is active
       user          : PROJECT/DURATION/SPEAKERS/TRANSCRIPT block
       ...history... : prior user/assistant turns (capped at last 6)
-      user          : the current user message
+      user          : the current user message + _FINAL_REMINDER
 
     History cap: 6 entries (3 round-trips). Long transcripts already eat
     most of the context window; older turns rarely contribute editorial
@@ -274,7 +296,10 @@ def _build_chat_messages(message, history, project_name, segments,
                 role = 'user'
             messages.append({'role': role, 'content': content})
 
-    messages.append({'role': 'user', 'content': message})
+    messages.append({
+        'role': 'user',
+        'content': f'{message}\n\n{_FINAL_REMINDER}',
+    })
     return system_message, messages
 
 # Bounded LRU for Layer 2 chunked-search responses. Layer 2 fires

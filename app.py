@@ -590,6 +590,39 @@ def move_project(project_id):
     return jsonify({'status': 'moved', 'folder': folder})
 
 
+@app.route('/folder/delete', methods=['POST'])
+def delete_folder():
+    """Delete EVERY project filed under a folder, and thus the folder itself.
+
+    Folders are implicit — a folder exists only while a project's
+    ``meta.folder`` names it — so removing every member project removes the
+    folder from the dashboard. Destructive and irreversible: each matching
+    project directory is removed with the same path-confined ``rmtree`` as
+    :func:`delete_project` (``safe_project_dir`` rejects any id that escapes
+    PROJECTS_DIR). The frontend gates this behind an explicit confirmation;
+    original source media on the editor's drives is never touched (we only
+    own the project directory, not the referenced footage).
+    """
+    name = (request.json or {}).get('folder', '')
+    name = name.strip() if isinstance(name, str) else ''
+    if not name:
+        return jsonify({'error': 'Folder name required'}), 400
+
+    deleted, skipped = 0, []
+    for p in list_projects():
+        if (p.get('folder') or '') != name:
+            continue
+        pid = p.get('id')
+        project_dir = safe_project_dir(pid) if pid else None
+        if project_dir is None:
+            skipped.append(pid)
+            continue
+        if os.path.exists(project_dir):
+            shutil.rmtree(project_dir, ignore_errors=True)
+        deleted += 1
+    return jsonify({'status': 'deleted', 'folder': name, 'deleted': deleted, 'skipped': skipped})
+
+
 # ── Editing platform (NLE) selection ───────────────────────────────
 
 @app.route('/api/projects/<project_id>/editing_platform', methods=['PATCH'])

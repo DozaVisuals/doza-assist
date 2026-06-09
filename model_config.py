@@ -126,15 +126,14 @@ def load_model_config():
 
 def save_model_config(tier, variant, auto_selected=True):
     """Persist model config to disk so users can inspect or override it."""
-    os.makedirs(SUPPORT_DIR, exist_ok=True)
+    from doza_assist.jsonio import atomic_write_json
     data = {
         'gemma4_variant': variant,
         'tier': tier,
         'auto_selected': auto_selected,
         'selected_at': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
-    with open(MODEL_CONFIG_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+    atomic_write_json(MODEL_CONFIG_FILE, data)
     return data
 
 

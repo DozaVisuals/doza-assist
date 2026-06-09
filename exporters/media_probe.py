@@ -91,6 +91,40 @@ def get_video_framerate(path: str) -> float | None:
     return None
 
 
+def get_media_duration(path: str) -> float | None:
+    """Detect the container duration in seconds using ffprobe.
+
+    Exports used to fall back to ``transcript['duration']`` — the end of the
+    last *spoken word* — as the media length. Any selected clip extending
+    past the final sentence (trailing B-roll, music, room tone) was clamped
+    to that shorter grid, and a clip living entirely in the tail was
+    silently dropped. The real container duration is the correct clamp
+    bound; this probe is the source of truth for it.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            duration = float(result.stdout.strip())
+            if duration > 0:
+                return duration
+    except Exception:
+        pass
+    return None
+
+
 _TIMECODE_RE = re.compile(r"^(\d+):(\d+):(\d+)([:;])(\d+)$")
 
 

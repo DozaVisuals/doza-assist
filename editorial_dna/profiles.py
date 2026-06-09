@@ -95,10 +95,10 @@ def _normalize_index(index):
 
 
 def _save_index(index):
+    from doza_assist.jsonio import atomic_write_json
     _ensure_dirs()
     index = _normalize_index(index)
-    with open(INDEX_PATH, 'w') as f:
-        json.dump(index, f, indent=2)
+    atomic_write_json(INDEX_PATH, index)
 
 
 def _index_entry(profile_id, name, created_at):
@@ -120,9 +120,8 @@ def _read_json(path, default=None):
 
 
 def _write_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+    from doza_assist.jsonio import atomic_write_json
+    atomic_write_json(path, data)
 
 
 def _write_text(path, text):

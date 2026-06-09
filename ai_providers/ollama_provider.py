@@ -13,6 +13,7 @@ import json
 import requests
 
 from .base import BaseProvider
+from . import ProviderError
 
 
 _KEEP_ALIVE = "30m"
@@ -31,6 +32,30 @@ DEFAULT_STOP_TOKENS = [
     "[No specific answer",
     "[No answer",
 ]
+
+
+def _raise_ollama_error(response, model):
+    """Turn a non-200 Ollama response into a typed, user-facing error.
+
+    Returning ``""`` here (the old behavior) made every failure — a deleted
+    model, an out-of-memory load, a bad request — indistinguishable from a
+    legitimately empty reply. Users saw "Analysis came back empty… try a
+    shorter section" when the real problem was "model not installed", and
+    the chat stream just went silent. The cloud providers raise typed
+    ProviderErrors; this brings Ollama in line.
+    """
+    try:
+        detail = (response.json().get("error") or "").strip()
+    except (ValueError, json.JSONDecodeError):
+        detail = (response.text or "").strip()[:300]
+    if response.status_code == 404 or "not found" in detail.lower():
+        raise ProviderError(
+            f"Ollama model '{model}' is not installed. "
+            f"Open AI Model settings to download it, or pick a different model.",
+        )
+    raise ProviderError(
+        f"Ollama error (HTTP {response.status_code}): {detail or 'no details'}",
+    )
 
 
 def _ollama_messages(system_prompt, user_or_messages):
@@ -100,7 +125,7 @@ class OllamaProvider(BaseProvider):
                 timeout=kwargs.get("timeout", 300),
             )
             if response.status_code != 200:
-                return ""
+                _raise_ollama_error(response, model)
             return response.json().get("response", "")
 
         # Chat / general path: /api/chat with messages array.
@@ -124,7 +149,7 @@ class OllamaProvider(BaseProvider):
             timeout=kwargs.get("timeout", 900 if task_type != "chat" else 300),
         )
         if response.status_code != 200:
-            return ""
+            _raise_ollama_error(response, model)
         return (response.json().get("message") or {}).get("content", "")
 
     def generate_stream(self, system_prompt, user_or_messages, task_type="general", **kwargs):
@@ -150,7 +175,7 @@ class OllamaProvider(BaseProvider):
             stream=True,
         ) as response:
             if response.status_code != 200:
-                return
+                _raise_ollama_error(response, model)
             for line in response.iter_lines():
                 if not line:
                     continue

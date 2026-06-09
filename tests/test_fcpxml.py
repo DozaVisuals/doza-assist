@@ -1260,3 +1260,81 @@ class TestSelectTrimsStaleAnnotations:
                 s = parse_rational(child.get("start"))
                 e = s + parse_rational(child.get("duration") or "0s")
                 assert clip_start <= s < clip_end and e <= clip_end
+
+
+# A captioned single-cam clip: a wide caption spanning the whole clip (so two
+# selects both keep it) plus a tail caption neither select reaches. The shape a
+# Pro tester hit — a 186-caption interview round-tripped through Story Builder
+# emitted ts1…tsN once per select, and FCP rejected the import with
+# "DTD validation failed. ID ts1 already defined".
+CAPTIONED_CLIP_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="r2" name="cam" start="0s" duration="60s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/cam.mp4"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="Captioned">
+                <sequence format="r1" duration="60s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="r2" offset="0s" name="cam" start="0s" duration="60s" audioRole="dialogue">
+                            <caption lane="1" offset="0s" name="wide" start="3600s" duration="60s" role="iTT?captionFormat=ITT.en-US">
+                                <text><text-style ref="ts1">Whole clip</text-style></text>
+                                <text-style-def id="ts1"><text-style font="Helvetica" fontSize="63"/></text-style-def>
+                            </caption>
+                            <caption lane="1" offset="50s" name="tail" start="3600s" duration="5s" role="iTT?captionFormat=ITT.en-US">
+                                <text><text-style ref="ts2">Tail only</text-style></text>
+                                <text-style-def id="ts2"><text-style font="Helvetica" fontSize="63"/></text-style-def>
+                            </caption>
+                        </asset-clip>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestCaptionedClipRoundTrip:
+    """Two selects cut from the same captioned clip must not both re-define the
+    same <text-style-def> ids, and each must carry only its overlapping
+    captions."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "captioned.fcpxml"
+        p.write_text(CAPTIONED_CLIP_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_text_style_def_ids_unique_across_copies(self, parsed):
+        # Two selects both overlap the wide caption (ts1); neither reaches the
+        # tail caption (ts2, offset 50s).
+        out = write_selects_as_new_project(
+            parsed, [Select(0, 10, label="A"), Select(20, 30, label="B")])
+        root = etree.fromstring(out)
+        ids = [el.get("id") for el in root.iter() if el.get("id")]
+        # No id appears twice — exactly what FCP's DTD enforces.
+        assert len(ids) == len(set(ids)), f"duplicate ids: {ids}"
+        # The shared caption's id was suffixed per copy, not left as bare ts1.
+        tsd_ids = [t.get("id") for t in root.iter("text-style-def")]
+        assert tsd_ids == ["ts1_s0", "ts1_s1"]
+        # Every <text-style ref> still resolves.
+        defined = set(ids)
+        for ts in root.iter("text-style"):
+            if ts.get("ref"):
+                assert ts.get("ref") in defined
+
+    def test_non_overlapping_captions_pruned(self, parsed):
+        # The tail caption (offset 50s) overlaps neither select → dropped from
+        # both copies; only the wide caption survives.
+        out = write_selects_as_new_project(
+            parsed, [Select(0, 10, label="A"), Select(20, 30, label="B")])
+        root = etree.fromstring(out)
+        for clip in root.findall(".//sequence/spine/asset-clip"):
+            caps = clip.findall("caption")
+            assert len(caps) == 1
+            assert caps[0].get("name") == "wide"

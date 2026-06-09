@@ -378,6 +378,35 @@ def _trim_nested_timing(
             child.set("duration", seconds_to_rational(clamped_end - clamped_start, frame_duration))
 
 
+def _uniquify_text_style_defs(clip_el: etree._Element, suffix: str) -> None:
+    """Make every inline ``<text-style-def id>`` in a copied clip unique.
+
+    Captions / titles define their styling inline as
+    ``<text-style-def id="ts1">`` and reference it with
+    ``<text-style ref="ts1">``. Those ids are document-unique only ONCE — but a
+    Story Builder export emits several selects from the SAME captioned source
+    clip, so each deep copy re-defines ts1…tsN and FCP rejects the import with
+    "DTD validation failed. ID ts1 already defined". Appending a per-copy
+    ``suffix`` to each definition id (and the refs that point at it within this
+    same clip) restores document-wide uniqueness. Recurses, so captions nested
+    inside a sync-clip's inner spine are covered too.
+    """
+    remap = {}
+    for tsd in clip_el.iter("text-style-def"):
+        old_id = tsd.get("id")
+        if not old_id:
+            continue
+        new_id = f"{old_id}{suffix}"
+        tsd.set("id", new_id)
+        remap[old_id] = new_id
+    if not remap:
+        return
+    for ts in clip_el.iter("text-style"):
+        ref = ts.get("ref")
+        if ref in remap:
+            ts.set("ref", remap[ref])
+
+
 def _build_copied_clip_node(
     parsed: ParsedFCPXML,
     select: Select,
@@ -386,6 +415,7 @@ def _build_copied_clip_node(
     start_str: str,
     duration_str: str,
     offset_str: str,
+    copy_seq: int = 0,
 ) -> etree._Element:
     """Emit a select by deep-copying its source spine clip and rewriting only
     the positioning attributes. Used for ``<sync-clip>`` and ``<asset-clip>``
@@ -419,10 +449,27 @@ def _build_copied_clip_node(
     # The select keeps only its slice of the source clip, so prune inherited
     # annotations/effects that now sit outside that slice.
     sel_start = parse_rational(start_str)
+    sel_end = sel_start + parse_rational(duration_str)
     _trim_nested_timing(
-        new_clip, sel_start, sel_start + parse_rational(duration_str),
-        parsed.sequence_frame_duration,
+        new_clip, sel_start, sel_end, parsed.sequence_frame_duration,
     )
+
+    # Connected captions (subtitles / lower-thirds) are anchored by ``offset``
+    # in the clip's own source-time coordinate. A subtitled interview carries
+    # hundreds; without pruning, every select drags the entire caption track.
+    # Drop the ones that don't overlap the kept range (FCP would hide them
+    # anyway — they fall outside the trimmed clip).
+    for cap in list(new_clip.findall("caption")):
+        cap_start = parse_rational(cap.get("offset"))
+        cap_end = cap_start + parse_rational(cap.get("duration"))
+        if cap_end <= sel_start or cap_start >= sel_end:
+            new_clip.remove(cap)
+
+    # Any caption/title styles that survived define <text-style-def id="tsN">
+    # inline. Give this copy a private suffix so several selects cut from the
+    # same captioned source clip can't all re-define ts1…tsN — the duplicate
+    # ids FCP rejects with "DTD validation failed. ID ts1 already defined".
+    _uniquify_text_style_defs(new_clip, f"_s{copy_seq}")
 
     note_text = select.note
     if select.speaker:
@@ -457,6 +504,7 @@ def _build_selects_spine(
     timeline_cursor = Fraction(0)
     fd = parsed.sequence_frame_duration
     original_spine_clips = _index_original_spine(parsed)
+    copy_seq = 0  # unique per deep-copied clip — drives text-style-def suffixing
     for s in selects:
         try:
             segment, container_start, container_end = _locate_select_range(parsed, s)
@@ -482,8 +530,9 @@ def _build_selects_spine(
                 continue
             node = _build_copied_clip_node(
                 parsed, s, segment, original_spine_clips[seg_idx],
-                start_str, dur_str, offset_str,
+                start_str, dur_str, offset_str, copy_seq,
             )
+            copy_seq += 1
         spine.append(node)
         timeline_cursor += dur_frac
     return spine, timeline_cursor

@@ -118,6 +118,76 @@ def test_downstream_engine_loss_still_offers_installer(client, monkeypatch):
     assert client._saved.get('status') == 'uploaded'
 
 
+def test_english_no_engine_offers_installer(client, monkeypatch):
+    """Issue #39: an English job tries Parakeet first; when it crashes/fails on a
+    file (the issue #23 Metal-crash class) it falls back to Whisper, which isn't
+    installed on a fresh DMG, and transcribe_file raises 'No transcription engine
+    found'. The route must offer the SAME in-app installer (not a bare pip-install
+    500) and keep the project renderable so the banner survives a reload."""
+    _project(client, 'en')
+    # whisper absent (fixture: _engine_available True only for parakeet_mlx), so
+    # _whisper_ready() is False. transcribe_file exhausts every engine.
+    monkeypatch.setattr(T, 'transcribe_file', lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError('No transcription engine found. Install one of: ...')))
+    resp = client.post('/project/p/transcribe')
+    body = resp.get_json()
+    assert resp.status_code == 400
+    assert body['needs_whisper_install'] is True
+    assert body['requested_language'] == 'en'
+    assert client._saved.get('status') == 'uploaded'
+    assert client._saved.get('error') in (None, '')
+
+
+def test_english_non_engine_error_still_500s(client, monkeypatch):
+    """The English fallback must fire ONLY for the no-engine exhaustion case. A
+    different failure (e.g. an undecodable/audio-less file) while Whisper happens
+    to be absent must still surface as a real 500 — not a misleading installer."""
+    _project(client, 'en')
+    monkeypatch.setattr(T, 'transcribe_file', lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError('ffmpeg audio extraction failed: no audio stream')))
+    resp = client.post('/project/p/transcribe')
+    body = resp.get_json()
+    assert resp.status_code == 500
+    assert not body.get('needs_whisper_install')
+    assert client._saved.get('status') == 'error'
+
+
+def test_model_cache_rejects_truncated_pt(monkeypatch, tmp_path):
+    """A download interrupted mid-write leaves a truncated large-v3-turbo.pt at
+    the final path. _whisper_model_cached must reject it on size so the install
+    actually completes instead of reporting a false 'ready' on a corrupt model."""
+    d = tmp_path / 'whisper'
+    d.mkdir()
+    monkeypatch.setattr(A, '_whisper_cache_dir', lambda: str(d))
+
+    assert A._whisper_model_cached() is False  # nothing cached yet
+
+    partial = d / 'large-v3-turbo.pt'
+    partial.write_bytes(b'\x00' * 4096)         # truncated partial
+    assert A._whisper_model_cached() is False
+
+    with open(partial, 'wb') as f:              # full-size (sparse) weights
+        f.truncate(A._WHISPER_MODEL_MIN_BYTES + 1)
+    assert A._whisper_model_cached() is True
+
+
+def test_stream_subprocess_heartbeat_when_child_quiet():
+    """The banner must keep moving even when the child emits nothing
+    newline-terminated for a while (the 'stuck on Starting install' report). A
+    heartbeat surfaces an elapsed clock during the quiet stretch."""
+    details = []
+    prog = (
+        'import sys, time\n'
+        'sys.stdout.write("downloading the speech model\\n"); sys.stdout.flush()\n'
+        'time.sleep(0.6)\n'   # go quiet — no newline — long enough for heartbeats
+    )
+    rc, _tail = A._stream_subprocess(
+        [sys.executable, '-c', prog], details.append, heartbeat_interval=0.15)
+    assert rc == 0
+    assert any('elapsed' in d for d in details), \
+        'expected a heartbeat with elapsed time during the quiet stretch'
+
+
 def test_whisper_ready_requires_package_and_model(monkeypatch):
     """_whisper_ready gates on BOTH the package and the cached model so the UI
     doesn't report 'done' while the ~1.5GB model is still missing."""

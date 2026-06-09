@@ -3861,6 +3861,13 @@ def _cap_and_rank_analysis(accum, segment_vectors=None, cap=7):
         deduped = []
         for b in out['broll_suggestions']:
             if isinstance(b, dict):
+                # Drop timecode-less entries. A salvaged trailing element from a
+                # truncated reply (the JSON-repair path) can be an empty {} or a
+                # description with no start/end — it can't be placed on a
+                # timeline, and unlike clips/soundbites b-roll has no later
+                # timecode filter, so skip it here.
+                if not (b.get('start') or b.get('end')):
+                    continue
                 key = json.dumps({k: b.get(k) for k in sorted(b.keys())}, sort_keys=True)
             else:
                 key = str(b).strip().lower()
@@ -5037,67 +5044,108 @@ def _parse_json_response(response_text):
 
 
 def _repair_truncated_json(text):
-    """Attempt to repair truncated JSON by closing open structures."""
-    # Strip trailing whitespace
-    text = text.rstrip()
+    """Repair truncated JSON by rewinding to the last fully-formed element of the
+    deepest still-open container, then closing the remaining open structures.
 
-    # If we're mid-string, close it: find if we have unmatched quote
+    Ollama (``/api/generate`` with ``format='json'``) stops mid-object when its
+    output runs past ``num_predict`` (``done_reason='length'``). The previous
+    implementation only closed open braces at the raw cut point, which left a
+    dangling key/value behind and produced structurally-invalid JSON — so a
+    response whose *leading* items were complete got discarded whole, the parse
+    fell through to the error dict, and the analysis came back empty (the German /
+    long-interview "Analysis produced no results" report). Verbose languages hit
+    this constantly because they spend ~40-50% more tokens on the same verbatim
+    quotes.
+
+    This version keeps every complete element and drops only the half-written
+    trailing one. It forward-scans with a container stack where each frame records
+    ``last_complete`` — the index just AFTER its last fully-formed element (or just
+    after the opening bracket if none yet). On truncation it rewinds the deepest
+    open frame to that boundary, strips trailing separators, and appends closers
+    innermost-first. Already-valid JSON is returned unchanged (idempotent)."""
+    text = text.rstrip()
+    if not text:
+        return text
+
+    stack = []          # frames: {'type': 'obj'|'arr', 'last_complete': int, 'expect_value': bool}
     in_str = False
     esc = False
-    last_quote = -1
+    scalar_start = -1   # index where the current bare scalar (number/true/false/null) began
+
+    def _finalize_scalar(end_idx):
+        # A bare scalar only ever appears as a VALUE; completing one advances the
+        # enclosing frame's last_complete and ends any object's value slot.
+        nonlocal scalar_start
+        if scalar_start != -1 and stack:
+            stack[-1]['last_complete'] = end_idx
+            if stack[-1]['type'] == 'obj':
+                stack[-1]['expect_value'] = False
+        scalar_start = -1
+
     for i, ch in enumerate(text):
-        if esc:
-            esc = False
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+                # A closed string is a VALUE iff we're in an array, or in an
+                # object after a ':' — object KEYS must not advance last_complete,
+                # otherwise a dangling '"key":' would be kept as if complete.
+                if stack:
+                    fr = stack[-1]
+                    if fr['type'] == 'arr' or fr.get('expect_value'):
+                        fr['last_complete'] = i + 1
+                        if fr['type'] == 'obj':
+                            fr['expect_value'] = False
             continue
-        if ch == '\\' and in_str:
-            esc = True
-            continue
+
         if ch == '"':
-            in_str = not in_str
-            last_quote = i
+            _finalize_scalar(i)
+            in_str = True
+        elif ch in ' \t\r\n':
+            _finalize_scalar(i)
+        elif ch == '{' or ch == '[':
+            _finalize_scalar(i)
+            stack.append({
+                'type': 'obj' if ch == '{' else 'arr',
+                'last_complete': i + 1,
+                'expect_value': False,
+            })
+        elif ch == '}' or ch == ']':
+            _finalize_scalar(i)
+            if stack:
+                stack.pop()
+                if stack:  # a closed container is a completed value for its parent
+                    stack[-1]['last_complete'] = i + 1
+                    if stack[-1]['type'] == 'obj':
+                        stack[-1]['expect_value'] = False
+        elif ch == ':':
+            _finalize_scalar(i)
+            if stack and stack[-1]['type'] == 'obj':
+                stack[-1]['expect_value'] = True
+        elif ch == ',':
+            _finalize_scalar(i)
+            if stack and stack[-1]['type'] == 'obj':
+                stack[-1]['expect_value'] = False
+        elif scalar_start == -1:
+            scalar_start = i  # start of a bare scalar token
 
-    # If we're inside an open string, truncate to last clean point before it
-    if in_str and last_quote > 0:
-        # Close the string and trim any trailing partial value
-        text = text[:last_quote + 1]
-        # We may now have something like  "key": "value  — close quote
-        if not text.endswith('"'):
-            text += '"'
+    # Cleanly balanced and not mid-token → already valid JSON; leave it alone.
+    if not stack and not in_str and scalar_start == -1:
+        return text
+    if not stack:
+        # Balanced brackets but trailing junk at top level — nothing sensible to
+        # close. Hand it back unchanged; the caller's json.loads will reject it.
+        return text
 
-    # Remove trailing commas, colons, or partial tokens
-    text = text.rstrip()
-    while text and text[-1] in (',', ':', ' ', '\n', '\t'):
-        text = text[:-1]
+    # Rewind the deepest open frame past its half-written trailing element, drop
+    # any trailing separators, then close every open frame innermost-first.
+    repaired = text[:stack[-1]['last_complete']].rstrip()
+    while repaired and repaired[-1] in (',', ':', ' ', '\t', '\r', '\n'):
+        repaired = repaired[:-1].rstrip()
+    for fr in reversed(stack):
+        repaired += '}' if fr['type'] == 'obj' else ']'
 
-    # Count open braces/brackets and close them
-    open_braces = 0
-    open_brackets = 0
-    in_string = False
-    escape_next = False
-
-    for ch in text:
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == '\\' and in_string:
-            escape_next = True
-            continue
-        if ch == '"' and not escape_next:
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == '{':
-            open_braces += 1
-        elif ch == '}':
-            open_braces -= 1
-        elif ch == '[':
-            open_brackets += 1
-        elif ch == ']':
-            open_brackets -= 1
-
-    # Close any remaining open structures
-    text += ']' * max(0, open_brackets)
-    text += '}' * max(0, open_braces)
-
-    return text
+    return repaired

@@ -247,13 +247,21 @@ def test_edl_record_tc_starts_at_one_hour_and_is_monotonic():
 
 
 def test_edl_timecode_format_strict_8_chars():
+    # NTSC vectors: the frame index is computed at the ACTUAL rate
+    # (24000/1001 for 23.976), then rendered NDF at the integer base — so
+    # wall-clock 3600s lands at TC 00:59:56:10, the standard NDF lag.
+    # (The old implementation counted frames at the integer rate, which placed
+    # every late-interview select ~3.6s/hour too late in Resolve.)
     for s, fr, expected in [
         (0.0,    23.976, "00:00:00:00"),
         (1.5,    23.976, "00:00:01:12"),
-        (3600.0, 23.976, "01:00:00:00"),
+        (3600.0, 23.976, "00:59:56:10"),
         (10.0,   25.0,   "00:00:10:00"),
         (10.0,   29.97,  "00:00:10:00"),
-        (3661.5, 23.976, "01:01:01:12"),
+        (3661.5, 23.976, "01:00:57:20"),
+        (3600.0, 29.97,  "00:59:56:12"),
+        (3600.0, 24.0,   "01:00:00:00"),  # integer rates have no lag
+        (3600.0, 25.0,   "01:00:00:00"),
     ]:
         assert _seconds_to_timecode(s, fr) == expected
 

@@ -183,14 +183,30 @@ def extract_audio(filepath, project_dir=None):
             pass  # not a valid WAV or wrong format — fall through to ffmpeg
 
     ffmpeg = _find_ffmpeg()
-    result = subprocess.run([
-        ffmpeg, '-i', filepath,
-        '-vn', '-acodec', 'pcm_s16le',
-        '-ar', '16000', '-ac', '1',
-        audio_path, '-y'
-    ], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg audio extraction failed: {result.stderr[:500]}")
+    # Write to a temp path and os.replace into place only on success, so an
+    # interrupted extraction (crash, force-quit, disk full) can't leave a
+    # truncated audio.wav that the existence check above would later serve as
+    # complete — silently cutting every future transcript short. `-y` moves
+    # BEFORE the output path: as a trailing arg it was a no-op, so a stale
+    # .part from a prior crash wasn't even overwritten.
+    tmp_path = audio_path + '.part.wav'
+    try:
+        result = subprocess.run([
+            ffmpeg, '-y', '-i', filepath,
+            '-vn', '-acodec', 'pcm_s16le',
+            '-ar', '16000', '-ac', '1',
+            tmp_path,
+        ], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg audio extraction failed: {result.stderr[:500]}")
+        os.replace(tmp_path, audio_path)
+    finally:
+        # Failure or interruption: never leave a partial file behind.
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
     return audio_path
 
 

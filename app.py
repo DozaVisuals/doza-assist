@@ -22,6 +22,7 @@ from werkzeug.utils import secure_filename
 from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
 from exporters.media_probe import (
     get_video_resolution, get_video_framerate, get_video_start_timecode_frames,
+    get_media_duration,
 )
 from doza_assist.fcpxml import (
     parse_fcpxml, ParseError, Select, WriterError,
@@ -31,6 +32,7 @@ from doza_assist.fcpxml.timeline_audio import (
     render_timeline_audio, TimelineAudioError,
 )
 import preferences as prefs
+from doza_assist.jsonio import atomic_write_json, load_json
 
 
 def get_project_platform(project: dict) -> str:
@@ -407,8 +409,14 @@ def get_project(project_id):
     meta_path = os.path.join(project_dir, 'meta.json')
     if not os.path.exists(meta_path):
         return None
-    with open(meta_path, 'r') as f:
-        return json.load(f)
+    # Tolerant load: a meta.json truncated by a crash/force-quit mid-write used
+    # to raise JSONDecodeError and 500 the dashboard for every project. Degrade
+    # to None (treated as "not found") and warn instead.
+    data = load_json(meta_path)
+    if not isinstance(data, dict):
+        print(f"Warning: could not read meta.json for project {project_id} (missing or corrupt)")
+        return None
+    return data
 
 
 def load_segment_vectors(project_id):
@@ -438,13 +446,55 @@ def load_paragraph_index(project_id):
 
 
 def save_project(project_id, data):
-    """Save a project's metadata."""
+    """Save a project's metadata (atomic temp-file + rename — a crash mid-write
+    can no longer leave a truncated meta.json behind)."""
     project_dir = safe_project_dir(project_id)
     if project_dir is None:
         raise ValueError(f'Invalid project_id: {project_id!r}')
     os.makedirs(project_dir, exist_ok=True)
-    with open(os.path.join(project_dir, 'meta.json'), 'w') as f:
-        json.dump(data, f, indent=2)
+    atomic_write_json(os.path.join(project_dir, 'meta.json'), data)
+
+
+# Per-project write locks. Flask runs threaded, so concurrent requests mutating
+# the same project (a minutes-long /analyze overlapping a chat save, two label
+# writes, …) must serialize their read-modify-write cycles or the last writer
+# silently reverts the other's keys. The registry itself is guarded so two
+# threads can't mint two locks for one project. (Pro keeps its own
+# _transcribe_jobs / _analysis_threads job-claim guards — these locks are only
+# for serializing the meta.json read-modify-write.)
+_project_locks = {}
+_project_locks_guard = threading.Lock()
+
+
+def project_lock(project_id):
+    """Return the (single) lock for a project, creating it on first use."""
+    with _project_locks_guard:
+        lock = _project_locks.get(project_id)
+        if lock is None:
+            lock = threading.Lock()
+            _project_locks[project_id] = lock
+        return lock
+
+
+def update_project(project_id, updates, remove=None):
+    """Atomically merge ``updates`` into the project's current on-disk state.
+
+    For long-running jobs (/transcribe, /analyze) that loaded the project
+    minutes ago: re-reads meta.json under the project lock and writes back only
+    the keys the job owns, so chat history / labels / renames saved while the
+    job ran are preserved instead of being clobbered by the job's stale
+    snapshot. ``remove`` lists keys to drop (e.g. a stale 'error'). Returns the
+    merged dict, or None if the project no longer exists (deleted mid-job).
+    """
+    with project_lock(project_id):
+        current = get_project(project_id)
+        if current is None:
+            return None
+        current.update(updates)
+        for key in (remove or []):
+            current.pop(key, None)
+        save_project(project_id, current)
+        return current
 
 
 def list_projects():
@@ -456,10 +506,14 @@ def list_projects():
     for pid in os.listdir(projects_dir):
         meta_path = os.path.join(projects_dir, pid, 'meta.json')
         if os.path.exists(meta_path):
-            with open(meta_path, 'r') as f:
-                meta = json.load(f)
-                meta['id'] = pid
-                projects.append(meta)
+            # Skip an unreadable/corrupt project instead of failing the whole
+            # listing (one bad meta.json used to 500 the dashboard).
+            meta = load_json(meta_path)
+            if not isinstance(meta, dict):
+                print(f"Warning: skipping unreadable project {pid}")
+                continue
+            meta['id'] = pid
+            projects.append(meta)
     projects.sort(key=lambda x: x.get('created_at', ''), reverse=True)
     return projects
 
@@ -509,9 +563,7 @@ def log_activity(project_id, event_type, description):
     })
     entries = entries[:50]
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(entries, f, indent=2)
+        atomic_write_json(path, entries)
     except OSError:
         pass
 
@@ -1126,6 +1178,16 @@ def upload():
     os.makedirs(project_dir, exist_ok=True)
 
     filename = secure_filename(file.filename)
+    # secure_filename strips all non-ASCII: a fully non-Latin name like
+    # "面接.mp4" or "Интервью.mp4" collapses to just "mp4" — no extension — and
+    # create_project_from_path then rejected the valid media file with a
+    # misleading "Unsupported file type". The real extension was already
+    # validated by allowed_file() above, so preserve it and synthesize a safe
+    # stem when sanitization ate the name. The visible project name comes from
+    # project_name (the original filename), so it's unaffected.
+    original_ext = file.filename.rsplit('.', 1)[1].lower()
+    if '.' not in filename or filename.rsplit('.', 1)[1].lower() != original_ext:
+        filename = f"upload-{project_id}.{original_ext}"
     filepath = os.path.join(project_dir, filename)
     file.save(filepath)
 
@@ -1895,11 +1957,15 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             language=language,
             progress_cb=progress_cb,
         )
-        # Persist to the project as before.
-        project = get_project(project_id) or {}
-        project['transcript'] = result
-        project['status'] = 'transcribed'
-        save_project(project_id, project)
+        # Persist only the keys this job owns, re-reading current state under
+        # the project lock — so chat history / labels / a rename saved while
+        # the (minutes-long) transcription ran aren't clobbered by this stale
+        # snapshot. Drops any prior 'error'.
+        project = update_project(
+            project_id,
+            {'transcript': result, 'status': 'transcribed'},
+            remove=['error'],
+        ) or {}
         seg_count = len((result or {}).get('segments', []))
         log_activity(project_id, 'transcribed',
                      f"{project.get('name', 'Project')} transcribed · {seg_count} segments")
@@ -1961,10 +2027,7 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             _transcribe_jobs[project_id] = err_payload
         _write_transcribe_status(project_id, err_payload)
         try:
-            project = get_project(project_id) or {}
-            project['status'] = 'error'
-            project['error'] = str(e)
-            save_project(project_id, project)
+            update_project(project_id, {'status': 'error', 'error': str(e)})
         except Exception:
             pass
     finally:
@@ -2195,8 +2258,7 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         if segment_vectors:
             project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
             vectors_path = os.path.join(project_dir, 'segment_vectors.json')
-            with open(vectors_path, 'w') as f:
-                json.dump(segment_vectors, f, indent=2)
+            atomic_write_json(vectors_path, segment_vectors)
 
         progress(step=global_total, total=global_total,
                  current="building paragraph index")
@@ -2208,7 +2270,7 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         except Exception as ie:
             print(f"Paragraph index build failed: {ie}")
 
-        project['analysis_cache'] = {
+        analysis_cache = {
             transcript_hash: {
                 **(cache_snapshot.get(transcript_hash, {}) if isinstance(cache_snapshot, dict) else {}),
                 analysis_type: {
@@ -2217,44 +2279,18 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
                 },
             }
         }
-        # Re-read on-disk meta right before save so we pick up any
-        # changes that concurrent writers (most importantly the Pro
-        # diarization worker) made to fields this worker does not own.
-        #
-        # Without this merge, the analyze worker's save_project clobbers
-        # the SPEAKER_NN labels and the meta["diarization"] block that
-        # diarization wrote while the LLM analysis was running. The
-        # symptom: a freshly-built collection shows all segments with
-        # the interviewer's name (e.g. "Chris") even though
-        # diarization_segments.json on disk has the real per-speaker
-        # boundaries and diarization_status.json says "done". (Verified
-        # in production on 0.8.14 with a 2-project collection that
-        # diarized correctly to 12 + 3 speakers respectively, but
-        # meta.json segments stayed pinned at the OSS Parakeet
-        # default-speaker label.)
-        try:
-            on_disk = get_project(project_id) or {}
-            if on_disk.get('transcript'):
-                # Take the LIVE transcript (with diarization's SPEAKER_NN
-                # labels) over the stale one we loaded at the top of
-                # this worker. Other transcript fields (text, timing,
-                # words) are also LIVE; they only change when
-                # transcribe re-runs, which would not happen during
-                # the analyze window anyway.
-                project['transcript'] = on_disk['transcript']
-            if on_disk.get('diarization'):
-                project['diarization'] = on_disk['diarization']
-            if on_disk.get('speaker_names'):
-                project['speaker_names'] = on_disk['speaker_names']
-        except Exception as merge_err:
-            # Non-fatal — analysis still completes. Surface it so the
-            # support flow doesn't have to guess.
-            print(
-                f"[analyze worker] merge-before-save failed for "
-                f"{project_id}: {merge_err}",
-                flush=True,
-            )
-        save_project(project_id, project)
+        # Persist ONLY the keys this worker owns, via update_project's locked
+        # read-modify-write. This SUPERSEDES the old hand-rolled
+        # merge-before-save block: that code re-read meta and manually carried
+        # the LIVE transcript / diarization / speaker_names forward so the
+        # analyze worker's blanket save_project wouldn't clobber what the Pro
+        # diarization worker wrote concurrently — the "all segments show the
+        # interviewer's name (e.g. Chris)" bug, verified in production on 0.8.14
+        # with a 2-project collection that diarized to 12 + 3 speakers but whose
+        # meta.json segments stayed pinned at the OSS Parakeet default label.
+        # Writing only 'analysis' + 'analysis_cache' preserves all of that AND
+        # the chat history / labels the old manual merge still missed.
+        update_project(project_id, {'analysis': result, 'analysis_cache': analysis_cache})
         title = result.get('suggested_title') or project.get('name', 'Project')
         log_activity(project_id, 'analyzed', f'AI analysis run · "{title}"')
 
@@ -2337,8 +2373,7 @@ def analyze(project_id):
     bucket = cache.get(transcript_hash) if isinstance(cache.get(transcript_hash), dict) else {}
     cached_entry = bucket.get(analysis_type) if isinstance(bucket.get(analysis_type), dict) else None
     if not force and cached_entry and isinstance(cached_entry.get('analysis'), dict):
-        project['analysis'] = cached_entry['analysis']
-        save_project(project_id, project)
+        update_project(project_id, {'analysis': cached_entry['analysis']})
         return jsonify({
             'status': 'cached',
             'analysis': cached_entry['analysis'],
@@ -2387,11 +2422,33 @@ def analyze_status(project_id):
     path = _analyze_status_path(project_id)
     if not os.path.exists(path):
         return jsonify({'idle': True})
-    try:
-        with open(path) as f:
-            return jsonify(json.load(f))
-    except (json.JSONDecodeError, OSError):
+    payload = load_json(path)
+    if not isinstance(payload, dict):
         return jsonify({'idle': True})
+    # Self-heal an orphaned status file: if no analyze thread is alive for this
+    # project, the run isn't marked done, and the file is older than ~2 min,
+    # it's a leftover from a crashed/abandoned run — remove it and report idle
+    # so the UI stops polling forever. The age guard avoids racing the /analyze
+    # route, which seeds this file BEFORE it registers + starts the worker.
+    if not payload.get('done'):
+        with _analysis_threads_lock:
+            t = _analysis_threads.get(project_id)
+        if not (t and t.is_alive()):
+            stale = True
+            updated = payload.get('updated_at')
+            if updated:
+                try:
+                    age = (datetime.now() - datetime.fromisoformat(updated)).total_seconds()
+                    stale = age > 120
+                except (ValueError, TypeError):
+                    stale = True
+            if stale:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return jsonify({'idle': True})
+    return jsonify(payload)
 
 
 @app.route('/project/<project_id>/chat', methods=['POST'])
@@ -2468,16 +2525,19 @@ def chat(project_id):
         # Persist chat history on single-project chats. Multi-project sessions
         # (comma-separated IDs) stay ephemeral — ownership is ambiguous and we
         # don't want to fork writes across multiple meta.json files.
-        if len(projects_for_chat) == 1:
+        if len(projects_for_chat) == 1 and reply.strip():
             p = projects_for_chat[0]
             pid = p['id']
-            stored = get_project(pid) or p
-            history_log = list(stored.get('chat_history') or [])
-            now_iso = datetime.now().isoformat()
-            history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
-            history_log.append({'role': 'assistant', 'content': reply, 'ts': now_iso})
-            stored['chat_history'] = history_log
-            save_project(pid, stored)
+            # Lock the read-modify-write so a concurrent /analyze or chat turn
+            # can't clobber the appended history; skip empty replies.
+            with project_lock(pid):
+                stored = get_project(pid) or p
+                history_log = list(stored.get('chat_history') or [])
+                now_iso = datetime.now().isoformat()
+                history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
+                history_log.append({'role': 'assistant', 'content': reply, 'ts': now_iso})
+                stored['chat_history'] = history_log
+                save_project(pid, stored)
 
         return jsonify({'reply': reply})
     except Exception as e:
@@ -2574,15 +2634,20 @@ def chat_stream(project_id):
 
         # Persist on single-project chats only — same rule the non-streaming
         # endpoint enforces. Multi-project sessions stay ephemeral.
-        if single_pid:
+        if single_pid and final_reply.strip():
             try:
-                stored = get_project(single_pid) or {}
-                history_log = list(stored.get('chat_history') or [])
-                now_iso = datetime.now().isoformat()
-                history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
-                history_log.append({'role': 'assistant', 'content': final_reply, 'ts': now_iso})
-                stored['chat_history'] = history_log
-                save_project(single_pid, stored)
+                # Serialize the read-modify-write so a concurrent /analyze or a
+                # second chat turn can't clobber this append (and vice versa).
+                # Skip persisting when the reply is empty (e.g. provider aborted
+                # before any token) so we don't write a dangling user turn.
+                with project_lock(single_pid):
+                    stored = get_project(single_pid) or {}
+                    history_log = list(stored.get('chat_history') or [])
+                    now_iso = datetime.now().isoformat()
+                    history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
+                    history_log.append({'role': 'assistant', 'content': final_reply, 'ts': now_iso})
+                    stored['chat_history'] = history_log
+                    save_project(single_pid, stored)
             except Exception as e:
                 print(f"[chat-stream] history persist failed: {e}")
 
@@ -2600,8 +2665,7 @@ def clear_chat(project_id):
     project = get_project(pid)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
-    project['chat_history'] = []
-    save_project(pid, project)
+    update_project(pid, {'chat_history': []})
     return jsonify({'status': 'cleared'})
 
 
@@ -2613,8 +2677,7 @@ def save_selects(project_id):
         return jsonify({'error': 'Project not found'}), 404
 
     selects = request.json.get('selects', [])
-    project['client_selects'] = selects
-    save_project(project_id, project)
+    update_project(project_id, {'client_selects': selects})
     return jsonify({'status': 'saved', 'count': len(selects)})
 
 
@@ -2627,10 +2690,12 @@ def save_labels(project_id):
 
     data = request.json or {}
     prev_count = len(project.get('labeled_sections', []) or [])
-    project['color_labels'] = data.get('color_labels', {})
-    project['labeled_sections'] = data.get('labeled_sections', [])
-    save_project(project_id, project)
-    new_count = len(project['labeled_sections'])
+    new_sections = data.get('labeled_sections', [])
+    update_project(project_id, {
+        'color_labels': data.get('color_labels', {}),
+        'labeled_sections': new_sections,
+    })
+    new_count = len(new_sections)
     delta = new_count - prev_count
     if delta > 0:
         log_activity(project_id, 'clip_added',
@@ -2638,7 +2703,27 @@ def save_labels(project_id):
     elif delta < 0:
         log_activity(project_id, 'clip_removed',
                      f"{-delta} clip{'s' if -delta != 1 else ''} removed · {new_count} total")
-    return jsonify({'status': 'saved', 'count': len(project['labeled_sections'])})
+    return jsonify({'status': 'saved', 'count': new_count})
+
+
+def _resolve_export_framerate(body, detected_fps):
+    """Pick the export framerate: explicit user override > probe > default.
+
+    The old expression (``detected_fps or body.get('framerate')``) made the
+    export UI's framerate field a no-op whenever ffprobe succeeded. An explicit,
+    valid body value now wins (snapped to the standard-rate grid); detection
+    remains the default when the field just echoes it.
+    """
+    from exporters.media_probe import snap_framerate
+    body_fps = (body or {}).get('framerate')
+    if body_fps:
+        try:
+            fps = float(body_fps)
+            if 1.0 <= fps <= 240.0:
+                return snap_framerate(fps)
+        except (TypeError, ValueError):
+            pass
+    return detected_fps or 23.976
 
 
 def _build_nle_export(project: dict, body: dict, force_platform: str | None = None):
@@ -2803,12 +2888,15 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
 
     # Source file + media metadata
     source_path = project.get('source_path', project.get('filepath', ''))
-    media_duration = None
-    if project.get('transcript') and project['transcript'].get('duration'):
+    # Real container duration is the correct clamp bound — a clip in the tail
+    # (B-roll/music past the last spoken word) used to be dropped when we fell
+    # back to the transcript's spoken-word end. Probe first, transcript second.
+    media_duration = get_media_duration(source_path)
+    if not media_duration and project.get('transcript') and project['transcript'].get('duration'):
         media_duration = project['transcript']['duration']
 
     detected_fps = get_video_framerate(source_path)
-    framerate = detected_fps or body.get('framerate', 23.976)
+    framerate = _resolve_export_framerate(body, detected_fps)
     export_mode = body.get('mode', 'cuts')  # 'cuts', 'markers', 'both'
     width, height = get_video_resolution(source_path)
     # Embedded start timecode (DJI/Sony stamp time-of-day TC); FCP rejects
@@ -3831,8 +3919,7 @@ def story_build(project_id):
                 if segment_vectors:
                     os.makedirs(project_dir, exist_ok=True)
                     vectors_path = os.path.join(project_dir, 'segment_vectors.json')
-                    with open(vectors_path, 'w') as f:
-                        json.dump(segment_vectors, f, indent=2)
+                    atomic_write_json(vectors_path, segment_vectors)
             except Exception as ve:
                 print(f"[story build] on-demand vector generation failed: {ve}")
 
@@ -3861,11 +3948,6 @@ def story_build(project_id):
         # Save the build to story_builds.json
         builds_path = os.path.join(project_dir, 'story_builds.json')
 
-        builds = []
-        if os.path.exists(builds_path):
-            with open(builds_path, 'r') as f:
-                builds = json.load(f)
-
         build_entry = {
             'id': str(uuid.uuid4())[:8],
             'prompt': message,
@@ -3875,10 +3957,14 @@ def story_build(project_id):
             'reasoning': result.get('reasoning', ''),
             'clips': clips,
         }
-        builds.append(build_entry)
-
-        with open(builds_path, 'w') as f:
-            json.dump(builds, f, indent=2)
+        # Locked read-modify-write so two concurrent builds can't drop each
+        # other's entry; atomic write so a crash can't truncate the list.
+        with project_lock(project_id):
+            builds = load_json(builds_path, [])
+            if not isinstance(builds, list):
+                builds = []
+            builds.append(build_entry)
+            atomic_write_json(builds_path, builds)
 
         clip_count = len(build_entry.get('clips', []))
         log_activity(
@@ -3919,38 +4005,35 @@ def story_update(project_id, build_id):
     """
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     builds_path = os.path.join(project_dir, 'story_builds.json')
-
-    builds = []
-    if os.path.exists(builds_path):
-        try:
-            with open(builds_path, 'r') as f:
-                builds = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            builds = []
-
     data = request.json or {}
 
-    # Try to find and update an existing build
-    for i, b in enumerate(builds):
-        if b['id'] == build_id:
-            if 'clips' in data:
-                builds[i]['clips'] = data['clips']
-            if 'story_title' in data:
-                builds[i]['story_title'] = data['story_title']
-            with open(builds_path, 'w') as f:
-                json.dump(builds, f, indent=2)
-            return jsonify({'status': 'updated', 'build': builds[i]})
+    # Whole read-modify-write under the project lock so the Story Builder's
+    # edit-in-place and the Story Brief's "Send to Story Builder" upsert can't
+    # race and lose each other's entry; atomic write so a crash can't truncate.
+    with project_lock(project_id):
+        builds = load_json(builds_path, [])
+        if not isinstance(builds, list):
+            builds = []
 
-    # Build not found — create it (upsert)
-    new_build = {
-        'id': build_id,
-        'story_title': data.get('story_title', 'Untitled'),
-        'clips': data.get('clips', []),
-        'created_at': datetime.now().isoformat(),
-    }
-    builds.append(new_build)
-    with open(builds_path, 'w') as f:
-        json.dump(builds, f, indent=2)
+        # Try to find and update an existing build
+        for i, b in enumerate(builds):
+            if b['id'] == build_id:
+                if 'clips' in data:
+                    builds[i]['clips'] = data['clips']
+                if 'story_title' in data:
+                    builds[i]['story_title'] = data['story_title']
+                atomic_write_json(builds_path, builds)
+                return jsonify({'status': 'updated', 'build': builds[i]})
+
+        # Build not found — create it (upsert)
+        new_build = {
+            'id': build_id,
+            'story_title': data.get('story_title', 'Untitled'),
+            'clips': data.get('clips', []),
+            'created_at': datetime.now().isoformat(),
+        }
+        builds.append(new_build)
+        atomic_write_json(builds_path, builds)
     return jsonify({'status': 'created', 'build': new_build}), 201
 
 
@@ -3960,17 +4043,15 @@ def story_delete(project_id, build_id):
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     builds_path = os.path.join(project_dir, 'story_builds.json')
 
-    if not os.path.exists(builds_path):
-        return jsonify({'error': 'No builds found'}), 404
-
-    with open(builds_path, 'r') as f:
-        builds = json.load(f)
-
-    deleted_title = next((b.get('story_title', 'Story') for b in builds if b['id'] == build_id), 'Story')
-    builds = [b for b in builds if b['id'] != build_id]
-
-    with open(builds_path, 'w') as f:
-        json.dump(builds, f, indent=2)
+    with project_lock(project_id):
+        if not os.path.exists(builds_path):
+            return jsonify({'error': 'No builds found'}), 404
+        builds = load_json(builds_path, [])
+        if not isinstance(builds, list):
+            builds = []
+        deleted_title = next((b.get('story_title', 'Story') for b in builds if b['id'] == build_id), 'Story')
+        builds = [b for b in builds if b['id'] != build_id]
+        atomic_write_json(builds_path, builds)
 
     log_activity(project_id, 'story_deleted', f"Story \"{deleted_title}\" deleted")
     return jsonify({'status': 'deleted'})
@@ -4013,13 +4094,16 @@ def _build_nle_story_export(project, body, force_platform=None):
         })
 
     source_path = project.get('source_path', project.get('filepath', ''))
-    media_duration = None
-    if project.get('transcript') and project['transcript'].get('duration'):
+    # Real container duration is the correct clamp bound — a clip in the tail
+    # (B-roll/music past the last spoken word) used to be dropped when we fell
+    # back to the transcript's spoken-word end. Probe first, transcript second.
+    media_duration = get_media_duration(source_path)
+    if not media_duration and project.get('transcript') and project['transcript'].get('duration'):
         media_duration = project['transcript']['duration']
 
     width, height = get_video_resolution(source_path)
     detected_fps = get_video_framerate(source_path)
-    framerate = detected_fps or body.get('framerate', 23.976)
+    framerate = _resolve_export_framerate(body, detected_fps)
     start_tc_frames = get_video_start_timecode_frames(source_path, framerate)
 
     if force_platform and force_platform in PLATFORMS:
@@ -4109,17 +4193,14 @@ def _get_comments_path(project_id):
 
 
 def _load_comments(project_id):
-    path = _get_comments_path(project_id)
-    if os.path.exists(path):
-        with open(path, 'r') as f:
-            return json.load(f)
-    return {'comments': []}
+    # Tolerant: a truncated client_comments.json degrades to "no comments"
+    # instead of 500-ing the portal/editor comment views.
+    data = load_json(_get_comments_path(project_id), {'comments': []})
+    return data if isinstance(data, dict) else {'comments': []}
 
 
 def _save_comments(project_id, data):
-    path = _get_comments_path(project_id)
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+    atomic_write_json(_get_comments_path(project_id), data)
 
 
 @app.route('/project/<project_id>/comments', methods=['GET'])
@@ -4146,9 +4227,10 @@ def add_comment(project_id):
     if not comment['comment_text']:
         return jsonify({'error': 'Comment text required'}), 400
 
-    comments_data = _load_comments(project_id)
-    comments_data['comments'].append(comment)
-    _save_comments(project_id, comments_data)
+    with project_lock(project_id):
+        comments_data = _load_comments(project_id)
+        comments_data.setdefault('comments', []).append(comment)
+        _save_comments(project_id, comments_data)
 
     return jsonify({'status': 'saved', 'comment': comment})
 
@@ -4156,21 +4238,23 @@ def add_comment(project_id):
 @app.route('/project/<project_id>/comments/<comment_id>/address', methods=['PUT'])
 def address_comment(project_id, comment_id):
     """Mark a comment as addressed (editor only)."""
-    comments_data = _load_comments(project_id)
-    for c in comments_data['comments']:
-        if c['id'] == comment_id:
-            c['addressed'] = not c.get('addressed', False)
-            _save_comments(project_id, comments_data)
-            return jsonify({'status': 'updated', 'addressed': c['addressed']})
+    with project_lock(project_id):
+        comments_data = _load_comments(project_id)
+        for c in comments_data.get('comments', []):
+            if c['id'] == comment_id:
+                c['addressed'] = not c.get('addressed', False)
+                _save_comments(project_id, comments_data)
+                return jsonify({'status': 'updated', 'addressed': c['addressed']})
     return jsonify({'error': 'Comment not found'}), 404
 
 
 @app.route('/project/<project_id>/comments/<comment_id>', methods=['DELETE'])
 def delete_comment(project_id, comment_id):
     """Delete a comment (editor only)."""
-    comments_data = _load_comments(project_id)
-    comments_data['comments'] = [c for c in comments_data['comments'] if c['id'] != comment_id]
-    _save_comments(project_id, comments_data)
+    with project_lock(project_id):
+        comments_data = _load_comments(project_id)
+        comments_data['comments'] = [c for c in comments_data.get('comments', []) if c['id'] != comment_id]
+        _save_comments(project_id, comments_data)
     return jsonify({'status': 'deleted'})
 
 

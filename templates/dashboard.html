@@ -244,6 +244,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
             </div>
             <div class="folder-actions">
                 <button class="btn btn-sm project-action-btn" onclick="event.stopPropagation(); renameFolder('{{ folder_name }}', this);" title="Rename folder">Rename</button>
+                <button class="btn btn-sm project-action-btn folder-delete-btn" style="color: var(--danger, #e5484d);" onclick="event.stopPropagation(); deleteFolder('{{ folder_name }}', {{ folder_projects | length }}, this);" title="Delete this folder and everything in it" aria-label="Delete folder">✕</button>
             </div>
         </div>
         <div class="folder-contents">
@@ -929,6 +930,31 @@ async function deleteProject(id, btn) {
         if (res.ok) location.reload();
         else { btn.disabled = false; btn.textContent = 'Delete'; alert('Error deleting project'); }
     } catch (err) { btn.disabled = false; btn.textContent = 'Delete'; alert('Error: ' + err.message); }
+}
+
+async function deleteFolder(name, count, btn) {
+    // Destructive bulk action — spell out exactly what's removed (and what
+    // isn't) so the editor can't trigger it by reflex.
+    const n = Number(count) || 0;
+    const noun = n === 1 ? 'interview' : 'interviews';
+    if (!confirm(
+        `Delete the entire "${name}" folder?\n\n` +
+        `This permanently deletes all ${n} ${noun} in it — every transcript, ` +
+        `analysis, and project file. Your original source media on disk is NOT ` +
+        `touched.\n\nThis cannot be undone.`
+    )) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+        const res = await fetch('/folder/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder: name }),
+        });
+        if (res.ok) { location.reload(); }
+        else { btn.disabled = false; btn.textContent = original; alert('Error deleting folder'); }
+    } catch (err) { btn.disabled = false; btn.textContent = original; alert('Error: ' + err.message); }
 }
 
 function selectBrowsedFile(path, name) {

@@ -2671,23 +2671,31 @@ async function startTranscription() {
             showToast('Transcription complete!');
             setTimeout(() => reloadAndKeepTab('transcript'), 3000);
         } else if (data.needs_whisper_install) {
-            // Non-English was requested but the Whisper engine isn't installed.
-            // Surface the same on-demand installer the Retranscribe modal uses,
-            // right here at the first wall the user hits, then auto-retry once
-            // the engine is ready (issue #36).
+            // The job needs the Whisper engine but it isn't installed. Fires for
+            // non-English jobs (Parakeet is English-only) AND for English jobs
+            // whose Parakeet engine crashed/failed on the file and fell back to
+            // Whisper, which isn't bundled (issues #36, #39). Surface the same
+            // on-demand installer the Retranscribe modal uses, right here at the
+            // first wall the user hits, then auto-retry once the engine is ready.
+            const reqLang = data.requested_language;
+            const isEn = !reqLang || reqLang === 'en';
+            const lang = (reqLang || '').toUpperCase();
             fill.style.width = '0%';
-            statusText.textContent = 'Non-English transcription needs an extra engine';
+            statusText.textContent = isEn
+                ? 'Transcription needs an extra engine'
+                : 'Non-English transcription needs an extra engine';
             timeText.textContent = '';
             const banner = document.getElementById('transcribeWhisperBanner');
             if (banner) {
-                const lang = (data.requested_language || '').toUpperCase();
                 banner.style.display = 'block';
                 banner.innerHTML = `
                     <div style="color: var(--text-secondary); margin-bottom: 0.6rem;">
                         <strong style="color: var(--text-primary);">Whisper engine required.</strong><br>
-                        Transcribing non-English audio${lang ? ` (${lang})` : ''} uses the Whisper engine, which isn't installed yet. It downloads the engine and a speech model (~2&nbsp;GB total) one time — you'll see live progress below, and it can take 10–20&nbsp;minutes on a slower connection.
+                        ${isEn
+                            ? `This file couldn't be handled by the fast engine and needs the Whisper engine as a fallback, which isn't installed yet.`
+                            : `Transcribing non-English audio${lang ? ` (${lang})` : ''} uses the Whisper engine, which isn't installed yet.`} It downloads the engine and a speech model (~2&nbsp;GB total) one time — you'll see live progress below, and it can take 10–20&nbsp;minutes on a slower connection.
                     </div>
-                    <button class="btn btn-sm btn-purple" id="firstRunInstallWhisper">Install non-English support</button>
+                    <button class="btn btn-sm btn-purple" id="firstRunInstallWhisper">Install transcription engine</button>
                 `;
                 const ib = document.getElementById('firstRunInstallWhisper');
                 if (ib) ib.onclick = () => runWhisperInstall(banner, () => {
@@ -3377,12 +3385,24 @@ async function runWhisperInstall(container, onDone) {
     }
 
     if (_whisperPollTimer) clearInterval(_whisperPollTimer);
+    let _pollFails = 0;
     _whisperPollTimer = setInterval(async () => {
         let state;
         try {
             const sres = await fetch('/api/install-whisper/status');
             state = await sres.json();
-        } catch (err) { return; }
+            _pollFails = 0;
+        } catch (err) {
+            // Don't silently freeze on a transient blip — but if the server is
+            // unreachable for several polls in a row, surface it instead of
+            // leaving the banner stuck on its last line forever.
+            if (++_pollFails > 5) {
+                clearInterval(_whisperPollTimer);
+                _whisperPollTimer = null;
+                container.innerHTML = '<div style="color: var(--danger, #f85149);">Lost contact with the server during install. Check that Doza Assist is still running, then try again.</div>';
+            }
+            return;
+        }
 
         if (state.status === 'done' || state.available) {
             clearInterval(_whisperPollTimer);
@@ -3402,9 +3422,12 @@ async function runWhisperInstall(container, onDone) {
             const retry = document.getElementById('retryWhisperBtn');
             if (retry) retry.onclick = () => runWhisperInstall(container, onDone);
         } else {
+            const elapsed = state.elapsed
+                ? ` · ${Math.floor(state.elapsed / 60)}m ${state.elapsed % 60}s elapsed`
+                : '';
             container.innerHTML = `
                 <div style="color: var(--text-secondary);">
-                    ${(state.detail || 'Installing…').replace(/</g, '&lt;')}
+                    ${(state.detail || 'Installing…').replace(/</g, '&lt;')}${elapsed}
                 </div>
             `;
         }

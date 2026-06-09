@@ -1434,14 +1434,31 @@ def _whisper_cache_dir():
     return os.path.join(base, 'whisper')
 
 
+# The healthy large-v3-turbo weights are ~1.62 GB. whisper writes the download
+# straight to the FINAL path with no temp-file + atomic rename, so a download
+# interrupted mid-write (watchdog kill, app quit, dropped network) leaves a
+# truncated .pt sitting at the real cache path. A filename-only check would then
+# report that corrupt partial as "ready" — _whisper_ready() goes True, the banner
+# hides, /api/install-whisper short-circuits to "done", and the next non-English
+# transcription silently re-downloads the full ~1.6 GB mid-run (issues #13, #36).
+# Gate on a conservative size floor so a partial is treated as not installed.
+_WHISPER_MODEL_MIN_BYTES = 1_500_000_000
+
+
 def _whisper_model_cached():
-    """True if the turbo weights are already on disk, so a re-run / second
-    project can skip the ~1.5 GB download."""
+    """True only if a FULL-SIZE turbo weight file is on disk, so a re-run /
+    second project can skip the ~1.6 GB download. A truncated partial left by an
+    interrupted download does not count."""
     try:
-        return any(
-            f.startswith('large-v3-turbo') and f.endswith('.pt')
-            for f in os.listdir(_whisper_cache_dir())
-        )
+        d = _whisper_cache_dir()
+        for f in os.listdir(d):
+            if f.startswith('large-v3-turbo') and f.endswith('.pt'):
+                try:
+                    if os.path.getsize(os.path.join(d, f)) >= _WHISPER_MODEL_MIN_BYTES:
+                        return True
+                except OSError:
+                    continue
+        return False
     except OSError:
         return False
 
@@ -1454,15 +1471,24 @@ def _whisper_ready():
     return _engine_available('whisper') and _whisper_model_cached()
 
 
-def _stream_subprocess(cmd, set_detail, prefix='', timeout=3600):
+def _stream_subprocess(cmd, set_detail, prefix='', timeout=3600, heartbeat_interval=5):
     """Run cmd, streaming combined stdout/stderr, pushing the freshest progress
     line into the install banner via set_detail(). Handles tqdm's \\r-rewritten
     progress bars (the model download) as well as pip's newline output. A
     watchdog kills the process after `timeout` s so a stalled network can't wedge
     the worker forever. Returns (returncode, tail) — tail is the last ~25 lines
-    for error reporting."""
+    for error reporting.
+
+    A background heartbeat refreshes the banner with elapsed time every few
+    seconds even when the child emits nothing newline-terminated for a long
+    stretch. pip piped to a non-TTY and the ~1.6 GB model download can both go
+    quiet for minutes inside the blocking read below; that previously left the
+    banner frozen on its last line, which read to users as "stuck on Starting
+    install…" (reddit report). The heartbeat runs independently of the read, so
+    the banner always shows movement while the worker is alive."""
     import collections
     import re as _re
+    import time as _time
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
@@ -1472,6 +1498,27 @@ def _stream_subprocess(cmd, set_detail, prefix='', timeout=3600):
     killer.start()
     tail = collections.deque(maxlen=25)
     buf = ''
+    start = _time.monotonic()
+    hb = {'last_line': '', 'last_emit': start}
+    hb_stop = threading.Event()
+
+    def _heartbeat():
+        # Every 5s, if no real progress line has surfaced recently, refresh the
+        # banner with the last line + a growing elapsed clock so it never looks
+        # frozen. Fires only while the child is alive (hb_stop gates the wait).
+        while not hb_stop.wait(heartbeat_interval):
+            if _time.monotonic() - hb['last_emit'] >= heartbeat_interval:
+                secs = int(_time.monotonic() - start)
+                base = hb['last_line'] or 'Working…'
+                set_detail(f"{prefix}{base} · {secs // 60}m {secs % 60:02d}s elapsed")
+
+    def _emit(line):
+        hb['last_line'] = line
+        hb['last_emit'] = _time.monotonic()
+        set_detail(prefix + line)
+
+    hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+    hb_thread.start()
     try:
         assert proc.stdout is not None
         while True:
@@ -1487,12 +1534,13 @@ def _stream_subprocess(cmd, set_detail, prefix='', timeout=3600):
                 line = line.strip()
                 if line:
                     tail.append(line)
-                    set_detail(prefix + line)
+                    _emit(line)
         if buf.strip():
             tail.append(buf.strip())
-            set_detail(prefix + buf.strip())
+            _emit(buf.strip())
         proc.wait()
     finally:
+        hb_stop.set()
         killer.cancel()
     return proc.returncode, '\n'.join(tail)
 
@@ -1549,6 +1597,21 @@ def _install_whisper_worker():
                 set_detail, prefix='model · ',
             )
             if rc != 0 or not _whisper_model_cached():
+                # A watchdog kill / dropped network can leave a truncated
+                # large-v3-turbo.pt at the final path. Remove the partial so the
+                # next "Try again" runs a real download instead of the Step-2
+                # skip-check (above) seeing the file and reporting instant — but
+                # false — success on a corrupt model.
+                try:
+                    import glob as _glob
+                    for _p in _glob.glob(os.path.join(_whisper_cache_dir(), 'large-v3-turbo*.pt')):
+                        try:
+                            if os.path.getsize(_p) < _WHISPER_MODEL_MIN_BYTES:
+                                os.remove(_p)
+                        except OSError:
+                            pass
+                except Exception:
+                    pass
                 set_state('error', f'Speech-model download failed: …{tail[-400:]}')
                 return
 
@@ -1594,6 +1657,8 @@ def install_whisper_status():
     with _whisper_install_lock:
         state = dict(_whisper_install_state)
     state['available'] = _whisper_ready()
+    started = state.get('started_at')
+    state['elapsed'] = int(time.time() - started) if started else 0
     return jsonify(state)
 
 
@@ -1689,25 +1754,40 @@ def transcribe(project_id):
         return jsonify({'status': 'transcribed', 'transcript': result})
 
     except Exception as e:
-        # Defense in depth for the guard above: if transcription still blew up
-        # on a non-English job because the Whisper engine isn't importable
-        # (e.g. it was uninstalled between the guard check and load_model, or a
-        # routing change slips a non-'en' job past the guard), surface the
-        # installer instead of a dead-end 500 — and keep the project renderable
-        # so the banner survives a reload (issue #36).
-        if requested_language != 'en' and not _engine_available('whisper'):
+        # Surface the in-app Whisper installer instead of a dead-end 500 whenever
+        # a job ran out of transcription engines and Whisper isn't ready — and
+        # keep the project renderable (status='uploaded') so the install banner
+        # survives a reload. Two ways this fires:
+        #   * non-English jobs that slipped past the pre-flight guard (e.g. the
+        #     engine was uninstalled between the guard check and load_model), and
+        #   * ENGLISH jobs where Parakeet was tried first and crashed/failed on
+        #     the file (the issue #23 Metal-crash class hits certain MXF/AVC and
+        #     some mp4 inputs), then fell back to WhisperX/Whisper — which aren't
+        #     installed on a fresh DMG. That used to dead-end with a bare "No
+        #     transcription engine found … pip install" 500 and no installer
+        #     button, which the user can't act on from inside the app (issue #39).
+        # Whisper is the universal fallback engine, so offer it for ANY language
+        # once every engine is exhausted. Gate on _whisper_ready() (package AND
+        # speech model) so a half-installed engine still routes to the installer.
+        err_text = str(e)
+        no_engine = 'No transcription engine found' in err_text
+        if (requested_language != 'en' or no_engine) and not _whisper_ready():
             project['status'] = 'uploaded'
             project.pop('error', None)
             save_project(project_id, project)
             return jsonify({
-                'error': f'Non-English transcription ({requested_language}) requires the Whisper engine, which is not installed.',
+                'error': (
+                    'Transcription needs the Whisper engine, which is not installed.'
+                    if requested_language == 'en'
+                    else f'Non-English transcription ({requested_language}) requires the Whisper engine, which is not installed.'
+                ),
                 'needs_whisper_install': True,
                 'requested_language': requested_language,
             }), 400
         project['status'] = 'error'
-        project['error'] = str(e)
+        project['error'] = err_text
         save_project(project_id, project)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': err_text}), 500
 
 
 def _analyze_status_path(project_id):
@@ -1844,7 +1924,12 @@ def analyze(project_id):
         if not (result.get('story_beats') or result.get('social_clips')
                 or result.get('strongest_soundbites')):
             _clear_analyze_status(project_id)
-            return jsonify({'error': 'Analysis produced no results — the model may need to be restarted. Try again.'}), 500
+            # The old copy told users to restart the model, which never helped
+            # (the model is healthy — its JSON reply was getting cut off on long /
+            # verbose-language interviews and dropped during parse). Point at the
+            # real cause and an action that can actually work now that truncated
+            # replies are salvaged.
+            return jsonify({'error': "Analysis came back empty. This can happen on a very long or non-English interview when the model's reply gets cut off. Try again — and if it keeps happening, try a shorter section or a different analysis model."}), 500
         project['analysis'] = result
 
         analyzer_total = analyzer_state['total']

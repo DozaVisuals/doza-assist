@@ -81,11 +81,17 @@ class OllamaProvider(BaseProvider):
                     "keep_alive": _KEEP_ALIVE,
                     "options": {
                         "temperature": kwargs.get("temperature", 0.1),
-                        # Bumped from 768 → 4096. The story-analyze schema
-                        # easily needs 1k+ output tokens; 768 was forcing
-                        # format='json' to close the JSON early, producing
-                        # syntactically valid but mostly empty dicts.
-                        "num_predict": kwargs.get("num_predict", 4096),
+                        # Bumped 768 → 4096 → 8192. The story-analyze schema asks
+                        # for up to 7 items each carrying a VERBATIM transcript
+                        # quote; in a token-verbose language (German runs ~40-50%
+                        # longer than English for the same words) the JSON routinely
+                        # ran past 4096 output tokens, so format='json' returned
+                        # done_reason='length' with the object cut mid-element and
+                        # the analysis came back empty (the German "produced no
+                        # results" report). The three-pass split keeps each call's
+                        # schema small, so a higher ceiling rarely adds latency on
+                        # normal inputs but removes the truncation trigger.
+                        "num_predict": kwargs.get("num_predict", 8192),
                         # Bumped 12288 → 32768. Generous context window
                         # prevents transcript truncation on long interviews.
                         "num_ctx": kwargs.get("num_ctx", 32768),

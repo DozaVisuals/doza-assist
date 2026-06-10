@@ -62,6 +62,29 @@ NLE_UNKNOWN = "unknown"
 # ``ParsedFCPXML.spine_segments`` — keep them sourced from here, never inline.
 SPINE_SEGMENT_TAGS = ("mc-clip", "sync-clip", "asset-clip")
 
+
+def iter_spine_clip_elements(spine):
+    """Yield ``(clip_element, parent_gap_or_None)`` for every spine entry the
+    pipeline treats as a segment, in document order.
+
+    Direct children whose tag is in :data:`SPINE_SEGMENT_TAGS` are primary-
+    storyline segments. ``<gap>`` children are transparent containers:
+    connected clips (``lane != 0``) anchored inside a gap — B-roll bridging a
+    hole in the primary storyline — are real timeline content whose dialogue
+    is selectable; skipping them silently dropped any select landing in the
+    gap (the long-standing "lane-1 B-roll-gap" bug). The writer's
+    ``_index_original_spine`` and Mode B's element indexing MUST iterate via
+    this same function — index N corresponds to ``spine_segments[N]``.
+    """
+    for child in spine:
+        if child.tag in SPINE_SEGMENT_TAGS:
+            yield child, None
+        elif child.tag == "gap":
+            for sub in child:
+                if (sub.tag in SPINE_SEGMENT_TAGS
+                        and (sub.get("lane") or "0") != "0"):
+                    yield sub, child
+
 _log = logging.getLogger(__name__)
 
 
@@ -168,6 +191,9 @@ class SpineSegment:
     duration_fraction: Fraction
     mc_sources: List[dict] = field(default_factory=list)
     audio_source: Optional[SegmentAudioSource] = None
+    # Non-empty for connected clips lifted out of a primary-storyline <gap>
+    # (e.g. "1" for lane-1 B-roll). Empty for primary spine segments.
+    lane: str = ""
 
     @property
     def offset_seconds(self) -> float:
@@ -195,6 +221,7 @@ class SpineSegment:
             "start_seconds": self.start_seconds,
             "duration_seconds": self.duration_seconds,
             "mc_sources": list(self.mc_sources),
+            "lane": self.lane,
         }
         if self.audio_source is not None:
             d["audio_source"] = self.audio_source.to_dict()
@@ -797,10 +824,7 @@ def parse_fcpxml(path) -> ParsedFCPXML:
 
     segments: List[SpineSegment] = []
 
-    for child in spine:
-        if child.tag not in SPINE_SEGMENT_TAGS:
-            continue
-
+    for child, parent_gap in iter_spine_clip_elements(spine):
         mc_sources: List[dict] = []
         if child.tag == "mc-clip":
             for ms in child.findall("mc-source"):
@@ -816,15 +840,29 @@ def parse_fcpxml(path) -> ParsedFCPXML:
 
         audio_source = _resolve_segment_audio(child, resource_by_id, mc_sources)
 
+        offset_fraction = parse_rational(child.get("offset"))
+        lane = ""
+        if parent_gap is not None:
+            # Connected clips are anchored in the gap's LOCAL timeline, whose
+            # origin is the gap's own start — the same composition rule
+            # _offset_within_sync_clip uses for nested sync-clip audio.
+            gap_offset = parse_rational(parent_gap.get("offset"))
+            gap_start = parse_rational(parent_gap.get("start"))
+            offset_fraction = gap_offset + (offset_fraction - gap_start)
+            lane = child.get("lane") or ""
+            if child.get("enabled") == "0" and audio_source is not None:
+                audio_source.is_muted = True
+
         seg = SpineSegment(
             kind=child.tag,
             ref=child.get("ref") or "",
             name=child.get("name") or "",
-            offset_fraction=parse_rational(child.get("offset")),
+            offset_fraction=offset_fraction,
             start_fraction=parse_rational(child.get("start")),
             duration_fraction=parse_rational(child.get("duration")),
             mc_sources=mc_sources,
             audio_source=audio_source,
+            lane=lane,
         )
         segments.append(seg)
 
@@ -848,19 +886,29 @@ def parse_fcpxml(path) -> ParsedFCPXML:
             "<asset-clip>, <mc-clip>, or <sync-clip> elements" + found + hint
         )
 
-    # Representative source: first non-muted segment, else first segment.
+    # Representative source: first non-muted PRIMARY segment (connected
+    # lane segments never represent the timeline), else first segment.
     representative = next(
-        (s for s in segments if s.audio_source and not s.audio_source.is_muted),
-        segments[0],
+        (s for s in segments
+         if not s.lane and s.audio_source and not s.audio_source.is_muted),
+        next((s for s in segments
+              if s.audio_source and not s.audio_source.is_muted),
+             segments[0]),
     )
     rep_audio = representative.audio_source
     assert rep_audio is not None  # every segment resolves audio above
 
     # Multi-source when segments span more than one distinct audio asset, or
     # mix container kinds (so ingest renders a composed timeline WAV).
+    # Connected (lane) segments are EXCLUDED here: they only matter on
+    # timelines that are already multi-source, and including them would flip
+    # is_multi_source for previously-ingested single-source projects whose
+    # stored selects are in source-time coordinates (exports re-parse the
+    # stored FCPXML at export time).
+    primary_segments = [s for s in segments if not s.lane] or segments
     distinct_sources = {(s.audio_source.path, s.audio_source.asset_id)
-                        for s in segments if s.audio_source is not None}
-    distinct_kinds = {s.kind for s in segments}
+                        for s in primary_segments if s.audio_source is not None}
+    distinct_kinds = {s.kind for s in primary_segments}
     is_multi_source = len(distinct_sources) > 1 or len(distinct_kinds) > 1
 
     library_el = root.find("library")
@@ -876,8 +924,8 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         version=version,
         source_path=path_str,
         nle_source=nle,
-        container_type=segments[0].kind,
-        container_ref=segments[0].ref,
+        container_type=primary_segments[0].kind,
+        container_ref=primary_segments[0].ref,
         audio_file_path=rep_audio.path,
         audio_asset_id=rep_audio.asset_id,
         active_audio_angle_id=rep_audio.active_audio_angle_id,

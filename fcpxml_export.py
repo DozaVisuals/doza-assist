@@ -21,7 +21,19 @@ import uuid
 from fractions import Fraction
 from urllib.parse import quote
 
-from exporters.xml_text import scrub_xml_text
+# NOTE: deliberately NOT imported from exporters.xml_text — the exporters
+# package __init__ eagerly loads the router/exporters, which import THIS
+# module for VIDEO_EXTS; importing the package from here is a cycle.
+# Keep this tiny scrub in sync with exporters/xml_text.py.
+_XML_ILLEGAL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def scrub_xml_text(text):
+    """Drop XML-1.0-illegal control characters (see exporters/xml_text.py)."""
+    if not text:
+        return "" if text is None else str(text)
+    return _XML_ILLEGAL_RE.sub("", str(text))
+
 
 # One source of truth for "does this extension carry video" — previously
 # duplicated (and drifted: .m4v counted as video in the Premiere exporter

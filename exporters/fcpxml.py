@@ -73,6 +73,7 @@ class FCPXMLExporter(BaseExporter):
         export_mode="cuts",
         total_clips=0,
         start_tc_frames=0,
+        tc_format="NDF",
     ) -> ExportResult:
         content = generate_fcpxml(
             markers=markers,
@@ -84,6 +85,7 @@ class FCPXMLExporter(BaseExporter):
             width=width,
             height=height,
             start_tc_frames=start_tc_frames,
+            tc_format=tc_format,
         )
 
         filename = _compose_marker_filename(
@@ -115,6 +117,7 @@ class FCPXMLExporter(BaseExporter):
         height,
         exports_dir,
         start_tc_frames=0,
+        tc_format="NDF",
     ) -> ExportResult:
         content = generate_story_fcpxml(
             markers=markers,
@@ -126,6 +129,7 @@ class FCPXMLExporter(BaseExporter):
             width=width,
             height=height,
             start_tc_frames=start_tc_frames,
+            tc_format=tc_format,
         )
 
         filename = (

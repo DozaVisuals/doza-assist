@@ -35,12 +35,14 @@ Select time semantics depend on the parsed project:
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Iterable, List, Optional, Tuple
 
 from lxml import etree
 
+from exporters.xml_text import scrub_xml_text
 from .parser import ParsedFCPXML, SpineSegment, SPINE_SEGMENT_TAGS
 from .timecode import parse_rational, seconds_to_rational, timeline_to_segment
 
@@ -57,10 +59,9 @@ class Select:
     ``speaker`` is the resolved display name of whoever is talking at the
     select's start (looked up from the transcript + ``speaker_names``
     rename map before the select is built). Empty when the project carries
-    no speaker info; when set, round-trip writers emit a "Speaker: Name"
-    keyword on the new mc-clip / sync-clip and append the name to any
-    marker note, matching what ``fcpxml_export.generate_fcpxml`` does for
-    direct-media exports.
+    no speaker info; when set, round-trip writers append the name to the
+    clip/marker note ("note — Speaker"). (Direct-media exports additionally
+    emit a "Speaker: …" keyword; the round-trip writers do not.)
     """
 
     start_seconds: float
@@ -266,7 +267,7 @@ def _build_mc_clip_node(
     mc = etree.Element("mc-clip")
     mc.set("ref", segment.ref)
     mc.set("offset", offset_str)
-    mc.set("name", select.label or "Select")
+    mc.set("name", scrub_xml_text(select.label) or "Select")
     mc.set("start", start_str)
     mc.set("duration", duration_str)
 
@@ -276,9 +277,10 @@ def _build_mc_clip_node(
     # Violating this order makes FCP silently drop the mc-source overrides
     # and fall back to the multicam's default angle — which manifests as
     # "audio but no video" on import.
-    note_text = select.note
-    if select.speaker:
-        note_text = f"{note_text} — {select.speaker}" if note_text else select.speaker
+    note_text = scrub_xml_text(select.note)
+    speaker = scrub_xml_text(select.speaker)
+    if speaker:
+        note_text = f"{note_text} — {speaker}" if note_text else speaker
     if note_text:
         note = etree.SubElement(mc, "note")
         note.text = note_text
@@ -441,7 +443,7 @@ def _build_copied_clip_node(
     new_clip.set("offset", offset_str)
     new_clip.set("start", start_str)
     new_clip.set("duration", duration_str)
-    new_clip.set("name", select.label or "Select")
+    new_clip.set("name", scrub_xml_text(select.label) or "Select")
     for attr in ("audioStart", "audioDuration"):
         if attr in new_clip.attrib:
             del new_clip.attrib[attr]
@@ -465,18 +467,50 @@ def _build_copied_clip_node(
         if cap_end <= sel_start or cap_start >= sel_end:
             new_clip.remove(cap)
 
+    # FCP reuses one <text-style-def> across captions with identical styling:
+    # the def lives in the FIRST such caption and later captions carry only
+    # <text-style ref="tsN">. If pruning dropped the def-carrying caption but
+    # kept a referencing one, the ref now dangles and FCP rejects the import
+    # on IDREF validation. Rescue: copy each missing def from the ORIGINAL
+    # element into the first kept caption before uniquification.
+    kept_refs = {
+        ts.get("ref") for ts in new_clip.iter("text-style") if ts.get("ref")
+    }
+    kept_defs = {
+        d.get("id") for d in new_clip.iter("text-style-def") if d.get("id")
+    }
+    missing = kept_refs - kept_defs
+    if missing:
+        first_kept_caption = new_clip.find("caption")
+        if first_kept_caption is not None:
+            for d in original_element.iter("text-style-def"):
+                if d.get("id") in missing:
+                    first_kept_caption.append(copy.deepcopy(d))
+                    missing.discard(d.get("id"))
+
     # Any caption/title styles that survived define <text-style-def id="tsN">
     # inline. Give this copy a private suffix so several selects cut from the
     # same captioned source clip can't all re-define ts1…tsN — the duplicate
     # ids FCP rejects with "DTD validation failed. ID ts1 already defined".
     _uniquify_text_style_defs(new_clip, f"_s{copy_seq}")
 
-    note_text = select.note
-    if select.speaker:
-        note_text = f"{note_text} — {select.speaker}" if note_text else select.speaker
+    note_text = scrub_xml_text(select.note)
+    speaker = scrub_xml_text(select.speaker)
+    if speaker:
+        note_text = f"{note_text} — {speaker}" if note_text else speaker
     _set_clip_note(new_clip, note_text)
 
     return new_clip
+
+
+def _safe_version(version: str) -> str:
+    """parsed.version is spliced raw into the serialized root tag; a corrupt
+    or hostile source attribute (quotes, angle brackets) would inject into
+    our output. Only dotted-numeric versions pass; anything else falls back
+    to a known-good value."""
+    if version and re.fullmatch(r"\d+(\.\d+)*", version):
+        return version
+    return "1.11"
 
 
 def _index_original_spine(parsed: ParsedFCPXML) -> List[etree._Element]:
@@ -489,7 +523,14 @@ def _index_original_spine(parsed: ParsedFCPXML) -> List[etree._Element]:
     to ``parsed.spine_segments[N]``.
     """
     root = etree.fromstring(parsed.original_fcpxml_bytes)
-    spine = root.find(".//sequence/spine")
+    # MUST anchor on the project's sequence: <resources> precedes <library>
+    # in document order, so a compound clip stored as <media><sequence><spine>
+    # would match a bare ".//sequence/spine" first and every select would
+    # deep-copy clips from inside the compound instead of the real spine
+    # (mirrors the parser's anchor at parse_fcpxml).
+    spine = root.find(".//project/sequence/spine")
+    if spine is None:
+        spine = root.find(".//sequence/spine")
     if spine is None:
         return []
     return [c for c in spine if c.tag in SPINE_SEGMENT_TAGS]
@@ -545,6 +586,7 @@ def write_selects_as_new_project(
     project_name: Optional[str] = None,
     event_name: Optional[str] = None,
     preserve_order: bool = False,
+    skipped_out: Optional[List[Select]] = None,
 ) -> bytes:
     """Mode A — emit an FCPXML where the selects are a new project's spine.
 
@@ -564,6 +606,11 @@ def write_selects_as_new_project(
 
     skipped: List[Select] = []
     spine_el, total_duration = _build_selects_spine(parsed, selects, skipped=skipped)
+    if skipped_out is not None:
+        # Surface partial drops to the caller — an editor exporting 12
+        # selects and silently receiving 10 clips is how the lane-1-gap
+        # bug shipped unnoticed.
+        skipped_out.extend(skipped)
 
     if len(skipped) == len(selects):
         raise WriterError(
@@ -576,7 +623,19 @@ def write_selects_as_new_project(
     fd = parsed.sequence_frame_duration
 
     sequence = etree.Element("sequence")
-    sequence.set("format", parsed.sequence_format_id)
+    synthesized_format = b""
+    if parsed.sequence_format_id:
+        sequence.set("format", parsed.sequence_format_id)
+    else:
+        # Resolve-exported FCPXML can omit the sequence format resource (the
+        # parser warned and defaulted the frame duration). Referencing a
+        # missing/empty id is an unresolved IDREF that FCP rejects — so
+        # synthesize a format carrying the effective frame duration and
+        # splice it in after the original resources.
+        sequence.set("format", "dozaFmt1")
+        synthesized_format = (
+            f'<format id="dozaFmt1" frameDuration="{fd.numerator}/{fd.denominator}s"/>'
+        ).encode("utf-8")
     sequence.set("duration", seconds_to_rational(total_duration, fd))
     sequence.set("tcStart", "0s")
     sequence.set("tcFormat", "NDF")
@@ -602,10 +661,15 @@ def write_selects_as_new_project(
     # Assemble the final document: prologue + <fcpxml> + verbatim <resources>
     # + freshly serialized <library> + closing tag. Preserving the original
     # resources byte-for-byte is what keeps FCP's bookmark validation happy.
+    resources_xml = parsed.original_resources_xml
+    if synthesized_format and b"</resources>" in resources_xml:
+        resources_xml = resources_xml.replace(
+            b"</resources>", b"    " + synthesized_format + b"\n</resources>", 1)
+
     buf = bytearray()
     buf += _XML_PROLOGUE
-    buf += f'<fcpxml version="{parsed.version}">\n    '.encode("utf-8")
-    buf += parsed.original_resources_xml
+    buf += f'<fcpxml version="{_safe_version(parsed.version)}">\n    '.encode("utf-8")
+    buf += resources_xml
     buf += b"\n    "
     buf += library_bytes
     buf += b"</fcpxml>\n"
@@ -627,9 +691,10 @@ def _marker_element(
     marker.set("value", select.label or "Marker")
     for k, v in _MARKER_KIND_ATTRS.get(select.kind, {}).items():
         marker.set(k, v)
-    note_text = select.note
-    if select.speaker:
-        note_text = f"{note_text} — {select.speaker}" if note_text else select.speaker
+    note_text = scrub_xml_text(select.note)
+    speaker = scrub_xml_text(select.speaker)
+    if speaker:
+        note_text = f"{note_text} — {speaker}" if note_text else speaker
     if note_text:
         marker.set("note", note_text)
     return marker
@@ -640,6 +705,7 @@ def write_markers_on_timeline(
     selects: Iterable[Select],
     *,
     project_name_suffix: str = "Doza Notes",
+    skipped_out: Optional[List[Select]] = None,
 ) -> bytes:
     """Mode B — copy the original structure and inject markers at each select.
 
@@ -686,9 +752,27 @@ def write_markers_on_timeline(
         segment, container_time = _locate_select_start(parsed, s.start_seconds)
         if segment is None or container_time is None:
             # Select falls in a gap — source audio is never on the timeline here.
+            if skipped_out is not None:
+                skipped_out.append(s)
             continue
         marker = _marker_element(parsed, s, container_time)
-        element_for_segment[id(segment)].append(marker)
+        target = element_for_segment[id(segment)]
+        # FCPXML's content model puts marker items BEFORE audio-channel-source,
+        # filters, and metadata; appending after them is DTD-invalid and real
+        # FCP exports carry those children on most spine clips.
+        _TRAILING_TAGS = (
+            "audio-channel-source", "filter-video", "filter-video-mask",
+            "filter-audio", "metadata",
+        )
+        insert_at = None
+        for idx, child in enumerate(target):
+            if child.tag in _TRAILING_TAGS:
+                insert_at = idx
+                break
+        if insert_at is None:
+            target.append(marker)
+        else:
+            target.insert(insert_at, marker)
 
     library_bytes = etree.tostring(library, pretty_print=True, encoding="utf-8")
 
@@ -697,7 +781,7 @@ def write_markers_on_timeline(
     # costs nothing and removes any doubt from an FCP import reviewer's mind).
     buf = bytearray()
     buf += _XML_PROLOGUE
-    buf += f'<fcpxml version="{parsed.version}">\n    '.encode("utf-8")
+    buf += f'<fcpxml version="{_safe_version(parsed.version)}">\n    '.encode("utf-8")
     buf += parsed.original_resources_xml
     buf += b"\n    "
     buf += library_bytes

@@ -71,7 +71,7 @@
                             title="Premiere Pro — exports XML (FCP7 format)">Premiere</button>
                     <button type="button" data-platform="resolve"
                             onclick="setEditingPlatform('resolve')"
-                            title="DaVinci Resolve — exports FCP7 XML; auto-imports into Resolve when External Scripting is enabled">Resolve</button>
+                            title="DaVinci Resolve — exports FCPXML; auto-imports into Resolve when External Scripting is enabled">Resolve</button>
                 </div>
                 {% endif %}
             </div>
@@ -791,8 +791,13 @@
                             <option value="25"{% if fps == 25.0 %} selected{% endif %}>25 fps (PAL)</option>
                             <option value="29.97"{% if fps == 29.97 %} selected{% endif %}>29.97 fps</option>
                             <option value="30"{% if fps == 30.0 %} selected{% endif %}>30 fps</option>
+                            <option value="48"{% if fps == 48.0 %} selected{% endif %}>48 fps</option>
+                            <option value="50"{% if fps == 50.0 %} selected{% endif %}>50 fps (PAL)</option>
                             <option value="59.94"{% if fps == 59.94 %} selected{% endif %}>59.94 fps</option>
                             <option value="60"{% if fps == 60.0 %} selected{% endif %}>60 fps</option>
+                            <option value="100"{% if fps == 100.0 %} selected{% endif %}>100 fps</option>
+                            <option value="119.88"{% if fps == 119.88 %} selected{% endif %}>119.88 fps</option>
+                            <option value="120"{% if fps == 120.0 %} selected{% endif %}>120 fps</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -930,7 +935,7 @@ const SHARED_TABS = {{ (shared_tabs or {})|tojson if is_shared else '{}' }};
 let EDITING_PLATFORM = {{ (editing_platform or 'fcp') | tojson }};
 
 const PLATFORM_NAMES = { fcp: 'Final Cut Pro', premiere: 'Premiere Pro', resolve: 'DaVinci Resolve' };
-const FORMAT_NAMES   = { fcp: 'FCPXML',        premiere: 'Premiere XML', resolve: 'EDL' };
+const FORMAT_NAMES   = { fcp: 'FCPXML',        premiere: 'Premiere XML', resolve: 'FCPXML' };
 const SHORT_NAMES    = { fcp: 'FCPX',          premiere: 'PrPro',        resolve: 'Resolve' };
 
 const EXPORT_LABELS = {
@@ -3741,6 +3746,15 @@ async function _exportFCPXMLRoundTrip(opts) {
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
+        if (data.skipped_count) {
+            // Partial drops used to be invisible — an editor exporting 12
+            // selects silently received 10 clips (the lane-1-gap bug class).
+            const names = (data.skipped || []).slice(0, 3).join(', ');
+            showToast(
+                `${data.skipped_count} select${data.skipped_count === 1 ? '' : 's'} ` +
+                `could not be placed (outside the timeline's clips)` +
+                (names ? `: ${names}` : ''), true);
+        }
     } catch (err) {
         showToast('Export error: ' + err.message, true);
     }
@@ -3874,13 +3888,20 @@ function downloadJSON() {
     downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '_transcript.json');
 }
 
+function displaySpeaker(raw) {
+    // Server-side exports resolve renames via speaker_names; these
+    // client-side downloads must do the same or raw SPEAKER_00 labels leak.
+    const map = PROJECT.speaker_names || {};
+    return map[raw] || raw;
+}
+
 function downloadSRT() {
     if (!PROJECT.transcript) return;
     let srt = '';
     PROJECT.transcript.segments.forEach((seg, i) => {
         srt += `${i + 1}\n`;
         srt += `${formatSRT(seg.start)} --> ${formatSRT(seg.end)}\n`;
-        srt += `${seg.speaker}: ${seg.text}\n\n`;
+        srt += `${displaySpeaker(seg.speaker)}: ${seg.text}\n\n`;
     });
     const blob = new Blob([srt], { type: 'text/srt' });
     downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '.srt');
@@ -3890,7 +3911,7 @@ function downloadTXT() {
     if (!PROJECT.transcript) return;
     let txt = PROJECT.name + '\n' + '='.repeat(40) + '\n\n';
     PROJECT.transcript.segments.forEach(seg => {
-        txt += `[${seg.start_formatted.substring(0, 8)}] ${seg.speaker}: ${seg.text}\n\n`;
+        txt += `[${seg.start_formatted.substring(0, 8)}] ${displaySpeaker(seg.speaker)}: ${seg.text}\n\n`;
     });
     const blob = new Blob([txt], { type: 'text/plain' });
     downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '.txt');

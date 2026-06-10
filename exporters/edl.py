@@ -12,6 +12,8 @@ Format limitations surfaced as warnings to the user:
 """
 
 import os
+
+from fcpxml_export import VIDEO_EXTS
 import re
 
 from .base import BaseExporter, ExportResult
@@ -89,6 +91,7 @@ def _build_edl(
     source_path: str,
     framerate: float,
     sequential_record: bool,
+    start_tc_frames: int = 0,
 ) -> str:
     """
     Render the EDL text.
@@ -102,6 +105,17 @@ def _build_edl(
     """
     reel = _sanitize_reel_name(source_path)
     clip_basename = os.path.basename(source_path) if source_path else "Source"
+
+    # EDL is line-oriented: a newline inside any interpolated text splits a
+    # comment/header across lines and strict CMX parsers reject the file.
+    # Collapse all whitespace runs, mirroring the note handling below.
+    title = " ".join((title or "").split())
+    clip_basename = " ".join(clip_basename.split())
+
+    # Audio-only sources must not claim a video component: Resolve shows
+    # offline video for AA/V events whose media has no picture.
+    ext = os.path.splitext(source_path)[1].lower() if source_path else ""
+    channel = "AA/V " if ext in VIDEO_EXTS else "AA   "
 
     lines = [f"TITLE: {title}", "FCM: NON-DROP FRAME", ""]
 
@@ -135,16 +149,16 @@ def _build_edl(
             rec_in_f = hour_frames + src_in_f
             rec_out_f = hour_frames + src_out_f
 
-        src_in_tc = _frames_to_timecode(src_in_f, fps_int)
-        src_out_tc = _frames_to_timecode(src_out_f, fps_int)
+        src_in_tc = _frames_to_timecode(start_tc_frames + src_in_f, fps_int)
+        src_out_tc = _frames_to_timecode(start_tc_frames + src_out_f, fps_int)
         rec_in_tc = _frames_to_timecode(rec_in_f, fps_int)
         rec_out_tc = _frames_to_timecode(rec_out_f, fps_int)
 
         lines.append(
-            f"{edit_num:03d}  {reel:<8} AA/V  C        "
+            f"{edit_num:03d}  {reel:<8} {channel} C        "
             f"{src_in_tc} {src_out_tc} {rec_in_tc} {rec_out_tc}"
         )
-        clip_name = (m.get("text") or f"Clip {edit_num}").strip()
+        clip_name = " ".join((m.get("text") or f"Clip {edit_num}").split())
         lines.append(f"* FROM CLIP NAME: {clip_basename}")
         if clip_name:
             lines.append(f"* CLIP NAME: {clip_name}")
@@ -183,7 +197,8 @@ class EDLExporter(BaseExporter):
         exports_dir,
         export_mode="cuts",
         total_clips=0,
-        start_tc_frames=0,  # accepted for interface parity (see note in export_story)
+        start_tc_frames=0,
+        tc_format="NDF",  # interface parity; this target renders its own TC convention  # embedded source TC — added to source in/out (Resolve conform)
     ) -> ExportResult:
         if export_type == "labels" and len(markers) == 1:
             suffix = (markers[0].get("text") or "Clip")[:40].strip()
@@ -214,6 +229,7 @@ class EDLExporter(BaseExporter):
             source_path=source_path or "",
             framerate=framerate,
             sequential_record=True,
+            start_tc_frames=start_tc_frames,
         )
 
         filename = (
@@ -245,7 +261,8 @@ class EDLExporter(BaseExporter):
         width,
         height,
         exports_dir,
-        start_tc_frames=0,  # accepted for interface parity; source TC handling is a TODO for EDL
+        start_tc_frames=0,
+        tc_format="NDF",  # interface parity; this target renders its own TC convention  # embedded source TC — added to source in/out (Resolve conform)
     ) -> ExportResult:
         # Story markers may carry an _order field; preserve it the way the
         # FCPXML story exporter does.
@@ -261,6 +278,7 @@ class EDLExporter(BaseExporter):
             source_path=source_path or "",
             framerate=framerate,
             sequential_record=True,
+            start_tc_frames=start_tc_frames,
         )
 
         filename = (

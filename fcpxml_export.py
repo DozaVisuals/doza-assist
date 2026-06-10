@@ -21,6 +21,13 @@ import uuid
 from fractions import Fraction
 from urllib.parse import quote
 
+from exporters.xml_text import scrub_xml_text
+
+# One source of truth for "does this extension carry video" — previously
+# duplicated (and drifted: .m4v counted as video in the Premiere exporter
+# but not here) across five sites.
+VIDEO_EXTS = ('.mp4', '.mov', '.m4v', '.mxf', '.avi', '.mkv', '.mts', '.m2ts')
+
 
 def _timebase(framerate=23.976):
     """Return (timebase, frame_dur) for a framerate. Fractional NTSC rates use a
@@ -37,6 +44,7 @@ def _timebase(framerate=23.976):
         59.94:  (60000, 1001),
         60.0:   (60, 1),
         100.0:  (100, 1),
+        119.88: (120000, 1001),
         120.0:  (120, 1),
     }
     return table.get(framerate, (24000, 1001))
@@ -89,7 +97,7 @@ MARKER_COLORS = {
 
 def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
                     source_path=None, media_duration=None, mode="cuts",
-                    width=1920, height=1080, start_tc_frames=0):
+                    width=1920, height=1080, start_tc_frames=0, tc_format="NDF"):
     """
     Generate an FCPXML file.
 
@@ -113,12 +121,13 @@ def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
 
     return _generate_cuts_timeline(markers, project_name, framerate,
                                    source_path, media_duration, mode, width, height,
-                                   start_tc_frames)
+                                   start_tc_frames, tc_format=tc_format)
 
 
 def _generate_cuts_timeline(markers, project_name, framerate, source_path,
                             media_duration, mode, width=1920, height=1080,
-                            start_tc_frames=0):
+                            start_tc_frames=0,
+                            tc_format="NDF"):
     """Generate FCPXML with actual cuts on the timeline referencing source media.
 
     ``start_tc_frames`` is the media's embedded start timecode in whole frames.
@@ -145,7 +154,12 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     # below is frame-snapped and clamped to this same grid so FCP can always
     # resolve it — an edit that reaches past the asset is rejected on import as
     # "Invalid edit with no respective media."
-    media_frames = seconds_to_frames(media_duration, framerate)
+    # FLOOR the media duration to whole frames: round() can declare one
+    # more frame than the file has (container duration >= stream duration),
+    # and the declared range is what FCP's import-time edit validation
+    # checks — the final clip of a full-length export is the one at risk.
+    _tb, _fd = _timebase(framerate)
+    media_frames = int(media_duration * _tb / _fd)
     media_dur_str = frames_to_fcpxml_time(media_frames, framerate)
 
     # File reference — use file:// URL for the source media
@@ -153,7 +167,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     ext = os.path.splitext(source_path)[1].lower()
 
     # Determine if video or audio-only
-    is_video = ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
+    is_video = ext in VIDEO_EXTS
 
     # Build the spine — each marker becomes an asset-clip on the timeline
     spine_clips = []
@@ -215,7 +229,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         spine_clips.append(
             f'                        <asset-clip name="{clip_name}" ref="r2" '
             f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
-            f'format="r1" tcFormat="NDF">'
+            f'format="r1" tcFormat="{tc_format}">'
             f'{keyword_xml}{marker_xml}'
             f'\n                        </asset-clip>'
         )
@@ -238,7 +252,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
 <fcpxml version="1.11">
     <resources>
-        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
+        <format id="r1"{_format_name_attr(width, height, framerate)} frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
         <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
@@ -261,7 +275,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
 def generate_story_fcpxml(markers, project_name="Interview", story_title="Story",
                           framerate=23.976, source_path=None, media_duration=None,
-                          width=1920, height=1080, start_tc_frames=0):
+                          width=1920, height=1080, start_tc_frames=0, tc_format="NDF"):
     """
     Generate FCPXML for a Story Builder sequence.
     Creates a single timeline with clips in narrative order as actual edits.
@@ -285,12 +299,13 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
     # below is frame-snapped and clamped to this same grid so FCP can always
     # resolve it — an edit that reaches past the asset is rejected on import as
     # "Invalid edit with no respective media."
-    media_frames = seconds_to_frames(media_duration, framerate)
+    _tb, _fd = _timebase(framerate)
+    media_frames = int(media_duration * _tb / _fd)  # floor — see above
     media_dur_str = frames_to_fcpxml_time(media_frames, framerate)
 
     file_url = 'file://' + quote(source_path, safe='/')
     ext = os.path.splitext(source_path)[1].lower()
-    is_video = ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
+    is_video = ext in VIDEO_EXTS
 
     spine_clips = []
     offset_frames = 0
@@ -337,7 +352,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
         spine_clips.append(
             f'                        <asset-clip name="{clip_name}" ref="r2" '
             f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
-            f'format="r1" tcFormat="NDF">{speaker_kw}{marker_xml}'
+            f'format="r1" tcFormat="{tc_format}">{speaker_kw}{marker_xml}'
             f'\n                        </asset-clip>'
         )
 
@@ -359,7 +374,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 
 <fcpxml version="1.11">
     <resources>
-        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
+        <format id="r1"{_format_name_attr(width, height, framerate)} frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
         <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
@@ -424,7 +439,7 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
 
 <fcpxml version="1.11">
     <resources>
-        <format id="r1" name="{_format_name(width, height, framerate)}" frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
+        <format id="r1"{_format_name_attr(width, height, framerate)} frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
     </resources>
     <library>
         <event name="{_escape_xml(project_name)} Markers">
@@ -444,6 +459,12 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
     return fcpxml
 
 
+def _format_name_attr(width, height, framerate):
+    """' name="…"' when FCP defines a name for this combo, else ''."""
+    name = _format_name(width, height, framerate)
+    return f' name="{name}"' if name else ''
+
+
 def _format_name(width, height, framerate):
     """Get the exact FCPX format name string.
 
@@ -455,10 +476,15 @@ def _format_name(width, height, framerate):
     For resolutions > 1080p, width is included.
     """
     rate = _framerate_label(framerate)
-    if height <= 1080:
+    # Only fabricate names for combos FCP actually defines; for anything
+    # else omit the attribute-value (caller drops name=) — formats are fully
+    # specified by frameDuration/width/height and a bogus name like
+    # FFVideoFormat600p120 invites importer strictness issues.
+    if height in (720, 1080):
         return f"FFVideoFormat{height}p{rate}"
-    else:
+    if height > 1080:
         return f"FFVideoFormat{width}x{height}p{rate}"
+    return ""
 
 
 def _framerate_label(framerate):
@@ -474,15 +500,19 @@ def _framerate_label(framerate):
         59.94: "5994",
         60.0: "60",
         100.0: "100",
+        119.88: "11988",
         120.0: "120",
     }
     return labels.get(framerate, "2398")
 
 
 def _escape_xml(text):
-    """Escape special XML characters."""
+    """Escape special XML characters (after scrubbing XML-illegal bytes)."""
     if not text:
         return ""
+    # C0 control chars are illegal in XML 1.0 even escaped — a single stray
+    # byte from a bad encoding corrupts the whole export for FCP.
+    text = scrub_xml_text(text)
     return (str(text)
             .replace('&', '&amp;')
             .replace('<', '&lt;')

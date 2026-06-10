@@ -19,6 +19,10 @@ years.
 
 import os
 import urllib.parse
+
+from exporters.xml_text import scrub_xml_text
+from fcpxml_export import VIDEO_EXTS
+from exporters.media_probe import get_audio_channels
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
@@ -36,6 +40,7 @@ _RATE_TABLE = {
     59.94:  (60, True,  60000.0 / 1001.0),
     60.0:   (60, False, 60.0),
     100.0:  (100, False, 100.0),
+    119.88: (120, True,  120000.0 / 1001.0),
     120.0:  (120, False, 120.0),
 }
 
@@ -67,7 +72,8 @@ def _file_url(source_path: str) -> str:
 
 def _build_file_element(file_id: str, source_path: str, framerate: float,
                         width: int, height: int, media_duration_frames: int,
-                        has_video: bool, has_audio: bool) -> ET.Element:
+                        has_video: bool, has_audio: bool,
+                        audio_channels: int = 2) -> ET.Element:
     file_el = ET.Element("file", id=file_id)
     ET.SubElement(file_el, "name").text = os.path.basename(source_path) if source_path else "Source"
     ET.SubElement(file_el, "pathurl").text = _file_url(source_path)
@@ -86,7 +92,7 @@ def _build_file_element(file_id: str, source_path: str, framerate: float,
         sample = ET.SubElement(audio, "samplecharacteristics")
         ET.SubElement(sample, "depth").text = "16"
         ET.SubElement(sample, "samplerate").text = "48000"
-        ET.SubElement(audio, "channelcount").text = "2"
+        ET.SubElement(audio, "channelcount").text = str(audio_channels)
 
     return file_el
 
@@ -148,7 +154,7 @@ def _is_video_source(source_path: str) -> bool:
     if not source_path:
         return False
     ext = os.path.splitext(source_path)[1].lower()
-    return ext in (".mp4", ".mov", ".mxf", ".avi", ".mkv", ".m4v")
+    return ext in VIDEO_EXTS
 
 
 def _build_sequence(
@@ -160,9 +166,12 @@ def _build_sequence(
     framerate: float,
     width: int,
     height: int,
+    export_mode: str = "cuts",
+    audio_channels: int = 2,
 ) -> ET.Element:
+    sequence_name = scrub_xml_text(sequence_name)
     has_video = _is_video_source(source_path)
-    has_audio = True  # transcribed sources always have audio
+    has_audio = True  # transcribed sources always have audio (gated at import)
 
     timebase, _, _ = _rate_for(framerate)
 
@@ -198,6 +207,7 @@ def _build_sequence(
     file_element = _build_file_element(
         file_id, source_path, framerate, width, height,
         media_duration_frames, has_video, has_audio,
+        audio_channels=audio_channels,
     )
 
     timeline_offset_frames = 0
@@ -215,14 +225,30 @@ def _build_sequence(
         clip_index += 1
         src_in_f = _seconds_to_frames(src_in_s, framerate)
         src_out_f = _seconds_to_frames(src_out_s, framerate)
+        # Clamp into the declared media range, mirroring the FCPXML
+        # generator — an <out> past <file><duration> relies on importer
+        # leniency.
+        if media_duration_frames > 0:
+            src_in_f = max(0, min(src_in_f, media_duration_frames))
+            src_out_f = max(src_in_f, min(src_out_f, media_duration_frames))
         dur_f = src_out_f - src_in_f
         if dur_f <= 0:
             continue
         rec_in_f = timeline_offset_frames
         rec_out_f = rec_in_f + dur_f
 
-        clip_name = (m.get("text") or f"Clip {clip_index}")[:80]
-        comment = (m.get("note") or "").strip()
+        clip_name = scrub_xml_text(m.get("text") or f"Clip {clip_index}")[:80]
+        comment = scrub_xml_text((m.get("note") or "").strip())
+
+        if export_mode == "markers":
+            # Sequence-level markers at the source position (the single
+            # full-length clip below starts at 0, so timeline == source).
+            marker_el = ET.SubElement(sequence, "marker")
+            ET.SubElement(marker_el, "comment").text = comment
+            ET.SubElement(marker_el, "name").text = clip_name
+            ET.SubElement(marker_el, "in").text = str(src_in_f)
+            ET.SubElement(marker_el, "out").text = str(src_out_f)
+            continue
 
         if has_video:
             _add_clipitem(
@@ -241,7 +267,11 @@ def _build_sequence(
             )
             file_emitted = True
 
-        for ch_index, audio_track in enumerate((audio_track_1, audio_track_2), start=1):
+        active_audio_tracks = (
+            (audio_track_1,) if audio_channels == 1
+            else (audio_track_1, audio_track_2)
+        )
+        for ch_index, audio_track in enumerate(active_audio_tracks, start=1):
             _add_clipitem(
                 audio_track,
                 clip_id=f"clipitem-a{ch_index}-{clip_index}",
@@ -260,6 +290,47 @@ def _build_sequence(
             file_emitted = True
 
         timeline_offset_frames = rec_out_f
+
+    if export_mode == "markers" and media_duration_frames > 0:
+        # One full-length clip under the markers (mirrors the FCPXML
+        # markers-only mode: full asset on the timeline, annotations on top).
+        full_name = scrub_xml_text(sequence_name)[:80]
+        if has_video:
+            _add_clipitem(
+                video_track,
+                clip_id="clipitem-v-full",
+                name=full_name,
+                file_ref_id=file_id,
+                source_in=0, source_out=media_duration_frames,
+                record_in=0, record_out=media_duration_frames,
+                framerate=framerate,
+                media_type="video",
+                masterclip_id=masterclip_id,
+                reuse_file=file_emitted,
+                file_element=None if file_emitted else file_element,
+            )
+            file_emitted = True
+        active_audio_tracks = (
+            (audio_track_1,) if audio_channels == 1
+            else (audio_track_1, audio_track_2)
+        )
+        for ch_index, audio_track in enumerate(active_audio_tracks, start=1):
+            _add_clipitem(
+                audio_track,
+                clip_id=f"clipitem-a{ch_index}-full",
+                name=full_name,
+                file_ref_id=file_id,
+                source_in=0, source_out=media_duration_frames,
+                record_in=0, record_out=media_duration_frames,
+                framerate=framerate,
+                media_type="audio",
+                masterclip_id=masterclip_id,
+                reuse_file=file_emitted,
+                file_element=None if file_emitted else file_element,
+                audio_channel=ch_index,
+            )
+            file_emitted = True
+        timeline_offset_frames = media_duration_frames
 
     # Sequence duration should match the assembled timeline if we have clips.
     if timeline_offset_frames > 0:
@@ -297,8 +368,11 @@ class PremiereXMLExporter(BaseExporter):
         exports_dir,
         export_mode="cuts",
         total_clips=0,
-        start_tc_frames=0,  # accepted for interface parity; Premiere uses 0-based file in/out
+        start_tc_frames=0,
+        tc_format="NDF",  # interface parity; this target renders its own TC convention  # accepted for interface parity; Premiere uses 0-based file in/out
     ) -> ExportResult:
+        # mono sources get a single audio track (see _build_sequence)
+        audio_channels = min(get_audio_channels(source_path) or 2, 2)
         if export_type == "labels" and len(markers) == 1:
             suffix = (markers[0].get("text") or "Clip")[:40].strip()
         elif export_type == "labels":
@@ -329,6 +403,8 @@ class PremiereXMLExporter(BaseExporter):
             framerate=framerate,
             width=width,
             height=height,
+            export_mode=("markers" if export_mode == "markers" else "cuts"),
+            audio_channels=audio_channels,
         )
         content = _prettify(root)
 
@@ -361,7 +437,8 @@ class PremiereXMLExporter(BaseExporter):
         width,
         height,
         exports_dir,
-        start_tc_frames=0,  # accepted for interface parity; Premiere uses 0-based file in/out
+        start_tc_frames=0,
+        tc_format="NDF",  # interface parity; this target renders its own TC convention  # accepted for interface parity; Premiere uses 0-based file in/out
     ) -> ExportResult:
         ordered = sorted(
             (m for m in markers if (m.get("end") or 0) > (m.get("start") or 0)),

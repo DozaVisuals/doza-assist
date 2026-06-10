@@ -114,6 +114,42 @@ def _find_ffmpeg():
     return 'ffmpeg'  # fall back, will error if not found
 
 
+def _audio_stream_plan(filepath):
+    """Probe the source's audio streams once per extraction.
+
+    Returns (stream_count, extra_ffmpeg_args).
+
+    - 0 streams -> the caller raises a clear "no audio track" error instead
+      of surfacing ffmpeg's raw "Output file does not contain any stream".
+    - 1 stream  -> no extra args (ffmpeg's default selection is correct).
+    - N streams -> mix them all: camera MXF/MOV records the real interview
+      mic on track 2+ with scratch on track 1, and ffmpeg's default picks
+      exactly ONE stream — the wrong-mic (or near-empty) transcript class
+      of bug. amix is enabled in the bundled LGPL ffmpeg build.
+    """
+    from exporters.media_probe import _find_ffprobe
+    ffprobe = _find_ffprobe()
+    count = 1  # fail open: assume one stream if probing is impossible
+    if ffprobe:
+        try:
+            result = subprocess.run(
+                [ffprobe, '-v', 'quiet', '-select_streams', 'a',
+                 '-show_entries', 'stream=index', '-of', 'csv=p=0', filepath],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                count = len([ln for ln in result.stdout.split() if ln.strip()])
+        except Exception:
+            count = 1
+    if count <= 1:
+        return count, []
+    pads = ''.join(f'[0:a:{i}]' for i in range(count))
+    return count, [
+        '-filter_complex', f'{pads}amix=inputs={count}:normalize=0[aout]',
+        '-map', '[aout]',
+    ]
+
+
 def extract_audio(filepath, project_dir=None):
     """
     Extract / convert any media file to a 16 kHz mono WAV for processing.
@@ -159,11 +195,14 @@ def extract_audio(filepath, project_dir=None):
     # complete — silently cutting every future transcript short. `-y` moves
     # BEFORE the output path: as a trailing arg it was a no-op, so a stale
     # .part from a prior crash wasn't even overwritten.
+    stream_count, mix_args = _audio_stream_plan(filepath)
+    if stream_count == 0:
+        raise RuntimeError('This file has no audio track to transcribe.')
     tmp_path = audio_path + '.part.wav'
     try:
         result = subprocess.run([
             ffmpeg, '-y', '-i', filepath,
-            '-vn', '-acodec', 'pcm_s16le',
+            '-vn', *mix_args, '-acodec', 'pcm_s16le',
             '-ar', '16000', '-ac', '1',
             tmp_path,
         ], capture_output=True, text=True)

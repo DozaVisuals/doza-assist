@@ -126,10 +126,15 @@ class TestSyncClipIngestWithRealAudio:
     points at a real audio file that transcription can pick up."""
 
     def test_create_project_from_sync_clip(self, client, tmp_path):
-        # Create a real (silent) audio file on disk so the existence check
-        # passes. We don't need decodable content — ingest only checks os.path.exists.
+        # Ingest now dry-runs ffprobe on referenced media (decodability gate),
+        # so the fixture must be a REAL minimal wav, not a 12-byte RIFF stub.
+        import wave as _wave
         audio = tmp_path / "dialogue.wav"
-        audio.write_bytes(b"RIFF____WAVE")
+        with _wave.open(str(audio), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"\x00\x00" * 1600)  # 0.1s of silence
 
         fcpxml = tmp_path / "sync.fcpxml"
         fcpxml.write_text(textwrap.dedent(f"""\

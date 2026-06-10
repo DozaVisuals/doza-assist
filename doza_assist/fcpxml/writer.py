@@ -43,7 +43,8 @@ from typing import Iterable, List, Optional, Tuple
 from lxml import etree
 
 from exporters.xml_text import scrub_xml_text
-from .parser import ParsedFCPXML, SpineSegment, SPINE_SEGMENT_TAGS
+from .parser import (ParsedFCPXML, SpineSegment, SPINE_SEGMENT_TAGS,
+                     iter_spine_clip_elements)
 from .timecode import parse_rational, seconds_to_rational, timeline_to_segment
 
 
@@ -443,6 +444,7 @@ def _build_copied_clip_node(
     new_clip.set("offset", offset_str)
     new_clip.set("start", start_str)
     new_clip.set("duration", duration_str)
+    new_clip.attrib.pop("lane", None)  # copies live ON the new spine, not beside it
     new_clip.set("name", scrub_xml_text(select.label) or "Select")
     for attr in ("audioStart", "audioDuration"):
         if attr in new_clip.attrib:
@@ -533,7 +535,9 @@ def _index_original_spine(parsed: ParsedFCPXML) -> List[etree._Element]:
         spine = root.find(".//sequence/spine")
     if spine is None:
         return []
-    return [c for c in spine if c.tag in SPINE_SEGMENT_TAGS]
+    # Lockstep contract: identical traversal to parse_fcpxml, INCLUDING
+    # connected lane clips inside gaps (see iter_spine_clip_elements).
+    return [el for el, _gap in iter_spine_clip_elements(spine)]
 
 
 def _build_selects_spine(
@@ -738,7 +742,7 @@ def write_markers_on_timeline(
     # The parser's SpineSegment list is in document order, so we can zip them up
     # with spine children of the right tags.
     spine_clip_elements: List[etree._Element] = [
-        c for c in spine if c.tag in SPINE_SEGMENT_TAGS
+        el for el, _gap in iter_spine_clip_elements(spine)
     ]
     if len(spine_clip_elements) != len(parsed.spine_segments):
         raise WriterError(

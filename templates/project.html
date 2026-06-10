@@ -24,8 +24,9 @@
         <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
         <a href="/" class="btn btn-sm">Projects</a>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
-        {# Tunnel disabled for beta. Re-enable with auth scoping before public release. #}
-        <button class="btn btn-sm" onclick="copyShareLink()" title="Copy shareable link" style="display:none;">Share</button>
+        {# Share button + tunnel JS removed from the commercial channels
+           (2026-06-10); the /share routes 404 in app.py. The cloud share
+           portal ships on its own release line. #}
         <div class="gear-menu-wrap" id="gearMenuWrap">
             <button class="gear-btn" onclick="toggleGearMenu(event)" title="Settings" aria-label="Settings">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -3934,128 +3935,6 @@ function formatSRT(seconds) {
     return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')},${String(ms).padStart(3,'0')}`;
 }
 
-// ── Share Link ──
-function copyShareLink() {
-    showShareSettings();
-}
-
-function showShareSettings() {
-    let overlay = document.getElementById('shareOverlay');
-    if (overlay) overlay.remove();
-
-    overlay = document.createElement('div');
-    overlay.id = 'shareOverlay';
-    overlay.className = 'modal-overlay active';
-    overlay.innerHTML = `
-        <div class="modal" style="max-width: 480px;">
-            <h2 style="margin-bottom: 0.25rem;">Share Project</h2>
-            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">Choose which tabs your client can see.</p>
-            <div id="shareTabToggles" style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.25rem;">
-                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_transcript" checked><span>Transcript</span></label>
-                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_clips" checked><span>Clips</span></label>
-                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_analysis" checked><span>AI Analysis</span></label>
-                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_chat" checked><span>Chat</span></label>
-                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_story" checked><span>Story Builder</span></label>
-                <label class="share-toggle-row"><input type="checkbox" id="shareToggle_export" checked><span>Export</span></label>
-            </div>
-            <p style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1rem; padding: 0.5rem 0.65rem; background: var(--bg-secondary); border-radius: var(--radius); line-height: 1.4;">Keep {{ brand }} open while sharing — the link only works while the app is running on your machine.</p>
-            <div id="shareLinkArea" style="display: none; margin-bottom: 0.75rem;">
-                <div style="display: flex; gap: 0.5rem;">
-                    <input type="text" class="form-input" id="shareUrlInput" readonly style="font-family: var(--mono); font-size: 0.8rem;">
-                    <button class="btn btn-primary" onclick="doShareCopy()" style="white-space: nowrap;">Copy Link</button>
-                </div>
-            </div>
-            <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
-                <button class="btn btn-sm" onclick="document.getElementById('shareOverlay').classList.remove('active')">Cancel</button>
-                <button class="btn btn-primary" id="shareGenerateBtn" onclick="generateShareLink()">Generate Link</button>
-            </div>
-        </div>`;
-    document.body.appendChild(overlay);
-
-    // Load existing settings
-    fetch(`/project/${PROJECT_ID}/share-settings`)
-        .then(r => r.json())
-        .then(data => {
-            if (data.shared_tabs) {
-                for (const [tab, on] of Object.entries(data.shared_tabs)) {
-                    const cb = document.getElementById('shareToggle_' + tab);
-                    if (cb) cb.checked = on;
-                }
-            }
-        })
-        .catch(() => {});
-}
-
-async function generateShareLink() {
-    const btn = document.getElementById('shareGenerateBtn');
-    btn.disabled = true;
-    btn.textContent = 'Saving...';
-
-    // Gather toggle states
-    const shared_tabs = {};
-    for (const tab of ['transcript', 'clips', 'analysis', 'chat', 'story', 'export']) {
-        const cb = document.getElementById('shareToggle_' + tab);
-        shared_tabs[tab] = cb ? cb.checked : true;
-    }
-
-    // Save settings
-    try {
-        await fetch(`/project/${PROJECT_ID}/share-settings`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ shared_tabs }),
-        });
-    } catch (err) {
-        showToast('Failed to save share settings', true);
-        btn.disabled = false;
-        btn.textContent = 'Generate Link';
-        return;
-    }
-
-    btn.textContent = 'Starting tunnel...';
-
-    // Start tunnel
-    try {
-        let res = await fetch('/tunnel/status');
-        let data = await res.json();
-
-        if (data.status !== 'running') {
-            res = await fetch('/tunnel/start', { method: 'POST' });
-            data = await res.json();
-        }
-
-        if (data.url) {
-            const shareUrl = data.url + '/share/' + PROJECT_ID;
-            showShareUrl(shareUrl);
-        } else {
-            showToast('Error: ' + (data.error || 'Could not start tunnel'), true);
-        }
-    } catch (err) {
-        const url = window.location.origin + '/share/' + PROJECT_ID;
-        showShareUrl(url);
-    }
-
-    btn.disabled = false;
-    btn.textContent = 'Generate Link';
-}
-
-function showShareUrl(url) {
-    const area = document.getElementById('shareLinkArea');
-    if (area) {
-        area.style.display = 'block';
-        document.getElementById('shareUrlInput').value = url;
-    }
-}
-
-function doShareCopy() {
-    const input = document.getElementById('shareUrlInput');
-    input.select();
-    input.setSelectionRange(0, 99999);
-    document.execCommand('copy');
-    showToast('Link copied!');
-    document.getElementById('shareOverlay').classList.remove('active');
-}
-
 // ── Reveal in Finder ──
 // ── Click speaker name to cycle through speakers ──
 function cycleSpeaker(el) {
@@ -4319,6 +4198,10 @@ async function runWhisperInstall(container, onDone) {
 
 async function doRetranscribe() {
     const lang = document.getElementById('retranscribeLang').value;
+    // One shot: the POST clears project state server-side, so a double-click
+    // would just queue a redundant destructive call during the 3s reload wait.
+    const confirmBtn = document.getElementById('retranscribeBtn');
+    if (confirmBtn) confirmBtn.disabled = true;
     try {
         const res = await fetch(`/project/${PROJECT_ID}/retranscribe`, {
             method: 'POST',
@@ -4331,9 +4214,11 @@ async function doRetranscribe() {
         } else {
             const data = await res.json();
             showToast('Error: ' + (data.error || 'Unknown error'), true);
+            if (confirmBtn) confirmBtn.disabled = false;
         }
     } catch (err) {
         showToast('Error: ' + err.message, true);
+        if (confirmBtn) confirmBtn.disabled = false;
     }
 }
 

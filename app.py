@@ -3640,75 +3640,16 @@ def export_fcpxml_multicam(project_id):
     return response
 
 
+# ── Share (removed from commercial channels) ────────────────────────────
+# The local share/review portal is not part of the FxFactory or direct Pro
+# builds (Chris, 2026-06-10): no Share button renders, and these routes fail
+# closed so stale links 404 instead of exposing a read-only project view.
+# The cloud share portal ships on its own release line.
 @app.route('/review/<project_id>')
-def client_review(project_id):
-    """Legacy review portal — redirect to shared view."""
-    return redirect(f'/share/{project_id}')
-
-
-@app.route('/project/<project_id>/share-settings', methods=['GET', 'POST'])
-def save_share_settings(project_id):
-    """Get or save which tabs are visible in the shared view."""
-    project = get_project(project_id)
-    if not project:
-        return jsonify({'error': 'Project not found'}), 404
-
-    if request.method == 'GET':
-        default_tabs = {'transcript': True, 'clips': True, 'analysis': True, 'chat': True, 'story': True, 'export': True}
-        return jsonify({'shared_tabs': project.get('shared_tabs', default_tabs)})
-
-    data = request.json or {}
-    project['shared_tabs'] = data.get('shared_tabs', {})
-    save_project(project_id, project)
-    return jsonify({'status': 'saved'})
-
-
 @app.route('/share/<project_id>')
-def shared_view(project_id):
-    """Shared project view — full project experience, read-only."""
-    project = get_project(project_id)
-    if not project or not project.get('transcript'):
-        return render_template('review_unavailable.html')
-
-    source_exists, _ = check_source_file(project)
-    project['source_exists'] = source_exists
-
-    # Normalize small-model field drift so the read-only view renders correctly.
-    if project.get('analysis'):
-        from ai_analysis import normalize_analysis
-        project['analysis'] = normalize_analysis(project['analysis'])
-
-    all_projects = [p for p in list_projects() if p.get('transcript')]
-    project_ids = [project_id]
-    projects_meta = [{'id': project['id'], 'name': project.get('name', 'Untitled'), 'color': 'accent'}]
-
-    paragraphs = []
-    if project.get('transcript') and project['transcript'].get('segments'):
-        paragraphs = group_into_paragraphs(project['transcript']['segments'])
-        for para in paragraphs:
-            para['project_id'] = project['id']
-            para['project_name'] = project.get('name', 'Untitled')
-            para['project_color'] = 'accent'
-
-    source_ext = os.path.splitext(project.get('source_path', '') or '')[1].lower()
-    is_video = source_ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
-
-    # Tab visibility — default all on
-    default_tabs = {'transcript': True, 'clips': True, 'analysis': True, 'chat': True, 'story': True, 'export': True}
-    shared_tabs = project.get('shared_tabs', default_tabs)
-
-    return render_template('project.html',
-                           project=project,
-                           projects=[project],
-                           projects_meta=projects_meta,
-                           all_projects=all_projects,
-                           active_ids=project_ids,
-                           paragraphs=paragraphs,
-                           is_multi=False,
-                           is_shared=True,
-                           is_video=is_video,
-                           shared_tabs=shared_tabs,
-                           segment_vectors=load_segment_vectors(project_id))
+@app.route('/project/<project_id>/share-settings', methods=['GET', 'POST'])
+def share_disabled(project_id):
+    return jsonify({'error': 'Not found'}), 404
 
 
 @app.route('/project/<project_id>/clear', methods=['POST'])
@@ -3742,6 +3683,19 @@ def retranscribe(project_id):
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
+    # Validate BEFORE destroying anything: a missing source file means the
+    # re-run can never succeed, and the user would lose their trial-length
+    # transcript for nothing (mirrors the /transcribe handler's check).
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if not source_path or not os.path.exists(source_path):
+        return jsonify({'error': 'Source file not found. It may have been moved or deleted.'}), 404
+
+    # Refuse while a transcription is actively running — a stale tab's
+    # Transcribe Again button must not delete audio under a live worker.
+    _snap = _transcribe_jobs.get(project_id) or {}
+    if _snap.get('phase') not in (None, 'idle', 'done', 'error'):
+        return jsonify({'error': 'A transcription is already running for this project.'}), 409
+
     data = request.get_json() or {}
     language = data.get('language', project.get('language', 'en')).strip()
     project['language'] = language
@@ -3772,6 +3726,15 @@ def retranscribe(project_id):
                 os.remove(p)
             except OSError:
                 pass
+
+    # Drop the PREVIOUS run's job state. Leaving a 'done' snapshot (in-memory
+    # or in transcribe_status.json) around means the post-reload page could
+    # read the trial run's terminal status and never start the real re-run.
+    _transcribe_jobs.pop(project_id, None)
+    try:
+        os.remove(_transcribe_status_path(project_id))
+    except OSError:
+        pass
 
     return jsonify({'status': 'cleared', 'language': language})
 

@@ -153,15 +153,27 @@ def extract_audio(filepath, project_dir=None):
         else:
             trial_path = filepath.rsplit('.', 1)[0] + '_audio_trial.wav'
         ffmpeg = _find_ffmpeg()
-        result = subprocess.run([
-            ffmpeg, '-i', filepath,
-            '-vn', '-acodec', 'pcm_s16le',
-            '-ar', '16000', '-ac', '1',
-            '-t', str(trial_max),
-            trial_path, '-y'
-        ], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg audio extraction failed: {result.stderr[:500]}")
+        # Same atomic-write hardening as the main invocation below: temp path
+        # + os.replace so an interrupted run can't leave a truncated trial WAV
+        # behind, and `-y` BEFORE `-i` (trailing it was a no-op).
+        tmp_trial = trial_path + '.part.wav'
+        try:
+            result = subprocess.run([
+                ffmpeg, '-y', '-i', filepath,
+                '-vn', '-acodec', 'pcm_s16le',
+                '-ar', '16000', '-ac', '1',
+                '-t', str(trial_max),
+                tmp_trial,
+            ], capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg audio extraction failed: {result.stderr[:500]}")
+            os.replace(tmp_trial, trial_path)
+        finally:
+            if os.path.exists(tmp_trial):
+                try:
+                    os.remove(tmp_trial)
+                except OSError:
+                    pass
         return trial_path
 
     # Skip extraction if audio already exists in the project dir

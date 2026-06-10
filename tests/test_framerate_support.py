@@ -44,7 +44,9 @@ def test_fifty_fps_no_longer_snaps_to_5994():
 def test_ntsc_pulldown_rates_still_snap():
     assert snap_framerate(48000 / 1001) == 48.0      # 47.952 -> 48
     assert snap_framerate(50.0) == 50.0
-    assert snap_framerate(120000 / 1001) == 120.0    # 119.88 -> 120
+    # 119.88 (NTSC 120 — iPhone/action-cam slo-mo) is first-class now:
+    # snapping it to 120.0 put frame indexes on a 1.001x-wrong grid.
+    assert snap_framerate(120000 / 1001) == 119.88
 
 
 # ── FCPXML ────────────────────────────────────────────────────────────

@@ -22,8 +22,9 @@ from werkzeug.utils import secure_filename
 from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
 from exporters.media_probe import (
     get_video_resolution, get_video_framerate, get_video_start_timecode_frames,
-    get_media_duration,
+    get_video_start_timecode_info, get_media_duration,
 )
+from fcpxml_export import VIDEO_EXTS
 from doza_assist.fcpxml import (
     parse_fcpxml, ParseError, Select, WriterError,
     write_selects_as_new_project, write_markers_on_timeline,
@@ -71,7 +72,8 @@ app.config['EXPORTS_DIR'] = os.path.join(_data_dir, 'exports')
 # Small file drag-and-drop limit (500MB)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 * 1024  # 32 GB — My Style imports multiple large masters
 
-ALLOWED_EXTENSIONS = {'wav', 'mp3', 'mp4', 'mov', 'aac', 'm4a', 'flac', 'aif', 'aiff', 'mxf', 'fcpxml'}
+ALLOWED_EXTENSIONS = {'wav', 'mp3', 'mp4', 'mov', 'm4v', 'aac', 'm4a', 'flac',
+                      'aif', 'aiff', 'mxf', 'mkv', 'avi', 'fcpxml', 'fcpxmld'}
 
 os.makedirs(app.config['PROJECTS_DIR'], exist_ok=True)
 os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
@@ -310,7 +312,7 @@ def _resolve_fcpxml_path(source_path: str) -> str:
     FCP exports the bundle form by default (a directory with Info.fcpxml inside);
     editors who "Export XML" can get either form depending on FCP's dialog.
     """
-    if os.path.isdir(source_path) and source_path.rstrip('/').endswith('.fcpxmld'):
+    if os.path.isdir(source_path) and source_path.rstrip('/').lower().endswith('.fcpxmld'):
         inner = os.path.join(source_path, 'Info.fcpxml')
         if not os.path.isfile(inner):
             raise ValueError(f'FCPXML bundle missing Info.fcpxml: {source_path}')
@@ -367,6 +369,30 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
                 f'FCPXML parsed OK, but the audio file it references was not found: '
                 f'{p}.{hint}'
             )
+
+    # Existence isn't decodability: an FCPXML can reference media FCP plays
+    # through camera plugins (R3D/BRAW) or codecs outside the bundled
+    # ffmpeg's allowlist. Failing here with a clear message beats creating a
+    # project that dies mid-transcription with a raw ffmpeg error.
+    from exporters.media_probe import _find_ffprobe
+    _ffprobe = _find_ffprobe()
+    if _ffprobe:
+        for p in unique_paths:
+            try:
+                probe = subprocess.run(
+                    [_ffprobe, '-v', 'error', '-select_streams', 'a',
+                     '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', p],
+                    capture_output=True, text=True, timeout=15,
+                )
+            except Exception:
+                continue  # probe trouble is not the user's problem
+            if probe.returncode != 0 or not probe.stdout.strip():
+                raise ValueError(
+                    f'The media this FCPXML references ({os.path.basename(p)}) '
+                    f'is not in a format Doza Assist can transcribe. '
+                    f'Re-export from FCP with standard audio (WAV/AAC/MOV), '
+                    f'or transcode the source first.'
+                )
 
     # Stash the original FCPXML inside the project directory so the writer
     # module can round-trip selects back out without needing the user to still
@@ -1516,7 +1542,7 @@ def project_view(project_id):
 
     # Assign a color index to each active project for visual distinction
     project_colors = ['accent', 'green', 'purple', 'orange', 'red']
-    video_extensions = ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
+    video_extensions = VIDEO_EXTS
     projects_meta = []
     for i, p in enumerate(projects):
         src_ext = os.path.splitext(p.get('source_path', '') or '')[1].lower()
@@ -1551,29 +1577,16 @@ def project_view(project_id):
         segment_vectors.extend(load_segment_vectors(p['id']))
 
     # Auto-detect framerate from primary project source for FCPXML export default
+    # Shared probe (exporters.media_probe): bundled-ffprobe-first resolution,
+    # attached-picture-safe stream selection, and the FULL standard-rate
+    # table — the old inline copy was missing 48/50/100/120, so high-rate
+    # footage defaulted (and exported) on the wrong grid.
     detected_framerate = 23.976
     source_path = project.get('source_path', project.get('filepath', ''))
     if source_path and os.path.exists(source_path):
-        ffprobe = shutil.which('ffprobe')
-        if not ffprobe:
-            for candidate in ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe']:
-                if os.path.isfile(candidate):
-                    ffprobe = candidate
-                    break
-        if ffprobe:
-            try:
-                result = subprocess.run([
-                    ffprobe, '-v', 'quiet', '-select_streams', 'v:0',
-                    '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0',
-                    source_path
-                ], capture_output=True, text=True, timeout=10)
-                if result.returncode == 0 and result.stdout.strip():
-                    num, den = result.stdout.strip().split('/')
-                    fps = float(num) / float(den)
-                    standards = [23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0]
-                    detected_framerate = min(standards, key=lambda s: abs(s - fps))
-            except Exception:
-                pass
+        probed = get_video_framerate(source_path)
+        if probed:
+            detected_framerate = probed
 
     project['editing_platform'] = get_project_platform(project)
 
@@ -1631,6 +1644,8 @@ def serve_media(project_id):
             '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
             '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4',
             '.wav': 'audio/wav', '.aac': 'audio/aac',
+            '.flac': 'audio/flac', '.aif': 'audio/aiff',
+            '.aiff': 'audio/aiff', '.mxf': 'application/mxf',
         }.get(ext)
         resp = send_file(source_path, mimetype=mime, conditional=True)
         # Encourage the browser to reuse range responses across reloads/seeks.
@@ -2901,7 +2916,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
     width, height = get_video_resolution(source_path)
     # Embedded start timecode (DJI/Sony stamp time-of-day TC); FCP rejects
     # 0-based edits exported against such media.
-    start_tc_frames = get_video_start_timecode_frames(source_path, framerate)
+    start_tc_frames, tc_format = get_video_start_timecode_info(source_path, framerate)
     total_clips = body.get('total_clips', len(markers)) or len(markers)
 
     if force_platform and force_platform in PLATFORMS:
@@ -2925,6 +2940,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         export_mode=export_mode,
         total_clips=total_clips,
         start_tc_frames=start_tc_frames,
+        tc_format=tc_format,
     )
     return result, exporter
 
@@ -3103,7 +3119,10 @@ def _find_nle_app_path(nle: str):
             nle, _NLE_BUNDLE_IDS.get(nle, ()), _NLE_FALLBACK_PATHS.get(nle, ()),
         )
 
-    _nle_path_cache[nle] = found
+    # Cache hits only: a cached miss means 'install the NLE, retry,
+    # still missing' until the backend restarts. mdfind is cheap.
+    if found is not None:
+        _nle_path_cache[nle] = found
     return found
 
 
@@ -3237,7 +3256,7 @@ def send_to_nle():
     include ``clips`` and ``story_title``.
 
     The export format always matches ``nle`` (FCPXML for fcp, Premiere XML for
-    premiere, EDL for resolve) — the user-selected NLE in the UI is the source
+    premiere, FCPXML for resolve) — the user-selected NLE in the UI is the source
     of truth, not whatever the project is configured for.
     """
     body = request.json or {}
@@ -3279,7 +3298,7 @@ def send_to_nle():
             result, _ = _build_nle_story_export(project, body, force_platform=nle)
             file_path, filename, format_name = result.file_path, result.filename, result.format_name
         elif export_type == 'multicam':
-            file_path, filename, _mode = _build_nle_multicam_export(project, body)
+            file_path, filename, _mode, _skipped = _build_nle_multicam_export(project, body)
             format_name = 'FCPXML'
         else:
             result, _ = _build_nle_export(project, body, force_platform=nle)
@@ -3290,20 +3309,14 @@ def send_to_nle():
         app.logger.error('Send-to-NLE export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
 
-    # FCP and Resolve auto-import when launched with the file; Premiere's CLI
-    # auto-import is unreliable, so we just reveal the file in Finder and let
-    # the editor drag it into an open project.
-    try:
-        if nle == 'premiere':
-            subprocess.Popen(['open', '-R', file_path])
-            opened_in = 'finder'
-        else:
-            subprocess.Popen(['open', '-a', app_path, file_path])
-            opened_in = 'app'
-    except Exception as e:
-        app.logger.error('Launching %s failed: %s', NLE_DISPLAY_NAMES[nle], e)
+    # Use the shared scripted handoff: FCP gets the bundle-ID launch, Resolve
+    # gets the scripting-API import (launching Resolve with plain `open -a`
+    # imports NOTHING - see exporters/resolve_import.py), Premiere reveals in
+    # Finder. Same path the first-party export routes use.
+    opened_in, info = _hand_file_to_nle(file_path, nle)
+    if opened_in is None:
         return jsonify({
-            'error': f'Could not launch {NLE_DISPLAY_NAMES[nle]}: {e}',
+            'error': info.get('error', f'Could not launch {NLE_DISPLAY_NAMES[nle]}'),
             'file': file_path,
         }), 500
 
@@ -3536,17 +3549,24 @@ def _build_nle_multicam_export(project, body):
             'Pick a source with content, or add clip labels first.'
         )
 
+    skipped_selects = []
     try:
         if mode == 'markers_timeline':
-            output = write_markers_on_timeline(parsed, selects)
+            output = write_markers_on_timeline(
+                parsed, selects, skipped_out=skipped_selects,
+            )
             suffix = 'Doza Notes'
         else:
             output = write_selects_as_new_project(
                 parsed, selects, preserve_order=preserve_order,
+                skipped_out=skipped_selects,
             )
             suffix = 'Doza Selects'
     except WriterError as e:
         raise MulticamExportError(f'Export failed: {e}')
+    skipped_labels = [
+        (s.label or f'{s.start_seconds:.1f}s') for s in skipped_selects
+    ]
 
     # Story Builder exports get a more specific filename suffix.
     if preserve_order and story_build_clips:
@@ -3561,7 +3581,7 @@ def _build_nle_multicam_export(project, body):
     with open(out_path, 'wb') as fh:
         fh.write(output)
 
-    return out_path, filename, mode
+    return out_path, filename, mode, skipped_labels
 
 
 @app.route('/project/<project_id>/export/fcpxml-multicam', methods=['POST'])
@@ -3591,7 +3611,8 @@ def export_fcpxml_multicam(project_id):
     deliver_to = str(body.get('deliver_to') or '').strip().lower()
 
     try:
-        out_path, filename, mode = _build_nle_multicam_export(project, body)
+        out_path, filename, mode, skipped_labels = _build_nle_multicam_export(
+            project, body)
     except MulticamExportError as e:
         return jsonify({'error': str(e)}), e.status
 
@@ -3607,6 +3628,7 @@ def export_fcpxml_multicam(project_id):
             'nle': 'fcp', 'nle_name': NLE_DISPLAY_NAMES['fcp'],
             'file': out_path, 'filename': filename,
             'format_name': 'FCPXML', 'mode': mode,
+            'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
         })
 
     if deliver_to == 'file':
@@ -3615,6 +3637,7 @@ def export_fcpxml_multicam(project_id):
             'status': 'ok', 'delivery': 'file',
             'file': out_path, 'filename': filename,
             'format_name': 'FCPXML', 'mode': mode,
+            'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
         })
 
     response = send_file(out_path, as_attachment=True, download_name=filename)
@@ -4104,7 +4127,7 @@ def _build_nle_story_export(project, body, force_platform=None):
     width, height = get_video_resolution(source_path)
     detected_fps = get_video_framerate(source_path)
     framerate = _resolve_export_framerate(body, detected_fps)
-    start_tc_frames = get_video_start_timecode_frames(source_path, framerate)
+    start_tc_frames, tc_format = get_video_start_timecode_info(source_path, framerate)
 
     if force_platform and force_platform in PLATFORMS:
         platform = force_platform
@@ -4124,6 +4147,7 @@ def _build_nle_story_export(project, body, force_platform=None):
         height=height,
         exports_dir=app.config['EXPORTS_DIR'],
         start_tc_frames=start_tc_frames,
+        tc_format=tc_format,
     )
     return result, exporter
 

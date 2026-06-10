@@ -378,9 +378,37 @@ def _build_transcript_ack(project_name):
     return f"Transcript loaded for '{project_name}'. What would you like to find?"
 
 
+# Post-transcript contract restatement, appended to the FINAL user turn.
+# The full three-mode orientation lives in CHAT_SYSTEM_PROMPT, which on a long
+# transcript sits tens of thousands of tokens above the generation point —
+# small local models (Gemma 4B especially) have strong recency bias and drift
+# back to prose summaries, the original long-FCPXML chat bug. Restating the
+# contract after the transcript AND history puts it in the recency-correct
+# position, immediately before generation. Adapted from the OSS v3.5.11
+# `_FINAL_REMINDER` but reworded for Pro's richer contract: it restates all
+# three modes (extractive / hybrid / conversational) from
+# prompts/chat-system-prompt.md instead of a blanket "always emit markers",
+# so Pro's conversational mode stays first-class. Constant text on the final
+# message keeps the Ollama KV prefix stable across turns; the raw user
+# message (without this tail) is what app.py persists to chat_history.
+_FINAL_REMINDER = (
+    'FINAL REMINDER (the full project context is above): when I ask you to '
+    'find, pull, list, rank, or recommend moments — including hybrid '
+    'questions like "what\'s the strongest theme and where does it live" — '
+    'every specific moment you name must carry a '
+    '[CLIP: start=HH:MM:SS end=HH:MM:SS title="short headline" note="one-line '
+    'editorial reason"] marker built from the transcript timecodes, one per '
+    'line, so I can play it. Never describe a moment as a clip without its '
+    'marker, and never substitute a prose summary for requested markers. For '
+    'purely conversational questions (story, themes, craft) answer normally — '
+    'a marker only when a specific moment directly anchors your point.'
+)
+
+
 def _build_chat_messages(message, history, project_name, segments,
                         formatted, analysis_block, relevant_excerpts_block,
-                        profile_id, labeled_sections=None, speaker_names=None):
+                        profile_id, labeled_sections=None, speaker_names=None,
+                        include_final_reminder=True):
     """Construct the (system_message, messages_array) pair for an Ollama
     /api/chat call.
 
@@ -389,7 +417,13 @@ def _build_chat_messages(message, history, project_name, segments,
       user (opt.)   : STYLE CONTEXT — only when a My Style profile is active
       user          : PROJECT/DURATION/SPEAKERS/TRANSCRIPT block
       ...history... : prior user/assistant turns (capped at last 6)
-      user          : the current user message
+      user          : the current user message + _FINAL_REMINDER
+
+    ``include_final_reminder=False`` drops the contract restatement from the
+    final turn. The Layer-2 conversational-synthesis divert passes False: its
+    router already classified the question as discussion-style and it
+    deliberately skips the clip-salvage post-processor, so nudging the model
+    toward markers there would bolt clips onto answers Pro wants as prose.
 
     History cap: 6 entries (3 round-trips). Long transcripts already eat
     most of the context window; older turns rarely contribute editorial
@@ -462,7 +496,14 @@ def _build_chat_messages(message, history, project_name, segments,
                 role = 'user'
             messages.append({'role': role, 'content': content})
 
-    messages.append({'role': 'user', 'content': message})
+    if include_final_reminder:
+        # Recency-correct contract restatement: after the transcript AND the
+        # history, immediately before generation. Only the FINAL turn carries
+        # it — replayed history turns come from chat_history, which stores the
+        # raw message, so the KV prefix stays stable across turns.
+        messages.append({'role': 'user', 'content': f'{message}\n\n{_FINAL_REMINDER}'})
+    else:
+        messages.append({'role': 'user', 'content': message})
     return system_message, messages
 
 # Bounded LRU for Layer 2 chunked-search responses. Layer 2 fires
@@ -3503,6 +3544,9 @@ def _chat_layer2_conversational_synthesis(message, history, project_name, segmen
         profile_id=profile_id,
         labeled_sections=labeled_sections,
         speaker_names=speaker_names,
+        # This path is only reached on discussion-style questions and skips
+        # clip-salvage on purpose — don't nudge the model toward markers.
+        include_final_reminder=False,
     )
     num_ctx = max(8192, _estimate_layer1_num_ctx(context))
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)

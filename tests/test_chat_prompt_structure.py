@@ -236,3 +236,76 @@ class TestParagraphGroupingOnLongTranscripts:
         # Both speakers are represented in the output.
         speakers_present = {p['speaker'] for p in paragraphs}
         assert speakers_present == {'Chris', 'Amanda'}
+
+
+class TestEndOfPromptReminder:
+    """The post-transcript FINAL REMINDER must ride the final user turn.
+
+    HISTORY: the original anti-recency-bias reminder was dropped when the
+    contract moved into CHAT_SYSTEM_PROMPT — which restored the long-FCPXML
+    failure shape: on 1000+ segment transcripts the contract sits tens of
+    thousands of tokens above the generation point and Gemma 4B drifts back
+    to prose summaries. ai_analysis._FINAL_REMINDER restores the restatement
+    in the recency-correct position (after transcript AND history), reworded
+    for Pro's three-mode contract: extractive/hybrid questions must carry
+    [CLIP:] markers, while purely conversational questions stay prose-first.
+    If these fail, the long-project prose-summary chat bug is coming back.
+    """
+
+    def test_final_reminder_rides_the_final_user_turn(self):
+        cap = _capture_system_prompt(_make_transcript(), "what did they say?")
+        final = cap['messages'][-1]
+        assert final['role'] == 'user'
+        assert final['content'].startswith("what did they say?")
+        assert 'FINAL REMINDER' in final['content']
+
+    def test_reminder_is_after_transcript_in_model_order(self):
+        # Recency bias only beats the bug if the rule comes AFTER the data.
+        # Assert on the constructed messages array directly — the chat router
+        # (and its clip-salvage retry) can make additional stubbed calls that
+        # would otherwise pollute a captured-prompt comparison.
+        segments = _make_transcript()['segments']
+        _, messages = ai_analysis._build_chat_messages(
+            "find the best moment", [], "Interview", segments,
+            formatted=ai_analysis._format_segments_for_ai(segments),
+            analysis_block='', relevant_excerpts_block='', profile_id=None,
+        )
+        idx_transcript = next(
+            i for i, m in enumerate(messages) if 'TRANSCRIPT:' in m['content'])
+        idx_reminder = next(
+            i for i, m in enumerate(messages) if 'FINAL REMINDER' in m['content'])
+        assert idx_reminder > idx_transcript
+        assert idx_reminder == len(messages) - 1  # the very last turn
+
+    def test_reminder_states_marker_syntax_and_conversational_escape(self):
+        # Pro's contract is three-mode: the restatement must demand markers
+        # for extractive/hybrid asks AND keep conversational mode prose-first.
+        r = ai_analysis._FINAL_REMINDER
+        assert '[CLIP: start=' in r
+        assert 'conversational' in r.lower()
+        assert 'answer normally' in r.lower()
+
+    def test_reminder_is_after_history_turns(self):
+        history = [
+            {'role': 'user', 'content': 'earlier question'},
+            {'role': 'assistant', 'content': 'earlier answer'},
+        ]
+        cap = _capture_system_prompt(
+            _make_transcript(), "now find the hook", history=history)
+        msgs = cap['messages']
+        idx_hist = next(i for i, m in enumerate(msgs) if m['content'] == 'earlier question')
+        idx_rem = next(i for i, m in enumerate(msgs) if 'FINAL REMINDER' in m['content'])
+        assert idx_rem > idx_hist
+        # Replayed history turns stay raw — only the final turn carries it.
+        assert sum('FINAL REMINDER' in m['content'] for m in msgs) == 1
+
+    def test_conversational_synthesis_path_opts_out(self):
+        # The Layer-2 discussion divert deliberately avoids clip pressure.
+        system_message, messages = ai_analysis._build_chat_messages(
+            "what do you make of her arc?", [], "Interview",
+            _make_transcript()['segments'], formatted="CONTEXT",
+            analysis_block='', relevant_excerpts_block='', profile_id=None,
+            include_final_reminder=False,
+        )
+        assert messages[-1]['content'] == "what do you make of her arc?"
+        assert all('FINAL REMINDER' not in m['content'] for m in messages)

@@ -165,3 +165,81 @@ def test_story_export_also_offsets_by_tc(source):
     s, d = _clips(xml)[0]
     assert s >= a_start
     assert s + d <= a_start + a_dur
+
+
+# ── tmcd gating (Sony XAVC-S regression) ─────────────────────────────
+#
+# Sony MP4s carry a `timecode` metadata TAG plus an `rtmd` data track but NO
+# `tmcd` track. FCP keys source timecode off the tmcd track only, so honoring
+# the tag put every exported clip hours outside the media ("Invalid edit with
+# no respective media" on import — Ella_trustees.MP4, 2026-06-10). The probe
+# must honor embedded TC only when a real tmcd stream exists.
+
+import json as _json
+import subprocess as _subprocess
+from unittest import mock
+
+from exporters import media_probe as _mp
+
+
+def _fake_probe_result(payload):
+    return _subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=_json.dumps(payload), stderr="")
+
+
+def _run_gated_probe(monkeypatch, payload, framerate=23.976):
+    monkeypatch.setattr(_mp, "_find_ffprobe", lambda: "/fake/ffprobe")
+    monkeypatch.setattr(_mp.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(
+        _mp.subprocess, "run", lambda *a, **k: _fake_probe_result(payload))
+    return _mp.get_video_start_timecode_frames("/fake/clip.mp4", framerate)
+
+
+class TestTmcdGating:
+    SONY_MP4 = {
+        "streams": [
+            {"codec_type": "video", "codec_tag_string": "avc1"},
+            {"codec_type": "audio", "codec_tag_string": "twos"},
+            {"codec_type": "data", "codec_tag_string": "rtmd"},
+        ],
+        "format": {"tags": {"timecode": "05:26:30:20"}},
+    }
+    DJI_MOV = {
+        "streams": [
+            {"codec_type": "video", "codec_tag_string": "hvc1"},
+            {"codec_type": "audio", "codec_tag_string": "mp4a"},
+            {"codec_type": "data", "codec_tag_string": "tmcd",
+             "tags": {"timecode": "14:23:07:12"}},
+        ],
+        "format": {"tags": {}},
+    }
+
+    def test_sony_mp4_tag_without_tmcd_returns_zero(self, monkeypatch):
+        assert _run_gated_probe(monkeypatch, self.SONY_MP4) == 0
+
+    def test_mov_with_tmcd_track_honors_timecode(self, monkeypatch):
+        fr = 29.97
+        expected = timecode_to_frames("14:23:07:12", fr)
+        assert expected and _run_gated_probe(monkeypatch, self.DJI_MOV, fr) == expected
+
+    def test_tmcd_without_own_tag_falls_back_to_format_tag(self, monkeypatch):
+        payload = {
+            "streams": [
+                {"codec_type": "data", "codec_tag_string": "tmcd"},
+            ],
+            "format": {"tags": {"timecode": "01:00:00:00"}},
+        }
+        assert _run_gated_probe(monkeypatch, payload, 25.0) == 25 * 3600
+
+    def test_no_timecode_anywhere_returns_zero(self, monkeypatch):
+        payload = {"streams": [{"codec_type": "video", "codec_tag_string": "avc1"}],
+                   "format": {"tags": {}}}
+        assert _run_gated_probe(monkeypatch, payload) == 0
+
+    def test_malformed_probe_json_returns_zero(self, monkeypatch):
+        monkeypatch.setattr(_mp, "_find_ffprobe", lambda: "/fake/ffprobe")
+        monkeypatch.setattr(_mp.os.path, "exists", lambda p: True)
+        monkeypatch.setattr(
+            _mp.subprocess, "run",
+            lambda *a, **k: _subprocess.CompletedProcess([], 0, "not json", ""))
+        assert _mp.get_video_start_timecode_frames("/fake/x.mp4", 23.976) == 0

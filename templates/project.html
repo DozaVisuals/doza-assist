@@ -4748,6 +4748,10 @@ async function runWhisperInstall(container, onDone) {
 
 async function doRetranscribe() {
     const lang = document.getElementById('retranscribeLang').value;
+    // One shot: the POST clears project state server-side, so a double-click
+    // would just queue a redundant destructive call during the 3s reload wait.
+    const confirmBtn = document.getElementById('retranscribeBtn');
+    if (confirmBtn) confirmBtn.disabled = true;
     try {
         const res = await fetch(`/project/${PROJECT_ID}/retranscribe`, {
             method: 'POST',
@@ -4760,9 +4764,11 @@ async function doRetranscribe() {
         } else {
             const data = await res.json();
             showToast('Error: ' + (data.error || 'Unknown error'), true);
+            if (confirmBtn) confirmBtn.disabled = false;
         }
     } catch (err) {
         showToast('Error: ' + err.message, true);
+        if (confirmBtn) confirmBtn.disabled = false;
     }
 }
 

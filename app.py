@@ -3750,6 +3750,19 @@ def retranscribe(project_id):
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
+    # Validate BEFORE destroying anything: a missing source file means the
+    # re-run can never succeed, and the user would lose their trial-length
+    # transcript for nothing (mirrors the /transcribe handler's check).
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if not source_path or not os.path.exists(source_path):
+        return jsonify({'error': 'Source file not found. It may have been moved or deleted.'}), 404
+
+    # Refuse while a transcription is actively running — a stale tab's
+    # Transcribe Again button must not delete audio under a live worker.
+    _snap = _transcribe_jobs.get(project_id) or {}
+    if _snap.get('phase') not in (None, 'idle', 'done', 'error'):
+        return jsonify({'error': 'A transcription is already running for this project.'}), 409
+
     data = request.get_json() or {}
     language = data.get('language', project.get('language', 'en')).strip()
     project['language'] = language
@@ -3780,6 +3793,15 @@ def retranscribe(project_id):
                 os.remove(p)
             except OSError:
                 pass
+
+    # Drop the PREVIOUS run's job state. Leaving a 'done' snapshot (in-memory
+    # or in transcribe_status.json) around means the post-reload page could
+    # read the trial run's terminal status and never start the real re-run.
+    _transcribe_jobs.pop(project_id, None)
+    try:
+        os.remove(_transcribe_status_path(project_id))
+    except OSError:
+        pass
 
     return jsonify({'status': 'cleared', 'language': language})
 

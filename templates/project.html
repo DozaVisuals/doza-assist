@@ -252,7 +252,14 @@
                     const phase = state.phase || 'idle';
                     const pct = Number.isFinite(state.pct) ? state.pct : null;
                     if (statusText && phase !== 'idle') {
-                        statusText.textContent = state.label || (phase.charAt(0).toUpperCase() + phase.slice(1)) + '…';
+                        const PHASE_LABELS = {
+                            queued: 'Starting…',
+                            extract_audio: 'Extracting audio…',
+                            load_model: 'Loading the transcription engine…',
+                            transcribing: 'Transcribing…',
+                        };
+                        statusText.textContent = state.label || PHASE_LABELS[phase]
+                            || (phase.charAt(0).toUpperCase() + phase.slice(1).replace(/_/g, ' ')) + '…';
                     }
                     if (fill && pct !== null) {
                         fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
@@ -3782,6 +3789,14 @@ async function startTranscription() {
             } else {
                 showToast('Error: ' + (data.error || 'Whisper not installed'), true);
             }
+        } else if (res.ok && (data.status === 'started' || data.status === 'transcribing')) {
+            // Async kickoff accepted: /transcribe returns 202 'started'
+            // immediately (or 'transcribing' if a worker is already on it)
+            // and the status poller below owns the card from here. The old
+            // synchronous contract ('transcribed' on completion) made this
+            // path paint a bogus "Unknown error" while the job ran fine.
+            statusText.textContent = 'Transcribing…';
+            timeText.textContent = '';
         } else {
             statusText.textContent = 'Error';
             timeText.textContent = data.error || 'Unknown error';

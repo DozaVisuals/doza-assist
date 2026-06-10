@@ -177,7 +177,11 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         src_start_str = frames_to_fcpxml_time(start_tc_frames + start_f, framerate)
         dur_str = frames_to_fcpxml_time(dur_f, framerate)
 
-        clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
+        # Truncate the RAW text first, then escape. Escaping inflates quotes
+        # and ampersands into multi-char entities (&quot; &apos; &amp;), so
+        # slicing the ESCAPED string can cut an entity in half and produce
+        # XML that FCP rejects with "EntityRef: expecting ';'".
+        clip_name = _escape_xml((m.get('text') or f'Clip {i+1}')[:80])
         note = _escape_xml(m.get('note', ''))
         category = _escape_xml(m.get('category', 'Clip'))
         speaker = (m.get('speaker') or '').strip()
@@ -309,7 +313,9 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
         src_start_str = frames_to_fcpxml_time(start_tc_frames + start_f, framerate)
         dur_str = frames_to_fcpxml_time(dur_f, framerate)
 
-        clip_name = _escape_xml(m.get('text', f'Clip {i+1}'))[:80]
+        # Raw-truncate THEN escape — see the entity-slicing note in
+        # generate_fcpxml above.
+        clip_name = _escape_xml((m.get('text') or f'Clip {i+1}')[:80])
         note = _escape_xml(m.get('note', ''))
         speaker = (m.get('speaker') or '').strip()
         marker_note = note
@@ -392,12 +398,15 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
         dur_str = seconds_to_fcpxml_time(max(duration, 1.0 / framerate), framerate)
 
         color = MARKER_COLORS.get(m.get('color', 'blue'), 'Blue')
-        name = _escape_xml(m.get('text', f'Marker {i+1}'))
+        raw_name = m.get('text') or f'Marker {i+1}'
         note = _escape_xml(m.get('note', ''))
-        category = m.get('category', 'Marker')
+        category = _escape_xml(m.get('category', 'Marker'))
         speaker = (m.get('speaker') or '').strip()
 
-        display_name = name[:80] + '...' if len(name) > 80 else name
+        # Raw-truncate THEN escape — see the entity-slicing note in
+        # generate_fcpxml above. (category was also previously unescaped here.)
+        display_name = _escape_xml(
+            raw_name[:80] + '...' if len(raw_name) > 80 else raw_name)
         marker_note = f"{note} [{category}]"
         if speaker:
             marker_note = f"{marker_note} — {_escape_xml(speaker)}"

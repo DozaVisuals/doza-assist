@@ -147,3 +147,52 @@ def test_story_export_edits_valid(source, fr):
     assert clips
     for off, start, dur in clips:
         assert start + dur <= asset, f"fr={fr}: story edit exceeds asset"
+
+
+# ── escape-then-truncate regression (FCP "EntityRef: expecting ';'") ─────
+#
+# Quote-heavy soundbite titles inflate when XML-escaped (&quot;/&apos; are
+# 5-6 chars each); slicing the ESCAPED string at 80 cut entities in half and
+# FCP rejected the whole document (Hillsborough soundbites, 2026-06-10).
+# Raw text must be truncated BEFORE escaping in every generator.
+
+import xml.dom.minidom as _minidom
+
+from fcpxml_export import generate_fcpxml as _gen_fcpxml
+from fcpxml_export import generate_story_fcpxml as _gen_story
+
+_HOSTILE_TEXTS = [
+    '"I\'m sure you\'ve been a big part of creating the culture here."',
+    '"We\'re #1 in R&D" — Tracy\'s intro <takes> & "quotes" everywhere ' * 3,
+    "Ampersand & angle <brackets> and 'apostrophes' \"doubled\" " * 4,
+    "ünïcødé — em-dash — and a very long tail " * 6,
+]
+
+
+def _hostile_markers():
+    return [
+        {"start": 10.0 + i * 20, "end": 20.0 + i * 20, "text": t,
+         "note": t[:120], "category": 'Sound&bite "x"', "speaker": "O'Brien & Co"}
+        for i, t in enumerate(_HOSTILE_TEXTS)
+    ]
+
+
+class TestEscapeThenTruncateRegression:
+    def test_direct_generator_parses_clean(self):
+        xml = _gen_fcpxml(_hostile_markers(), project_name='T & "T"',
+                          source_path="/tmp/a & b's clip.wav")
+        _minidom.parseString(xml)
+
+    def test_story_generator_parses_clean(self):
+        xml = _gen_story(_hostile_markers(), project_name='T & "T"',
+                         story_title="St'ory & <Title>",
+                         source_path="/tmp/a & b's clip.mp4")
+        _minidom.parseString(xml)
+
+    def test_no_truncated_entity_at_value_boundary(self):
+        # Worst case: escaped length crosses 80 exactly inside an entity.
+        text = '"' * 16  # 16 quotes -> 96 escaped chars, slice@80 cuts mid-&quot;
+        xml = _gen_fcpxml(
+            [{"start": 1, "end": 2, "text": text, "note": "", "category": "C"}],
+            project_name="P", source_path="/tmp/x.wav")
+        _minidom.parseString(xml)

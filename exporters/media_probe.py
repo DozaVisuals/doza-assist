@@ -6,6 +6,7 @@ generate timeline metadata. Previously this logic was duplicated inline in
 two places; now it lives here and both routes call into it.
 """
 
+import json
 import os
 import re
 import shutil
@@ -156,10 +157,19 @@ def get_video_start_timecode_frames(path: str, framerate: float) -> int:
     """Return the media's embedded start timecode in whole frames (0 if none).
 
     DJI, Sony, and many cameras stamp time-of-day timecode. Final Cut keys an
-    asset's source timecode off it, so an FCPXML that exports 0-based edits
-    against such media is rejected with "Invalid edit with no respective media"
-    — the edits fall outside the media's real timecode range. Reads the
-    `timecode` tag from the format or any stream (e.g. a `tmcd` track)."""
+    asset's source timecode off the media's real timecode TRACK (``tmcd``), so
+    an FCPXML that exports 0-based edits against such media is rejected with
+    "Invalid edit with no respective media" — the edits fall outside the
+    media's real timecode range.
+
+    The inverse bit us on Sony XAVC-S: MP4 containers cannot carry a ``tmcd``
+    track, but Sony stamps a ``timecode`` metadata TAG (alongside an ``rtmd``
+    data track). FCP ignores the tag and treats such files as starting at 0 —
+    exporting tag-derived TC offsets put every clip outside the media and
+    produced the same rejection in the other direction. So: honor the embedded
+    timecode ONLY when the container carries a real ``tmcd`` stream, matching
+    what FCP itself keys off.
+    """
     if not path or not os.path.exists(path):
         return 0
     ffprobe = _find_ffprobe()
@@ -169,17 +179,38 @@ def get_video_start_timecode_frames(path: str, framerate: float) -> int:
         result = subprocess.run(
             [
                 ffprobe, "-v", "quiet",
-                "-show_entries", "format_tags=timecode:stream_tags=timecode",
-                "-of", "default=nw=1:nk=1",
+                "-print_format", "json",
+                "-show_entries",
+                "stream=codec_type,codec_tag_string:stream_tags=timecode:format_tags=timecode",
                 path,
             ],
             capture_output=True, text=True, timeout=10,
         )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                frames = timecode_to_frames(line.strip(), framerate)
-                if frames:
-                    return frames
+        if result.returncode != 0:
+            return 0
+        data = json.loads(result.stdout or "{}")
+        streams = data.get("streams") or []
+        tmcd_streams = [
+            s for s in streams
+            if (s.get("codec_tag_string") or "").lower() == "tmcd"
+        ]
+        if not tmcd_streams:
+            return 0
+        # Prefer the tmcd stream's own tag, then any other stream tag, then
+        # the container-level tag (muxers vary in where they stamp it).
+        candidates = []
+        for s in tmcd_streams + streams:
+            tc = ((s.get("tags") or {}).get("timecode") or "").strip()
+            if tc:
+                candidates.append(tc)
+        fmt_tc = (((data.get("format") or {}).get("tags") or {})
+                  .get("timecode") or "").strip()
+        if fmt_tc:
+            candidates.append(fmt_tc)
+        for tc in candidates:
+            frames = timecode_to_frames(tc, framerate)
+            if frames:
+                return frames
     except Exception:
         pass
     return 0

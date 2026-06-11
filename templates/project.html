@@ -131,7 +131,7 @@
             <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;" id="transcribeTimeText"></p>
             <div id="transcribeWhisperBanner" style="display:none; max-width: 380px; margin: 1.25rem auto 0; padding: 0.85rem; text-align: left; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
             <div id="transcribeRetry" style="display:none; margin-top: 1.25rem;">
-                <button class="btn btn-purple" onclick="document.getElementById('transcribeRetry').style.display='none'; document.getElementById('transcribeStatusText').textContent='Transcribing...'; document.getElementById('transcribeTimeText').textContent=''; startTranscription();">Retry transcription</button>
+                <button class="btn btn-purple" onclick="document.getElementById('transcribeRetry').style.display='none'; document.getElementById('transcribeStatusText').textContent='Transcribing...'; document.getElementById('transcribeTimeText').textContent=''; startTranscription(); if (window.__resumeTranscribePoll) window.__resumeTranscribePoll();">Retry transcription</button>
             </div>
         </div>
     </div>
@@ -228,13 +228,18 @@
                         // job guard admits a fresh run.
                         const retry = document.getElementById('transcribeRetry');
                         if (retry) retry.style.display = 'block';
-                        return;
+                        return;  // poll resumes via __resumeTranscribePoll on Retry
                     }
                     setTimeout(tick, POLL_MS);
                 } catch (_) {
                     setTimeout(tick, POLL_MS);
                 }
             }
+            // Resume hook for the Retry button: the loop exits permanently
+            // on a terminal error, and tick is scoped to this IIFE — without
+            // this, a retried job ran to completion with the card frozen at
+            // the old error (the user had to reload to discover success).
+            window.__resumeTranscribePoll = () => setTimeout(tick, POLL_MS);
             // Small initial delay so startTranscription() (when status == uploaded)
             // has time to register the job before we poll.
             window.addEventListener('DOMContentLoaded', () => setTimeout(tick, 1500));
@@ -4247,9 +4252,10 @@ function downloadTXT() {
     PROJECT.transcript.segments.forEach(seg => {
         // Follow the on-screen timecode mode: a TXT handed to an editor is
         // most useful when its timecodes match the source media's TC.
-        const label = (typeof tcDisplayMode !== 'undefined' && tcDisplayMode)
+        const label = (typeof tcDisplayMode !== 'undefined' && tcDisplayMode
+                       && typeof TC_BY_PROJECT !== 'undefined' && TC_BY_PROJECT[PROJECT_ID])
             ? fmtDisplayTC(seg.start, PROJECT_ID)
-            : seg.start_formatted.substring(0, 8);
+            : seg.start_formatted.substring(0, 8);  // padded server format
         txt += `[${label}] ${displaySpeaker(seg.speaker)}: ${seg.text}\n\n`;
     });
     const blob = new Blob([txt], { type: 'text/plain' });
@@ -4314,11 +4320,29 @@ function cycleSpeaker(el) {
     const mapping = {};
     mapping[current] = next;
 
-    // Save: update all segments in this time range
+    // Save: update all segments in this time range. NOT fire-and-forget —
+    // the (now-live) diarization 409 gate and any server error must revert
+    // the optimistic DOM update, or the label silently snaps back on the
+    // next reload and click-to-reassign looks broken.
     fetch(`/project/${PROJECT_ID}/update-speaker-range`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ start: blockStart, end: paraEnd, speaker: next }),
+    }).then(async res => {
+        if (res.ok) return;
+        let msg = 'Could not reassign the speaker';
+        try {
+            const data = await res.json();
+            msg = data.message || data.error || msg;
+        } catch (_) {}
+        el.textContent = current;
+        el.className = 'para-speaker';
+        if (idx === 0) el.classList.add('speaker-1');
+        else el.classList.add('speaker-2');
+        showToast(msg, true);
+    }).catch(() => {
+        el.textContent = current;
+        showToast('Could not reach the server — speaker change not saved', true);
     });
 }
 

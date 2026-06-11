@@ -431,10 +431,16 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     audio_path = extract_audio(filepath, project_dir=project_dir)
 
     # Try Parakeet MLX first (fastest on Apple Silicon) — English only
+    # NOTE: the engines receive the RAW progress_cb (an event-dict callable),
+    # NOT the milestone helper _emit(phase, pct, ...) above. Passing _emit
+    # here was the bug that killed all engine progress: every engine calls
+    # progress_cb(event_dict), which raised a swallowed TypeError inside
+    # _emit, so the status file never saw a 'transcribing' phase and the bar
+    # parked at 5% for entire runs.
     if language == 'en':
         try:
             _emit("load_model", 5, engine="parakeet-mlx")
-            return _transcribe_parakeet(audio_path, speaker_labels, progress_cb=_emit)
+            return _transcribe_parakeet(audio_path, speaker_labels, progress_cb=progress_cb)
         except ImportError:
             print("Parakeet MLX not available, trying Whisper...", flush=True)
         except Exception as e:
@@ -465,7 +471,7 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     # Try WhisperX
     try:
         _emit("load_model", 5, engine="whisperx", slow_mode=True)
-        return _transcribe_whisperx(audio_path, speaker_labels, language=language, progress_cb=_emit)
+        return _transcribe_whisperx(audio_path, speaker_labels, language=language, progress_cb=progress_cb)
     except ImportError:
         print("WhisperX not available, trying standard Whisper...")
 
@@ -474,7 +480,7 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
         _emit("load_model", 5, engine="whisper", slow_mode=True)
         return _transcribe_whisper(
             audio_path, speaker_labels, num_speakers=num_speakers,
-            language=language, progress_cb=_emit,
+            language=language, progress_cb=progress_cb,
         )
     except ImportError:
         raise RuntimeError(

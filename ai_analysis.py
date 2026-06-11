@@ -4260,7 +4260,9 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
     def _record_chunk_failure(kind, i, e):
         nonlocal consecutive_timeouts
         from ai_providers import ProviderError
+        code = ''
         if isinstance(e, ProviderError):
+            code = e.code or ''
             if e.code in _FATAL_CODES:
                 raise e
             if e.code == 'unreachable' and not any_call_succeeded:
@@ -4274,7 +4276,7 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         else:
             consecutive_timeouts = 0
         detail = str(e)[:200]
-        chunk_errors.append(detail)
+        chunk_errors.append((detail, code))
         print(f"[analyze] {kind} chunk {i+1}/{len(chunks)} failed: {e}")
         accum['analysis_warnings'].append(
             f'{kind} analysis failed on chunk {i+1}/{len(chunks)}: {detail}'
@@ -4321,14 +4323,14 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
 
     if attempted_calls and len(chunk_errors) >= attempted_calls:
         # EVERY call failed — this is a backend problem, not a content
-        # problem. Promote the most common real error verbatim instead of
-        # letting the generic "came back empty" copy bury it; the analyze
-        # worker's ProviderError handler persists message + code into the
-        # status file for the UI.
+        # problem. Promote the most common real error verbatim — WITH its
+        # typed code, so the worker persists it and the UI's settings link
+        # renders for settings-fixable causes — instead of letting the
+        # generic "came back empty" copy bury it.
         from collections import Counter
         from ai_providers import ProviderError
-        dominant = Counter(chunk_errors).most_common(1)[0][0]
-        raise ProviderError(dominant)
+        dominant_msg, dominant_code = Counter(chunk_errors).most_common(1)[0][0]
+        raise ProviderError(dominant_msg, code=dominant_code)
 
     step += 1
     _emit(step, total_steps, "synthesizing summary")

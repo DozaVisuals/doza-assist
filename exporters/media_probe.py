@@ -237,10 +237,13 @@ def get_video_start_timecode_frames(path: str, framerate: float) -> int:
 
 def get_video_start_timecode_info(path: str, framerate: float) -> tuple[int, str]:
     """Return (start timecode in whole frames, "DF"|"NDF") — thin export
-    wrapper over get_video_start_timecode, kept so the FCPXML export call
-    sites and their v3.5.7 invariant are untouched."""
+    wrapper over get_video_start_timecode, kept BYTE-COMPATIBLE with the
+    pre-refactor behavior so the FCPXML export call sites and their v3.5.7
+    invariant are untouched: zero frames always reports "NDF" (the old
+    code returned the (0, "NDF") fallthrough for zero tags regardless of
+    the tag's separator)."""
     tc = get_video_start_timecode(path, framerate)
-    if not tc:
+    if not tc or tc["frames"] == 0:
         return 0, "NDF"
     return tc["frames"], ("DF" if tc["drop"] else "NDF")
 

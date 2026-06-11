@@ -2087,19 +2087,23 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
         # know the transcript landed on disk and is ready to diarize.
         # DIARIZATION_ENABLED gate: the flag was documented but never
         # actually checked on this (the only live) enqueue path — only
-        # dead legacy code honored it.
-        _diar_flag = os.environ.get('DIARIZATION_ENABLED', '1').strip().lower()
-        if _diar_flag in ('0', 'false', 'no', 'off'):
-            print(f"[transcribe] diarization disabled by env for {project_id}", flush=True)
+        # dead legacy code honored it. The extension's own parsed flag is
+        # the single source of truth so the env semantics can't drift.
+        try:
+            from diarization import DIARIZATION_ENABLED as _diar_enabled
+            from diarization import get_worker as _get_diar_worker
+        except ImportError:
+            # OSS / no diarization extension on this build.
+            _diar_enabled = False
+            _get_diar_worker = None
+        if not _diar_enabled:
+            if _get_diar_worker is not None:
+                print(f"[transcribe] diarization disabled by env for {project_id}", flush=True)
         else:
             try:
-                from diarization import get_worker as _get_diar_worker
                 projects_dir = app.config['PROJECTS_DIR']
                 _get_diar_worker(projects_dir).enqueue(project_id)
                 print(f"[transcribe] diarization queued for {project_id}", flush=True)
-            except ImportError:
-                # OSS / no diarization extension on this build.
-                pass
             except Exception as e:
                 # Non-fatal; transcription still completes. Surface so the
                 # support flow doesn't have to guess.
@@ -3860,15 +3864,19 @@ def clear_transcript(project_id):
 
     # Remove extracted audio (will be re-extracted on next transcribe) —
     # including the recipe sidecar and the FX trial WAV, which used to be
-    # orphaned here.
+    # orphaned here. Diarization state describes the DESTROYED transcript:
+    # a surviving status='done' would permanently 409-lock speaker renames
+    # on the next (undiarized) transcript and suppress the honesty banner.
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
-    for name in ('audio.wav', 'audio.wav.meta.json', 'audio_trial.wav'):
+    for name in ('audio.wav', 'audio.wav.meta.json', 'audio_trial.wav',
+                 'diarization_status.json', 'diarization_segments.json'):
         stale = os.path.join(project_dir, name)
         if os.path.exists(stale):
             try:
                 os.remove(stale)
             except OSError:
                 pass
+    update_project(project_id, {}, remove=['diarization', 'speaker_names'])
 
     return jsonify({'status': 'cleared'})
 
@@ -3906,11 +3914,20 @@ def retranscribe(project_id):
     project.pop('error', None)
     save_project(project_id, project)
 
-    # Remove extracted audio so it gets re-extracted
+    # Remove extracted audio so it gets re-extracted — sidecar included
+    # (an orphaned recipe sidecar would mis-describe the next WAV), and
+    # diarization state, which describes the transcript being destroyed
+    # (a surviving 'done' would 409-lock renames on the new transcript).
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
-    audio_wav = os.path.join(project_dir, 'audio.wav')
-    if os.path.exists(audio_wav):
-        os.remove(audio_wav)
+    for name in ('audio.wav', 'audio.wav.meta.json', 'audio_trial.wav',
+                 'diarization_status.json', 'diarization_segments.json'):
+        stale = os.path.join(project_dir, name)
+        if os.path.exists(stale):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    update_project(project_id, {}, remove=['diarization', 'speaker_names'])
 
     # Drop the cached paragraph_index + segment_vectors — they reference the
     # OLD transcript text. Letting them survive a retranscribe means the
@@ -3992,10 +4009,16 @@ def _diarization_state(project_id, project=None):
         st = read_status(_P(app.config['PROJECTS_DIR']) / project_id) or {}
         status = st.get('status') or 'not_started'
         if status in ('queued', 'running'):
+            # Stale-claim demotion. The worker heartbeats RUNNING (~60s) so
+            # 10 minutes of silence means a restart orphan; QUEUED items
+            # legitimately wait behind long jobs, so they get a much longer
+            # leash — demoting a live queue tail would invite manual
+            # reassignment that pyannote then clobbers.
+            limit = 600 if status == 'running' else 3600
             updated = st.get('updated_at')
             try:
                 age = (datetime.now() - datetime.fromisoformat(updated)).total_seconds()
-                if age > 600:
+                if age > limit:
                     return 'not_started'
             except (TypeError, ValueError):
                 return 'not_started'

@@ -231,32 +231,55 @@ def timecode_to_frames(tc: str, framerate: float) -> int | None:
 
 
 def get_video_start_timecode_frames(path: str, framerate: float) -> int:
-    """Whole-frame start timecode (0 if none) — see get_video_start_timecode_info."""
+    """Whole-frame start timecode (0 if none) — see get_video_start_timecode."""
     return get_video_start_timecode_info(path, framerate)[0]
 
 
 def get_video_start_timecode_info(path: str, framerate: float) -> tuple[int, str]:
-    """Return (start timecode in whole frames, "DF"|"NDF") for the media.
+    """Return (start timecode in whole frames, "DF"|"NDF") — thin export
+    wrapper over get_video_start_timecode, kept BYTE-COMPATIBLE with the
+    pre-refactor behavior so the FCPXML export call sites and their v3.5.7
+    invariant are untouched: zero frames always reports "NDF" (the old
+    code returned the (0, "NDF") fallthrough for zero tags regardless of
+    the tag's separator)."""
+    tc = get_video_start_timecode(path, framerate)
+    if not tc or tc["frames"] == 0:
+        return 0, "NDF"
+    return tc["frames"], ("DF" if tc["drop"] else "NDF")
 
-    DJI, Sony, and many cameras stamp time-of-day timecode. Final Cut keys an
-    asset's source timecode off the media's real timecode TRACK (``tmcd``), so
-    an FCPXML that exports 0-based edits against such media is rejected with
-    "Invalid edit with no respective media" — the edits fall outside the
-    media's real timecode range.
 
-    The inverse bit us on Sony XAVC-S: MP4 containers cannot carry a ``tmcd``
-    track, but Sony stamps a ``timecode`` metadata TAG (alongside an ``rtmd``
-    data track). FCP ignores the tag and treats such files as starting at 0 —
-    exporting tag-derived TC offsets put every clip outside the media and
-    produced the same rejection in the other direction. So: honor the embedded
-    timecode ONLY when the container carries a real ``tmcd`` stream, matching
-    what FCP itself keys off.
+def get_video_start_timecode(path: str, framerate: float) -> dict | None:
+    """Embedded start timecode, or None when absent.
+
+    Shape: ``{'frames': int, 'drop': bool, 'raw': str, 'source': str}`` —
+    frames on the nominal grid, drop-frame flag, the raw tag/derivation,
+    and which mechanism carried it ('tmcd' or 'bwf'). A legitimate
+    ``00:00:00:00`` tmcd tag returns ``{'frames': 0, ...}`` — callers must
+    distinguish "zero TC" (display layers still know TC exists) from
+    "no TC" (None). Dual-tag media prefers the first NONZERO candidate.
+
+    DJI, Sony, and many cameras stamp time-of-day timecode. Final Cut keys
+    an asset's source timecode off the media's real timecode TRACK
+    (``tmcd``), so an FCPXML that exports 0-based edits against such media
+    is rejected with "Invalid edit with no respective media".
+
+    The inverse bit us on Sony XAVC-S: MP4 containers cannot carry a
+    ``tmcd`` track, but Sony stamps a ``timecode`` metadata TAG (alongside
+    an ``rtmd`` data track). FCP ignores the tag and treats such files as
+    starting at 0 — so we honor embedded timecode ONLY when the container
+    carries a real ``tmcd`` stream, matching what FCP keys off. The same
+    gate governs the DISPLAY layer so on-screen TC always matches what an
+    export (and FCP) will say.
+
+    BWF field-recorder WAV/AIFF stamp time-of-day TC as bext
+    time_reference (samples since midnight) — FCP anchors such assets
+    there, so those are honored too.
     """
     if not path or not os.path.exists(path):
-        return 0, "NDF"
+        return None
     ffprobe = _find_ffprobe()
     if not ffprobe:
-        return 0, "NDF"
+        return None
     try:
         result = subprocess.run(
             [
@@ -269,7 +292,7 @@ def get_video_start_timecode_info(path: str, framerate: float) -> tuple[int, str
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
-            return 0, "NDF"
+            return None
         data = json.loads(result.stdout or "{}")
         streams = data.get("streams") or []
         fmt_tags = (data.get("format") or {}).get("tags") or {}
@@ -289,17 +312,25 @@ def get_video_start_timecode_info(path: str, framerate: float) -> tuple[int, str
             fmt_tc = (fmt_tags.get("timecode") or "").strip()
             if fmt_tc:
                 candidates.append(fmt_tc)
+            zero_tc = None
             for tc in candidates:
                 frames = timecode_to_frames(tc, framerate)
-                if frames:
-                    m = _TIMECODE_RE.match(tc.strip())
-                    is_drop = bool(m) and m.group(4) in (";", ".", ",")
-                    return frames, ("DF" if is_drop else "NDF")
-            return 0, "NDF"
-        # No tmcd track. BWF field-recorder WAV/AIFF stamp time-of-day TC as
-        # bext time_reference (samples since midnight) — FCP anchors such
-        # assets there, so 0-based exports hit the same "invalid edit"
-        # rejection the tmcd path fixes for camera files.
+                if frames is None:
+                    continue
+                m = _TIMECODE_RE.match(tc.strip())
+                is_drop = bool(m) and m.group(4) in (";", ".", ",")
+                if frames > 0:
+                    # First NONZERO wins: dual-tag media (a zero container
+                    # tag plus the real camera TC on the tmcd stream, or
+                    # vice versa) must keep resolving to the real one.
+                    return {"frames": frames, "drop": is_drop,
+                            "raw": tc.strip(), "source": "tmcd"}
+                if zero_tc is None:
+                    zero_tc = {"frames": 0, "drop": is_drop,
+                               "raw": tc.strip(), "source": "tmcd"}
+            # Only zero tags found: the media genuinely starts at zero TC.
+            return zero_tc
+        # No tmcd track — BWF bext time_reference (samples since midnight).
         time_ref = (fmt_tags.get("time_reference") or "").strip()
         if time_ref and time_ref.isdigit() and int(time_ref) > 0:
             sample_rate = 0
@@ -312,7 +343,40 @@ def get_video_start_timecode_info(path: str, framerate: float) -> tuple[int, str
                     break
             if sample_rate > 0:
                 seconds = int(time_ref) / sample_rate
-                return int(round(seconds * framerate)), "NDF"
+                frames = int(round(seconds * framerate))
+                return {"frames": frames, "drop": False,
+                        "raw": f"bext:{time_ref}", "source": "bwf"}
     except Exception:
         pass
-    return 0, "NDF"
+    return None
+
+
+def frames_to_timecode_label(total_frames: int, framerate: float, drop: bool = False) -> str:
+    """Inverse of timecode_to_frames: render a nominal-grid frame count as
+    an SMPTE label, re-inserting drop-frame skips when ``drop`` is True."""
+    nominal = int(round(framerate))
+    if nominal <= 0:
+        return "00:00:00:00"
+    frames = max(0, int(total_frames))
+    if drop and nominal % 30 == 0:
+        # Re-insert the dropped frame numbers: 2 per minute (×nominal/30),
+        # except every tenth minute.
+        drop_per_min = 2 * (nominal // 30)
+        frames_per_min = nominal * 60 - drop_per_min
+        frames_per_10min = nominal * 600 - drop_per_min * 9
+        d10 = frames // frames_per_10min
+        rem = frames % frames_per_10min
+        if rem < nominal * 60:
+            m_extra = 0
+        else:
+            m_extra = 1 + (rem - nominal * 60) // frames_per_min
+        frames += drop_per_min * (d10 * 9 + m_extra)
+        sep = ';'
+    else:
+        sep = ';' if drop else ':'
+    ff = frames % nominal
+    total_seconds = frames // nominal
+    ss = total_seconds % 60
+    mm = (total_seconds // 60) % 60
+    hh = total_seconds // 3600
+    return f"{hh:02d}:{mm:02d}:{ss:02d}{sep}{ff:02d}"

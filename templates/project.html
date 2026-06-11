@@ -218,6 +218,9 @@
             </div>
             <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;" id="transcribeTimeText"></p>
             <div id="transcribeWhisperBanner" style="display:none; max-width: 380px; margin: 1.25rem auto 0; padding: 0.85rem; text-align: left; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
+            <div id="transcribeRetry" style="display:none; margin-top: 1.25rem;">
+                <button class="btn btn-purple" onclick="document.getElementById('transcribeRetry').style.display='none'; document.getElementById('transcribeStatusText').textContent='Transcribing...'; document.getElementById('transcribeTimeText').textContent=''; startTranscription(); if (window.__resumeTranscribePoll) window.__resumeTranscribePoll();">Retry transcription</button>
+            </div>
         </div>
     </div>
     {% if project.status == 'uploaded' %}
@@ -264,6 +267,37 @@
                     if (fill && pct !== null) {
                         fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
                     }
+                    // Minutes-processed + ETA from the payload the worker
+                    // already ships (pct / audio_sec / started_at) — the
+                    // bar used to move with no time context at all. Plus
+                    // the stall banner the status writer's docstring
+                    // promised: no update for >2 min ⇒ say so instead of
+                    // letting a wedged engine look like slow progress.
+                    if (timeText && phase === 'transcribing') {
+                        let label = '';
+                        if (state.audio_sec && pct !== null && pct > 10) {
+                            const frac = Math.min(1, Math.max(0, (pct - 10) / 78));
+                            const doneMin = Math.floor((frac * state.audio_sec) / 60);
+                            const totalMin = Math.max(1, Math.round(state.audio_sec / 60));
+                            label = `${doneMin} of ${totalMin} min processed`;
+                            if (state.started_at && frac > 0.03) {
+                                const el = (Date.now() - Date.parse(state.started_at)) / 1000;
+                                if (el > 10) {
+                                    const rem = Math.max(0, el / frac - el);
+                                    const m = Math.round(rem / 60);
+                                    label += ` · ~${m < 1 ? '<1' : m}m remaining`;
+                                }
+                            }
+                        }
+                        if (state.updated_at) {
+                            const age = (Date.now() - Date.parse(state.updated_at)) / 1000;
+                            if (age > 120) {
+                                label = (label ? label + ' · ' : '') +
+                                    'No progress for a while — the engine may be working through a hard section, or stalled.';
+                            }
+                        }
+                        timeText.textContent = label;
+                    }
                     if (phase === 'done' || state.transcribed) {
                         if (fill) fill.style.width = '100%';
                         if (statusText) statusText.textContent = 'Done!';
@@ -275,15 +309,25 @@
                         return;
                     }
                     if (phase === 'error') {
-                        if (statusText) statusText.textContent = 'Error';
-                        if (timeText)   timeText.textContent = state.error || 'Transcription failed';
-                        return;
+                        if (statusText) statusText.textContent = state.recoverable ? 'Transcription was interrupted' : 'Error';
+                        if (timeText)   timeText.textContent = state.error || state.message || 'Transcription failed';
+                        // Always offer Retry on a terminal error — the
+                        // backend re-armed the project, and the duplicate-
+                        // job guard admits a fresh run.
+                        const retry = document.getElementById('transcribeRetry');
+                        if (retry) retry.style.display = 'block';
+                        return;  // poll resumes via __resumeTranscribePoll on Retry
                     }
                     setTimeout(tick, POLL_MS);
                 } catch (_) {
                     setTimeout(tick, POLL_MS);
                 }
             }
+            // Resume hook for the Retry button: the loop exits permanently
+            // on a terminal error, and tick is scoped to this IIFE — without
+            // this, a retried job ran to completion with the card frozen at
+            // the old error (the user had to reload to discover success).
+            window.__resumeTranscribePoll = () => setTimeout(tick, POLL_MS);
             // Small initial delay so startTranscription() (when status == uploaded)
             // has time to register the job before we poll.
             window.addEventListener('DOMContentLoaded', () => setTimeout(tick, 1500));
@@ -333,13 +377,19 @@
                     <span class="dz-bar"></span>
                 </div>
             </div>
+            <div id="videoUnplayableNote" style="display:none; text-align:center; padding: 0.5rem 1rem 0.75rem; font-size: 0.8rem; line-height: 1.45; color: var(--text-muted);">
+                This camera format (MXF / high-bitrate codec) can't be previewed as video — playing audio. Exports always use the original file.
+            </div>
         </div>
-        {# Audio element only when at least one project in scope is audio-only. #}
-        {# For video projects we never need it, and a stray <audio> in the DOM #}
-        {# can issue a metadata probe in some browsers even without src. #}
-        {% if not is_video or projects_meta|selectattr('is_video', 'equalto', false)|list %}
+        {# Always present so the audio fallback can never dangle on a null
+           element — clicking 🔊 in an all-video view used to throw on null
+           and half-apply (button lit, playback still bound to the video
+           element). src is only preset for audio-only projects; video
+           projects get a src lazily when audio-only engages, so no
+           spurious metadata probe fires. The waveform's AnalyserNode
+           attaches to this one element exactly once (see
+           _wfAttachToAudioEl) — it must never be recreated. #}
         <audio id="audioPlayer" preload="metadata" {% if not is_video %}src="/project/{{ project.id }}/media"{% endif %} style="display:none"></audio>
-        {% endif %}
 
         <div class="player-controls-box">
             <div class="player-inner">
@@ -355,6 +405,9 @@
                 <button class="player-speed-btn" id="speedBtn" onclick="cycleSpeed()" title="Playback speed">1x</button>
                 {% if is_video %}
                 <button class="player-speed-btn" id="audioOnlyBtn" onclick="toggleAudioOnly()" title="Audio-only mode (lighter playback for heavy footage)">🔊</button>
+                {% if projects_meta | selectattr('start_tc') | list %}
+                <button class="player-speed-btn" id="tcDisplayBtn" onclick="toggleTcDisplay()" title="Toggle source timecode display (camera TC ↔ 00:00-relative)">TC</button>
+                {% endif %}
                 {% endif %}
             </div>
             {% if is_multi %}
@@ -367,13 +420,31 @@
         <div class="left-section" id="speakerSection">
             <div class="card-title" style="margin-bottom: 0.5rem;">Speakers</div>
             <div id="speakerList">
-                {% set speakers = [] %}
+                {# transcript_speakers = labels actually present in segments.
+                   Drives the no-diarization banner. sidebar_speakers is
+                   SEEDED with the configured interviewer/subject names ONLY
+                   when reassignment needs the second option (multi-speaker
+                   config, one distinct label, and diarization is in a
+                   silent state — queued/running/done projects get the real
+                   pyannote labels and must not grow phantom rows). Without
+                   seeding, cycleSpeaker had nothing to cycle to. #}
+                {% set transcript_speakers = [] %}
                 {% for seg in project.transcript.segments %}
-                    {% if seg.speaker not in speakers %}
-                        {% if speakers.append(seg.speaker) %}{% endif %}
+                    {% if seg.speaker not in transcript_speakers %}
+                        {% if transcript_speakers.append(seg.speaker) %}{% endif %}
                     {% endif %}
                 {% endfor %}
-                {% for speaker in speakers %}
+                {% set sidebar_speakers = transcript_speakers|list %}
+                {% set diar_silent = (diarization_state | default('unavailable')) not in ('queued', 'running', 'done') %}
+                {% if project.num_speakers and project.num_speakers > 1
+                      and transcript_speakers|length == 1 and diar_silent %}
+                    {% for extra in [project.interviewer_name, project.subject_name] %}
+                        {% if extra and extra not in sidebar_speakers %}
+                            {% if sidebar_speakers.append(extra) %}{% endif %}
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
+                {% for speaker in sidebar_speakers %}
                 <div class="speaker-row" data-original="{{ speaker }}">
                     <div style="width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: {% if loop.index == 1 %}var(--green){% elif loop.index == 2 %}var(--purple){% elif loop.index == 3 %}var(--orange){% else %}var(--accent){% endif %};"></div>
                     <input type="text" class="speaker-input" value="{{ speaker }}" onchange="renameSpeaker(this.closest('.speaker-row').dataset.original, this.value)">
@@ -481,6 +552,35 @@
                         <a href="{{ activate_url }}" target="_blank" rel="noopener" style="margin-left: 6px; font-weight: 600; color: var(--accent);">Activate</a>
                     </div>
                 </div>
+                {% endif %}
+                {# Speaker-separation honesty banner: shown when the project
+                   was configured multi-speaker, the transcript carries a
+                   single distinct label, AND diarization is in a SILENT
+                   state (not_started/skipped/error-stale/unavailable) —
+                   queued/running/done states have the diarization
+                   extension's own live banners. Keyed on segment labels so
+                   it self-clears once labels diverge (pyannote rewrite or
+                   manual reassignment); dismissal persists per project.
+                   Suppressed on trial-length transcripts: the trial banner
+                   above already owns this slot, and a capped excerpt's
+                   speaker labels aren't worth a second stacked warning. #}
+                {% set diar_silent_banner = (diarization_state | default('unavailable')) not in ('queued', 'running', 'done') %}
+                {% if not is_shared and project.num_speakers and project.num_speakers > 1
+                      and transcript_speakers|length == 1 and diar_silent_banner
+                      and not project.transcript.truncated_for_trial %}
+                <div id="speakerHonestyBanner" data-project="{{ project.id }}" style="margin: 0 0 0.75rem; padding: 0.7rem 0.9rem; background: color-mix(in srgb, var(--orange) 8%, transparent); border: 1px solid color-mix(in srgb, var(--orange) 35%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.45; display: flex; gap: 0.6rem; align-items: flex-start;">
+                    <span style="flex-shrink: 0;">🎙️</span>
+                    <span style="color: var(--text-secondary);">
+                        Speaker separation hasn't run on this project, so paragraphs share one label.
+                        <strong style="color: var(--text-primary);">Click a speaker name on any paragraph to reassign it</strong> — your interviewer and subject names are ready in the sidebar.
+                    </span>
+                    <button onclick="localStorage.setItem('speaker-banner-dismissed-{{ project.id }}','1'); this.closest('#speakerHonestyBanner').style.display='none'" style="margin-left: auto; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1rem; line-height: 1;" title="Dismiss" aria-label="Dismiss">&times;</button>
+                </div>
+                <script>
+                    if (localStorage.getItem('speaker-banner-dismissed-{{ project.id }}') === '1') {
+                        document.getElementById('speakerHonestyBanner').style.display = 'none';
+                    }
+                </script>
                 {% endif %}
                 <div class="transcript-container" id="transcriptContainer">
                     {% include '_transcript_paragraphs.html' %}
@@ -1325,7 +1425,7 @@ function _onTimeUpdate() {
     if (!audio.duration) return;
     const pct = (audio.currentTime / audio.duration) * 100;
     playerProgress.style.width = pct + '%';
-    playerCurrentTime.textContent = fmtTime(audio.currentTime);
+    playerCurrentTime.textContent = fmtDisplayTC(audio.currentTime, currentAudioProject);
     highlightActiveSegment(audio.currentTime);
 }
 function _onPlay() { playIcon.style.display='none'; pauseIcon.style.display=''; }
@@ -1492,6 +1592,22 @@ function setPlayerView(mode) {
 
 {% if is_video %}
 videoEl.src = "/project/{{ project.id }}/media";
+videoEl.addEventListener('error', () => {
+    const err = videoEl.error;
+    if (!err) return;
+    // MEDIA_ERR_DECODE (3) / MEDIA_ERR_SRC_NOT_SUPPORTED (4): Chromium
+    // can't demux or decode this container/codec — MXF always, many
+    // 10-bit 4:2:2 camera MP4s. The viewer used to sit black with a dead
+    // progress bar and no message. Fall back to the extracted audio
+    // (waveform view) automatically and say so.
+    if (err.code !== 3 && err.code !== 4) return;
+    if (audioOnlyMode) return;
+    if (enterAudioOnly()) {
+        const note = document.getElementById('videoUnplayableNote');
+        if (note) note.style.display = '';
+        showToast("This camera format can't be previewed as video — playing audio only");
+    }
+});
 {% else %}
 // Audio-only project: kick the waveform on so the player box isn't a
 // blank black rectangle while the editor scrubs through interview audio.
@@ -1621,34 +1737,86 @@ function togglePlay() {
 }
 
 let audioOnlyMode = false;
-function toggleAudioOnly() {
-    const btn = document.getElementById('audioOnlyBtn');
-    if (!btn) return;
-    audioOnlyMode = !audioOnlyMode;
+
+function enterAudioOnly() {
+    // Switch playback to the extracted audio track. Used by the 🔊 toggle
+    // AND as the automatic fallback when Chromium can't decode the source
+    // container/codec (MXF always; 10-bit 4:2:2 camera MP4s often).
+    // Returns true on success so callers flip UI state only after the
+    // element swap actually happened — the old toggle threw on a null
+    // audio element and left the player half-switched (button lit,
+    // playback still bound to the dead video element).
+    if (audioOnlyMode) return true;
+    if (!audioEl) {
+        console.warn('[player] audio-only refused: no audio element in DOM');
+        return false;
+    }
     const currentTime = audio ? audio.currentTime : 0;
     const wasPlaying = audio && !audio.paused;
     if (audio) audio.pause();
 
-    if (audioOnlyMode) {
+    audioEl.src = `/project/${currentAudioProject}/media/audio`;
+    audio = audioEl;
+    currentPlayerIsVideo = false;
+    audioOnlyMode = true;
+    setPlayerView('waveform');
+    bindPlayerEvents();
+
+    const btn = document.getElementById('audioOnlyBtn');
+    if (btn) {
         btn.style.background = 'var(--accent)';
         btn.style.color = '#fff';
         btn.title = 'Switch back to video playback';
-        audioEl.src = `/project/{{ project.id }}/media/audio`;
-        audio = audioEl;
-        currentPlayerIsVideo = false;
-        setPlayerView('waveform');
-    } else {
+    }
+    audio.currentTime = currentTime;
+    if (wasPlaying) audio.play();
+    return true;
+}
+
+function exitAudioOnly() {
+    if (!audioOnlyMode) return;
+    // Chromium can't decode this source at all (that's why the auto-
+    // fallback engaged). Exiting would bind playback to a permanently
+    // errored video element — black box, note gone, and since the src
+    // never changes no new 'error' event can re-trigger the fallback.
+    if (videoEl && videoEl.error && currentAudioProject === currentVideoProject) {
+        showToast("This format can't be played as video — staying on audio");
+        return;
+    }
+    const currentTime = audio ? audio.currentTime : 0;
+    const wasPlaying = audio && !audio.paused;
+    if (audio) audio.pause();
+
+    audioEl.src = '';
+    // Multi-project: jumpTo in audio-only mode switches projects on the
+    // AUDIO element only — re-sync the video element before handing
+    // playback back, or it resumes the page-load project's video at this
+    // project's position.
+    if (currentVideoProject !== currentAudioProject) {
+        videoEl.src = `/project/${currentAudioProject}/media`;
+        currentVideoProject = currentAudioProject;
+    }
+    audio = videoEl;
+    currentPlayerIsVideo = true;
+    audioOnlyMode = false;
+    setPlayerView('video');
+    bindPlayerEvents();
+
+    const btn = document.getElementById('audioOnlyBtn');
+    if (btn) {
         btn.style.background = '';
         btn.style.color = '';
         btn.title = 'Audio-only mode (lighter playback for heavy footage)';
-        audioEl.src = '';
-        audio = videoEl;
-        currentPlayerIsVideo = true;
-        setPlayerView('video');
     }
-    bindPlayerEvents();
+    const note = document.getElementById('videoUnplayableNote');
+    if (note) note.style.display = 'none';
     audio.currentTime = currentTime;
     if (wasPlaying) audio.play();
+}
+
+function toggleAudioOnly() {
+    if (audioOnlyMode) exitAudioOnly();
+    else enterAudioOnly();
 }
 
 function seekPlayer(e) {
@@ -1660,6 +1828,10 @@ function seekPlayer(e) {
 }
 
 let currentAudioProject = PROJECT_ID;
+// Which project's media the VIDEO element currently holds. Diverges from
+// currentAudioProject when audio-only mode switches projects (jumpTo only
+// retargets the audio element there); exitAudioOnly re-syncs it.
+let currentVideoProject = PROJECT_ID;
 
 function parseTc(val) {
     // Handle both seconds (42.0) and timecodes ("00:00:42")
@@ -1684,9 +1856,15 @@ function jumpTo(seconds, projectId) {
         // Check if this project is video or audio and switch player if needed
         const meta = PROJECTS_META.find(p => p.id === projectId);
         const needsVideo = meta ? meta.is_video : false;
-        switchPlayerElement(needsVideo);
-
-        audio.src = `/project/${projectId}/media`;
+        if (audioOnlyMode) {
+            // Stay on the extracted-audio track across project switches —
+            // the user (or the unplayable-format fallback) chose audio.
+            audio.src = `/project/${projectId}/media/audio`;
+        } else {
+            switchPlayerElement(needsVideo);
+            audio.src = `/project/${projectId}/media`;
+            if (needsVideo) currentVideoProject = projectId;
+        }
         currentAudioProject = projectId;
         // Update the now-playing indicator
         const indicator = document.getElementById('playerProjectName');
@@ -1794,6 +1972,125 @@ function fmtTime(s) {
     if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
     return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
 }
+// NOTE: fmtTime must stay byte-stable and 0-based — it serializes story
+// build start_time/end_time that the export markers parse. The source-TC
+// layer below is DISPLAY-ONLY and goes through fmtDisplayTC instead.
+
+// ── Source-timecode display (ported from OSS v3.5.12) ──
+// Camera files carry embedded time-of-day timecode; editors match
+// transcript moments to their NLE by SOURCE TC, not media-relative 00:00.
+// Every seek, data attribute, and export payload stays 0-based seconds —
+// only what the user READS is offset. The probe is tmcd/BWF-gated server-
+// side, so what's shown always matches what an FCPXML export will say.
+const TC_BY_PROJECT = {};
+PROJECTS_META.forEach(p => {
+    if (p.start_tc && p.start_tc.frames > 0 && p.start_tc.fps) {
+        TC_BY_PROJECT[p.id] = p.start_tc;
+    }
+});
+const HAS_SOURCE_TC = Object.keys(TC_BY_PROJECT).length > 0;
+// Default ON when TC exists — the symptom is only fixed if discovered.
+let tcDisplayMode = HAS_SOURCE_TC && localStorage.getItem('tc-display') !== 'off';
+
+function framesToTcLabel(frames, fps, drop) {
+    const nominal = Math.round(fps);
+    if (nominal <= 0) return '00:00:00:00';
+    frames = Math.max(0, Math.round(frames));
+    let sep = drop ? ';' : ':';
+    if (drop && nominal % 30 === 0) {
+        // Re-insert drop-frame skips: 2 per minute (×nominal/30) except
+        // every tenth minute. Mirrors media_probe.frames_to_timecode_label.
+        const dropPerMin = 2 * (nominal / 30);
+        const framesPerMin = nominal * 60 - dropPerMin;
+        const framesPer10 = nominal * 600 - dropPerMin * 9;
+        const d10 = Math.floor(frames / framesPer10);
+        const rem = frames % framesPer10;
+        const mExtra = rem < nominal * 60 ? 0 : 1 + Math.floor((rem - nominal * 60) / framesPerMin);
+        frames += dropPerMin * (d10 * 9 + mExtra);
+    }
+    const ff = frames % nominal;
+    const ts = Math.floor(frames / nominal);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(Math.floor(ts / 3600))}:${pad(Math.floor(ts / 60) % 60)}:${pad(ts % 60)}${sep}${pad(ff)}`;
+}
+
+function fmtDisplayTC(s, pid) {
+    // Offset math in FRAMES at the project's real rate — naive seconds
+    // addition drifts visibly against a time-of-day NTSC timecode.
+    if (!tcDisplayMode) return fmtTime(s);
+    if (!pid && IS_MULTI) return fmtTime(s);  // mixed-project surfaces stay relative
+    const tc = TC_BY_PROJECT[pid || PROJECT_ID];
+    if (!tc) return fmtTime(s);
+    const totalFrames = tc.frames + Math.round((parseFloat(s) || 0) * tc.fps);
+    return framesToTcLabel(totalFrames, tc.fps, tc.drop);
+}
+
+function fmtServerTime(s) {
+    // Zero-padded HH:MM:SS matching the server-side paragraph render, so
+    // toggling OFF restores the original format exactly.
+    s = Math.max(0, Math.floor(parseFloat(s) || 0));
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+}
+
+function _initTcSurfaces() {
+    // Stamp server-rendered analysis timecode elements once with their
+    // original text + shape so the toggle can rewrite and restore them.
+    document.querySelectorAll('.analysis-item .analysis-item-tc').forEach(tcEl => {
+        if (tcEl.dataset.tcInit) return;
+        tcEl.dataset.tcInit = '1';
+        tcEl.dataset.orig = tcEl.textContent;
+        tcEl.dataset.range = tcEl.textContent.includes('–') ? '1' : '';
+    });
+}
+
+function refreshTimecodeDisplays() {
+    // Server-rendered paragraph timecodes.
+    document.querySelectorAll('.para-block').forEach(block => {
+        const tcEl = block.querySelector('.para-tc');
+        if (!tcEl) return;
+        const s = parseFloat(block.dataset.start);
+        const pid = block.dataset.project || PROJECT_ID;
+        tcEl.textContent = (tcDisplayMode && TC_BY_PROJECT[pid])
+            ? fmtDisplayTC(s, pid) : fmtServerTime(s);
+    });
+    // Server-rendered analysis items (beats / social clips / soundbites).
+    _initTcSurfaces();
+    document.querySelectorAll('.analysis-item .analysis-item-tc[data-tc-init]').forEach(tcEl => {
+        const item = tcEl.closest('.analysis-item');
+        if (!tcDisplayMode || !TC_BY_PROJECT[PROJECT_ID] || IS_MULTI) {
+            tcEl.textContent = tcEl.dataset.orig;
+            return;
+        }
+        const s = parseTc(item.dataset.clipStart);
+        const e = parseTc(item.dataset.clipEnd);
+        tcEl.textContent = tcEl.dataset.range
+            ? `${fmtDisplayTC(s)} – ${fmtDisplayTC(e)}` : fmtDisplayTC(s);
+    });
+    // JS-rendered surfaces: the clips tab re-renders now; story/chat cards
+    // pick up the current mode on their next render.
+    try { if (typeof renderClipsTab === 'function') renderClipsTab(); } catch (e) {}
+}
+
+function toggleTcDisplay() {
+    tcDisplayMode = !tcDisplayMode;
+    localStorage.setItem('tc-display', tcDisplayMode ? 'on' : 'off');
+    _syncTcButton();
+    refreshTimecodeDisplays();
+}
+
+function _syncTcButton() {
+    const btn = document.getElementById('tcDisplayBtn');
+    if (!btn) return;
+    if (!HAS_SOURCE_TC) { btn.style.display = 'none'; return; }
+    btn.style.background = tcDisplayMode ? 'var(--accent)' : '';
+    btn.style.color = tcDisplayMode ? '#fff' : '';
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    _syncTcButton();
+    if (tcDisplayMode) refreshTimecodeDisplays();
+});
 
 // ── Word-level highlighting ──
 // Build a sorted index of all timed words for fast binary-search lookup
@@ -2529,7 +2826,7 @@ function renderChatStoryCard(build) {
                 <svg class="csp-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
             </button>
             <span class="chat-story-clip-title">${escapeHtml(clip.title || 'Untitled')}</span>
-            <span class="chat-story-clip-tc" onclick="jumpTo(${s})">${fmtTime(s)} - ${fmtTime(e)}</span>
+            <span class="chat-story-clip-tc" onclick="jumpTo(${s})">${fmtDisplayTC(s)} - ${fmtDisplayTC(e)}</span>
             <span class="chat-story-clip-dur">${formatDuration(dur)}</span>
         </div>`;
     });
@@ -2776,7 +3073,7 @@ function renderChatReply(text) {
                 ? `<div class="cc-note">${note.trim()}</div>`
                 : '';
 
-            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtTime(start)}–${fmtTime(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
+            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtDisplayTC(start)}–${fmtDisplayTC(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
             const idx = CARD_STASH.length;
             CARD_STASH.push(cardHtml);
             return `\uE000CCCARD${idx}\uE001`;
@@ -3073,7 +3370,7 @@ function addClipFromChat(start, end, title, btn) {
         card.className = 'chat-inline-clip';
         card.innerHTML = `<span class="chat-inline-clip-dot"></span>`
             + `<span class="chat-inline-clip-title">${escapeHtml(title)}</span>`
-            + `<span class="chat-inline-clip-tc">${fmtTime(start)} – ${fmtTime(end)}</span>`
+            + `<span class="chat-inline-clip-tc">${fmtDisplayTC(start)} – ${fmtDisplayTC(end)}</span>`
             + `<button class="chat-inline-clip-play" onclick="jumpTo(${start})">&#9654;</button>`;
         // Insert after the button's parent tc-group or after the cc-card
         const anchor = btn.closest('.chat-tc-group') || btn.closest('.cc-card');
@@ -3148,7 +3445,7 @@ function renderClipsTab() {
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
                 <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
-                <span class="clip-row-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</span>
+                <span class="clip-row-tc">${fmtDisplayTC(clip.start, clip.project_id)} – ${fmtDisplayTC(clip.end, clip.project_id)}</span>
                 <span class="clip-row-dur">${formatDuration(duration)}</span>
                 <button class="clip-row-play" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})">
                     <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg>
@@ -3167,7 +3464,7 @@ function renderClipsTab() {
             </div>
             <div class="clip-card-meta">
                 <span class="clip-card-dot" style="background: var(--${colorVar});"></span>
-                <span class="clip-card-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)}</span>
+                <span class="clip-card-tc">${fmtDisplayTC(clip.start, clip.project_id)} – ${fmtDisplayTC(clip.end, clip.project_id)}</span>
                 <button class="cc-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}')" title="Add to Story Builder" style="font-size:11px;padding:2px 8px;">+ Story</button>
                 <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
             </div>
@@ -3873,12 +4170,41 @@ async function runAnalysis() {
         }
         stopAnalyzeProgressPoll();
         showToast('Error: ' + (data.error || 'Unknown error'), true);
+        _showAnalyzeSettingsLink(data);
         resetAnalyzeBtn();
     } catch (err) {
         stopAnalyzeProgressPoll();
         showToast('Error: ' + err.message, true);
         resetAnalyzeBtn();
     }
+}
+
+// Renders a persistent error + Open Settings link in the pre-analysis card
+// for settings-fixable failures (Ollama down, model missing, key problems,
+// out of memory). DOM-built — textContent/href are injection-proof
+// regardless of what the payload holds. The status-file error path and the
+// preflight 400 path both route through here.
+function _showAnalyzeSettingsLink(data) {
+    if (!data) return;
+    const fixable = ['unreachable', 'model_missing', 'missing_key',
+                     'invalid_key', 'insufficient_memory'];
+    if (!data.settings_url && !(data.code && fixable.includes(data.code))) return;
+    const card = document.getElementById('preAnalysis');
+    if (!card || document.getElementById('analyzeSettingsLink')) return;
+    const p = document.createElement('p');
+    p.id = 'analyzeSettingsLink';
+    p.style.cssText = 'margin-top:0.75rem; font-size:0.85rem;';
+    const msg = document.createElement('span');
+    msg.style.color = 'var(--red)';
+    msg.textContent = data.error || '';
+    const link = document.createElement('a');
+    link.href = '/settings';
+    link.style.color = 'var(--accent)';
+    link.textContent = 'Open Settings';
+    p.appendChild(msg);
+    p.appendChild(document.createElement('br'));
+    p.appendChild(link);
+    card.appendChild(p);
 }
 
 // Tracks whether the current poll session has ever seen the worker as
@@ -3903,6 +4229,7 @@ function startAnalyzeProgressPoll() {
             if (data.error) {
                 stopAnalyzeProgressPoll();
                 showToast('Analysis error: ' + data.error, true);
+                _showAnalyzeSettingsLink(data);
                 resetAnalyzeBtn();
                 return;
             }
@@ -4340,7 +4667,13 @@ function downloadTXT() {
     if (!PROJECT.transcript) return;
     let txt = PROJECT.name + '\n' + '='.repeat(40) + '\n\n';
     PROJECT.transcript.segments.forEach(seg => {
-        txt += `[${seg.start_formatted.substring(0, 8)}] ${displaySpeaker(seg.speaker)}: ${seg.text}\n\n`;
+        // Follow the on-screen timecode mode: a TXT handed to an editor is
+        // most useful when its timecodes match the source media's TC.
+        const label = (typeof tcDisplayMode !== 'undefined' && tcDisplayMode
+                       && typeof TC_BY_PROJECT !== 'undefined' && TC_BY_PROJECT[PROJECT_ID])
+            ? fmtDisplayTC(seg.start, PROJECT_ID)
+            : seg.start_formatted.substring(0, 8);  // padded server format
+        txt += `[${label}] ${displaySpeaker(seg.speaker)}: ${seg.text}\n\n`;
     });
     const blob = new Blob([txt], { type: 'text/plain' });
     downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '.txt');
@@ -4491,7 +4824,13 @@ function cycleSpeaker(el) {
     // Get all known speakers
     const inputs = document.querySelectorAll('.speaker-input');
     const speakers = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
-    if (speakers.length < 2) return; // Need at least 2 speakers to cycle
+    if (speakers.length < 2) {
+        // Sidebar seeding should make this unreachable on multi-speaker
+        // projects, but never fail silently — this was the dead-end that
+        // made click-to-reassign look broken.
+        showToast('Add a second speaker name in the sidebar to reassign paragraphs');
+        return;
+    }
 
     const current = el.textContent.trim();
     const idx = speakers.indexOf(current);
@@ -4520,11 +4859,29 @@ function cycleSpeaker(el) {
     const mapping = {};
     mapping[current] = next;
 
-    // Save: update all segments in this time range
+    // Save: update all segments in this time range. NOT fire-and-forget —
+    // the (now-live) diarization 409 gate and any server error must revert
+    // the optimistic DOM update, or the label silently snaps back on the
+    // next reload and click-to-reassign looks broken.
     fetch(`/project/${PROJECT_ID}/update-speaker-range`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ start: blockStart, end: paraEnd, speaker: next }),
+    }).then(async res => {
+        if (res.ok) return;
+        let msg = 'Could not reassign the speaker';
+        try {
+            const data = await res.json();
+            msg = data.message || data.error || msg;
+        } catch (_) {}
+        el.textContent = current;
+        el.className = 'para-speaker';
+        if (idx === 0) el.classList.add('speaker-1');
+        else el.classList.add('speaker-2');
+        showToast(msg, true);
+    }).catch(() => {
+        el.textContent = current;
+        showToast('Could not reach the server — speaker change not saved', true);
     });
 }
 
@@ -5067,7 +5424,7 @@ function renderStorySequence(build) {
                     <button class="story-card-remove" onclick="removeStoryClip(${idx})" title="Remove">&times;</button>
                 </div>
                 <div class="story-card-meta">
-                    <span class="story-card-tc">${fmtTime(start)} - ${fmtTime(end)}</span>
+                    <span class="story-card-tc">${fmtDisplayTC(start)} - ${fmtDisplayTC(end)}</span>
                 </div>
                 <div class="story-card-note">${safeNote}</div>
                 <div class="story-card-player">
@@ -5861,7 +6218,7 @@ function renderStoryClipLibrary() {
             <button class="story-clip-play" onclick="jumpTo(${clip.start})">&#9654;</button>
             <div class="story-clip-info">
                 <span class="story-clip-title">${safeTitle}</span>
-                <span class="story-clip-tc">${fmtTime(clip.start)} – ${fmtTime(clip.end)} &middot; ${dur}s</span>
+                <span class="story-clip-tc">${fmtDisplayTC(clip.start)} – ${fmtDisplayTC(clip.end)} &middot; ${dur}s</span>
             </div>
             <button class="cc-add story-clip-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}',this)">+ Story</button>
         </div>`;

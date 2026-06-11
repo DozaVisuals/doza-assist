@@ -44,8 +44,13 @@ def test_retries_then_succeeds(monkeypatch):
     assert calls["n"] == 3, "should retry past the transient refusals"
 
 
-def test_gives_up_after_budget_and_reraises(monkeypatch):
-    # Ollama never comes back — re-raise the connection error (don't hang).
+def test_gives_up_after_budget_and_raises_typed(monkeypatch):
+    # Ollama never comes back — exhaust the backoff budget (don't hang),
+    # then raise a TYPED ProviderError(code='unreachable') so the analysis
+    # loop can fast-abort and the UI names the real problem. (Previously
+    # re-raised the raw urllib3 ConnectionError, which surfaced as a
+    # connection-pool repr.)
+    from ai_providers import ProviderError
     calls = {"n": 0}
 
     def always_refused(url, **kwargs):
@@ -53,16 +58,19 @@ def test_gives_up_after_budget_and_reraises(monkeypatch):
         raise requests.exceptions.ConnectionError("refused")
 
     monkeypatch.setattr(ollama_provider.requests, "post", always_refused)
-    with pytest.raises(requests.exceptions.ConnectionError):
+    with pytest.raises(ProviderError) as exc:
         ollama_provider._post_with_reconnect("http://x/api/generate", json={}, timeout=180)
-    # 1 initial attempt + len(_CONNECT_BACKOFF) retries.
+    assert exc.value.code == "unreachable"
+    # 1 initial attempt + len(_CONNECT_BACKOFF) retries — budget unchanged.
     assert calls["n"] == len(ollama_provider._CONNECT_BACKOFF) + 1
 
 
 def test_does_not_retry_read_timeout(monkeypatch):
     # A read timeout is the model being slow, not Ollama being down — that's
     # the caller's model-aware timeout's job. Retrying would multiply a long
-    # wait. It must propagate on the first attempt.
+    # wait. It must propagate on the FIRST attempt, typed as
+    # code='timeout' so the chunk loop's consecutive-timeout abort works.
+    from ai_providers import ProviderError
     calls = {"n": 0}
 
     def slow(url, **kwargs):
@@ -70,8 +78,9 @@ def test_does_not_retry_read_timeout(monkeypatch):
         raise requests.exceptions.ReadTimeout("read timed out")
 
     monkeypatch.setattr(ollama_provider.requests, "post", slow)
-    with pytest.raises(requests.exceptions.ReadTimeout):
+    with pytest.raises(ProviderError) as exc:
         ollama_provider._post_with_reconnect("http://x/api/generate", json={}, timeout=180)
+    assert exc.value.code == "timeout"
     assert calls["n"] == 1, "read timeouts must not be retried"
 
 

@@ -4242,44 +4242,6 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
     step = 0
     _emit(step, total_steps, "starting")
 
-    # Per-call failure bookkeeping (ported from OSS v3.5.12). Permanently-
-    # broken backends abort always; 'unreachable' aborts only before any
-    # call has succeeded — mid-run it's usually the bundled-Ollama
-    # supervisor relaunching after an OOM (the reconnect bridge covers
-    # ≤20s blips; anything longer surfaces here), and throwing away
-    # completed chunks over a transient restart is worse than logging one
-    # lost chunk. Two consecutive timeouts also abort (one can be a cold
-    # model load; two means it's not recovering).
-    _FATAL_CODES = ('missing_key', 'invalid_key',
-                    'model_missing', 'insufficient_memory')
-    chunk_errors = []
-    attempted_calls = 0
-    consecutive_timeouts = 0
-    any_call_succeeded = False
-
-    def _record_chunk_failure(kind, i, e):
-        nonlocal consecutive_timeouts
-        from ai_providers import ProviderError
-        if isinstance(e, ProviderError):
-            if e.code in _FATAL_CODES:
-                raise e
-            if e.code == 'unreachable' and not any_call_succeeded:
-                raise e
-            if e.code == 'timeout':
-                consecutive_timeouts += 1
-                if consecutive_timeouts >= 2:
-                    raise e
-            else:
-                consecutive_timeouts = 0
-        else:
-            consecutive_timeouts = 0
-        detail = str(e)[:200]
-        chunk_errors.append(detail)
-        print(f"[analyze] {kind} chunk {i+1}/{len(chunks)} failed: {e}")
-        accum['analysis_warnings'].append(
-            f'{kind} analysis failed on chunk {i+1}/{len(chunks)}: {detail}'
-        )
-
     for i, chunk in enumerate(chunks):
         chunk_text = _format_segments_for_ai(chunk['segments'])
         range_label = f"{_seconds_to_tc(chunk['start_seconds'])}-{_seconds_to_tc(chunk['end_seconds'])}"
@@ -4287,7 +4249,6 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         if analysis_type in ('story', 'all'):
             step += 1
             _emit(step, total_steps, f"chunk {i+1}/{chunk_count}: story beats")
-            attempted_calls += 1
             try:
                 _merge_story_chunk(
                     accum,
@@ -4298,14 +4259,22 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
                     ),
                     is_first_chunk=(i == 0),
                 )
-                consecutive_timeouts = 0
-                any_call_succeeded = True
             except Exception as e:
-                _record_chunk_failure('Story', i, e)
+                # Missing/invalid API key is permanent — re-raise so the
+                # whole analysis aborts with the clear message instead of
+                # silently producing empty results across every chunk.
+                from ai_providers import ProviderError
+                if isinstance(e, ProviderError) and e.code in ('missing_key', 'invalid_key'):
+                    raise
+                print(f"[analyze] story chunk {i+1}/{len(chunks)} failed: {e}")
+                accum['analysis_warnings'].append(
+                    f'Story analysis failed on chunk {i+1}/{len(chunks)} '
+                    f'({type(e).__name__}). Some beats / themes / soundbites '
+                    'may be missing for that section.'
+                )
         if analysis_type in ('social', 'all'):
             step += 1
             _emit(step, total_steps, f"chunk {i+1}/{chunk_count}: social clips")
-            attempted_calls += 1
             try:
                 _merge_social_chunk(
                     accum,
@@ -4314,21 +4283,16 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
                         clips_target=per_chunk_target,
                     ),
                 )
-                consecutive_timeouts = 0
-                any_call_succeeded = True
             except Exception as e:
-                _record_chunk_failure('Social-clip', i, e)
-
-    if attempted_calls and len(chunk_errors) >= attempted_calls:
-        # EVERY call failed — this is a backend problem, not a content
-        # problem. Promote the most common real error verbatim instead of
-        # letting the generic "came back empty" copy bury it; the analyze
-        # worker's ProviderError handler persists message + code into the
-        # status file for the UI.
-        from collections import Counter
-        from ai_providers import ProviderError
-        dominant = Counter(chunk_errors).most_common(1)[0][0]
-        raise ProviderError(dominant)
+                from ai_providers import ProviderError
+                if isinstance(e, ProviderError) and e.code in ('missing_key', 'invalid_key'):
+                    raise
+                print(f"[analyze] social chunk {i+1}/{len(chunks)} failed: {e}")
+                accum['analysis_warnings'].append(
+                    f'Social-clip analysis failed on chunk {i+1}/{len(chunks)} '
+                    f'({type(e).__name__}). Some clip suggestions may be '
+                    'missing for that section.'
+                )
 
     step += 1
     _emit(step, total_steps, "synthesizing summary")

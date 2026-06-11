@@ -6,7 +6,6 @@ Falls back to standard Whisper if WhisperX is not available.
 
 import os
 import ssl
-import sys
 import json
 import shutil
 import time
@@ -115,57 +114,6 @@ def _find_ffmpeg():
     return 'ffmpeg'  # fall back, will error if not found
 
 
-# ── Whisper progress hook ──
-# whisper.transcribe creates `tqdm.tqdm(total=content_frames, ...)` and calls
-# `pbar.update(n)` after each ~30s decode window — even when the bar is
-# disabled (verbose=None). Swapping the `tqdm` reference inside the
-# whisper.transcribe module for a subclass turns those updates into a real
-# progress signal, replacing the wall-clock estimator's guesswork during
-# the long CPU decode. ContextVar routing keeps concurrent jobs from
-# cross-reporting. Fail-open: if a future whisper drops tqdm, the
-# estimator fallback still runs. [Ported from OSS v3.5.12 / 61c8ae5.]
-import contextvars
-
-_whisper_progress_cb = contextvars.ContextVar('whisper_progress_cb', default=None)
-
-
-def _install_whisper_progress_hook():
-    """Install the tqdm shim into whisper.transcribe (idempotent).
-    Returns True when the hook is active."""
-    try:
-        # NOT `import whisper.transcribe as _wt`: whisper/__init__ rebinds
-        # the `transcribe` attribute to the FUNCTION, so attribute-style
-        # import grabs that instead of the module. import_module returns
-        # the real module from sys.modules.
-        import importlib
-        _wt = importlib.import_module('whisper.transcribe')
-        if getattr(_wt, '_doza_progress_hooked', False):
-            return True
-        if not hasattr(_wt, 'tqdm') or not hasattr(_wt.tqdm, 'tqdm'):
-            return False
-        import tqdm as _tqdm_mod
-
-        class _ProgressTqdm(_tqdm_mod.tqdm):
-            def update(self, n=1):
-                try:
-                    self._doza_seen = getattr(self, '_doza_seen', 0) + (n or 0)
-                    cb = _whisper_progress_cb.get()
-                    if cb and self.total:
-                        cb(min(self._doza_seen / self.total, 1.0))
-                except Exception:
-                    pass
-                return super().update(n)
-
-        class _TqdmShim:
-            tqdm = _ProgressTqdm
-
-        _wt.tqdm = _TqdmShim
-        _wt._doza_progress_hooked = True
-        return True
-    except Exception:
-        return False
-
-
 def _audio_stream_plan(filepath):
     """Probe the source's audio streams once per extraction.
 
@@ -202,65 +150,6 @@ def _audio_stream_plan(filepath):
     ]
 
 
-# Extraction recipe version. Bump whenever the ffmpeg invocation below
-# changes in a way that affects WAV content (e.g. the multi-stream amix
-# mixdown, or any change to the Pro bundled-ffmpeg invocation). Cached WAVs
-# carrying an older recipe — or no sidecar at all, which covers everything
-# extracted by pre-port builds including truncated non-atomic-era files and
-# silent wrong-stream picks — are discarded and re-extracted once.
-# [Ported from OSS v3.5.12 / 61c8ae5.]
-_EXTRACT_RECIPE = 2
-
-
-def _audio_meta_path(audio_path):
-    return audio_path + '.meta.json'
-
-
-def _wav_duration_seconds(audio_path):
-    """Duration of OUR extracted WAV (16 kHz mono s16) from its byte size.
-
-    No ffprobe dependency — extraction must keep working on machines where
-    a standalone ffmpeg resolves but ffprobe doesn't. The 44-byte canonical
-    header is noise at this precision."""
-    try:
-        return max(os.path.getsize(audio_path) - 44, 0) / 32000.0
-    except OSError:
-        return 0.0
-
-
-def _cached_audio_valid(audio_path, filepath):
-    """True iff the cached WAV was produced by the CURRENT extraction recipe
-    from the CURRENT source file and still matches the duration recorded at
-    write time. Anything else — no sidecar (pre-port builds), older recipe,
-    source replaced, suspiciously tiny file, or a WAV that shrank since the
-    sidecar was written (truncation) — is treated as poisoned."""
-    from doza_assist.jsonio import load_json
-    meta = load_json(_audio_meta_path(audio_path))
-    if not isinstance(meta, dict) or meta.get('recipe') != _EXTRACT_RECIPE:
-        return False
-    try:
-        st = os.stat(filepath)
-    except OSError:
-        return False
-    if meta.get('source_size') != st.st_size or meta.get('source_mtime') != int(st.st_mtime):
-        return False
-    try:
-        if os.path.getsize(audio_path) <= 1024:
-            return False
-    except OSError:
-        return False
-    wav_dur = _wav_duration_seconds(audio_path)
-    if wav_dur < 0.5:
-        return False
-    # Compare against the duration recorded when THIS wav was written —
-    # self-consistent, needs no source probe, and sidesteps sources whose
-    # audio track is legitimately shorter than the video container.
-    recorded = meta.get('wav_duration')
-    if isinstance(recorded, (int, float)) and recorded > 0 and wav_dur < 0.9 * recorded:
-        return False
-    return True
-
-
 def extract_audio(filepath, project_dir=None):
     """
     Extract / convert any media file to a 16 kHz mono WAV for processing.
@@ -274,10 +163,6 @@ def extract_audio(filepath, project_dir=None):
 
     If *project_dir* is provided the WAV is written to
     ``projects/<id>/audio.wav``; otherwise it lands next to the source.
-
-    The cache is recipe-versioned and self-healing: WAVs from older builds
-    (truncated, or silent wrong-stream picks from before the amix mixdown)
-    are detected and re-extracted automatically — no uninstall needed.
     """
     # Determine output path for extracted audio
     if project_dir:
@@ -285,16 +170,9 @@ def extract_audio(filepath, project_dir=None):
     else:
         audio_path = filepath.rsplit('.', 1)[0] + '_audio.wav'
 
+    # Skip extraction if audio already exists in the project dir
     if os.path.exists(audio_path):
-        if _cached_audio_valid(audio_path, filepath):
-            return audio_path
-        # Stale, truncated, wrong-recipe, or silent-wrong-stream cache —
-        # remove and re-extract. This is the no-uninstall-needed self-heal.
-        for stale in (audio_path, _audio_meta_path(audio_path)):
-            try:
-                os.remove(stale)
-            except OSError:
-                pass
+        return audio_path
 
     # If the source is already a 16 kHz mono WAV we can just reference it
     # directly — no decode ambiguity is possible for uncompressed PCM.
@@ -320,15 +198,10 @@ def extract_audio(filepath, project_dir=None):
     stream_count, mix_args = _audio_stream_plan(filepath)
     if stream_count == 0:
         raise RuntimeError('This file has no audio track to transcribe.')
-    # Unique temp suffix: the background transcribe job, /media/audio's
-    # on-the-fly extraction, and the batch worker can all extract the same
-    # project concurrently — two writers on one tmp path meant the second
-    # os.replace exploded on a vanished file. -nostdin keeps a confused
-    # ffmpeg from blocking on a TTY that isn't there.
-    tmp_path = f'{audio_path}.part-{os.getpid()}-{threading.get_ident()}.wav'
+    tmp_path = audio_path + '.part.wav'
     try:
         result = subprocess.run([
-            ffmpeg, '-nostdin', '-y', '-i', filepath,
+            ffmpeg, '-y', '-i', filepath,
             '-vn', *mix_args, '-acodec', 'pcm_s16le',
             '-ar', '16000', '-ac', '1',
             tmp_path,
@@ -343,35 +216,6 @@ def extract_audio(filepath, project_dir=None):
                 os.remove(tmp_path)
             except OSError:
                 pass
-
-    # Empty-audio guard: a source whose audio decodes to (near-)nothing
-    # produces a valid-but-empty WAV, which used to sail into the engines
-    # and crash Whisper with "cannot reshape tensor of 0 elements". The
-    # zero-STREAM case was caught above; this catches zero-CONTENT.
-    wav_dur = _wav_duration_seconds(audio_path)
-    if wav_dur < 0.1:
-        for stale in (audio_path, _audio_meta_path(audio_path)):
-            try:
-                os.remove(stale)
-            except OSError:
-                pass
-        raise RuntimeError(
-            'Extracted audio is empty — the file may have no usable audio '
-            'track. Check that the source plays sound in QuickTime.'
-        )
-
-    try:
-        from doza_assist.jsonio import atomic_write_json
-        st = os.stat(filepath)
-        atomic_write_json(_audio_meta_path(audio_path), {
-            'recipe': _EXTRACT_RECIPE,
-            'source_size': st.st_size,
-            'source_mtime': int(st.st_mtime),
-            'wav_duration': wav_dur,
-        })
-    except OSError:
-        # Sidecar write failure just means re-extraction next time.
-        pass
     return audio_path
 
 
@@ -485,114 +329,152 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
 
 
 def _transcribe_parakeet(filepath, speaker_labels=None, progress_cb=None):
-    """Transcribe using Parakeet MLX in an isolated subprocess.
+    """Transcribe using Parakeet MLX — fastest on Apple Silicon.
 
-    The decode is moved into ``parakeet_worker.py`` and spawned as a child
-    Python process. Rationale (issue #23, ported from OSS v3.5.4): on some
-    M1 systems MLX/Metal raises a C++ exception inside the Metal completion
-    handler that Python cannot catch — it propagates to ``std::terminate``
-    and SIGABRTs the whole process. In-process, that killed the entire
-    backend mid-job; the Electron shell restarted it, the status file went
-    permanently stale, and the user got a frozen "Transcribing…" card with
-    no retry. With isolation the SIGABRT kills the worker only and this
-    function raises, so transcribe_file falls through to the bundled
-    Whisper engine like any other Parakeet failure.
+    Chunks long audio into 5-minute segments to avoid Metal GPU memory limits.
 
-    Cost: the model reloads per call (~5-15s) — the warm in-process cache
-    can't survive process isolation. The per-chunk progress contract is
-    preserved: the worker streams ``DOZA_PROGRESS {json}`` lines (same
-    phase/pct/audio_sec events the in-process version emitted) and this
-    parent forwards them to ``progress_cb``.
-
-    First-run import check up front so a missing parakeet_mlx surfaces as
-    ImportError (the signal transcribe_file uses to skip to Whisper)
-    rather than a worker crash.
+    ``progress_cb`` is invoked per chunk with phase=transcribing and a
+    pct in [10, 90] derived from chunk_end / total_samples. The 10-90
+    band is the engine's working share; the wrapper reserves 0-10 for
+    audio extraction + model load and 90-100 for post-processing.
     """
-    import importlib.util
-    if importlib.util.find_spec('parakeet_mlx') is None:
-        raise ImportError('parakeet_mlx is not installed')
+    global _parakeet_model
+    import numpy as np
+    from parakeet_mlx.audio import load_audio
 
-    def _emit(event):
+    def _emit(phase, pct, **extra):
         if progress_cb is None:
             return
         try:
+            event = {"phase": phase, "pct": int(pct), "engine": "parakeet-mlx"}
+            event.update(extra)
             progress_cb(event)
         except Exception:
             pass
 
-    worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               'parakeet_worker.py')
-    out_fd, out_path = tempfile.mkstemp(prefix='parakeet_result_', suffix='.json')
-    os.close(out_fd)
-    err_fd, err_path = tempfile.mkstemp(prefix='parakeet_stderr_', suffix='.log')
-    os.close(err_fd)
+    with _model_lock:
+        if _parakeet_model is None:
+            from parakeet_mlx import from_pretrained
+            print("Loading Parakeet TDT model...", flush=True)
+            _emit("load_model", 5)
+            _parakeet_model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
+        else:
+            print("Using cached Parakeet TDT model.", flush=True)
+        model = _parakeet_model
+
+    print("Loading audio...", flush=True)
+    _emit("load_audio", 8)
+    audio_data = load_audio(filepath, model.preprocessor_config.sample_rate)
+
+    sr = model.preprocessor_config.sample_rate
+    total_samples = len(audio_data)
+    total_duration = total_samples / sr
+
+    # Chunk into ~5 minute segments with 1s overlap to avoid cutting words
+    chunk_sec = 300  # 5 minutes
+    overlap_sec = 1
+    chunk_samples = int(chunk_sec * sr)
+    overlap_samples = int(overlap_sec * sr)
 
     default_speaker = 'Speaker'
     if speaker_labels:
         default_speaker = speaker_labels.get('SPEAKER_00', 'Speaker')
 
-    try:
-        with open(err_path, 'w') as err_file:
-            proc = subprocess.Popen(
-                [sys.executable, worker_path,
-                 '--audio', filepath,
-                 '--output', out_path,
-                 '--speaker', default_speaker],
-                stdout=subprocess.PIPE,
-                stderr=err_file,
-                text=True,
-                bufsize=1,
-            )
-            # Stream worker stdout live: DOZA_PROGRESS lines become
-            # progress events (keeping the wrapper's per-chunk bar);
-            # everything else is forwarded to the app log verbatim.
-            for line in proc.stdout:
-                line = line.rstrip('\n')
-                if line.startswith('DOZA_PROGRESS '):
-                    try:
-                        _emit(json.loads(line[len('DOZA_PROGRESS '):]))
-                    except (ValueError, json.JSONDecodeError):
-                        pass
-                elif line:
-                    print(f"[parakeet-worker] {line}", flush=True)
-            proc.wait()
+    all_segments = []
+    chunk_start = 0
+    chunk_idx = 0
+
+    while chunk_start < total_samples:
+        chunk_end = min(chunk_start + chunk_samples, total_samples)
+        chunk = audio_data[chunk_start:chunk_end]
+        time_offset = chunk_start / sr
+
+        chunk_idx += 1
+        # Emit AFTER chunk_end is known so the bar tracks actual
+        # progress (which sample range we're about to decode).
+        pct = 10 + int(80 * chunk_end / max(1, total_samples))
+        _emit("transcribing", pct, audio_sec=int(total_duration))
+        print(f"Transcribing chunk {chunk_idx} ({time_offset:.0f}s - {chunk_end/sr:.0f}s)...", flush=True)
+
+        # Save chunk as temp WAV (parakeet.transcribe expects a file path).
+        # Unique per call — a fixed name like ``parakeet_chunk_1.wav`` is
+        # shared across every transcription on the machine, so two runs (or
+        # a stale file left by a crashed run) would read each other's audio.
+        import soundfile as sf
+        import uuid
+        tmp_path = os.path.join(
+            tempfile.gettempdir(), f'parakeet_chunk_{uuid.uuid4().hex}_{chunk_idx}.wav'
+        )
+        sf.write(tmp_path, np.array(chunk), sr)
 
         try:
-            with open(err_path, 'r') as f:
-                err_text = f.read()
-        except OSError:
-            err_text = ''
-        if err_text.strip():
-            print(f"[parakeet-worker:stderr] {err_text[-2000:]}", flush=True)
-
-        if proc.returncode != 0:
-            # Include stderr in the raised message: transcribe_file's
-            # metallib detection ("default metallib" / "language version 4")
-            # keys off this text to pick its fallback messaging.
-            detail = ''
+            result = model.transcribe(tmp_path)
+        finally:
             try:
-                with open(out_path, 'r') as f:
-                    payload = json.load(f)
-                detail = payload.get('error', '')
-            except (OSError, ValueError, json.JSONDecodeError):
-                pass
-            raise RuntimeError(
-                f"Parakeet worker exited with {proc.returncode}"
-                f"{' (likely Metal/MLX crash)' if proc.returncode < 0 or proc.returncode == 134 else ''}: "
-                f"{detail or err_text[-500:] or 'no error detail'}"
-            )
-
-        with open(out_path, 'r') as f:
-            result = json.load(f)
-        if 'error' in result and 'segments' not in result:
-            raise RuntimeError(f"Parakeet worker failed: {result['error']}")
-        return result
-    finally:
-        for tmp in (out_path, err_path):
-            try:
-                os.remove(tmp)
+                os.remove(tmp_path)
             except OSError:
                 pass
+
+        for sent in result.sentences:
+            if not sent.text.strip():
+                continue
+
+            # Merge subword tokens into full words
+            # Parakeet uses BPE: tokens starting with space begin a new word
+            words = []
+            for tok in sent.tokens:
+                tok_text = tok.text
+                tok_start = round(tok.start + time_offset, 3)
+                tok_end = round(tok.end + time_offset, 3)
+
+                if tok_text.startswith(' ') or not words:
+                    # New word
+                    words.append({
+                        'start': tok_start,
+                        'end': tok_end,
+                        'word': tok_text,
+                    })
+                else:
+                    # Continuation of previous word — merge
+                    words[-1]['word'] += tok_text
+                    words[-1]['end'] = tok_end
+
+            seg_start = (sent.tokens[0].start if sent.tokens else 0) + time_offset
+            seg_end = (sent.tokens[-1].end if sent.tokens else 0) + time_offset
+
+            all_segments.append({
+                'start': round(seg_start, 3),
+                'end': round(seg_end, 3),
+                'text': sent.text.strip(),
+                'speaker': default_speaker,
+                'start_formatted': format_timestamp(seg_start),
+                'end_formatted': format_timestamp(seg_end),
+                'words': words,
+            })
+
+        # Advance past this chunk, minus overlap
+        chunk_start = chunk_end - overlap_samples
+        if chunk_end >= total_samples:
+            break
+
+    # Remove duplicate segments from overlap regions
+    if len(all_segments) > 1:
+        deduped = [all_segments[0]]
+        for seg in all_segments[1:]:
+            # Skip if this segment starts before the previous one ends (overlap duplicate)
+            if seg['start'] < deduped[-1]['end'] - 0.5:
+                continue
+            deduped.append(seg)
+        all_segments = deduped
+
+    print(f"Parakeet done: {len(all_segments)} segments in {total_duration:.0f}s of audio", flush=True)
+
+    return {
+        'segments': all_segments,
+        'language': 'en',
+        'duration': all_segments[-1]['end'] if all_segments else 0,
+        'engine': 'parakeet-mlx',
+    }
 
 
 def _transcribe_whisperx(audio_path, speaker_labels=None, language='en', progress_cb=None):
@@ -809,32 +691,18 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
         audio_duration_sec = 60.0  # safe baseline
 
     _stop_estimator = threading.Event()
-    # Once the tqdm hook delivers a real decode fraction, the wall-clock
-    # estimator goes silent — real data beats the 1.0x-realtime guess that
-    # camped at 88% for the whole back half on memory-pressured machines.
-    _real_progress_seen = threading.Event()
-
-    def _on_real_progress(fraction):
-        _real_progress_seen.set()
-        # Map 0–1 decode fraction into the 10–88 band; 90–100 stays
-        # reserved for finalize + downstream (diarization) phases.
-        pct = min(88, 10 + int(78 * fraction))
-        _emit("transcribing", pct, audio_sec=int(audio_duration_sec))
 
     def _estimator():
         import time as _t
-        # Fail-open fallback when the tqdm hook is unavailable: Whisper
-        # turbo on Apple Silicon CPU runs at ~1.0x realtime in FP32. Aim
-        # the bar at the estimated finish but cap at 88 so it never
-        # claims completion.
+        # Whisper turbo on Apple Silicon CPU runs at ~1.0x realtime in
+        # FP32. A 10-min interview takes ~10 min. We aim the bar at the
+        # estimated finish but cap at 88 so it never claims completion.
         REALTIME_MULTIPLIER = 1.0
         start = _t.time()
         estimated_total = audio_duration_sec * REALTIME_MULTIPLIER
         _emit("transcribing", 10, audio_sec=int(audio_duration_sec))
         last_pct = 10
         while not _stop_estimator.wait(2.0):
-            if _real_progress_seen.is_set():
-                continue  # the engine is reporting truth; stay quiet
             elapsed = _t.time() - start
             ratio = min(1.0, elapsed / max(1.0, estimated_total))
             pct = min(88, int(10 + 78 * ratio))
@@ -844,14 +712,9 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
 
     estimator_thread = threading.Thread(target=_estimator, daemon=True)
     estimator_thread.start()
-    _cb_token = None
-    if _install_whisper_progress_hook():
-        _cb_token = _whisper_progress_cb.set(_on_real_progress)
     try:
         result = model.transcribe(audio_path, **transcribe_kwargs)
     finally:
-        if _cb_token is not None:
-            _whisper_progress_cb.reset(_cb_token)
         _stop_estimator.set()
         try:
             estimator_thread.join(timeout=1.0)
@@ -884,25 +747,11 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
             'words': words,
         })
 
-    out = {
+    return {
         'segments': segments,
         'language': result.get('language', 'en'),
         'duration': segments[-1]['end'] if segments else 0,
         'engine': 'whisper',
     }
-    if num_speakers and num_speakers > 1:
-        # Engine honesty: Whisper cannot tell speakers apart, so every
-        # segment above carries one label. On Pro the pyannote extension
-        # usually rewrites these minutes later; the UI banner keys on the
-        # diarization status + distinct labels, and uses this flag to know
-        # the single label is an engine limitation rather than reality.
-        out['diarization'] = 'unavailable'
-        out['note'] = (
-            f'The Whisper engine cannot separate speakers — all segments '
-            f'are labeled "{default_speaker}". Speaker identification runs '
-            f'separately; you can also click any speaker name in the '
-            f'transcript to reassign that paragraph.'
-        )
-    return out
 
 

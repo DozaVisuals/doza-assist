@@ -35,11 +35,8 @@ def _post_with_reconnect(url, *, json=None, timeout=None, stream=False):
     """``requests.post`` that survives a brief Ollama restart.
 
     Retries on ``ConnectionError`` only (a refused socket while the supervisor
-    relaunches Ollama), never on read timeouts. When Ollama never comes back
-    within the backoff budget, raises a TYPED ProviderError — the old raw
-    urllib3 re-raise meant the analysis loop couldn't fast-abort and the
-    user saw a connection-pool repr instead of "Ollama isn't running".
-    Timeouts are likewise wrapped so callers can count and abort on them.
+    relaunches Ollama), never on read timeouts. Re-raises the last connection
+    error if Ollama never comes back within the backoff budget.
     """
     last_err = None
     for attempt in range(len(_CONNECT_BACKOFF) + 1):
@@ -49,17 +46,7 @@ def _post_with_reconnect(url, *, json=None, timeout=None, stream=False):
             last_err = e
             if attempt < len(_CONNECT_BACKOFF):
                 time.sleep(_CONNECT_BACKOFF[attempt])
-        except requests.exceptions.Timeout as e:
-            raise ProviderError(
-                "Ollama timed out mid-request — the model may be overloaded "
-                "or still loading. Try again in a moment.",
-                code="timeout",
-            ) from e
-    raise ProviderError(
-        "Ollama isn't reachable — it may have stopped. Relaunch Doza Assist "
-        "to restart it automatically.",
-        code="unreachable",
-    ) from last_err
+    raise last_err
 
 
 def _raise_ollama_error(response, model):
@@ -71,34 +58,18 @@ def _raise_ollama_error(response, model):
     shorter section" when the real problem was "model not installed", and the
     chat stream just went silent. The cloud providers raise typed
     ProviderErrors; this brings Ollama in line.
-
-    ``code`` lets callers react structurally: the analysis chunk loop
-    fast-aborts on permanent conditions instead of burning one long timeout
-    per chunk, and 'insufficient_memory' matters specifically on 8GB
-    machines where the model warm-loads fine at a small num_ctx but OOMs at
-    the analysis call's 32768 — so chat works while analysis fails.
     """
     try:
         detail = (response.json().get("error") or "").strip()
     except (ValueError, json.JSONDecodeError):
         detail = (response.text or "").strip()[:300]
-    lower = detail.lower()
-    if response.status_code == 404 or "not found" in lower:
+    if response.status_code == 404 or "not found" in detail.lower():
         raise ProviderError(
             f"Ollama model '{model}' is not installed. "
             f"Open AI Model settings to download it, or pick a different model.",
-            code="model_missing",
-        )
-    if "memory" in lower and ("requires more" in lower or "available" in lower):
-        raise ProviderError(
-            f"The AI model '{model}' needs more memory than this Mac has free. "
-            f"Close other apps, or switch to the smaller gemma4:e2b variant in "
-            f"AI Model settings.",
-            code="insufficient_memory",
         )
     raise ProviderError(
         f"Ollama error (HTTP {response.status_code}): {detail or 'no details'}",
-        code="server_error",
     )
 
 
@@ -227,23 +198,6 @@ class OllamaProvider(BaseProvider):
                 timeout=kwargs.get("timeout", 180),
             )
             if response.status_code != 200 and "think" in payload:
-                # The think-retry exists for daemons/models that reject the
-                # `think` field — NOT for failures the retry can't fix.
-                # Re-sending a full 32k-ctx analysis call after an
-                # out-of-memory or model-not-found error doubles a load the
-                # 8GB machine just proved it can't take.
-                try:
-                    _detail = (response.json().get("error") or "").lower()
-                except (ValueError, json.JSONDecodeError):
-                    _detail = ""
-                _permanent = (
-                    response.status_code == 404
-                    or "not found" in _detail
-                    or ("memory" in _detail
-                        and ("requires more" in _detail or "available" in _detail))
-                )
-                if _permanent:
-                    _raise_ollama_error(response, model)
                 payload.pop("think", None)
                 response = _post_with_reconnect(
                     f"{self.base_url}/api/generate",
@@ -292,10 +246,7 @@ class OllamaProvider(BaseProvider):
         # any local model the app supports.
         connect_timeout = kwargs.get("connect_timeout", 15)
         read_timeout = kwargs.get("read_timeout", kwargs.get("timeout", 60))
-        # Through the reconnect bridge: a supervisor-relaunched Ollama used
-        # to fail streamed chat instantly with a raw ConnectionError while
-        # non-stream calls survived the same blip.
-        with _post_with_reconnect(
+        with requests.post(
             f"{self.base_url}/api/chat",
             json={
                 "model": model,

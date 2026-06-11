@@ -153,19 +153,22 @@ def timecode_to_frames(tc: str, framerate: float) -> int | None:
     return total
 
 
-def get_video_start_timecode_frames(path: str, framerate: float) -> int:
-    """Return the media's embedded start timecode in whole frames (0 if none).
+def get_video_start_timecode(path: str, framerate: float) -> dict | None:
+    """Return the media's embedded start timecode, or None when absent.
 
-    DJI, Sony, and many cameras stamp time-of-day timecode. Final Cut keys an
-    asset's source timecode off it, so an FCPXML that exports 0-based edits
-    against such media is rejected with "Invalid edit with no respective media"
-    — the edits fall outside the media's real timecode range. Reads the
-    `timecode` tag from the format or any stream (e.g. a `tmcd` track)."""
+    Shape: ``{'frames': int, 'drop': bool, 'raw': str}`` — frames on the
+    nominal grid (what FCP keys asset.start off), the drop-frame flag (a
+    ``;`` separator), and the raw tag string for display/debugging.
+
+    DJI, Sony, and many cameras stamp time-of-day timecode. Reads the
+    `timecode` tag from the format or any stream (e.g. a `tmcd` track).
+    A legitimate ``00:00:00:00`` tag returns ``{'frames': 0, ...}`` —
+    callers must distinguish "zero TC" from "no TC" (None)."""
     if not path or not os.path.exists(path):
-        return 0
+        return None
     ffprobe = _find_ffprobe()
     if not ffprobe:
-        return 0
+        return None
     try:
         result = subprocess.run(
             [
@@ -177,10 +180,68 @@ def get_video_start_timecode_frames(path: str, framerate: float) -> int:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
+            zero_tc = None
             for line in result.stdout.splitlines():
-                frames = timecode_to_frames(line.strip(), framerate)
-                if frames:
-                    return frames
+                raw = line.strip()
+                frames = timecode_to_frames(raw, framerate)
+                if frames is None:
+                    continue
+                if frames > 0:
+                    # Prefer the first NONZERO tag: dual-tag media (a
+                    # format-level 00:00:00:00 plus a tmcd stream carrying
+                    # the real camera TC) must keep resolving to the real
+                    # one — get_video_start_timecode_frames feeds FCPXML
+                    # asset.start, and a zero there regresses the v3.5.7
+                    # "Invalid edit" fix.
+                    return {'frames': frames, 'drop': ';' in raw, 'raw': raw}
+                if zero_tc is None:
+                    zero_tc = {'frames': 0, 'drop': ';' in raw, 'raw': raw}
+            # Only zero tags found: the media genuinely starts at zero TC —
+            # report it (display layers must know TC exists) rather than
+            # treating it as absent.
+            return zero_tc
     except Exception:
         pass
-    return 0
+    return None
+
+
+def get_video_start_timecode_frames(path: str, framerate: float) -> int:
+    """Embedded start timecode in whole frames (0 if none) — thin wrapper
+    kept for the FCPXML export call sites.
+
+    Final Cut keys an asset's source timecode off the embedded TC, so an
+    FCPXML that exports 0-based edits against such media is rejected with
+    "Invalid edit with no respective media"."""
+    tc = get_video_start_timecode(path, framerate)
+    return tc['frames'] if tc else 0
+
+
+def frames_to_timecode_label(total_frames: int, framerate: float, drop: bool = False) -> str:
+    """Inverse of timecode_to_frames: render a nominal-grid frame count as
+    an SMPTE label, re-inserting drop-frame skips when ``drop`` is True."""
+    nominal = int(round(framerate))
+    if nominal <= 0:
+        return "00:00:00:00"
+    frames = max(0, int(total_frames))
+    if drop and nominal % 30 == 0:
+        # Re-insert the dropped frame numbers: 2 per minute (×nominal/30),
+        # except every tenth minute.
+        drop_per_min = 2 * (nominal // 30)
+        frames_per_min = nominal * 60 - drop_per_min
+        frames_per_10min = nominal * 600 - drop_per_min * 9
+        d10 = frames // frames_per_10min
+        rem = frames % frames_per_10min
+        if rem < nominal * 60:
+            m_extra = 0
+        else:
+            m_extra = 1 + (rem - nominal * 60) // frames_per_min
+        frames += drop_per_min * (d10 * 9 + m_extra)
+        sep = ';'
+    else:
+        sep = ';' if drop else ':'
+    ff = frames % nominal
+    total_seconds = frames // nominal
+    ss = total_seconds % 60
+    mm = (total_seconds // 60) % 60
+    hh = total_seconds // 3600
+    return f"{hh:02d}:{mm:02d}:{ss:02d}{sep}{ff:02d}"

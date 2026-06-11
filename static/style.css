@@ -710,6 +710,17 @@ body {
 
 .para-speaker:hover {
     background: var(--bg-hover);
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+}
+
+/* Affordance hint: clicking the name reassigns the paragraph's speaker —
+   the dotted underline + pencil on hover make that discoverable (it was
+   tooltip-only, and nobody found it — issue #39). */
+.para-speaker:hover::after {
+    content: ' ✎';
+    font-size: 0.8em;
+    opacity: 0.7;
 }
 
 .para-speaker.speaker-1 { color: var(--green); }

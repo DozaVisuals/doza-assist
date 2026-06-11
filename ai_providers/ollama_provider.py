@@ -43,19 +43,57 @@ def _raise_ollama_error(response, model):
     shorter section" when the real problem was "model not installed", and
     the chat stream just went silent. The cloud providers raise typed
     ProviderErrors; this brings Ollama in line.
+
+    ``code`` lets callers react structurally: the analysis chunk loop
+    fast-aborts on permanent conditions instead of burning one 300s timeout
+    per chunk, and 'insufficient_memory' matters specifically on 8GB
+    machines where the model warm-loads fine at a small num_ctx but OOMs at
+    the analysis call's 32768 — so chat works while analysis fails
+    (issue #39).
     """
     try:
         detail = (response.json().get("error") or "").strip()
     except (ValueError, json.JSONDecodeError):
         detail = (response.text or "").strip()[:300]
-    if response.status_code == 404 or "not found" in detail.lower():
+    lower = detail.lower()
+    if response.status_code == 404 or "not found" in lower:
         raise ProviderError(
             f"Ollama model '{model}' is not installed. "
             f"Open AI Model settings to download it, or pick a different model.",
+            code="model_missing",
+        )
+    if "memory" in lower and ("requires more" in lower or "available" in lower):
+        raise ProviderError(
+            f"The AI model '{model}' needs more memory than this Mac has free. "
+            f"Close other apps, or switch to the smaller gemma4:e2b variant in "
+            f"AI Model settings.",
+            code="insufficient_memory",
         )
     raise ProviderError(
         f"Ollama error (HTTP {response.status_code}): {detail or 'no details'}",
+        code="server_error",
     )
+
+
+def _post(url, *, json=None, timeout=None, stream=False, base_url=''):
+    """requests.post that converts transport failures into typed
+    ProviderErrors. A refused socket used to surface as a raw urllib3 repr
+    (or burn the full per-call timeout once per analysis chunk); the typed
+    codes let the analysis loop fast-abort and the UI name the real fix."""
+    try:
+        return requests.post(url, json=json, timeout=timeout, stream=stream)
+    except requests.exceptions.ConnectionError as e:
+        raise ProviderError(
+            f"Ollama isn't reachable at {base_url or url} — is Ollama "
+            f"running? Relaunch Doza Assist to start it automatically.",
+            code="unreachable",
+        ) from e
+    except requests.exceptions.Timeout as e:
+        raise ProviderError(
+            "Ollama timed out mid-request — the model may be overloaded or "
+            "still loading. Try again in a moment.",
+            code="timeout",
+        ) from e
 
 
 def _ollama_messages(system_prompt, user_or_messages):
@@ -95,8 +133,9 @@ class OllamaProvider(BaseProvider):
         # and wants JSON-shaped output. /api/generate with format='json'
         # constrains decoding to a valid JSON token tree.
         if task_type == "analysis" and not isinstance(user_or_messages, list):
-            response = requests.post(
+            response = _post(
                 f"{self.base_url}/api/generate",
+                base_url=self.base_url,
                 json={
                     "model": model,
                     "prompt": str(user_or_messages),
@@ -130,8 +169,9 @@ class OllamaProvider(BaseProvider):
 
         # Chat / general path: /api/chat with messages array.
         messages = _ollama_messages(system_prompt, user_or_messages)
-        response = requests.post(
+        response = _post(
             f"{self.base_url}/api/chat",
+            base_url=self.base_url,
             json={
                 "model": model,
                 "messages": messages,
@@ -155,8 +195,9 @@ class OllamaProvider(BaseProvider):
     def generate_stream(self, system_prompt, user_or_messages, task_type="general", **kwargs):
         model = self._resolve_model(kwargs.get("model_override"))
         messages = _ollama_messages(system_prompt, user_or_messages)
-        with requests.post(
+        with _post(
             f"{self.base_url}/api/chat",
+            base_url=self.base_url,
             json={
                 "model": model,
                 "messages": messages,

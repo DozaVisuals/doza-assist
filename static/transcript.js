@@ -562,7 +562,9 @@ let _searchHiddenParas = new Set();
 let _searchDebounceTimer = null;
 let _searchHandlersWired = false;
 
-const _TC_RE = /^\d{1,2}:\d{2}(:\d{2})?$/;
+// Accepts MM:SS, HH:MM:SS, and full SMPTE HH:MM:SS:FF / HH:MM:SS;FF —
+// editors paste source timecodes straight out of their NLE.
+const _TC_RE = /^\d{1,2}:\d{2}(:\d{2})?([:;]\d{1,2})?$/;
 
 function transcriptSearchInit(container) {
     if (_searchEls) return;  // Idempotent — DOM created once per page.
@@ -585,7 +587,7 @@ function transcriptSearchInit(container) {
                 <line x1="10.5" y1="10.5" x2="14" y2="14" stroke-linecap="round"/>
             </svg>
             <input type="text" class="transcript-search-input" id="transcriptSearchInput"
-                   placeholder="Search transcript or jump to timecode (e.g. 14:30)"
+                   placeholder="Search transcript or jump to timecode (e.g. 14:30 or 14:23:11:05)"
                    spellcheck="false" autocomplete="off">
             <button class="transcript-search-clear" id="transcriptSearchClear"
                     type="button" title="Clear (Esc)" aria-label="Clear search" style="display:none;">×</button>
@@ -792,7 +794,27 @@ function _searchUpdateCounter() {
 }
 
 function _searchTimecodeJump(tcStr) {
-    const target = _segTcToSec(tcStr);
+    // Strip an SMPTE frames field (HH:MM:SS:FF / ;FF) — second-level
+    // precision is plenty for a transcript jump.
+    let cleaned = tcStr;
+    const smpte = cleaned.match(/^(\d{1,2}:\d{2}:\d{2})[:;]\d{1,2}$/);
+    if (smpte) cleaned = smpte[1];
+    let target = _segTcToSec(cleaned);
+    // When source-TC display is on AND the typed value lands at/past the
+    // project's embedded start TC, the user is pasting SOURCE timecode —
+    // subtract the offset to get media-relative seconds. Anything below
+    // the offset (e.g. "14:30" meaning 14m30s into the media) stays
+    // relative; subtracting there would slam every short jump to 0:00.
+    // (Multi-project views key off the primary project's offset — the
+    // only one the search field can sensibly mean.)
+    if (typeof tcDisplayMode !== 'undefined' && tcDisplayMode &&
+            typeof TC_BY_PROJECT !== 'undefined') {
+        const tc = TC_BY_PROJECT[typeof PROJECT_ID !== 'undefined' ? PROJECT_ID : ''];
+        if (tc && tc.fps) {
+            const offset = tc.frames / tc.fps;
+            if (target >= offset) target = target - offset;
+        }
+    }
     const paras = Array.from(_searchEls.container.querySelectorAll('.para-block'));
     let best = null;
     let bestStart = -Infinity;

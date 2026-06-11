@@ -57,6 +57,58 @@ _whisperx_align_cache = {}      # {lang_code: (model_a, metadata, device)}
 _whisper_cache = {}             # {model_name: model}
 
 
+# ── Whisper progress hook ──
+# whisper.transcribe creates `tqdm.tqdm(total=content_frames, ...)` and calls
+# `pbar.update(n)` after each ~30s decode window — even when the bar is
+# disabled (verbose=None). Swapping the `tqdm` reference inside the
+# whisper.transcribe module for a subclass turns those updates into a real
+# progress signal. Without this, the UI's size-based guess sat at
+# "Almost done…" for the entire multi-minute CPU decode of a long file and
+# read as a hang (issue #39). ContextVar routing keeps two concurrent jobs
+# from cross-reporting. Fail-open: if a future whisper drops tqdm, we
+# transcribe without progress instead of breaking.
+import contextvars
+
+_whisper_progress_cb = contextvars.ContextVar('whisper_progress_cb', default=None)
+
+
+def _install_whisper_progress_hook():
+    """Install the tqdm shim into whisper.transcribe (idempotent).
+    Returns True when the hook is active."""
+    try:
+        # NOT `import whisper.transcribe as _wt`: whisper/__init__ rebinds
+        # the `transcribe` attribute to the FUNCTION, so attribute-style
+        # import grabs that instead of the module. import_module returns
+        # the real module from sys.modules.
+        import importlib
+        _wt = importlib.import_module('whisper.transcribe')
+        if getattr(_wt, '_doza_progress_hooked', False):
+            return True
+        if not hasattr(_wt, 'tqdm') or not hasattr(_wt.tqdm, 'tqdm'):
+            return False
+        import tqdm as _tqdm_mod
+
+        class _ProgressTqdm(_tqdm_mod.tqdm):
+            def update(self, n=1):
+                try:
+                    self._doza_seen = getattr(self, '_doza_seen', 0) + (n or 0)
+                    cb = _whisper_progress_cb.get()
+                    if cb and self.total:
+                        cb(min(self._doza_seen / self.total, 1.0))
+                except Exception:
+                    pass
+                return super().update(n)
+
+        class _TqdmShim:
+            tqdm = _ProgressTqdm
+
+        _wt.tqdm = _TqdmShim
+        _wt._doza_progress_hooked = True
+        return True
+    except Exception:
+        return False
+
+
 def _find_ffmpeg():
     """Find the ffmpeg binary, checking common Homebrew paths if not on PATH."""
     path = shutil.which('ffmpeg')
@@ -68,6 +120,95 @@ def _find_ffmpeg():
     return 'ffmpeg'  # fall back, will error if not found
 
 
+# Extraction recipe version. Bump whenever the ffmpeg invocation below
+# changes in a way that affects WAV content (e.g. the multi-stream mixdown
+# added in v3.5.12). Cached WAVs carrying an older recipe — or no sidecar at
+# all, which covers everything extracted by ≤3.5.11 including truncated or
+# silent wrong-stream files — are discarded and re-extracted once.
+_EXTRACT_RECIPE = 2
+
+
+def _audio_meta_path(audio_path):
+    return audio_path + '.meta.json'
+
+
+def _count_audio_streams(filepath):
+    """Number of audio streams in the source, or None when the probe fails.
+
+    Camera originals (Sony/Panasonic MXF especially) routinely carry 2-8
+    MONO audio streams — one per recorder channel. ffmpeg's default stream
+    selection takes a single 'best' stream, so if the speaker's lav mic is
+    on stream 2 and stream 1 is a dead channel, the old extraction produced
+    a technically-valid WAV of pure silence (issue #39's empty-tensor crash
+    and one-speaker symptoms both trace back here).
+
+    A CONFIRMED zero (probe succeeded, no audio streams) is meaningful —
+    extraction would fail with ffmpeg noise — so callers must distinguish
+    it from None (probe unavailable: proceed and let ffmpeg decide).
+    """
+    from exporters.media_probe import _find_ffprobe
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [ffprobe, '-v', 'error', '-select_streams', 'a',
+             '-show_entries', 'stream=index', '-of', 'csv=p=0', filepath],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return len([ln for ln in result.stdout.strip().splitlines() if ln.strip()])
+    except Exception:
+        pass
+    return None
+
+
+def _wav_duration_seconds(audio_path):
+    """Duration of OUR extracted WAV (16 kHz mono s16) from its byte size.
+
+    No ffprobe dependency — transcription must keep working on machines
+    where a standalone ffmpeg resolves but ffprobe doesn't (static builds;
+    setup_assistant skips `brew install ffmpeg` whenever any ffmpeg is on
+    PATH). The 44-byte canonical header is noise at this precision."""
+    try:
+        return max(os.path.getsize(audio_path) - 44, 0) / 32000.0
+    except OSError:
+        return 0.0
+
+
+def _cached_audio_valid(audio_path, filepath):
+    """True iff the cached WAV was produced by the CURRENT extraction recipe
+    from the CURRENT source file and still matches the duration recorded at
+    write time. Anything else — no sidecar (pre-3.5.12), older recipe,
+    source replaced, suspiciously tiny file, or a WAV that shrank since the
+    sidecar was written (truncation) — is treated as poisoned."""
+    from doza_assist.jsonio import load_json
+    meta = load_json(_audio_meta_path(audio_path))
+    if not isinstance(meta, dict) or meta.get('recipe') != _EXTRACT_RECIPE:
+        return False
+    try:
+        st = os.stat(filepath)
+    except OSError:
+        return False
+    if meta.get('source_size') != st.st_size or meta.get('source_mtime') != int(st.st_mtime):
+        return False
+    try:
+        if os.path.getsize(audio_path) <= 1024:
+            return False
+    except OSError:
+        return False
+    wav_dur = _wav_duration_seconds(audio_path)
+    if wav_dur < 0.5:
+        return False
+    # Compare against the duration recorded when THIS wav was written —
+    # self-consistent, needs no source probe, and sidesteps sources whose
+    # audio track is legitimately shorter than the video container.
+    recorded = meta.get('wav_duration')
+    if isinstance(recorded, (int, float)) and recorded > 0 and wav_dur < 0.9 * recorded:
+        return False
+    return True
+
+
 def extract_audio(filepath, project_dir=None):
     """
     Extract audio from video files to WAV for processing.
@@ -76,7 +217,14 @@ def extract_audio(filepath, project_dir=None):
     (projects/<id>/audio.wav) instead of next to the source file.
     This avoids copying huge video files -- we only create a small
     16kHz mono WAV (~10MB per hour of audio).
+
+    All audio streams are mixed down to one mono track (camera files often
+    split mics across separate mono streams), the result is validated as
+    non-empty, and a recipe-versioned sidecar makes the cache self-healing
+    across app updates.
     """
+    from doza_assist.jsonio import atomic_write_json
+
     ext = filepath.rsplit('.', 1)[-1].lower()
     if ext in ('wav', 'mp3', 'aac', 'm4a', 'flac', 'aif', 'aiff'):
         return filepath
@@ -87,24 +235,48 @@ def extract_audio(filepath, project_dir=None):
     else:
         audio_path = filepath.rsplit('.', 1)[0] + '_audio.wav'
 
-    # Skip extraction if audio already exists in the project dir. Safe
-    # because extraction below writes to a temp path and renames into place
-    # atomically — a file at audio_path is always a COMPLETE extraction.
-    # (Previously ffmpeg wrote audio_path directly; a failed or interrupted
-    # run left a truncated WAV that this skip then served forever, silently
-    # cutting the transcript short.)
     if os.path.exists(audio_path):
-        return audio_path
+        if _cached_audio_valid(audio_path, filepath):
+            return audio_path
+        # Stale, truncated, wrong-recipe, or silent-wrong-stream cache —
+        # remove and re-extract. This is the no-uninstall-needed self-heal.
+        for stale in (audio_path, _audio_meta_path(audio_path)):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
 
     ffmpeg = _find_ffmpeg()
-    tmp_path = audio_path + '.part.wav'
+    # Unique temp suffix: /transcribe holds the per-project job claim, but
+    # /media/audio's on-the-fly extraction can race it — two writers on one
+    # tmp path meant the second os.replace exploded on a vanished file.
+    tmp_path = f'{audio_path}.part-{os.getpid()}-{threading.get_ident()}.wav'
+    n_streams = _count_audio_streams(filepath)
+    if n_streams == 0:
+        # Confirmed no audio track at all — fail with a message the user
+        # can act on instead of ffmpeg's wall of build flags.
+        raise RuntimeError(
+            'Extracted audio is empty — the file has no usable audio '
+            'track. Check that the source plays sound in QuickTime.'
+        )
+    cmd = [ffmpeg, '-nostdin', '-y', '-i', filepath]
+    if n_streams is not None and n_streams > 1:
+        # Mix every audio stream into one mono track so a mic parked on any
+        # channel is always audible to the transcriber. normalize=0 keeps
+        # absolute levels (a hot lav next to a dead channel must not be
+        # halved into the noise floor).
+        inputs = ''.join(f'[0:a:{i}]' for i in range(n_streams))
+        cmd += [
+            '-filter_complex',
+            f'{inputs}amix=inputs={n_streams}:duration=longest:normalize=0[mix]',
+            '-map', '[mix]',
+        ]
+    else:
+        cmd += ['-vn']
+    cmd += ['-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', tmp_path]
+
     try:
-        result = subprocess.run([
-            ffmpeg, '-y', '-i', filepath,
-            '-vn', '-acodec', 'pcm_s16le',
-            '-ar', '16000', '-ac', '1',
-            tmp_path,
-        ], capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg audio extraction failed: {result.stderr[:500]}")
         os.replace(tmp_path, audio_path)
@@ -115,6 +287,34 @@ def extract_audio(filepath, project_dir=None):
                 os.remove(tmp_path)
             except OSError:
                 pass
+
+    # Empty-audio guard: a source with no usable audio track produces a
+    # valid-but-empty WAV, which used to sail into the engines and crash
+    # Whisper with the inscrutable "cannot reshape tensor of 0 elements".
+    # Size-math duration (our own WAV format) — never ffprobe-dependent.
+    wav_dur = _wav_duration_seconds(audio_path)
+    if wav_dur < 0.1:
+        for stale in (audio_path, _audio_meta_path(audio_path)):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+        raise RuntimeError(
+            'Extracted audio is empty — the file may have no usable audio '
+            'track. Check that the source plays sound in QuickTime.'
+        )
+
+    try:
+        st = os.stat(filepath)
+        atomic_write_json(_audio_meta_path(audio_path), {
+            'recipe': _EXTRACT_RECIPE,
+            'source_size': st.st_size,
+            'source_mtime': int(st.st_mtime),
+            'wav_duration': wav_dur,
+        })
+    except OSError:
+        # Sidecar write failure just means re-extraction next time.
+        pass
     return audio_path
 
 
@@ -126,7 +326,8 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
-def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speakers=2, language='en'):
+def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speakers=2,
+                    language='en', progress_cb=None):
     """
     Transcribe an audio/video file.
 
@@ -135,6 +336,9 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     For multi-speaker requests, also skips Parakeet — it has no diarization, so
     every segment would collapse onto SPEAKER_00 and the user would see one
     speaker even though they configured several (issue #28).
+
+    ``progress_cb(fraction)`` receives 0.0–1.0 decode progress when the
+    active engine can report it (currently the Whisper path).
 
     Returns:
         dict with 'segments' list, each containing:
@@ -174,7 +378,8 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
 
     # Fall back to standard Whisper
     try:
-        return _transcribe_whisper(audio_path, speaker_labels, num_speakers=num_speakers, language=language)
+        return _transcribe_whisper(audio_path, speaker_labels, num_speakers=num_speakers,
+                                   language=language, progress_cb=progress_cb)
     except ImportError:
         raise RuntimeError(
             "No transcription engine found. Install one of:\n"
@@ -404,7 +609,8 @@ def _transcribe_lightning(audio_path, speaker_labels=None):
     }
 
 
-def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, language='en'):
+def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, language='en',
+                        progress_cb=None):
     """Transcribe using OpenAI Whisper. Speaker assignment done manually by user.
 
     Uses 'turbo' (Whisper large-v3-turbo, 1.62GB) — the same model MacWhisper uses.
@@ -443,7 +649,17 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
     transcribe_kwargs = {"word_timestamps": True}
     if language != 'auto':
         transcribe_kwargs["language"] = language
-    result = model.transcribe(audio_path, **transcribe_kwargs)
+
+    # Route whisper's internal per-window tqdm updates to progress_cb for
+    # the duration of this call only (ContextVar — concurrency-safe).
+    _cb_token = None
+    if progress_cb is not None and _install_whisper_progress_hook():
+        _cb_token = _whisper_progress_cb.set(progress_cb)
+    try:
+        result = model.transcribe(audio_path, **transcribe_kwargs)
+    finally:
+        if _cb_token is not None:
+            _whisper_progress_cb.reset(_cb_token)
 
     # Default speaker name
     default_speaker = 'Speaker'
@@ -470,11 +686,23 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
             'words': words,
         })
 
-    return {
+    out = {
         'segments': segments,
         'language': result.get('language', 'en'),
         'duration': segments[-1]['end'] if segments else 0,
         'engine': 'whisper',
     }
+    if num_speakers and num_speakers > 1:
+        # Honesty flag: this engine cannot tell speakers apart, so every
+        # segment above carries one label. The UI reads this to show a
+        # banner pointing at click-to-reassign instead of silently
+        # presenting a two-person interview as a monologue (issue #39).
+        out['diarization'] = 'unavailable'
+        out['note'] = (
+            f'The Whisper engine cannot separate speakers — all segments are '
+            f'labeled "{default_speaker}". Click any speaker name in the '
+            f'transcript to reassign that paragraph.'
+        )
+    return out
 
 

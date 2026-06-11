@@ -85,7 +85,12 @@ def test_english_is_unaffected_by_guard(client, monkeypatch):
     _project(client, 'en')
     monkeypatch.setattr(
         T, 'transcribe_file',
-        lambda *a, **k: {'segments': [], 'language': 'en', 'engine': 'parakeet'})
+        # One fake segment: an EMPTY transcript is now (correctly) treated
+        # as an error by the zero-segment honesty guard — this test only
+        # cares that English sails past the Whisper-install gate.
+        lambda *a, **k: {'segments': [{'start': 0, 'end': 1, 'text': 'hi',
+                                       'speaker': 'A'}],
+                         'language': 'en', 'engine': 'parakeet'})
     resp = client.post('/project/p/transcribe')
     body = resp.get_json()
     assert resp.status_code == 200

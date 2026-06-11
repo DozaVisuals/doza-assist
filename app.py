@@ -21,7 +21,7 @@ from werkzeug.utils import secure_filename
 from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
 from exporters.media_probe import (
     get_video_resolution, get_video_framerate, get_video_start_timecode_frames,
-    get_media_duration,
+    get_video_start_timecode, get_media_duration,
 )
 from doza_assist.fcpxml import (
     parse_fcpxml, ParseError, Select, WriterError,
@@ -1297,6 +1297,9 @@ def project_view(project_id):
     for pid in project_ids:
         p = get_project(pid)
         if p:
+            # get_project returns the raw meta dict; very old projects may
+            # predate the id field. Transient — never persisted wholesale.
+            p.setdefault('id', pid)
             exists, _ = check_source_file(p)
             p['source_exists'] = exists
             # Canonicalize analysis field names on read so projects analyzed by
@@ -1323,11 +1326,30 @@ def project_view(project_id):
     projects_meta = []
     for i, p in enumerate(projects):
         src_ext = os.path.splitext(p.get('source_path', '') or '')[1].lower()
+        # Lazy-probe the embedded source timecode once and persist it.
+        # Editors matching transcript moments to their NLE need timecodes
+        # in SOURCE TC, not media-relative 00:00 (issue #39). Persisted via
+        # update_project (field-merge) — the loop dict `p` carries transient
+        # keys (source_exists, normalized analysis) that must never leak
+        # into meta.json. `start_tc: None` is persisted on a failed/absent
+        # probe so we don't re-probe on every page view; a missing source
+        # file skips persisting entirely so the probe retries when the
+        # drive remounts.
+        if 'start_tc' not in p:
+            src = p.get('source_path', p.get('filepath', ''))
+            if src and os.path.exists(src):
+                tc_fps = get_video_framerate(src)
+                tc = get_video_start_timecode(src, tc_fps) if tc_fps else None
+                p['start_tc'] = ({'frames': tc['frames'], 'fps': tc_fps,
+                                  'drop': tc['drop'], 'raw': tc['raw']}
+                                 if tc else None)
+                update_project(p['id'], {'start_tc': p['start_tc']})
         projects_meta.append({
             'id': p['id'],
             'name': p.get('name', 'Untitled'),
             'color': project_colors[i % len(project_colors)],
             'is_video': src_ext in video_extensions,
+            'start_tc': p.get('start_tc'),
         })
 
     # Build combined paragraphs across all projects
@@ -1442,23 +1464,45 @@ def serve_media_audio(project_id):
 
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
 
+    def _send_wav(path):
+        # conditional=True enables HTTP Range (206) responses. Safari
+        # refuses to play / cannot seek <audio> sources without Range
+        # support, and this route is now the automatic fallback player for
+        # browser-undecodable camera formats — parity with serve_media.
+        # no-cache (NOT no-store): the WAV self-heals/changes after a
+        # retranscribe, so the browser must revalidate — conditional
+        # send_file answers unchanged files with cheap 304s.
+        response = send_file(path, mimetype='audio/wav', conditional=True)
+        response.headers['Accept-Ranges'] = 'bytes'
+        response.headers['Cache-Control'] = 'private, no-cache'
+        return response
+
     # Prefer timeline WAV for FCPXML projects (already composed)
     timeline_wav = os.path.join(project_dir, 'timeline_audio.wav')
     if os.path.exists(timeline_wav):
-        return send_file(timeline_wav, mimetype='audio/wav')
+        return _send_wav(timeline_wav)
 
-    # Standard extracted audio from transcription
+    source_path = project.get('source_path', project.get('filepath', ''))
+
+    # Standard extracted audio from transcription — but only when it passes
+    # the same recipe/duration validation transcription uses. Serving the
+    # bytes blindly handed the playback fallback the exact truncated/silent
+    # WAV that poisoned the user's transcripts in the first place
+    # (issue #39); now it falls through and re-extracts.
     audio_wav = os.path.join(project_dir, 'audio.wav')
     if os.path.exists(audio_wav):
-        return send_file(audio_wav, mimetype='audio/wav')
+        from transcribe import _cached_audio_valid
+        if not (source_path and os.path.exists(source_path)) or \
+                _cached_audio_valid(audio_wav, source_path):
+            return _send_wav(audio_wav)
 
-    # Extract on the fly if transcription hasn't run yet
-    source_path = project.get('source_path', project.get('filepath', ''))
+    # Extract on the fly (not yet transcribed, or the cache failed
+    # validation — extract_audio deletes and rebuilds it).
     if source_path and os.path.exists(source_path):
         from transcribe import extract_audio
         try:
             wav_path = extract_audio(source_path, project_dir=project_dir)
-            return send_file(wav_path, mimetype='audio/wav')
+            return _send_wav(wav_path)
         except Exception:
             pass
 
@@ -1757,7 +1801,52 @@ def transcribe(project_id):
     try:
         return _run_transcription(project_id, project, source_path)
     finally:
+        # Clearing in the same finally as the job release means a crash can
+        # never leave a stale progress file behind — the status endpoint's
+        # `running` flag (in-process truth) is the gate either way.
+        _clear_transcribe_progress(project_id)
         _release_job(project_id, 'transcribe')
+
+
+def _transcribe_progress_path(project_id):
+    return os.path.join(app.config['PROJECTS_DIR'], project_id, 'transcribe_status.json')
+
+
+def _make_transcribe_progress_writer(project_id):
+    """Throttled writer for engine decode progress (0.0–1.0).
+
+    The Whisper engine reports per-window fractions via the tqdm hook in
+    transcribe.py; this persists them for the /transcribe/status poll so the
+    UI can show real progress instead of a size-based guess that camped on
+    "Almost done…" for the whole CPU decode (issue #39's perceived hang).
+    """
+    path = _transcribe_progress_path(project_id)
+    started_at = datetime.now().isoformat()
+    state = {'last_write': 0.0}
+
+    def _write(fraction):
+        try:
+            now = time.time()
+            # Whisper reports roughly once per 30s decode window; the
+            # throttle just guards against bursty engines.
+            if now - state['last_write'] < 1.0:
+                return
+            state['last_write'] = now
+            atomic_write_json(path, {
+                'progress': round(float(fraction), 4),
+                'started_at': started_at,
+                'updated_at': datetime.now().isoformat(),
+            }, indent=None)
+        except Exception:
+            pass
+    return _write
+
+
+def _clear_transcribe_progress(project_id):
+    try:
+        os.remove(_transcribe_progress_path(project_id))
+    except OSError:
+        pass
 
 
 def _run_transcription(project_id, project, source_path):
@@ -1807,7 +1896,20 @@ def _run_transcription(project_id, project, source_path):
             },
             num_speakers=num_speakers,
             language=language,
+            progress_cb=_make_transcribe_progress_writer(project_id),
         )
+        # An empty transcript is a failure, not a success. Saving zero
+        # segments as status='transcribed' used to present the user a blank
+        # transcript page with no hint anything went wrong (a silent or
+        # wrong-stream audio track being the usual cause — issue #39).
+        seg_count = len((result or {}).get('segments', []))
+        if seg_count == 0:
+            err_text = ('Transcription produced no speech — the audio track '
+                        'may be silent. Check that the source plays sound, '
+                        'then use Retry.')
+            update_project(project_id, {'status': 'error', 'error': err_text})
+            return jsonify({'error': err_text}), 500
+
         # Merge-on-save: re-read meta under the project lock and write only
         # the keys this job owns. The old full-dict save_project here wrote
         # back a snapshot from request start, silently reverting any chat
@@ -1816,9 +1918,23 @@ def _run_transcription(project_id, project, source_path):
         update_project(project_id,
                        {'transcript': result, 'status': 'transcribed'},
                        remove=['error'])
-        seg_count = len((result or {}).get('segments', []))
         log_activity(project_id, 'transcribed',
                      f"{project.get('name', 'Project')} transcribed · {seg_count} segments")
+
+        # A NEW transcript invalidates derived retrieval artifacts. Without
+        # this, a re-transcription (including the audio-cache self-heal
+        # path) kept chat retrieval pinned to the index built from the OLD
+        # transcript, because the build below skips when the file exists.
+        # Mirrors what /retranscribe clears.
+        for stale in (_paragraph_index_path(project_id),
+                      os.path.join(app.config['PROJECTS_DIR'], project_id,
+                                   'segment_vectors.json')):
+            try:
+                os.remove(stale)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
         # Auto-build the TF-IDF paragraph index so chat retrieval immediately
         # works against semantic ranking instead of substring matching only.
@@ -1826,8 +1942,8 @@ def _run_transcription(project_id, project, source_path):
         # transforms chat output quality on a fresh project — without it the
         # chat falls back to literal-keyword matching and produces vague or
         # un-clip-cited responses (this was the laptop bug).
-        # Idempotent: skip if already on disk so re-transcription doesn't
-        # rebuild needlessly. The full /analyze endpoint still rebuilds it
+        # The stale-index clearing above guarantees this build runs against
+        # the new transcript. The full /analyze endpoint still rebuilds it
         # alongside segment_vectors when the user runs AI Analysis.
         try:
             idx_path = _paragraph_index_path(project_id)
@@ -1971,6 +2087,36 @@ def analyze(project_id):
                 'segment_vectors': load_segment_vectors(project_id),
             })
 
+    # Preflight (local-Ollama only, ~5s): a dead backend or empty model
+    # library used to fail every chunk one long timeout at a time and then
+    # surface as the generic "Analysis came back empty" — ~20 minutes of
+    # progress bar hiding "Ollama isn't running" (issue #39). Cloud
+    # providers skip this; their typed errors already surface immediately.
+    # NOTE: passing preflight doesn't guarantee success (the 8GB
+    # out-of-memory case loads tags fine and OOMs at the real call) — the
+    # typed insufficient_memory fast-abort in the chunk loop covers that.
+    from ai_analysis import _ollama_is_active
+    if _ollama_is_active():
+        from ai_providers import get_active_provider
+        try:
+            conn = get_active_provider().test_connection()
+        except Exception:
+            conn = {'success': False}
+        if not conn.get('success'):
+            return jsonify({
+                'error': "Ollama isn't running — start it (or relaunch Doza "
+                         "Assist, which starts it automatically) and try again.",
+                'code': 'unreachable',
+                'settings_url': '/settings',
+            }), 400
+        if not (conn.get('models') or []):
+            return jsonify({
+                'error': 'No AI model is installed in Ollama yet. Open AI '
+                         'Model settings to download one.',
+                'code': 'model_missing',
+                'settings_url': '/settings',
+            }), 400
+
     # One analysis per project at a time. A duplicate POST (double-click,
     # reload + re-run while the first request is still grinding) used to run
     # a second full LLM pipeline racing the first on analyze_status.json —
@@ -2019,12 +2165,17 @@ def analyze(project_id):
         if not (result.get('story_beats') or result.get('social_clips')
                 or result.get('strongest_soundbites')):
             _clear_analyze_status(project_id)
-            # The old copy told users to restart the model, which never helped
-            # (the model is healthy — its JSON reply was getting cut off on long /
-            # verbose-language interviews and dropped during parse). Point at the
-            # real cause and an action that can actually work now that truncated
-            # replies are salvaged.
-            return jsonify({'error': "Analysis came back empty. This can happen on a very long or non-English interview when the model's reply gets cut off. Try again — and if it keeps happening, try a shorter section or a different analysis model."}), 500
+            # Empty-but-healthy: the backend responded but produced nothing
+            # usable (truncated replies on long/verbose interviews, schema
+            # drift). All-calls-FAILED no longer reaches here — the chunk
+            # loop promotes the dominant real error as a ProviderError and
+            # the preflight catches dead backends in 5s. Ship whatever
+            # warnings the run recorded so the user sees specifics, not
+            # just the generic copy.
+            return jsonify({
+                'error': "Analysis came back empty. This can happen on a very long or non-English interview when the model's reply gets cut off. Try again — and if it keeps happening, try a shorter section or a different analysis model.",
+                'analysis_warnings': result.get('analysis_warnings') or [],
+            }), 500
         project['analysis'] = result
 
         analyzer_total = analyzer_state['total']
@@ -2121,12 +2272,37 @@ def transcribe_status(project_id):
     with _active_jobs_guard:
         running = (project_id, 'transcribe') in _active_jobs
     project = get_project(project_id) or {}
-    return jsonify({
+    payload = {
         'running': running,
         'status': project.get('status'),
         'error': project.get('error'),
         'has_transcript': bool(project.get('transcript')),
-    })
+    }
+    if running:
+        # Engine decode progress (Whisper path) + audio duration so the UI
+        # can render "X of Y min processed" with a real ETA.
+        prog = load_json(_transcribe_progress_path(project_id))
+        if isinstance(prog, dict):
+            for key in ('progress', 'started_at', 'updated_at'):
+                if prog.get(key) is not None:
+                    payload[key] = prog[key]
+        duration = None
+        audio_wav = os.path.join(app.config['PROJECTS_DIR'], project_id, 'audio.wav')
+        try:
+            if os.path.exists(audio_wav):
+                # 16kHz mono s16: 32000 bytes/sec (44-byte header is noise).
+                duration = max(os.path.getsize(audio_wav) - 44, 0) / 32000.0
+        except OSError:
+            pass
+        if not duration:
+            # Audio-only uploads return the source path from extract_audio
+            # and never create audio.wav — probe the source instead.
+            src = project.get('source_path', project.get('filepath', ''))
+            if src and os.path.exists(src):
+                duration = get_media_duration(src)
+        if duration:
+            payload['duration'] = round(duration, 1)
+    return jsonify(payload)
 
 
 @app.route('/project/<project_id>/analyze/status', methods=['GET'])
@@ -3054,9 +3230,16 @@ def shared_view(project_id):
         from ai_analysis import normalize_analysis
         project['analysis'] = normalize_analysis(project['analysis'])
 
+    source_ext = os.path.splitext(project.get('source_path', '') or '')[1].lower()
+    is_video = source_ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
+
     all_projects = [p for p in list_projects() if p.get('transcript')]
     project_ids = [project_id]
-    projects_meta = [{'id': project['id'], 'name': project.get('name', 'Untitled'), 'color': 'accent'}]
+    # is_video must be present for parity with project_view's meta — the
+    # always-rendered audio element, the unplayable-video fallback, and
+    # jumpTo's element switching all read it from PROJECTS_META.
+    projects_meta = [{'id': project['id'], 'name': project.get('name', 'Untitled'),
+                      'color': 'accent', 'is_video': is_video}]
 
     paragraphs = []
     if project.get('transcript') and project['transcript'].get('segments'):
@@ -3065,9 +3248,6 @@ def shared_view(project_id):
             para['project_id'] = project['id']
             para['project_name'] = project.get('name', 'Untitled')
             para['project_color'] = 'accent'
-
-    source_ext = os.path.splitext(project.get('source_path', '') or '')[1].lower()
-    is_video = source_ext in ('.mp4', '.mov', '.mxf', '.avi', '.mkv')
 
     # Tab visibility — default all on
     default_tabs = {'transcript': True, 'clips': True, 'analysis': True, 'chat': True, 'story': True, 'export': True}
@@ -3217,19 +3397,28 @@ def update_speaker_range(project_id):
     if not new_speaker:
         return jsonify({'error': 'No speaker specified'}), 400
 
-    transcript = project.get('transcript', {})
-    segments = transcript.get('segments', [])
+    # Re-read + mutate under the project lock (read-modify-write).
+    with project_lock(project_id):
+        project = get_project(project_id)
+        if not project:
+            return jsonify({'error': 'Project not found'}), 404
+        transcript = project.get('transcript', {})
+        segments = transcript.get('segments', [])
 
-    count = 0
-    for seg in segments:
-        # Segment overlaps with the range
-        if seg['start'] >= range_start - 0.1 and seg['end'] <= range_end + 0.1:
-            seg['speaker'] = new_speaker
-            count += 1
+        count = 0
+        for seg in segments:
+            # Match by START containment. The frontend derives range_end from
+            # the paragraph's last WORD timestamp, but Whisper segment `end`
+            # often overshoots it by trailing-silence padding — requiring
+            # end-containment silently dropped the paragraph's final segment
+            # from the reassignment.
+            if range_start - 0.1 <= seg['start'] < range_end:
+                seg['speaker'] = new_speaker
+                count += 1
 
-    project['transcript']['segments'] = segments
-    save_project(project_id, project)
-    return jsonify({'status': 'updated'})
+        project['transcript']['segments'] = segments
+        save_project(project_id, project)
+    return jsonify({'status': 'updated', 'count': count})
 
 
 # ── Story Builder ──────────────────────────────────────────────────

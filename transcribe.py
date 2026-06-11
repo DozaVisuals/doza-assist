@@ -261,6 +261,22 @@ def _cached_audio_valid(audio_path, filepath):
     return True
 
 
+def _trial_max_seconds():
+    """Trial cap length, parsed fail-SAFE for licensing.
+
+    Only the FxFactory wrapper sets DOZA_TRIAL_MAX_SECONDS (main.js). A
+    malformed value must not crash trial transcription, and an inflated
+    value must not quietly disable the cap (env vars can be injected
+    around the wrapper, e.g. launchctl setenv) — so anything unparsable
+    falls back to 120 and the result is clamped to [1, 600]."""
+    raw = os.environ.get('DOZA_TRIAL_MAX_SECONDS', '120') or '120'
+    try:
+        val = int(float(raw))
+    except (TypeError, ValueError):
+        val = 120
+    return min(max(val, 1), 600)
+
+
 def extract_audio(filepath, project_dir=None):
     """
     Extract / convert any media file to a 16 kHz mono WAV for processing.
@@ -283,7 +299,7 @@ def extract_audio(filepath, project_dir=None):
     # DOZA_TRIAL=1 (see main.js), so on the direct channel `trial` is always
     # False and every line below the trial block runs exactly as it does today.
     trial = os.environ.get('DOZA_TRIAL') == '1'
-    trial_max = int(os.environ.get('DOZA_TRIAL_MAX_SECONDS', '120') or '120')
+    trial_max = _trial_max_seconds()
 
     # Determine output path for extracted audio
     if project_dir:
@@ -346,7 +362,15 @@ def extract_audio(filepath, project_dir=None):
         return trial_path
 
     # Reuse the cached extraction only if it passes recipe/source validation.
-    if os.path.exists(audio_path):
+    # Same-path guard: callers may hand us our own previous OUTPUT as the
+    # input (My Style import extracts first, then transcribe_file re-enters
+    # here with the WAV). The sidecar records the ORIGINAL source's
+    # size/mtime, so validating the WAV against itself is a guaranteed
+    # mismatch — and the self-heal below would delete its own input. When
+    # input and output are the same file there is nothing to extract; fall
+    # through to the 16k-mono passthrough.
+    if os.path.exists(audio_path) and \
+            os.path.abspath(filepath) != os.path.abspath(audio_path):
         if _cached_audio_valid(audio_path, filepath):
             return audio_path
         # Stale, truncated, wrong-recipe, or silent-wrong-stream cache —
@@ -492,7 +516,7 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     # On the direct channel DOZA_TRIAL is unset, so `trial` is False and the
     # annotator below is a pass-through (nothing is added to the result dict).
     trial = os.environ.get('DOZA_TRIAL') == '1'
-    trial_max = int(os.environ.get('DOZA_TRIAL_MAX_SECONDS', '120') or '120')
+    trial_max = _trial_max_seconds()
 
     def _apply_trial(result):
         """Tag the engine result when the trial cap is active; otherwise return

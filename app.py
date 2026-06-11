@@ -1722,6 +1722,15 @@ def serve_media_audio(project_id):
         response.headers['Cache-Control'] = 'private, no-cache'
         return response
 
+    # Trial artifact first: when a trial-mode transcription produced a
+    # capped WAV, playback should match the capped transcript on screen —
+    # even for FCPXML projects whose ingest rendered a full-length
+    # timeline_audio.wav. /retranscribe deletes audio_trial.wav, so a
+    # licensed re-run restores the full-length sources below.
+    trial_wav = os.path.join(project_dir, 'audio_trial.wav')
+    if os.path.exists(trial_wav):
+        return _send_audio(trial_wav)
+
     # Prefer timeline WAV for FCPXML projects (already composed)
     timeline_wav = os.path.join(project_dir, 'timeline_audio.wav')
     if os.path.exists(timeline_wav):

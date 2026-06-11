@@ -285,7 +285,15 @@ def extract_audio(filepath, project_dir=None):
     else:
         audio_path = filepath.rsplit('.', 1)[0] + '_audio.wav'
 
-    if os.path.exists(audio_path):
+    # Same-path guard: callers may hand us our own previous OUTPUT as the
+    # input (My Style import extracts first, then transcribe_file re-enters
+    # here with the WAV). The sidecar records the ORIGINAL source's
+    # size/mtime, so validating the WAV against itself is a guaranteed
+    # mismatch — and the self-heal below would delete its own input. When
+    # input and output are the same file there is nothing to extract; fall
+    # through to the 16k-mono passthrough.
+    if os.path.exists(audio_path) and \
+            os.path.abspath(filepath) != os.path.abspath(audio_path):
         if _cached_audio_valid(audio_path, filepath):
             return audio_path
         # Stale, truncated, wrong-recipe, or silent-wrong-stream cache —

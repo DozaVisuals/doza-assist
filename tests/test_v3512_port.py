@@ -156,6 +156,56 @@ class TestCachedAudioValid:
         assert _cached_audio_valid(str(wav), str(src)) is False
 
 
+# ── extract_audio same-path guard ──────────────────────────────────────────
+
+def _write_16k_mono_wav(path, seconds=2.0):
+    import struct
+    import wave
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setframerate(16000)
+        wf.setsampwidth(2)
+        n = int(seconds * 16000)
+        wf.writeframes(struct.pack(f"<{n}h", *([0] * n)))
+
+
+class TestSamePathGuard:
+    def test_extract_audio_does_not_delete_its_own_input(self, tmp_path, monkeypatch):
+        """My Style import: transcribe_file re-enters extract_audio with the
+        already-extracted WAV as filepath. The stale sidecar (recorded from
+        the ORIGINAL source) must not trigger the self-heal delete."""
+        monkeypatch.delenv("DOZA_TRIAL", raising=False)
+        audio = tmp_path / "audio.wav"
+        _write_16k_mono_wav(audio)
+        # Sidecar describing a DIFFERENT (original) source — guaranteed
+        # mismatch if validated against the WAV itself.
+        (tmp_path / "audio.wav.meta.json").write_text(json.dumps({
+            "recipe": 999, "source_size": 1, "source_mtime": 1,
+            "wav_duration": 999.0,
+        }))
+        result = transcribe_module.extract_audio(str(audio), project_dir=str(tmp_path))
+        assert result == str(audio)
+        assert audio.exists(), "extract_audio deleted its own input"
+
+    def test_distinct_source_still_self_heals(self, tmp_path, monkeypatch):
+        """The guard must not weaken the normal self-heal: a stale cache for
+        a real (different) source is still discarded."""
+        monkeypatch.delenv("DOZA_TRIAL", raising=False)
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"RIFF" + b"\x00" * 64)   # poisoned tiny cache
+        (tmp_path / "audio.wav.meta.json").write_text(json.dumps({
+            "recipe": 1, "source_size": 1, "source_mtime": 1,
+            "wav_duration": 999.0,
+        }))
+        src = tmp_path / "source.wav"
+        _write_16k_mono_wav(src, seconds=3.0)
+        result = transcribe_module.extract_audio(str(src), project_dir=str(tmp_path))
+        # Source is already 16k mono s16 → passthrough returns it, but the
+        # poisoned cache must be GONE so nothing downstream can pick it up.
+        assert result == str(src)
+        assert not audio.exists()
+
+
 # ── Zero-segment honesty (transcribe worker) ───────────────────────────────
 
 class TestZeroSegmentWorker:

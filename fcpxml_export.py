@@ -38,7 +38,8 @@ def scrub_xml_text(text):
 # One source of truth for "does this extension carry video" — previously
 # duplicated (and drifted: .m4v counted as video in the Premiere exporter
 # but not here) across five sites.
-VIDEO_EXTS = ('.mp4', '.mov', '.m4v', '.mxf', '.avi', '.mkv', '.mts', '.m2ts')
+VIDEO_EXTS = ('.mp4', '.mov', '.m4v', '.mxf', '.avi', '.mkv', '.mts', '.m2ts',
+              '.ts')
 
 
 def _timebase(framerate=23.976):

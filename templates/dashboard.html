@@ -89,7 +89,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
         </div>
         <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
             Drag a file here, paste a path, or click Browse. Your file stays in place -- nothing gets copied.
-            <br>Supported media: WAV, MP3, MP4, MOV, AAC, M4A, FLAC, AIF, AIFF, MXF.
+            <br>Supported media: WAV, MP3, MP4, MOV, AAC, M4A, FLAC, AIF, AIFF, MXF, MKV, AVI, TS/M2TS.
             <br>Or drop an <strong>FCPXML</strong> (or <code>.fcpxmld</code> bundle) from Final Cut — {{ brand }} will
             read the multicam or sync-clip container and transcribe the active audio angle automatically.
         </p>
@@ -182,43 +182,34 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                     <div class="form-group">
                         <label class="form-label">Language</label>
                         <select class="form-input" id="language" onchange="updateLanguageHint()">
-                            <option value="en" selected>English</option>
+                            {# Canonical list from doza_assist.output_language.LANGUAGES.
+                               Auto-detect leads (newsroom flows) — the
+                               'selected' attr on English is only the no-JS
+                               fallback; the sticky last-used default below
+                               picks the real initial value. #}
                             <option value="auto">Auto-detect</option>
+                            <option value="en" selected>English</option>
                             <option disabled>──────────</option>
-                            <option value="ar">Arabic</option>
-                            <option value="zh">Chinese</option>
-                            <option value="cs">Czech</option>
-                            <option value="da">Danish</option>
-                            <option value="nl">Dutch</option>
-                            <option value="fi">Finnish</option>
-                            <option value="fr">French</option>
-                            <option value="de">German</option>
-                            <option value="el">Greek</option>
-                            <option value="he">Hebrew</option>
-                            <option value="hi">Hindi</option>
-                            <option value="hu">Hungarian</option>
-                            <option value="id">Indonesian</option>
-                            <option value="it">Italian</option>
-                            <option value="ja">Japanese</option>
-                            <option value="ko">Korean</option>
-                            <option value="ms">Malay</option>
-                            <option value="no">Norwegian</option>
-                            <option value="pl">Polish</option>
-                            <option value="pt">Portuguese</option>
-                            <option value="ro">Romanian</option>
-                            <option value="ru">Russian</option>
-                            <option value="sk">Slovak</option>
-                            <option value="es">Spanish</option>
-                            <option value="sv">Swedish</option>
-                            <option value="th">Thai</option>
-                            <option value="tr">Turkish</option>
-                            <option value="uk">Ukrainian</option>
-                            <option value="vi">Vietnamese</option>
+                            {% for code, name in languages if code != 'en' %}
+                            <option value="{{ code }}">{{ name }}</option>
+                            {% endfor %}
                         </select>
                         <p id="languageHint" style="display:none; font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
                             Non-English uses the Whisper engine. If it isn't installed yet, you'll be prompted to add it (~200&nbsp;MB, one time) when transcription starts.
                         </p>
                     </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Output Language</label>
+                    <select class="form-input" id="outputLanguage">
+                        <option value="match" selected>Match interview language</option>
+                        {% for code, name in languages %}
+                        <option value="{{ code }}">{{ name }}</option>
+                        {% endfor %}
+                    </select>
+                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
+                        AI summaries, analysis and chat answers. Quotes always stay in the original language.
+                    </p>
                 </div>
                 <div id="selectedFile" style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;"></div>
                 <div class="btn-group" style="justify-content: flex-end;">
@@ -344,6 +335,20 @@ dropCard.addEventListener('drop', async (e) => {
     if (!e.dataTransfer.files.length) return;
     const file = e.dataTransfer.files[0];
 
+    // Electron shell: the preload exposes the dropped file's REAL path —
+    // use it directly instead of crawling the drives. The /find-file walk
+    // below is only the no-shell (plain browser) fallback; on machines with
+    // big network volumes mounted it can run for minutes and the fetch dies
+    // ("Failed to fetch").
+    const directPath = (window.dozaBatch && window.dozaBatch.getPathForFile)
+        ? window.dozaBatch.getPathForFile(file) : null;
+    if (directPath) {
+        filePathInput.value = directPath;
+        selectPathBtn.style.display = 'inline-flex';
+        selectFilePath();
+        return;
+    }
+
     // Show searching state
     const findingDiv = document.getElementById('findingFile');
     const matchesDiv = document.getElementById('multipleMatches');
@@ -391,7 +396,8 @@ dropCard.addEventListener('drop', async (e) => {
         }
     } catch (err) {
         findingDiv.style.display = 'none';
-        alert('Error searching for file: ' + err.message);
+        alert('Could not search your drives for "' + file.name + '" (' + err.message + ').\n\n'
+            + 'Paste the full file path into the Source File Path field, or click Browse to navigate to it.');
     }
 });
 
@@ -424,6 +430,8 @@ async function createFromPath() {
     btn.textContent = 'Creating...';
 
     try {
+        const chosenLanguage = document.getElementById('language').value || 'en';
+        rememberDefaultLanguage(chosenLanguage);  // sticky last-used default
         const res = await fetch('/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -434,7 +442,8 @@ async function createFromPath() {
                 interviewer_name: document.getElementById('interviewerName').value || 'Interviewer',
                 subject_name: document.getElementById('subjectName').value || 'Subject',
                 num_speakers: parseInt(document.getElementById('numSpeakers').value) || 2,
-                language: document.getElementById('language').value || 'en',
+                language: chosenLanguage,
+                output_language: (document.getElementById('outputLanguage') && document.getElementById('outputLanguage').value) || 'match',
             }),
         });
         const data = await res.json();
@@ -977,8 +986,28 @@ function updateLanguageHint() {
     const sel = document.getElementById('language');
     const hint = document.getElementById('languageHint');
     if (!sel || !hint) return;
+    // 'auto' included: auto-detect runs through Whisper as well.
     hint.style.display = (sel.value !== 'en') ? 'block' : 'none';
 }
+
+// Sticky last-used transcription language (shared key with the Pro import
+// queue, which is injected into this page). Seeded English so existing
+// English-first installs keep their instant Parakeet first run; a newsroom
+// that picks Auto-detect once keeps it forever.
+const DOZA_LANG_KEY = 'dozaDefaultLanguage';
+function getDefaultLanguage() {
+    const v = localStorage.getItem(DOZA_LANG_KEY);
+    const sel = document.getElementById('language');
+    if (!v || !sel) return 'en';
+    return [...sel.options].some(o => o.value === v && !o.disabled) ? v : 'en';
+}
+function rememberDefaultLanguage(v) {
+    if (v) try { localStorage.setItem(DOZA_LANG_KEY, v); } catch (e) {}
+}
+(function applyStickyLanguage() {
+    const sel = document.getElementById('language');
+    if (sel) sel.value = getDefaultLanguage();
+})();
 updateLanguageHint();
 </script>
 

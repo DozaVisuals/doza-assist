@@ -47,6 +47,20 @@ def _find_ffprobe() -> str | None:
     return None
 
 
+def _first_csv_row(stdout: str) -> str:
+    """First non-empty row of ffprobe csv output.
+
+    ffprobe prints each stream once per enclosing section: containers with
+    programs (MPEG-TS) list streams under the program AND at top level, so
+    even a ``V:0``-selected probe yields its row twice. Parsing the joined
+    blob raised ValueError and silently dropped every probe below to its
+    fallback for TS sources."""
+    for line in stdout.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
 def get_video_resolution(path: str) -> tuple[int, int]:
     """Detect (width, height) using ffprobe. Falls back to 1920x1080."""
     if not path or not os.path.exists(path):
@@ -69,7 +83,7 @@ def get_video_resolution(path: str) -> tuple[int, int]:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split(",")
+            parts = _first_csv_row(result.stdout).split(",")
             if len(parts) >= 2:
                 width, height = int(parts[0]), int(parts[1])
                 if width > 0 and height > 0:
@@ -99,7 +113,7 @@ def get_video_framerate(path: str) -> float | None:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            num, den = result.stdout.strip().split("/")
+            num, den = _first_csv_row(result.stdout).split("/")
             fps = float(num) / float(den)
             # Implausible rates (cover-art 90000/1, broken streams) must not
             # snap to a "standard" rate — treat as no-video-stream instead.
@@ -134,9 +148,42 @@ def get_audio_channels(path: str) -> int | None:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            channels = int(result.stdout.strip().split(",")[0])
+            channels = int(_first_csv_row(result.stdout).split(",")[0])
             if channels > 0:
                 return channels
+    except Exception:
+        pass
+    return None
+
+
+def get_media_container_format(path: str) -> str | None:
+    """Container format name(s) via ffprobe, or None on any probe trouble.
+
+    Returns the raw first-row string, e.g. ``'mpegts'``, ``'wav'``, or the
+    comma-separated demuxer family ``'mov,mp4,m4a,3gp,3g2,mj2'`` (csv=p=0
+    quotes comma-containing values — callers should substring-match, not
+    compare equality). Used to warn editors when an export references
+    MPEG-TS broadcast media, which FCP/Premiere/Resolve cannot decode.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-show_entries", "format=format_name",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            row = _first_csv_row(result.stdout)
+            if row:
+                return row
     except Exception:
         pass
     return None
@@ -174,7 +221,7 @@ def get_media_duration(path: str) -> float | None:
         )
         if result.returncode == 0 and result.stdout.strip():
             try:
-                duration = float(result.stdout.strip().split(",")[0])
+                duration = float(_first_csv_row(result.stdout).split(",")[0])
                 if duration > 0:
                     return duration
             except ValueError:

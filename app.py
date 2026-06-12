@@ -23,6 +23,7 @@ from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
 from exporters.media_probe import (
     get_video_resolution, get_video_framerate, get_video_start_timecode_frames,
     get_video_start_timecode_info, get_video_start_timecode, get_media_duration,
+    get_media_container_format,
 )
 from fcpxml_export import VIDEO_EXTS
 from doza_assist.fcpxml import (
@@ -34,6 +35,11 @@ from doza_assist.fcpxml.timeline_audio import (
 )
 import preferences as prefs
 from doza_assist.jsonio import atomic_write_json, load_json
+from doza_assist.output_language import (
+    LANGUAGES as OUTPUT_LANGUAGES,
+    language_name,
+    resolve_output_language,
+)
 
 
 def get_project_platform(project: dict) -> str:
@@ -73,7 +79,12 @@ app.config['EXPORTS_DIR'] = os.path.join(_data_dir, 'exports')
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 * 1024  # 32 GB — My Style imports multiple large masters
 
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'mp4', 'mov', 'm4v', 'aac', 'm4a', 'flac',
-                      'aif', 'aiff', 'mxf', 'mkv', 'avi', 'fcpxml', 'fcpxmld'}
+                      'aif', 'aiff', 'mxf', 'mkv', 'avi', 'fcpxml', 'fcpxmld',
+                      # MPEG-TS broadcast files: newsroom systems (Mimir et
+                      # al.) hand these out both as .ts and misnamed .mp4;
+                      # m2ts/mts are the AVCHD camcorder spellings. The
+                      # bundled ffmpeg's mpegts demuxer handles all three.
+                      'ts', 'm2ts', 'mts'}
 
 os.makedirs(app.config['PROJECTS_DIR'], exist_ok=True)
 os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
@@ -301,8 +312,39 @@ def inject_brand():
     }
 
 
+@app.context_processor
+def inject_trial_state():
+    """Expose the live trial state to templates.
+
+    The FxFactory wrapper sets ``DOZA_TRIAL=1`` in this process's
+    environment at spawn time while the product is unlicensed; once the
+    user purchases (and the wrapper respawns the backend), the variable
+    is absent. Templates use this to distinguish "you are in the trial"
+    (show the purchase CTA) from "this project was transcribed during
+    the trial" (show a re-transcribe hint instead — the stored
+    ``transcript.truncated_for_trial`` flag outlives the trial itself).
+    The direct channel and OSS installs never set DOZA_TRIAL, so this is
+    always False there.
+    """
+    return {'doza_trial_active': os.environ.get('DOZA_TRIAL') == '1'}
+
+
+@app.context_processor
+def inject_languages():
+    """Canonical language list for every template dropdown (dashboard create
+    modal, project Retranscribe + Output Language). Single source:
+    doza_assist.output_language.LANGUAGES — list of (code, name), 'en' first."""
+    return {'languages': OUTPUT_LANGUAGES}
+
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _valid_output_language(value):
+    """Clamp an output_language input to 'match' or a canonical code."""
+    value = (value or 'match').strip().lower()
+    return value if (value == 'match' or language_name(value)) else 'match'
 
 
 def _resolve_fcpxml_path(source_path: str) -> str:
@@ -1056,6 +1098,7 @@ def create_project_from_path(
     subject_name='Subject',
     num_speakers=2,
     language='en',
+    output_language='match',
     project_id=None,
 ):
     """Create a new project from a file already on disk. Returns project_id.
@@ -1125,6 +1168,9 @@ def create_project_from_path(
         'subject_name': subject_name or 'Subject',
         'num_speakers': num_speakers,
         'language': language or 'en',
+        # AI prose language: 'match' (follow the interview language)
+        # or an explicit code from doza_assist.output_language.LANGUAGES.
+        'output_language': _valid_output_language(output_language),
         'filename': os.path.basename(media_source_path),
         'source_path': media_source_path,
         'filepath': media_source_path,
@@ -1168,6 +1214,7 @@ def create_project():
             subject_name=data.get('subject_name', 'Subject').strip(),
             num_speakers=int(data.get('num_speakers', 2)),
             language=data.get('language', 'en').strip(),
+            output_language=data.get('output_language', 'match').strip(),
         )
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
@@ -1190,6 +1237,7 @@ def upload():
     interviewer_name = request.form.get('interviewer_name', 'Interviewer').strip()
     subject_name = request.form.get('subject_name', 'Subject').strip()
     language = request.form.get('language', 'en').strip()
+    output_language = request.form.get('output_language', 'match').strip()
 
     if not project_name:
         project_name = file.filename.rsplit('.', 1)[0]
@@ -1225,6 +1273,7 @@ def upload():
             interviewer_name=interviewer_name,
             subject_name=subject_name,
             language=language,
+            output_language=output_language,
             project_id=project_id,
         )
     except ValueError as e:
@@ -1246,15 +1295,25 @@ def find_file():
     if not filename:
         return jsonify({'error': 'No filename provided'}), 400
 
+    # Home folders FIRST, /Volumes last: mounted network shares (newsroom
+    # NAS volumes) can take minutes to walk, and the browser fetch dies long
+    # before that ("Failed to fetch"). Most dropped files live in the home
+    # dirs; finding one there ends the search before /Volumes is touched.
     home = str(Path.home())
-    search_roots = ['/Volumes']
+    search_roots = []
     for d in ['Desktop', 'Documents', 'Movies', 'Downloads', 'Music']:
         p = os.path.join(home, d)
         if os.path.exists(p):
             search_roots.append(p)
+    search_roots.append('/Volumes')
+
+    # Hard wall-clock budget so a huge/slow volume returns a usable answer
+    # instead of hanging the request indefinitely.
+    deadline = time.monotonic() + 15.0
 
     matches = []
     seen = set()
+    visited_dirs = set()  # symlink-cycle guard for followlinks=True
 
     # FCP package bundles (e.g. .fcpxmld) are directories on disk, but the
     # browser drag-drop reports them as a single "file" with size 0. Match
@@ -1262,8 +1321,19 @@ def find_file():
     is_bundle = filename.lower().endswith(('.fcpxmld', '.fcpbundle'))
 
     for root_dir in search_roots:
+        # A match found in an earlier (home) root is the answer — never pay
+        # the /Volumes walk on top of it.
+        if matches or time.monotonic() > deadline:
+            break
         try:
             for dirpath, dirnames, filenames in os.walk(root_dir, followlinks=True):
+                if time.monotonic() > deadline:
+                    break
+                real_dir = os.path.realpath(dirpath)
+                if real_dir in visited_dirs:
+                    dirnames.clear()  # symlink loop — don't descend again
+                    continue
+                visited_dirs.add(real_dir)
                 # Match bundle before we prune — a bundle is a dir that happens
                 # to match the target name.
                 if is_bundle and filename in dirnames:
@@ -2070,9 +2140,13 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
         # the project lock — so chat history / labels / a rename saved while
         # the (minutes-long) transcription ran aren't clobbered by this stale
         # snapshot. Drops any prior 'error'.
+        # detected_language: meta-level copy of the engine's detected (or
+        # echoed) language code, so the output-language resolver reads meta
+        # only and never digs into the transcript blob.
         project = update_project(
             project_id,
-            {'transcript': result, 'status': 'transcribed'},
+            {'transcript': result, 'status': 'transcribed',
+             'detected_language': (result.get('language') or 'en')},
             remove=['error'],
         ) or {}
         log_activity(project_id, 'transcribed',
@@ -2189,12 +2263,17 @@ def transcribe(project_id):
 
     # Guard non-English requests when only Parakeet (English-only) is installed.
     requested_language = project.get('language', 'en')
-    if requested_language not in ('en', 'auto') and not _engine_available('whisper'):
+    if requested_language != 'en' and not _engine_available('whisper'):
+        # 'auto' included: auto-detect skips the English-only Parakeet path
+        # inside transcribe_file, so without Whisper it used to die deep in
+        # the engine with a generic "No transcription engine found".
+        label = ('Auto-detect' if requested_language == 'auto'
+                 else f'Non-English transcription ({requested_language})')
         project['status'] = 'error'
         project['error'] = 'whisper_not_installed'
         save_project(project_id, project)
         return jsonify({
-            'error': f'Non-English transcription ({requested_language}) requires the Whisper engine, which is not installed.',
+            'error': f'{label} requires the Whisper engine, which is not installed.',
             'needs_whisper_install': True,
             'requested_language': requested_language,
         }), 400
@@ -2416,6 +2495,7 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
             analysis_type=analysis_type,
             segment_vectors=existing_vectors or None,
             progress_callback=_from_analyzer,
+            output_language=resolve_output_language(project),
         )
         if not (result.get('story_beats') or result.get('social_clips')
                 or result.get('strongest_soundbites')):
@@ -2724,6 +2804,7 @@ def chat(project_id):
                 paragraph_index=load_paragraph_index(p['id']),
                 labeled_sections=p.get('labeled_sections') or None,
                 speaker_names=p.get('speaker_names') or None,
+                output_language=resolve_output_language(p),
             )
         else:
             # Multi-project: combine transcripts with project labels.
@@ -2750,6 +2831,9 @@ def chat(project_id):
                 project_name=' + '.join(project_names),
                 analysis=None,
                 profile_id=profile_id,
+                # Multi-project chat is explicitly OUT OF SCOPE for the
+                # output-language feature (combined transcripts keep their
+                # historical behavior) — no output_language passed.
             )
 
         # Persist chat history on single-project chats. Multi-project sessions
@@ -2815,6 +2899,7 @@ def chat_stream(project_id):
             'paragraph_index': load_paragraph_index(p['id']),
             'labeled_sections': p.get('labeled_sections') or None,
             'speaker_names': p.get('speaker_names') or None,
+            'output_language': resolve_output_language(p),
         }
         single_pid = p['id']
     else:
@@ -2833,6 +2918,8 @@ def chat_stream(project_id):
             'project_name': ' + '.join(project_names),
             'analysis': None,
             'profile_id': profile_id,
+            # Multi-project: resolve from the FIRST project's meta — cheap
+            # and consistent (no cross-project language reconciliation).
         }
         single_pid = None
 
@@ -3213,15 +3300,22 @@ def export_fcpxml(project_id):
             'format_name': result.format_name,
         }
         payload.update(info)
+        warning = _mpegts_media_warning(project, nle)
+        if warning:
+            payload['media_warning'] = warning
         return jsonify(payload)
 
     if deliver_to == 'file':
         _reveal_in_finder(result.file_path)
-        return jsonify({
+        payload = {
             'status': 'ok', 'delivery': 'file',
             'file': result.file_path, 'filename': result.filename,
             'format_name': result.format_name,
-        })
+        }
+        warning = _mpegts_media_warning(project)
+        if warning:
+            payload['media_warning'] = warning
+        return jsonify(payload)
 
     return _exporter_response(result, project, exporter)
 
@@ -3234,6 +3328,39 @@ NLE_DISPLAY_NAMES = {
     'premiere': 'Premiere Pro',
     'resolve': 'DaVinci Resolve',
 }
+
+
+def _mpegts_media_warning(project: dict, nle: str | None = None) -> str | None:
+    """Heads-up when the project's source media is an MPEG-TS broadcast stream.
+
+    Newsroom MAMs hand out ``.ts`` files and TS content misnamed ``.mp4``
+    (the Mimir shape). NLE support varies: Premiere Pro reads MPEG-TS
+    natively (no warning at all); recent Resolve builds usually decode TS
+    H.264 too, while FCP and older Resolve Free import the clips as
+    offline/unsupported. So this is a CONDITIONAL heads-up ("if the media
+    shows offline…"), not an error — field testing showed the exports
+    frequently conform fine. Returns a user-facing message, or None when
+    the media is fine or the target reads TS natively. Fails open: any
+    probe trouble (missing file, no ffprobe, timeout) returns None so
+    exports never block on the advisory.
+    """
+    try:
+        if nle == 'premiere':
+            return None  # Premiere Pro supports MPEG-TS natively
+        src = project.get('source_path') or project.get('filepath') or ''
+        fmt = get_media_container_format(src)
+        if 'mpegts' not in (fmt or ''):
+            return None
+        nle_name = NLE_DISPLAY_NAMES.get(nle) if nle else None
+        readers = nle_name or 'Final Cut Pro or DaVinci Resolve'
+        return (
+            f"Heads-up: {os.path.basename(src)} is an MPEG-TS broadcast "
+            f"stream. If the media shows as offline or unsupported in "
+            f"{readers}, re-wrap it to a standard MP4 first (lossless: "
+            f"`ffmpeg -i in.ts -c copy out.mp4`)."
+        )
+    except Exception:
+        return None
 
 
 # CFBundleIdentifier for each NLE. Spotlight indexes apps by bundle ID
@@ -3535,7 +3662,7 @@ def send_to_nle():
             'file': file_path,
         }), 500
 
-    return jsonify({
+    payload = {
         'status': 'ok',
         'nle': nle,
         'nle_name': NLE_DISPLAY_NAMES[nle],
@@ -3543,7 +3670,11 @@ def send_to_nle():
         'file': file_path,
         'filename': filename,
         'format_name': format_name,
-    })
+    }
+    warning = _mpegts_media_warning(project, nle)
+    if warning:
+        payload['media_warning'] = warning
+    return jsonify(payload)
 
 
 def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
@@ -3838,22 +3969,30 @@ def export_fcpxml_multicam(project_id):
         if opened_in is None:
             return jsonify({'error': info.get('error', 'NLE delivery failed'),
                             'file': out_path}), 500
-        return jsonify({
+        payload = {
             'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
             'nle': 'fcp', 'nle_name': NLE_DISPLAY_NAMES['fcp'],
             'file': out_path, 'filename': filename,
             'format_name': 'FCPXML', 'mode': mode,
             'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
-        })
+        }
+        warning = _mpegts_media_warning(project, 'fcp')
+        if warning:
+            payload['media_warning'] = warning
+        return jsonify(payload)
 
     if deliver_to == 'file':
         _reveal_in_finder(out_path)
-        return jsonify({
+        payload = {
             'status': 'ok', 'delivery': 'file',
             'file': out_path, 'filename': filename,
             'format_name': 'FCPXML', 'mode': mode,
             'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
-        })
+        }
+        warning = _mpegts_media_warning(project)
+        if warning:
+            payload['media_warning'] = warning
+        return jsonify(payload)
 
     response = send_file(out_path, as_attachment=True, download_name=filename)
     response.headers['X-Export-Format'] = 'FCPXML'
@@ -3968,6 +4107,39 @@ def clear_transcript(project_id):
     return jsonify({'status': 'cleared'})
 
 
+@app.route('/api/languages', methods=['GET'])
+def api_languages():
+    """Canonical language list — the single source for every UI dropdown.
+
+    Replaces the option lists previously duplicated across dashboard.html,
+    project.html, and the Pro import queue."""
+    return jsonify({'languages': [
+        {'code': code, 'name': name} for code, name in OUTPUT_LANGUAGES
+    ]})
+
+
+@app.route('/project/<project_id>/output-language', methods=['POST'])
+def set_output_language(project_id):
+    """Set the project's AI Output Language ('match' or a canonical code).
+
+    Non-destructive (unlike retranscribe): prose language only affects
+    future AI generations. Returns reanalyze_hint when the project already
+    has saved analysis, so the UI can suggest a re-run without forcing one.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    value = _valid_output_language((request.json or {}).get('output_language'))
+    changed = value != (project.get('output_language') or 'match')
+    project = update_project(project_id, {'output_language': value}) or {}
+    return jsonify({
+        'status': 'ok',
+        'output_language': value,
+        'resolved': resolve_output_language(project),
+        'reanalyze_hint': bool(changed and project.get('analysis')),
+    })
+
+
 @app.route('/project/<project_id>/retranscribe', methods=['POST'])
 def retranscribe(project_id):
     """Update language and re-run transcription."""
@@ -4014,7 +4186,8 @@ def retranscribe(project_id):
                 os.remove(stale)
             except OSError:
                 pass
-    update_project(project_id, {}, remove=['diarization', 'speaker_names'])
+    update_project(project_id, {},
+                   remove=['diarization', 'speaker_names', 'detected_language'])
 
     # Drop the cached paragraph_index + segment_vectors — they reference the
     # OLD transcript text. Letting them survive a retranscribe means the
@@ -4261,6 +4434,7 @@ def story_build(project_id):
             project_name=project.get('name', 'Interview'),
             segment_vectors=segment_vectors or None,
             profile_id=profile_id,
+            output_language=resolve_output_language(project),
         )
 
         clips = result.get('clips') or []
@@ -4506,15 +4680,22 @@ def story_export(project_id):
             'format_name': result.format_name,
         }
         payload.update(info)
+        warning = _mpegts_media_warning(project, nle)
+        if warning:
+            payload['media_warning'] = warning
         return jsonify(payload)
 
     if deliver_to == 'file':
         _reveal_in_finder(result.file_path)
-        return jsonify({
+        payload = {
             'status': 'ok', 'delivery': 'file',
             'file': result.file_path, 'filename': result.filename,
             'format_name': result.format_name,
-        })
+        }
+        warning = _mpegts_media_warning(project)
+        if warning:
+            payload['media_warning'] = warning
+        return jsonify(payload)
 
     return _exporter_response(result, project, exporter)
 

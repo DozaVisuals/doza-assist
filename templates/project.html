@@ -3582,7 +3582,7 @@ async function exportSelectedClips() {
             } else {
                 showToast(`Exported ${checkedIds.size} clips!`);
             }
-            if (data.media_warning) showToast(data.media_warning, true);
+            if (data.media_warning) showToast(data.media_warning);  // info, not error
         } else {
             showToast((data && data.error) || 'Export failed', true);
         }
@@ -4071,7 +4071,7 @@ async function exportFCPXML(category) {
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
-        if (data.media_warning) showToast(data.media_warning, true);
+        if (data.media_warning) showToast(data.media_warning);  // info, not error
     } catch (err) {
         showToast('Export error: ' + err.message, true);
     }
@@ -4108,7 +4108,7 @@ async function _exportFCPXMLRoundTrip(opts) {
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
-        if (data.media_warning) showToast(data.media_warning, true);
+        if (data.media_warning) showToast(data.media_warning);  // info, not error
         if (data.skipped_count) {
             // Partial drops used to be invisible — an editor exporting 12
             // selects silently received 10 clips (the lane-1-gap bug class).
@@ -4232,7 +4232,7 @@ async function exportFCPXMLMulticam() {
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'} — ${modeLabel}`);
         }
-        if (data.media_warning) showToast(data.media_warning, true);
+        if (data.media_warning) showToast(data.media_warning);  // info, not error
     } catch (err) {
         showToast('Export error: ' + err.message, true);
     }
@@ -5258,7 +5258,7 @@ async function exportStoryFCPXML() {
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
-        if (data.media_warning) showToast(data.media_warning, true);
+        if (data.media_warning) showToast(data.media_warning);  // info, not error
     } catch (err) { showToast('Export error: ' + err.message, true); }
 }
 

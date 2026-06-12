@@ -151,13 +151,24 @@ class TestMpegtsMediaWarning:
         assert 'newsroom-clip.mp4' in msg
         assert 'ffmpeg -i in.ts -c copy out.mp4' in msg
         # No NLE given -> name all three readers.
-        assert 'Final Cut Pro, Premiere and Resolve' in msg
+        assert 'Final Cut Pro or DaVinci Resolve' in msg
+        assert msg.startswith('Heads-up:')
+
+    def test_premiere_gets_no_warning(self, monkeypatch):
+        """Premiere Pro reads MPEG-TS natively — warning suppressed
+        entirely (field report: the toast was crying wolf on every
+        Premiere export of newsroom TS media)."""
+        import app as app_module
+        monkeypatch.setattr(app_module, 'get_media_container_format',
+                            lambda p: 'mpegts')
+        proj = {'source_path': '/tmp/x.ts'}
+        assert app_module._mpegts_media_warning(proj, nle='premiere') is None
 
     def test_nle_arg_names_the_target_editor(self, monkeypatch):
         self._mock_format(monkeypatch, 'mpegts')
         msg = app_module._mpegts_media_warning(
             {'source_path': '/media/x.ts'}, nle='resolve')
-        assert msg and 'DaVinci Resolve cannot read MPEG-TS' in msg
+        assert msg and 'DaVinci Resolve' in msg and 'offline or unsupported' in msg
 
     def test_clean_container_returns_none(self, monkeypatch):
         self._mock_format(monkeypatch, 'wav')

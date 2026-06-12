@@ -3286,28 +3286,33 @@ NLE_DISPLAY_NAMES = {
 
 
 def _mpegts_media_warning(project: dict, nle: str | None = None) -> str | None:
-    """Advisory when the project's source media is an MPEG-TS broadcast stream.
+    """Heads-up when the project's source media is an MPEG-TS broadcast stream.
 
-    FCP, Premiere and Resolve all import TS media as offline/unsupported with
-    no explanation — newsroom MAMs hand out ``.ts`` files and TS content
-    misnamed ``.mp4`` (the Mimir shape), so an export referencing such media
-    conforms against clips the NLE cannot decode. Returns a user-facing
-    message, or None when the media is fine. Fails open: any probe trouble
-    (missing file, no ffprobe, timeout) returns None so exports never block
-    on the advisory.
+    Newsroom MAMs hand out ``.ts`` files and TS content misnamed ``.mp4``
+    (the Mimir shape). NLE support varies: Premiere Pro reads MPEG-TS
+    natively (no warning at all); recent Resolve builds usually decode TS
+    H.264 too, while FCP and older Resolve Free import the clips as
+    offline/unsupported. So this is a CONDITIONAL heads-up ("if the media
+    shows offline…"), not an error — field testing showed the exports
+    frequently conform fine. Returns a user-facing message, or None when
+    the media is fine or the target reads TS natively. Fails open: any
+    probe trouble (missing file, no ffprobe, timeout) returns None so
+    exports never block on the advisory.
     """
     try:
+        if nle == 'premiere':
+            return None  # Premiere Pro supports MPEG-TS natively
         src = project.get('source_path') or project.get('filepath') or ''
         fmt = get_media_container_format(src)
         if 'mpegts' not in (fmt or ''):
             return None
         nle_name = NLE_DISPLAY_NAMES.get(nle) if nle else None
-        readers = nle_name or 'Final Cut Pro, Premiere and Resolve'
+        readers = nle_name or 'Final Cut Pro or DaVinci Resolve'
         return (
-            f"{os.path.basename(src)} is an MPEG-TS broadcast stream — "
-            f"{readers} cannot read MPEG-TS media. Re-wrap it to a standard "
-            f"MP4 (lossless, e.g. `ffmpeg -i in.ts -c copy out.mp4`) before "
-            f"conforming."
+            f"Heads-up: {os.path.basename(src)} is an MPEG-TS broadcast "
+            f"stream. If the media shows as offline or unsupported in "
+            f"{readers}, re-wrap it to a standard MP4 first (lossless: "
+            f"`ffmpeg -i in.ts -c copy out.mp4`)."
         )
     except Exception:
         return None

@@ -263,3 +263,21 @@ class TestExtractAudioFromTs:
         # 16 kHz mono s16: ~1.15 s of samples ≥ the 0.1 s empty-audio gate
         # (the TS mux trims the 1.2 s sine slightly).
         assert os.path.getsize(out) > 32000
+
+
+class TestTsExtensionAccepted:
+    """Genuine .ts/.m2ts/.mts files must pass every extension gate — the
+    field follow-up to the misnamed-.mp4 fix: TV 2's Mimir proxies arrive
+    with their real .ts extension too, and were rejected at upload."""
+
+    def test_allowed_extensions(self):
+        import app as app_module
+        for ext in ('ts', 'm2ts', 'mts'):
+            assert ext in app_module.ALLOWED_EXTENSIONS, ext
+            assert app_module.allowed_file(f'clip.{ext}'), ext
+            assert app_module.allowed_file(f'CLIP.{ext.upper()}'), ext
+
+    def test_ts_classified_as_video(self):
+        from fcpxml_export import VIDEO_EXTS
+        for ext in ('.ts', '.m2ts', '.mts'):
+            assert ext in VIDEO_EXTS, ext

@@ -89,7 +89,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
         </div>
         <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
             Drag a file here, paste a path, or click Browse. Your file stays in place -- nothing gets copied.
-            <br>Supported media: WAV, MP3, MP4, MOV, AAC, M4A, FLAC, AIF, AIFF, MXF.
+            <br>Supported media: WAV, MP3, MP4, MOV, AAC, M4A, FLAC, AIF, AIFF, MXF, MKV, AVI, TS/M2TS.
             <br>Or drop an <strong>FCPXML</strong> (or <code>.fcpxmld</code> bundle) from Final Cut — {{ brand }} will
             read the multicam or sync-clip container and transcribe the active audio angle automatically.
         </p>
@@ -344,6 +344,20 @@ dropCard.addEventListener('drop', async (e) => {
     if (!e.dataTransfer.files.length) return;
     const file = e.dataTransfer.files[0];
 
+    // Electron shell: the preload exposes the dropped file's REAL path —
+    // use it directly instead of crawling the drives. The /find-file walk
+    // below is only the no-shell (plain browser) fallback; on machines with
+    // big network volumes mounted it can run for minutes and the fetch dies
+    // ("Failed to fetch").
+    const directPath = (window.dozaBatch && window.dozaBatch.getPathForFile)
+        ? window.dozaBatch.getPathForFile(file) : null;
+    if (directPath) {
+        filePathInput.value = directPath;
+        selectPathBtn.style.display = 'inline-flex';
+        selectFilePath();
+        return;
+    }
+
     // Show searching state
     const findingDiv = document.getElementById('findingFile');
     const matchesDiv = document.getElementById('multipleMatches');
@@ -391,7 +405,8 @@ dropCard.addEventListener('drop', async (e) => {
         }
     } catch (err) {
         findingDiv.style.display = 'none';
-        alert('Error searching for file: ' + err.message);
+        alert('Could not search your drives for "' + file.name + '" (' + err.message + ').\n\n'
+            + 'Paste the full file path into the Source File Path field, or click Browse to navigate to it.');
     }
 });
 

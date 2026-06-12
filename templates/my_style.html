@@ -58,7 +58,7 @@ function toggleTheme() {
             <p class="drop-zone-hint">or <label for="fileInput" style="color:var(--accent);cursor:pointer;text-decoration:underline;">browse files</label></p>
             <p class="drop-zone-hint" style="margin-top:8px;font-size:12px;opacity:0.7;">FCPXML reads only the dialogue that survived the cut. Video files are treated as the finished piece.</p>
         </div>
-        <input type="file" id="fileInput" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.fcpxml,.fcpxmld" style="display:none;">
+        <input type="file" id="fileInput" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.ts,.m2ts,.mts,.mxf,.fcpxml,.fcpxmld" style="display:none;">
         <input type="file" id="folderInput" webkitdirectory style="display:none;">
     </div>
     <p class="my-style-privacy">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
@@ -344,7 +344,7 @@ function toggleTheme() {
     <!-- Actions -->
     <div class="my-style-actions">
         <button type="button" class="btn btn-accent" onclick="document.getElementById('fileInputMore').click()">Import more</button>
-        <input type="file" id="fileInputMore" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.fcpxml,.fcpxmld" style="display:none;">
+        <input type="file" id="fileInputMore" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.ts,.m2ts,.mts,.mxf,.fcpxml,.fcpxmld" style="display:none;">
         <button class="btn" onclick="regenerateAnalysis()">Regenerate analysis</button>
     </div>
 

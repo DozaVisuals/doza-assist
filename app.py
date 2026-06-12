@@ -73,7 +73,12 @@ app.config['EXPORTS_DIR'] = os.path.join(_data_dir, 'exports')
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 * 1024  # 32 GB — My Style imports multiple large masters
 
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'mp4', 'mov', 'm4v', 'aac', 'm4a', 'flac',
-                      'aif', 'aiff', 'mxf', 'mkv', 'avi', 'fcpxml', 'fcpxmld'}
+                      'aif', 'aiff', 'mxf', 'mkv', 'avi', 'fcpxml', 'fcpxmld',
+                      # MPEG-TS broadcast files: newsroom systems (Mimir et
+                      # al.) hand these out both as .ts and misnamed .mp4;
+                      # m2ts/mts are the AVCHD camcorder spellings. The
+                      # bundled ffmpeg's mpegts demuxer handles all three.
+                      'ts', 'm2ts', 'mts'}
 
 os.makedirs(app.config['PROJECTS_DIR'], exist_ok=True)
 os.makedirs(app.config['EXPORTS_DIR'], exist_ok=True)
@@ -1246,15 +1251,25 @@ def find_file():
     if not filename:
         return jsonify({'error': 'No filename provided'}), 400
 
+    # Home folders FIRST, /Volumes last: mounted network shares (newsroom
+    # NAS volumes) can take minutes to walk, and the browser fetch dies long
+    # before that ("Failed to fetch"). Most dropped files live in the home
+    # dirs; finding one there ends the search before /Volumes is touched.
     home = str(Path.home())
-    search_roots = ['/Volumes']
+    search_roots = []
     for d in ['Desktop', 'Documents', 'Movies', 'Downloads', 'Music']:
         p = os.path.join(home, d)
         if os.path.exists(p):
             search_roots.append(p)
+    search_roots.append('/Volumes')
+
+    # Hard wall-clock budget so a huge/slow volume returns a usable answer
+    # instead of hanging the request indefinitely.
+    deadline = time.monotonic() + 15.0
 
     matches = []
     seen = set()
+    visited_dirs = set()  # symlink-cycle guard for followlinks=True
 
     # FCP package bundles (e.g. .fcpxmld) are directories on disk, but the
     # browser drag-drop reports them as a single "file" with size 0. Match
@@ -1262,8 +1277,19 @@ def find_file():
     is_bundle = filename.lower().endswith(('.fcpxmld', '.fcpbundle'))
 
     for root_dir in search_roots:
+        # A match found in an earlier (home) root is the answer — never pay
+        # the /Volumes walk on top of it.
+        if matches or time.monotonic() > deadline:
+            break
         try:
             for dirpath, dirnames, filenames in os.walk(root_dir, followlinks=True):
+                if time.monotonic() > deadline:
+                    break
+                real_dir = os.path.realpath(dirpath)
+                if real_dir in visited_dirs:
+                    dirnames.clear()  # symlink loop — don't descend again
+                    continue
+                visited_dirs.add(real_dir)
                 # Match bundle before we prune — a bundle is a dir that happens
                 # to match the target name.
                 if is_bundle and filename in dirnames:

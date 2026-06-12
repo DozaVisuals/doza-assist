@@ -34,6 +34,11 @@ from doza_assist.fcpxml.timeline_audio import (
 )
 import preferences as prefs
 from doza_assist.jsonio import atomic_write_json, load_json
+from doza_assist.output_language import (
+    LANGUAGES as OUTPUT_LANGUAGES,
+    language_name,
+    resolve_output_language,
+)
 
 
 def get_project_platform(project: dict) -> str:
@@ -306,8 +311,22 @@ def inject_brand():
     }
 
 
+@app.context_processor
+def inject_languages():
+    """Canonical language list for every template dropdown (dashboard create
+    modal, project Retranscribe + Output Language). Single source:
+    doza_assist.output_language.LANGUAGES — list of (code, name), 'en' first."""
+    return {'languages': OUTPUT_LANGUAGES}
+
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _valid_output_language(value):
+    """Clamp an output_language input to 'match' or a canonical code."""
+    value = (value or 'match').strip().lower()
+    return value if (value == 'match' or language_name(value)) else 'match'
 
 
 def _resolve_fcpxml_path(source_path: str) -> str:
@@ -1061,6 +1080,7 @@ def create_project_from_path(
     subject_name='Subject',
     num_speakers=2,
     language='en',
+    output_language='match',
     project_id=None,
 ):
     """Create a new project from a file already on disk. Returns project_id.
@@ -1130,6 +1150,9 @@ def create_project_from_path(
         'subject_name': subject_name or 'Subject',
         'num_speakers': num_speakers,
         'language': language or 'en',
+        # AI prose language: 'match' (follow the interview language)
+        # or an explicit code from doza_assist.output_language.LANGUAGES.
+        'output_language': _valid_output_language(output_language),
         'filename': os.path.basename(media_source_path),
         'source_path': media_source_path,
         'filepath': media_source_path,
@@ -1173,6 +1196,7 @@ def create_project():
             subject_name=data.get('subject_name', 'Subject').strip(),
             num_speakers=int(data.get('num_speakers', 2)),
             language=data.get('language', 'en').strip(),
+            output_language=data.get('output_language', 'match').strip(),
         )
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
@@ -1195,6 +1219,7 @@ def upload():
     interviewer_name = request.form.get('interviewer_name', 'Interviewer').strip()
     subject_name = request.form.get('subject_name', 'Subject').strip()
     language = request.form.get('language', 'en').strip()
+    output_language = request.form.get('output_language', 'match').strip()
 
     if not project_name:
         project_name = file.filename.rsplit('.', 1)[0]
@@ -1230,6 +1255,7 @@ def upload():
             interviewer_name=interviewer_name,
             subject_name=subject_name,
             language=language,
+            output_language=output_language,
             project_id=project_id,
         )
     except ValueError as e:
@@ -2068,9 +2094,13 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
         # the project lock — so chat history / labels / a rename saved while
         # the (minutes-long) transcription ran aren't clobbered by this stale
         # snapshot. Drops any prior 'error'.
+        # detected_language: meta-level copy of the engine's detected (or
+        # echoed) language code, so the output-language resolver reads meta
+        # only and never digs into the transcript blob.
         project = update_project(
             project_id,
-            {'transcript': result, 'status': 'transcribed'},
+            {'transcript': result, 'status': 'transcribed',
+             'detected_language': (result.get('language') or 'en')},
             remove=['error'],
         ) or {}
         log_activity(project_id, 'transcribed',
@@ -2187,12 +2217,17 @@ def transcribe(project_id):
 
     # Guard non-English requests when only Parakeet (English-only) is installed.
     requested_language = project.get('language', 'en')
-    if requested_language not in ('en', 'auto') and not _engine_available('whisper'):
+    if requested_language != 'en' and not _engine_available('whisper'):
+        # 'auto' included: auto-detect skips the English-only Parakeet path
+        # inside transcribe_file, so without Whisper it used to die deep in
+        # the engine with a generic "No transcription engine found".
+        label = ('Auto-detect' if requested_language == 'auto'
+                 else f'Non-English transcription ({requested_language})')
         project['status'] = 'error'
         project['error'] = 'whisper_not_installed'
         save_project(project_id, project)
         return jsonify({
-            'error': f'Non-English transcription ({requested_language}) requires the Whisper engine, which is not installed.',
+            'error': f'{label} requires the Whisper engine, which is not installed.',
             'needs_whisper_install': True,
             'requested_language': requested_language,
         }), 400
@@ -2414,6 +2449,7 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
             analysis_type=analysis_type,
             segment_vectors=existing_vectors or None,
             progress_callback=_from_analyzer,
+            output_language=resolve_output_language(project),
         )
         if not (result.get('story_beats') or result.get('social_clips')
                 or result.get('strongest_soundbites')):
@@ -2722,6 +2758,7 @@ def chat(project_id):
                 paragraph_index=load_paragraph_index(p['id']),
                 labeled_sections=p.get('labeled_sections') or None,
                 speaker_names=p.get('speaker_names') or None,
+                output_language=resolve_output_language(p),
             )
         else:
             # Multi-project: combine transcripts with project labels.
@@ -2748,6 +2785,9 @@ def chat(project_id):
                 project_name=' + '.join(project_names),
                 analysis=None,
                 profile_id=profile_id,
+                # Multi-project: resolve from the FIRST project's meta — cheap
+                # and consistent (no cross-project language reconciliation).
+                output_language=resolve_output_language(projects_for_chat[0]),
             )
 
         # Persist chat history on single-project chats. Multi-project sessions
@@ -2813,6 +2853,7 @@ def chat_stream(project_id):
             'paragraph_index': load_paragraph_index(p['id']),
             'labeled_sections': p.get('labeled_sections') or None,
             'speaker_names': p.get('speaker_names') or None,
+            'output_language': resolve_output_language(p),
         }
         single_pid = p['id']
     else:
@@ -2831,6 +2872,9 @@ def chat_stream(project_id):
             'project_name': ' + '.join(project_names),
             'analysis': None,
             'profile_id': profile_id,
+            # Multi-project: resolve from the FIRST project's meta — cheap
+            # and consistent (no cross-project language reconciliation).
+            'output_language': resolve_output_language(projects_for_chat[0]),
         }
         single_pid = None
 
@@ -3907,6 +3951,39 @@ def clear_transcript(project_id):
     return jsonify({'status': 'cleared'})
 
 
+@app.route('/api/languages', methods=['GET'])
+def api_languages():
+    """Canonical language list — the single source for every UI dropdown.
+
+    Replaces the option lists previously duplicated across dashboard.html,
+    project.html, and the Pro import queue."""
+    return jsonify({'languages': [
+        {'code': code, 'name': name} for code, name in OUTPUT_LANGUAGES
+    ]})
+
+
+@app.route('/project/<project_id>/output-language', methods=['POST'])
+def set_output_language(project_id):
+    """Set the project's AI Output Language ('match' or a canonical code).
+
+    Non-destructive (unlike retranscribe): prose language only affects
+    future AI generations. Returns reanalyze_hint when the project already
+    has saved analysis, so the UI can suggest a re-run without forcing one.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    value = _valid_output_language((request.json or {}).get('output_language'))
+    changed = value != (project.get('output_language') or 'match')
+    project = update_project(project_id, {'output_language': value}) or {}
+    return jsonify({
+        'status': 'ok',
+        'output_language': value,
+        'resolved': resolve_output_language(project),
+        'reanalyze_hint': bool(changed and project.get('analysis')),
+    })
+
+
 @app.route('/project/<project_id>/retranscribe', methods=['POST'])
 def retranscribe(project_id):
     """Update language and re-run transcription."""
@@ -4200,6 +4277,7 @@ def story_build(project_id):
             project_name=project.get('name', 'Interview'),
             segment_vectors=segment_vectors or None,
             profile_id=profile_id,
+            output_language=resolve_output_language(project),
         )
 
         clips = result.get('clips') or []

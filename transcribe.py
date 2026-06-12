@@ -769,7 +769,11 @@ def _transcribe_whisperx(audio_path, speaker_labels=None, language='en', progres
 
     return {
         'segments': segments,
-        'language': result.get('language', 'en'),
+        # lang_code, NOT result['language']: whisperx.align() replaces the
+        # result dict with {'segments','word_segments'} only, so reading
+        # 'language' here always fell back to 'en' and the auto-detected
+        # language was silently lost.
+        'language': lang_code or 'en',
         'duration': segments[-1]['end'] if segments else 0,
         'engine': 'whisperx',
     }

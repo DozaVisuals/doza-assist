@@ -182,43 +182,33 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                     <div class="form-group">
                         <label class="form-label">Language</label>
                         <select class="form-input" id="language" onchange="updateLanguageHint()">
+                            {# Canonical list from doza_assist.output_language.LANGUAGES
+                               ('en' first, then alphabetical). 'auto' is a UI
+                               sentinel spliced in after English — visual parity
+                               with the old hardcoded list. #}
                             <option value="en" selected>English</option>
                             <option value="auto">Auto-detect</option>
                             <option disabled>──────────</option>
-                            <option value="ar">Arabic</option>
-                            <option value="zh">Chinese</option>
-                            <option value="cs">Czech</option>
-                            <option value="da">Danish</option>
-                            <option value="nl">Dutch</option>
-                            <option value="fi">Finnish</option>
-                            <option value="fr">French</option>
-                            <option value="de">German</option>
-                            <option value="el">Greek</option>
-                            <option value="he">Hebrew</option>
-                            <option value="hi">Hindi</option>
-                            <option value="hu">Hungarian</option>
-                            <option value="id">Indonesian</option>
-                            <option value="it">Italian</option>
-                            <option value="ja">Japanese</option>
-                            <option value="ko">Korean</option>
-                            <option value="ms">Malay</option>
-                            <option value="no">Norwegian</option>
-                            <option value="pl">Polish</option>
-                            <option value="pt">Portuguese</option>
-                            <option value="ro">Romanian</option>
-                            <option value="ru">Russian</option>
-                            <option value="sk">Slovak</option>
-                            <option value="es">Spanish</option>
-                            <option value="sv">Swedish</option>
-                            <option value="th">Thai</option>
-                            <option value="tr">Turkish</option>
-                            <option value="uk">Ukrainian</option>
-                            <option value="vi">Vietnamese</option>
+                            {% for code, name in languages if code != 'en' %}
+                            <option value="{{ code }}">{{ name }}</option>
+                            {% endfor %}
                         </select>
                         <p id="languageHint" style="display:none; font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
                             Non-English uses the Whisper engine. If it isn't installed yet, you'll be prompted to add it (~200&nbsp;MB, one time) when transcription starts.
                         </p>
                     </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Output Language</label>
+                    <select class="form-input" id="outputLanguage">
+                        <option value="match" selected>Match interview language</option>
+                        {% for code, name in languages %}
+                        <option value="{{ code }}">{{ name }}</option>
+                        {% endfor %}
+                    </select>
+                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
+                        AI summaries, analysis and chat answers. Quotes always stay in the original language.
+                    </p>
                 </div>
                 <div id="selectedFile" style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;"></div>
                 <div class="btn-group" style="justify-content: flex-end;">
@@ -450,6 +440,7 @@ async function createFromPath() {
                 subject_name: document.getElementById('subjectName').value || 'Subject',
                 num_speakers: parseInt(document.getElementById('numSpeakers').value) || 2,
                 language: document.getElementById('language').value || 'en',
+                output_language: (document.getElementById('outputLanguage') && document.getElementById('outputLanguage').value) || 'match',
             }),
         });
         const data = await res.json();

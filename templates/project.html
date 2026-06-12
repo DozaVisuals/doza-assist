@@ -36,6 +36,7 @@
                 {% if project.transcript %}
                 <button class="gear-menu-item" onclick="closeGearMenu(); showRetranscribe();">Retranscribe</button>
                 {% endif %}
+                <button class="gear-menu-item" onclick="closeGearMenu(); showOutputLanguage();">Output Language</button>
                 <button class="gear-menu-item" onclick="closeGearMenu(); toggleTheme();">
                     <span class="gear-theme-label-dark">Light theme</span>
                     <span class="gear-theme-label-light">Dark theme</span>
@@ -1029,6 +1030,10 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
 
 const PROJECT_ID = '{{ project.id }}';
 const PROJECT = {{ project | tojson }};
+// Canonical language list — [code, English name] pairs, 'en' first then
+// alphabetical, injected from doza_assist.output_language.LANGUAGES via the
+// shared template context. 'auto'/'match' are UI sentinels added per-modal.
+const LANGS = {{ languages | tojson }};
 const PROJECT_IDS = {{ active_ids | tojson }};
 const PROJECTS_META = {{ projects_meta | tojson }};
 const IS_MULTI = {{ 'true' if is_multi else 'false' }};
@@ -4415,23 +4420,87 @@ async function clearTranscript() {
     }
 }
 
+// ── Output Language ──
+// Non-destructive sibling of Retranscribe: sets the language all AI-generated
+// PROSE (analysis, chat, story builder) is written in. Verbatim quotes always
+// stay in the interview's original language.
+function showOutputLanguage() {
+    let overlay = document.getElementById('outputLanguageOverlay');
+    if (overlay) overlay.remove();
+
+    const current = PROJECT.output_language || 'match';
+    const opts = [['match', 'Match interview language']].concat(LANGS);
+    const options = opts.map(([v, l]) =>
+        `<option value="${v}"${v === current ? ' selected' : ''}>${l}</option>`
+    ).join('');
+
+    overlay = document.createElement('div');
+    overlay.id = 'outputLanguageOverlay';
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 420px;">
+            <h2>Output Language</h2>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">
+                AI summaries, analysis and chat answers. Quotes always stay in the original language.
+            </p>
+            <div class="form-group">
+                <label class="form-label">Output Language</label>
+                <select class="form-input" id="outputLanguageSelect">${options}</select>
+            </div>
+            <div id="outputLanguageNotice" style="display:none; padding: 0.75rem; margin: 0.5rem 0 0; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
+            <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
+                <button class="btn btn-sm" onclick="document.getElementById('outputLanguageOverlay').remove()">Close</button>
+                <button class="btn btn-sm btn-purple" id="outputLanguageSaveBtn" onclick="saveOutputLanguage()">Save</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+async function saveOutputLanguage() {
+    const sel = document.getElementById('outputLanguageSelect');
+    const btn = document.getElementById('outputLanguageSaveBtn');
+    if (!sel) return;
+    const value = sel.value || 'match';
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/output-language`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ output_language: value }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Unknown error');
+        PROJECT.output_language = data.output_language || value;
+        showToast('Output language saved');
+        const notice = document.getElementById('outputLanguageNotice');
+        if (data.reanalyze_hint && notice) {
+            // Saved analysis was generated under a different language —
+            // suggest (don't force) a re-run; keep the modal open so the
+            // notice is read before Close.
+            notice.style.display = 'block';
+            notice.textContent = 'Analysis was generated in a different language. Re-run Analyze to regenerate it.';
+        } else {
+            const ov = document.getElementById('outputLanguageOverlay');
+            if (ov) ov.remove();
+        }
+    } catch (err) {
+        showToast('Error: ' + err.message, true);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
+}
+
 // ── Retranscribe ──
 function showRetranscribe() {
     let overlay = document.getElementById('retranscribeOverlay');
     if (overlay) overlay.remove();
 
     const currentLang = PROJECT.language || 'en';
-    const langs = [
-        ['en','English'],['auto','Auto-detect'],
-        ['ar','Arabic'],['zh','Chinese'],['cs','Czech'],['da','Danish'],
-        ['nl','Dutch'],['fi','Finnish'],['fr','French'],['de','German'],
-        ['el','Greek'],['he','Hebrew'],['hi','Hindi'],['hu','Hungarian'],
-        ['id','Indonesian'],['it','Italian'],['ja','Japanese'],['ko','Korean'],
-        ['ms','Malay'],['no','Norwegian'],['pl','Polish'],['pt','Portuguese'],
-        ['ro','Romanian'],['ru','Russian'],['sk','Slovak'],['es','Spanish'],
-        ['sv','Swedish'],['th','Thai'],['tr','Turkish'],['uk','Ukrainian'],
-        ['vi','Vietnamese']
-    ];
+    // Canonical list (LANGS, 'en' first) with the 'auto' UI sentinel spliced
+    // in after English — same order as the old hardcoded array.
+    const langs = LANGS.slice(0, 1)
+        .concat([['auto', 'Auto-detect']], LANGS.slice(1));
     const options = langs.map(([v,l]) =>
         `<option value="${v}"${v === currentLang ? ' selected' : ''}>${l}</option>`
     ).join('');

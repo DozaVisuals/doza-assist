@@ -331,7 +331,7 @@ class TestStoryBuildEndpoint:
             return generated
 
         def _fake_build(transcript, message, project_name="Interview",
-                        segment_vectors=None, profile_id=None):
+                        segment_vectors=None, profile_id=None, **kwargs):
             # The endpoint must pass the auto-generated vectors through.
             assert segment_vectors == generated
             return {

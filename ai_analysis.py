@@ -13,6 +13,7 @@ import requests
 
 from editorial_dna.injector import get_active_style_block, inject_my_style
 from editorial_dna.storytelling import inject_storytelling_foundation
+from doza_assist.output_language import language_directive
 
 # Keep the Ollama model resident in memory between requests. Default is
 # 5 minutes — too short for an editor reading a reply before typing the
@@ -408,7 +409,7 @@ _FINAL_REMINDER = (
 def _build_chat_messages(message, history, project_name, segments,
                         formatted, analysis_block, relevant_excerpts_block,
                         profile_id, labeled_sections=None, speaker_names=None,
-                        include_final_reminder=True):
+                        include_final_reminder=True, language_directive_text=''):
     """Construct the (system_message, messages_array) pair for an Ollama
     /api/chat call.
 
@@ -467,6 +468,12 @@ def _build_chat_messages(message, history, project_name, segments,
             # the transcript message, no double-injection.
             analysis_block = selections_block
 
+    # Output-language directive rides at the very END of the system string
+    # (after any clip-aware framing). Empty for English — plain concat
+    # keeps English prompts byte-identical to pre-feature behavior.
+    if language_directive_text:
+        system_message = system_message + language_directive_text
+
     messages = []
     if style_block:
         messages.append({
@@ -521,7 +528,7 @@ _CHUNK_CACHE_LOCK = threading.Lock()
 def chat_about_transcript(transcript, message, history=None, project_name="Interview",
                           analysis=None, profile_id=None, segment_vectors=None,
                           paragraph_index=None, labeled_sections=None,
-                          speaker_names=None):
+                          speaker_names=None, output_language=None):
     """
     Chat with AI about the transcript. Supports follow-up questions.
     Returns the AI reply as a string (may contain embedded clip suggestions).
@@ -546,6 +553,13 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     """
     segments = (transcript or {}).get('segments', [])
     duration = segments[-1].get('end', 0) if segments else 0
+    # Resolved output-language directive ('' for English → zero diff) and
+    # the title-anchor skip: cross-language replies carry translated clip
+    # titles whose words won't literally appear in the transcript, so the
+    # title-anchor validator sub-check would drop legitimate clips.
+    directive = language_directive(output_language, chat=True)
+    skip_title_anchor = bool(output_language) and \
+        output_language != (transcript or {}).get('language', 'en')
     phrases, words = _extract_query_keywords(message)
     theme_phrases = _collect_theme_phrases_from_vectors(segment_vectors, message)
     tfidf_hits = []
@@ -579,6 +593,8 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
                 message, history, project_name, segments,
                 analysis, profile_id, labeled_sections,
                 speaker_names=speaker_names,
+                language_directive_text=directive,
+                skip_title_anchor=skip_title_anchor,
             )
         paragraphs = _build_paragraphs(transcript)
         return _chat_layer2_chunked_search(
@@ -586,6 +602,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
             phrases, words, profile_id, analysis,
             segment_vectors=segment_vectors, theme_phrases=theme_phrases,
             tfidf_hits=tfidf_hits, speaker_names=speaker_names,
+            language_directive_text=directive,
         )
 
     formatted = _format_transcript_for_ai(transcript, speaker_names)
@@ -614,12 +631,15 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         message, history, project_name, segments,
         formatted, analysis_block, relevant_excerpts_block, profile_id,
         labeled_sections=labeled_sections, speaker_names=speaker_names,
+        language_directive_text=directive,
     )
     num_ctx = _estimate_layer1_num_ctx(formatted)
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
     response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)
-    cleaned = _validate_clip_markers_in_text(cleaned, segments)
+    cleaned = _validate_clip_markers_in_text(
+        cleaned, segments, skip_title_anchor=skip_title_anchor,
+    )
     # Skip clip salvage when the editor's question is conversational
     # (themes, story, craft, chitchat, or explicit "no clips"). Forcing
     # markers into a discussion answer breaks the orientation contract.
@@ -627,6 +647,8 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
+            language_directive_text=directive,
+            skip_title_anchor=skip_title_anchor,
         )
     # Enforce explicit clip count from the user message. Gemma 4B
     # routinely ignores "1 clip" / "one more" / "another" and emits 2-3.
@@ -671,7 +693,7 @@ def _call_ai_chat_stream(system_message, messages, num_ctx=32768):
 def chat_about_transcript_stream(transcript, message, history=None, project_name="Interview",
                                  analysis=None, profile_id=None, segment_vectors=None,
                                  paragraph_index=None, labeled_sections=None,
-                                 speaker_names=None):
+                                 speaker_names=None, output_language=None):
     """Streaming variant of :func:`chat_about_transcript`.
 
     Layer 1 yields ``('token', piece)`` events as Ollama produces them, then
@@ -696,6 +718,11 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
 
     segments = (transcript or {}).get('segments', [])
     duration = segments[-1].get('end', 0) if segments else 0
+    # Mirror of the non-streaming path: resolved language directive ('' for
+    # English) plus the cross-language title-anchor skip for the validator.
+    directive = language_directive(output_language, chat=True)
+    skip_title_anchor = bool(output_language) and \
+        output_language != (transcript or {}).get('language', 'en')
     # Each retrieval step is wrapped so a single misbehaving helper can't
     # take the whole chat down. Failures degrade gracefully — empty result
     # + heartbeat — instead of bubbling up and blocking the SSE.
@@ -729,6 +756,8 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
                 message, history, project_name, segments,
                 analysis, profile_id, labeled_sections,
                 speaker_names=speaker_names,
+                language_directive_text=directive,
+                skip_title_anchor=skip_title_anchor,
             ):
                 yield event
             return
@@ -743,6 +772,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             phrases, words, profile_id, analysis,
             segment_vectors=segment_vectors, theme_phrases=theme_phrases,
             tfidf_hits=tfidf_hits, speaker_names=speaker_names,
+            language_directive_text=directive,
         ):
             yield event
         return
@@ -782,6 +812,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         message, history, project_name, segments,
         formatted, analysis_block, relevant_excerpts_block, profile_id,
         labeled_sections=labeled_sections, speaker_names=speaker_names,
+        language_directive_text=directive,
     )
 
     pieces = []
@@ -862,7 +893,9 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     full = ''.join(pieces)
     full = _strip_trailing_repetition(full)
     cleaned = _clean_chat_response(full)
-    cleaned = _validate_clip_markers_in_text(cleaned, segments)
+    cleaned = _validate_clip_markers_in_text(
+        cleaned, segments, skip_title_anchor=skip_title_anchor,
+    )
     # Salvage pass mirrors the non-streaming path. Adds latency only when
     # the model's first attempt produced zero markers — most calls return
     # immediately. Streamed clients see a brief pause after the prose
@@ -872,6 +905,8 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
+            language_directive_text=directive,
+            skip_title_anchor=skip_title_anchor,
         )
     # Enforce explicit clip count from the user message — same defense
     # the non-streaming path applies. See _enforce_clip_count.
@@ -1564,7 +1599,9 @@ def _deterministic_clip_markers(matched_paragraphs, target_count):
 
 def _salvage_clips_if_missing(cleaned_text, formatted_transcript, segments,
                                 num_ctx=8192, target_count=3,
-                                matched_paragraphs=None, user_message=None):
+                                matched_paragraphs=None, user_message=None,
+                                language_directive_text='',
+                                skip_title_anchor=False):
     """Force clips into the response when the model's first pass produced
     none. Two-stage salvage:
 
@@ -1612,6 +1649,9 @@ def _salvage_clips_if_missing(cleaned_text, formatted_transcript, segments,
         "line, with real timecodes from the transcript. You never emit "
         "an empty [CLIP] placeholder. No prose. No explanation."
     )
+    # Output-language directive ('' for English → byte-identical prompt).
+    if language_directive_text:
+        salvage_system = salvage_system + language_directive_text
 
     validated = ''
     try:
@@ -1626,7 +1666,9 @@ def _salvage_clips_if_missing(cleaned_text, formatted_transcript, segments,
 
     if raw and raw.strip():
         normalized = _clean_chat_response(raw)
-        validated = _validate_clip_markers_in_text(normalized, segments)
+        validated = _validate_clip_markers_in_text(
+            normalized, segments, skip_title_anchor=skip_title_anchor,
+        )
 
     # Deterministic fallback: if the LLM extractor produced nothing usable,
     # build markers from the matched paragraphs directly. This guarantees
@@ -1652,7 +1694,8 @@ def _salvage_clips_if_missing(cleaned_text, formatted_transcript, segments,
     return validated.strip()
 
 
-def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
+def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0,
+                                   skip_title_anchor=False):
     """Drop ``[CLIP:]`` markers whose timecodes don't anchor to the transcript.
 
     Small local models occasionally invent timecodes that look plausible
@@ -1668,6 +1711,12 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
 
     Returns ``text`` unchanged when ``segments`` is empty or no markers
     are present, so callers can apply this unconditionally.
+
+    ``skip_title_anchor=True`` bypasses ONLY the title-anchor sub-check —
+    numeric timecode validation still runs. Chat call sites set it when the
+    resolved output language differs from the transcript language: clip
+    titles are then translated prose whose words won't literally appear in
+    the transcript, so the cross-reference heuristic would drop valid clips.
     """
     import re
     if not text or not segments:
@@ -1773,19 +1822,22 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0):
             return True  # if we can't parse, leave it for the renderer to sort out
         if not _start_in_transcript(start_sec):
             return False
-        # Title-anchor check (best-effort; never raises).
-        try:
-            full = match.group(0)
-            tm = title_re.search(full)
-            if tm:
-                em = re.search(r'end=([^\s\]]+)', full)
-                end_sec = _tc_to_seconds(em.group(1).strip().strip('"\'')) if em else start_sec
-                if not _title_anchored(start_sec, end_sec, tm.group(2)):
-                    print(f"[clip-validate] dropping misanchored clip: "
-                          f"start={start_str} title={tm.group(2)!r}", flush=True)
-                    return False
-        except Exception:
-            pass
+        # Title-anchor check (best-effort; never raises). Bypassed when the
+        # reply language differs from the transcript language — translated
+        # titles legitimately share no surface words with the transcript.
+        if not skip_title_anchor:
+            try:
+                full = match.group(0)
+                tm = title_re.search(full)
+                if tm:
+                    em = re.search(r'end=([^\s\]]+)', full)
+                    end_sec = _tc_to_seconds(em.group(1).strip().strip('"\'')) if em else start_sec
+                    if not _title_anchored(start_sec, end_sec, tm.group(2)):
+                        print(f"[clip-validate] dropping misanchored clip: "
+                              f"start={start_str} title={tm.group(2)!r}", flush=True)
+                        return False
+            except Exception:
+                pass
         return True
 
     # Walk lines so we strip both the marker AND the editorial sentence that
@@ -3525,7 +3577,9 @@ def _build_synthesis_context_block(project_name, segments, analysis, labeled_sec
 
 def _chat_layer2_conversational_synthesis(message, history, project_name, segments,
                                           analysis, profile_id, labeled_sections,
-                                          speaker_names=None):
+                                          speaker_names=None,
+                                          language_directive_text='',
+                                          skip_title_anchor=False):
     """Conversational synthesis on long interviews — the divert from
     chunked clip search when the editor's question is discussion-style.
 
@@ -3547,12 +3601,15 @@ def _chat_layer2_conversational_synthesis(message, history, project_name, segmen
         # This path is only reached on discussion-style questions and skips
         # clip-salvage on purpose — don't nudge the model toward markers.
         include_final_reminder=False,
+        language_directive_text=language_directive_text,
     )
     num_ctx = max(8192, _estimate_layer1_num_ctx(context))
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
     response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)
-    cleaned = _validate_clip_markers_in_text(cleaned, segments)
+    cleaned = _validate_clip_markers_in_text(
+        cleaned, segments, skip_title_anchor=skip_title_anchor,
+    )
     # Deliberately skip _salvage_clips_if_missing — this path is only
     # reached on conversational queries.
     return cleaned
@@ -3560,7 +3617,9 @@ def _chat_layer2_conversational_synthesis(message, history, project_name, segmen
 
 def _chat_layer2_conversational_synthesis_stream(message, history, project_name, segments,
                                                   analysis, profile_id, labeled_sections,
-                                                  speaker_names=None):
+                                                  speaker_names=None,
+                                                  language_directive_text='',
+                                                  skip_title_anchor=False):
     """Streaming variant of :func:`_chat_layer2_conversational_synthesis`.
 
     Yields ('progress', label) for the prep step, then ('done', reply) with
@@ -3573,6 +3632,8 @@ def _chat_layer2_conversational_synthesis_stream(message, history, project_name,
             message, history, project_name, segments,
             analysis, profile_id, labeled_sections,
             speaker_names=speaker_names,
+            language_directive_text=language_directive_text,
+            skip_title_anchor=skip_title_anchor,
         )
     except Exception as e:
         print(f"[chat-stream] conversational synthesis failed: {e}")
@@ -3583,7 +3644,8 @@ def _chat_layer2_conversational_synthesis_stream(message, history, project_name,
 def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
                                 phrases, words, profile_id, analysis,
                                 segment_vectors=None, theme_phrases=None,
-                                tfidf_hits=None, speaker_names=None):
+                                tfidf_hits=None, speaker_names=None,
+                                language_directive_text=''):
     """Orchestrate the Layer 2 path: chunk → concurrent per-chunk search →
     aggregate → render clip cards. No LLM sees the full transcript; the
     model's ranking job is scoped to a single ~10-minute window at a time.
@@ -3651,6 +3713,10 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
             chunk, message, phrases, words, idx, len(chunks), project_name,
             strict_keyword=strict_keyword,
         )
+        # Output-language directive ('' for English → byte-identical):
+        # clip titles/why blurbs come from these per-chunk JSON calls.
+        if language_directive_text:
+            system_prompt = system_prompt + language_directive_text
         # Per-chunk scoring runs on the smaller variant when it's
         # available (~2-3× faster decode on Apple Silicon). Synthesis
         # rerank below stays on the user's hardware-tier variant so
@@ -3688,7 +3754,8 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
 def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_name,
                                        phrases, words, profile_id, analysis,
                                        segment_vectors=None, theme_phrases=None,
-                                       tfidf_hits=None, speaker_names=None):
+                                       tfidf_hits=None, speaker_names=None,
+                                       language_directive_text=''):
     """Streaming variant of :func:`_chat_layer2_chunked_search`.
 
     Yields ``('progress', label)`` events as each chunk completes so the
@@ -3741,6 +3808,9 @@ def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_nam
             chunk, message, phrases, words, idx, len(chunks), project_name,
             strict_keyword=strict_keyword,
         )
+        # Mirror of the non-streaming variant — see _chat_layer2_chunked_search.
+        if language_directive_text:
+            system_prompt = system_prompt + language_directive_text
         response = _call_ai_json(system_prompt, user_prompt, model_override=fast_model)
         return _parse_chunk_response(response, chunk)
 
@@ -4045,7 +4115,8 @@ def _merge_social_chunk(accum: dict, social_data):
         accum['analysis_warnings'].append(_CHUNK_DROP_WARNING)
 
 
-def _synthesize_overall_summary(summaries, titles, project_name, warnings=None):
+def _synthesize_overall_summary(summaries, titles, project_name, warnings=None,
+                                language_directive_text=''):
     """Combine per-chunk summaries + titles into one overall summary/title.
 
     When multiple interviews are strung into a single timeline the chunked
@@ -4082,6 +4153,8 @@ def _synthesize_overall_summary(summaries, titles, project_name, warnings=None):
         "distinct interviews strung into one timeline — your overview must cover ALL "
         "sections, not just the first. Respond in valid JSON only. No markdown, no fences."
     )
+    if language_directive_text:
+        system_prompt = system_prompt + language_directive_text
     prompt = f"""PROJECT: {project_name}
 
 Per-section summaries (in timeline order):
@@ -4134,7 +4207,8 @@ ANALYSIS_PER_CATEGORY_CAP = 7
 
 
 def analyze_transcript(transcript, project_name="Interview", analysis_type="all",
-                       segment_vectors=None, progress_callback=None):
+                       segment_vectors=None, progress_callback=None,
+                       output_language=None):
     """
     Analyze a transcript for story structure and social media clips.
 
@@ -4179,6 +4253,9 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
 
     segments = (transcript or {}).get('segments', [])
     total_duration = segments[-1].get('end', 0) if segments else 0
+    # Resolved output-language directive — '' for English, so every
+    # downstream concat leaves English prompts byte-identical.
+    directive = language_directive(output_language)
 
     # Provider-aware chunking threshold. Cloud providers (Anthropic, OpenAI)
     # have large context windows and a 1-hour interview fits comfortably in
@@ -4207,6 +4284,7 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         return _analyze_transcript_single(
             formatted, project_name, analysis_type, segment_vectors=segment_vectors,
             progress_emit=_emit, segments=segments,
+            output_language=output_language,
         )
 
     # Chunked path: walk 15-minute slices and merge.
@@ -4297,6 +4375,7 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
                         chunk_text, chunk_label,
                         beats_target=per_chunk_target,
                         soundbites_target=per_chunk_target,
+                        language_directive_text=directive,
                     ),
                     is_first_chunk=(i == 0),
                 )
@@ -4314,6 +4393,7 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
                     _analyze_social(
                         chunk_text, chunk_label,
                         clips_target=per_chunk_target,
+                        language_directive_text=directive,
                     ),
                 )
                 consecutive_timeouts = 0
@@ -4339,6 +4419,7 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
         accum.pop('_chunk_titles', []),
         project_name,
         warnings=accum['analysis_warnings'],
+        language_directive_text=directive,
     )
     accum['summary'] = overall['summary']
     accum['suggested_title'] = overall['suggested_title']
@@ -4357,8 +4438,9 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
 
 def _analyze_transcript_single(formatted_text, project_name, analysis_type,
                                 segment_vectors=None, progress_emit=None,
-                                segments=None):
+                                segments=None, output_language=None):
     """One-shot analysis path for short interviews."""
+    directive = language_directive(output_language)
     types_count = (1 if analysis_type in ('story', 'all') else 0) + \
                   (1 if analysis_type in ('social', 'all') else 0)
     total_steps = types_count + 1  # +1 cap+rerank
@@ -4378,6 +4460,7 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type,
             formatted_text, project_name,
             beats_target=ANALYSIS_PER_CATEGORY_CAP,
             soundbites_target=ANALYSIS_PER_CATEGORY_CAP,
+            language_directive_text=directive,
         )
         if isinstance(story_data, dict):
             result['summary'] = _first_present(story_data, 'summary', 'overview', 'synopsis')
@@ -4411,6 +4494,7 @@ def _analyze_transcript_single(formatted_text, project_name, analysis_type,
         social_data = _analyze_social(
             formatted_text, project_name,
             clips_target=ANALYSIS_PER_CATEGORY_CAP,
+            language_directive_text=directive,
         )
         if isinstance(social_data, dict):
             result['social_clips'] = _first_present_list(
@@ -5150,7 +5234,8 @@ def _chunk_cache_put(key, value):
             _CHUNK_CACHE.popitem(last=False)
 
 
-def build_story(transcript, message, project_name="Interview", segment_vectors=None, profile_id=None):
+def build_story(transcript, message, project_name="Interview", segment_vectors=None, profile_id=None,
+                output_language=None):
     """
     Build a narrative sequence from the transcript based on the user's description.
     Returns a dict with story_title, target_duration, and clips array.
@@ -5160,7 +5245,10 @@ def build_story(transcript, message, project_name="Interview", segment_vectors=N
     much more consistent across runs.
     """
     if segment_vectors:
-        return _build_story_from_vectors(segment_vectors, message, project_name, profile_id=profile_id)
+        return _build_story_from_vectors(
+            segment_vectors, message, project_name, profile_id=profile_id,
+            output_language=output_language,
+        )
 
     formatted = _format_transcript_for_ai(transcript)
 
@@ -5206,6 +5294,10 @@ TRANSCRIPT (presented in recording order — re-sequence freely for narrative ar
 Return ONLY valid JSON. No markdown, no extra text."""
 
     system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
+    # Output-language directive ('' for English → byte-identical prompt).
+    directive = language_directive(output_language)
+    if directive:
+        system_prompt = system_prompt + directive
     response = _call_ai(prompt, system_prompt)
     return _parse_json_response(response)
 
@@ -5483,7 +5575,8 @@ def _extract_excerpt_for_range(transcript, tc_in, tc_out, max_words=50):
     return ' '.join(words)
 
 
-def _build_story_from_vectors(segment_vectors, message, project_name, profile_id=None):
+def _build_story_from_vectors(segment_vectors, message, project_name, profile_id=None,
+                              output_language=None):
     """Build a narrative using pre-classified segment vectors as the menu of clips.
 
     Prioritizes "high" narrative scores; uses "episodic" segments for key moments
@@ -5588,6 +5681,10 @@ Return ONLY valid JSON in this shape:
 }}"""
 
     system_prompt = inject_my_style(system_prompt, profile_id=profile_id)
+    # Output-language directive ('' for English → byte-identical prompt).
+    directive = language_directive(output_language)
+    if directive:
+        system_prompt = system_prompt + directive
     response = _call_ai(prompt, system_prompt)
     parsed = _parse_json_response(response)
     if not isinstance(parsed, dict):
@@ -5635,7 +5732,8 @@ Return ONLY valid JSON in this shape:
     }
 
 
-def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_target=7):
+def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_target=7,
+                   language_directive_text=''):
     """Analyze transcript for documentary story structure.
 
     Three-pass split: local Gemma 4b can't reliably populate multiple
@@ -5661,13 +5759,18 @@ def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_tar
     # Pass 1 — soundbites (highest editorial value, runs first)
     soundbites_result = _analyze_story_soundbites(
         transcript_text, project_name, soundbites_target,
+        language_directive_text=language_directive_text,
     )
     # Pass 2 — story beats + b-roll suggestions
     beats_result = _analyze_story_beats(
         transcript_text, project_name, beats_target,
+        language_directive_text=language_directive_text,
     )
     # Pass 3 — overview (summary, title, themes — no timecodes)
-    overview = _analyze_story_overview(transcript_text, project_name)
+    overview = _analyze_story_overview(
+        transcript_text, project_name,
+        language_directive_text=language_directive_text,
+    )
 
     return {
         'summary': _first_present(overview or {}, 'summary', 'overview', 'synopsis'),
@@ -5688,7 +5791,8 @@ def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_tar
     }
 
 
-def _analyze_story_soundbites(transcript_text, project_name, soundbites_target):
+def _analyze_story_soundbites(transcript_text, project_name, soundbites_target,
+                              language_directive_text=''):
     """Pass 1: strongest soundbites only.
 
     Dedicated call so the model focuses entirely on finding the best
@@ -5703,6 +5807,8 @@ def _analyze_story_soundbites(transcript_text, project_name, soundbites_target):
         "Copy HH:MM:SS timecodes exactly from the transcript — "
         "do not invent or round timecodes."
     )
+    if language_directive_text:
+        system_prompt = system_prompt + language_directive_text
     prompt = f"""PROJECT: {project_name}
 
 TRANSCRIPT:
@@ -5734,7 +5840,8 @@ Return ONLY valid JSON, nothing else."""
     return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
 
-def _analyze_story_beats(transcript_text, project_name, beats_target):
+def _analyze_story_beats(transcript_text, project_name, beats_target,
+                         language_directive_text=''):
     """Pass 2: story beats + b-roll suggestions.
 
     These share a pass because they reason about the same narrative arc —
@@ -5748,6 +5855,8 @@ def _analyze_story_beats(transcript_text, project_name, beats_target):
         "Copy HH:MM:SS timecodes exactly from the transcript — "
         "do not invent or round timecodes."
     )
+    if language_directive_text:
+        system_prompt = system_prompt + language_directive_text
     prompt = f"""PROJECT: {project_name}
 
 TRANSCRIPT:
@@ -5780,7 +5889,8 @@ Return ONLY valid JSON, nothing else."""
     return retry if isinstance(retry, dict) else (parsed if isinstance(parsed, dict) else {})
 
 
-def _analyze_story_overview(transcript_text, project_name):
+def _analyze_story_overview(transcript_text, project_name,
+                            language_directive_text=''):
     """Pass 3: summary + suggested_title + themes only.
 
     Small schema, no timecodes — easy for Gemma 4b to fill reliably.
@@ -5790,6 +5900,8 @@ def _analyze_story_overview(transcript_text, project_name):
         "You are an expert documentary film editor. Output JSON only. "
         "No markdown, no fences, no commentary, no <think> tags."
     )
+    if language_directive_text:
+        system_prompt = system_prompt + language_directive_text
     prompt = f"""PROJECT: {project_name}
 
 TRANSCRIPT:
@@ -5862,7 +5974,8 @@ def _looks_usable_social(value):
     return False
 
 
-def _analyze_social(transcript_text, project_name, clips_target=7):
+def _analyze_social(transcript_text, project_name, clips_target=7,
+                    language_directive_text=''):
     """Find social media clip opportunities in the transcript.
 
     ``clips_target`` sets the upper bound the model is asked to return.
@@ -5875,6 +5988,8 @@ def _analyze_social(transcript_text, project_name, clips_target=7):
 repurposing long-form documentary interview content into viral short-form clips.
 You know what performs well on Instagram Reels, TikTok, LinkedIn, and YouTube Shorts.
 Always respond in valid JSON format only. No other text."""
+    if language_directive_text:
+        system_prompt = system_prompt + language_directive_text
 
     prompt = f"""Analyze this interview transcript and identify the best social media clip opportunities.
 
@@ -5924,6 +6039,8 @@ Return ONLY valid JSON, no markdown formatting."""
         'You output JSON only. No markdown, no prose, no <think> tags. '
         'Output a single JSON array of clip objects matching the schema below.'
     )
+    if language_directive_text:
+        retry_system = retry_system + language_directive_text
     retry_prompt = (
         'Re-analyze the interview below for short-form social media clips. '
         'Respond ONLY with this JSON array:\n'

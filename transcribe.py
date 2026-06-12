@@ -5,6 +5,7 @@ Falls back to standard Whisper if WhisperX is not available.
 """
 
 import os
+import re
 import ssl
 import sys
 import json
@@ -166,6 +167,28 @@ def _install_whisper_progress_hook():
         return False
 
 
+# Lines ffmpeg prints before any diagnostics: version, build, configure
+# flags, and the lib version table. ~3 KB on the bundled build.
+_FFMPEG_BANNER_LINE = re.compile(
+    r'^\s*(?:ffmpeg version |ffprobe version |built with |configuration: '
+    r'|lib(?:avutil|avcodec|avformat|avdevice|avfilter|swscale|swresample'
+    r'|postproc)\s)'
+)
+
+
+def _ffmpeg_error_excerpt(stderr, limit=500):
+    """The diagnostically useful TAIL of ffmpeg's stderr.
+
+    ffmpeg writes its banner first and the actual error LAST, so
+    head-truncating stderr handed users 500 chars of configure flags and
+    discarded the error itself (the only support artifact for a remote
+    failure). Strip banner lines, keep the tail."""
+    lines = [ln for ln in (stderr or '').splitlines()
+             if ln.strip() and not _FFMPEG_BANNER_LINE.match(ln)]
+    text = '\n'.join(lines).strip() or (stderr or '').strip()
+    return text[-limit:]
+
+
 def _audio_stream_plan(filepath):
     """Probe the source's audio streams once per extraction.
 
@@ -178,6 +201,9 @@ def _audio_stream_plan(filepath):
       mic on track 2+ with scratch on track 1, and ffmpeg's default picks
       exactly ONE stream — the wrong-mic (or near-empty) transcript class
       of bug. amix is enabled in the bundled LGPL ffmpeg build.
+    - Program containers (MPEG-TS) are exempt from the mixdown: their
+      multi-audio is alternate services/languages, so ffmpeg's default
+      best-stream pick applies regardless of stream count.
     """
     from exporters.media_probe import _find_ffprobe
     ffprobe = _find_ffprobe()
@@ -190,7 +216,26 @@ def _audio_stream_plan(filepath):
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
-                count = len([ln for ln in result.stdout.split() if ln.strip()])
+                # ffprobe prints each stream once per enclosing section,
+                # and containers with programs (MPEG-TS broadcast files,
+                # often misnamed .mp4 by newsroom systems) list every
+                # stream under its program AND in the top-level stream
+                # list. Line-counting doubled a one-audio TS to 2, and the
+                # amix map then referenced a nonexistent [0:a:1] — "Stream
+                # specifier matches no streams" — failing the whole
+                # extraction.
+                tokens = result.stdout.split()
+                distinct = set(tokens)
+                if len(tokens) > len(distinct):
+                    # Duplicated listings = program container. Multi-audio
+                    # there means alternate services or languages — not the
+                    # multi-mic camera case amix exists for — and mixing
+                    # those transcribes unrelated speech over each other.
+                    # ffmpeg's default best-stream pick is the honest
+                    # choice.
+                    count = 1 if distinct else 0
+                else:
+                    count = len(distinct)
         except Exception:
             count = 1
     if count <= 1:
@@ -342,7 +387,17 @@ def extract_audio(filepath, project_dir=None):
             tmp_path,
         ], capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg audio extraction failed: {result.stderr[:500]}")
+            try:
+                # Full stderr to the backend log — the UI gets only the
+                # excerpt, support needs the rest.
+                print(f'[extract_audio] ffmpeg rc={result.returncode} '
+                      f'stderr: {result.stderr[-4000:]}',
+                      file=sys.stderr, flush=True)
+            except OSError:
+                pass  # dead stderr pipe must not eat the real error below
+            raise RuntimeError(
+                'ffmpeg audio extraction failed: '
+                f'{_ffmpeg_error_excerpt(result.stderr)}')
         os.replace(tmp_path, audio_path)
     finally:
         # Failure or interruption: never leave a partial file behind.

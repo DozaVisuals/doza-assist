@@ -23,6 +23,7 @@ from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
 from exporters.media_probe import (
     get_video_resolution, get_video_framerate, get_video_start_timecode_frames,
     get_video_start_timecode_info, get_video_start_timecode, get_media_duration,
+    get_media_container_format,
 )
 from fcpxml_export import VIDEO_EXTS
 from doza_assist.fcpxml import (
@@ -3254,15 +3255,22 @@ def export_fcpxml(project_id):
             'format_name': result.format_name,
         }
         payload.update(info)
+        warning = _mpegts_media_warning(project, nle)
+        if warning:
+            payload['media_warning'] = warning
         return jsonify(payload)
 
     if deliver_to == 'file':
         _reveal_in_finder(result.file_path)
-        return jsonify({
+        payload = {
             'status': 'ok', 'delivery': 'file',
             'file': result.file_path, 'filename': result.filename,
             'format_name': result.format_name,
-        })
+        }
+        warning = _mpegts_media_warning(project)
+        if warning:
+            payload['media_warning'] = warning
+        return jsonify(payload)
 
     return _exporter_response(result, project, exporter)
 
@@ -3275,6 +3283,34 @@ NLE_DISPLAY_NAMES = {
     'premiere': 'Premiere Pro',
     'resolve': 'DaVinci Resolve',
 }
+
+
+def _mpegts_media_warning(project: dict, nle: str | None = None) -> str | None:
+    """Advisory when the project's source media is an MPEG-TS broadcast stream.
+
+    FCP, Premiere and Resolve all import TS media as offline/unsupported with
+    no explanation — newsroom MAMs hand out ``.ts`` files and TS content
+    misnamed ``.mp4`` (the Mimir shape), so an export referencing such media
+    conforms against clips the NLE cannot decode. Returns a user-facing
+    message, or None when the media is fine. Fails open: any probe trouble
+    (missing file, no ffprobe, timeout) returns None so exports never block
+    on the advisory.
+    """
+    try:
+        src = project.get('source_path') or project.get('filepath') or ''
+        fmt = get_media_container_format(src)
+        if 'mpegts' not in (fmt or ''):
+            return None
+        nle_name = NLE_DISPLAY_NAMES.get(nle) if nle else None
+        readers = nle_name or 'Final Cut Pro, Premiere and Resolve'
+        return (
+            f"{os.path.basename(src)} is an MPEG-TS broadcast stream — "
+            f"{readers} cannot read MPEG-TS media. Re-wrap it to a standard "
+            f"MP4 (lossless, e.g. `ffmpeg -i in.ts -c copy out.mp4`) before "
+            f"conforming."
+        )
+    except Exception:
+        return None
 
 
 # CFBundleIdentifier for each NLE. Spotlight indexes apps by bundle ID
@@ -3576,7 +3612,7 @@ def send_to_nle():
             'file': file_path,
         }), 500
 
-    return jsonify({
+    payload = {
         'status': 'ok',
         'nle': nle,
         'nle_name': NLE_DISPLAY_NAMES[nle],
@@ -3584,7 +3620,11 @@ def send_to_nle():
         'file': file_path,
         'filename': filename,
         'format_name': format_name,
-    })
+    }
+    warning = _mpegts_media_warning(project, nle)
+    if warning:
+        payload['media_warning'] = warning
+    return jsonify(payload)
 
 
 def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
@@ -3879,22 +3919,30 @@ def export_fcpxml_multicam(project_id):
         if opened_in is None:
             return jsonify({'error': info.get('error', 'NLE delivery failed'),
                             'file': out_path}), 500
-        return jsonify({
+        payload = {
             'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
             'nle': 'fcp', 'nle_name': NLE_DISPLAY_NAMES['fcp'],
             'file': out_path, 'filename': filename,
             'format_name': 'FCPXML', 'mode': mode,
             'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
-        })
+        }
+        warning = _mpegts_media_warning(project, 'fcp')
+        if warning:
+            payload['media_warning'] = warning
+        return jsonify(payload)
 
     if deliver_to == 'file':
         _reveal_in_finder(out_path)
-        return jsonify({
+        payload = {
             'status': 'ok', 'delivery': 'file',
             'file': out_path, 'filename': filename,
             'format_name': 'FCPXML', 'mode': mode,
             'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
-        })
+        }
+        warning = _mpegts_media_warning(project)
+        if warning:
+            payload['media_warning'] = warning
+        return jsonify(payload)
 
     response = send_file(out_path, as_attachment=True, download_name=filename)
     response.headers['X-Export-Format'] = 'FCPXML'
@@ -4523,15 +4571,22 @@ def story_export(project_id):
             'format_name': result.format_name,
         }
         payload.update(info)
+        warning = _mpegts_media_warning(project, nle)
+        if warning:
+            payload['media_warning'] = warning
         return jsonify(payload)
 
     if deliver_to == 'file':
         _reveal_in_finder(result.file_path)
-        return jsonify({
+        payload = {
             'status': 'ok', 'delivery': 'file',
             'file': result.file_path, 'filename': result.filename,
             'format_name': result.format_name,
-        })
+        }
+        warning = _mpegts_media_warning(project)
+        if warning:
+            payload['media_warning'] = warning
+        return jsonify(payload)
 
     return _exporter_response(result, project, exporter)
 

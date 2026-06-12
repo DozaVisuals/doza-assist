@@ -156,6 +156,39 @@ def get_audio_channels(path: str) -> int | None:
     return None
 
 
+def get_media_container_format(path: str) -> str | None:
+    """Container format name(s) via ffprobe, or None on any probe trouble.
+
+    Returns the raw first-row string, e.g. ``'mpegts'``, ``'wav'``, or the
+    comma-separated demuxer family ``'mov,mp4,m4a,3gp,3g2,mj2'`` (csv=p=0
+    quotes comma-containing values — callers should substring-match, not
+    compare equality). Used to warn editors when an export references
+    MPEG-TS broadcast media, which FCP/Premiere/Resolve cannot decode.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-show_entries", "format=format_name",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            row = _first_csv_row(result.stdout)
+            if row:
+                return row
+    except Exception:
+        pass
+    return None
+
+
 def get_media_duration(path: str) -> float | None:
     """Detect the container duration in seconds using ffprobe.
 

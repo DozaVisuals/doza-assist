@@ -3526,8 +3526,13 @@ async function exportSelectedClips() {
 
     // FCPXML-imported projects: use the round-trip exporter so the
     // original video media references are preserved (not just the WAV).
+    // Plain asset-clip imports honor the chosen editing platform; multicam/
+    // sync-clip containers are FCP-only by nature, so those always round-trip.
     const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
-    if (hasFcpxmlSource) {
+    const rtContainer = (hasFcpxmlSource ? (PROJECT.fcpxml_source || {}) : {}).container_type || '';
+    const rtIsFcpOnly = hasFcpxmlSource && rtContainer !== 'asset-clip';
+    const useRoundTrip = hasFcpxmlSource && (EDITING_PLATFORM === 'fcp' || rtIsFcpOnly);
+    if (useRoundTrip) {
         try {
             await _exportFCPXMLRoundTrip({
                 sources: ['client_selects'],
@@ -3577,6 +3582,7 @@ async function exportSelectedClips() {
             } else {
                 showToast(`Exported ${checkedIds.size} clips!`);
             }
+            if (data.media_warning) showToast(data.media_warning, true);
         } else {
             showToast((data && data.error) || 'Export failed', true);
         }
@@ -4017,8 +4023,13 @@ async function exportFCPXML(category) {
     // level `const` lives in the *lexical* global scope, not on `window` —
     // so `window.PROJECT` is undefined here. Check the lexical binding via
     // `typeof` instead.
+    // Plain asset-clip imports honor the chosen editing platform; multicam/
+    // sync-clip containers are FCP-only by nature, so those always round-trip.
     const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
-    if (hasFcpxmlSource && category) {
+    const rtContainer = (hasFcpxmlSource ? (PROJECT.fcpxml_source || {}) : {}).container_type || '';
+    const rtIsFcpOnly = hasFcpxmlSource && rtContainer !== 'asset-clip';
+    const useRoundTrip = hasFcpxmlSource && (EDITING_PLATFORM === 'fcp' || rtIsFcpOnly);
+    if (useRoundTrip && category) {
         const rtSource = _CATEGORY_TO_RT_SOURCE[category];
         if (rtSource) {
             return _exportFCPXMLRoundTrip({
@@ -4060,6 +4071,7 @@ async function exportFCPXML(category) {
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
+        if (data.media_warning) showToast(data.media_warning, true);
     } catch (err) {
         showToast('Export error: ' + err.message, true);
     }
@@ -4086,10 +4098,17 @@ async function _exportFCPXMLRoundTrip(opts) {
             return;
         }
         if (data.delivery === 'nle') {
-            showToast('Sent to Final Cut Pro');
+            // When the round-trip ran despite a non-FCP platform selection
+            // (multicam/sync-clip containers are FCP-only), say why the file
+            // went to FCP instead of pretending that was the user's choice.
+            const platformIsFcp = typeof EDITING_PLATFORM === 'undefined' || EDITING_PLATFORM === 'fcp';
+            showToast(platformIsFcp
+                ? 'Sent to Final Cut Pro'
+                : 'Multicam round-trips preserve the FCP container — sent to Final Cut Pro');
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
+        if (data.media_warning) showToast(data.media_warning, true);
         if (data.skipped_count) {
             // Partial drops used to be invisible — an editor exporting 12
             // selects silently received 10 clips (the lane-1-gap bug class).
@@ -4213,6 +4232,7 @@ async function exportFCPXMLMulticam() {
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'} — ${modeLabel}`);
         }
+        if (data.media_warning) showToast(data.media_warning, true);
     } catch (err) {
         showToast('Export error: ' + err.message, true);
     }
@@ -5191,8 +5211,13 @@ async function exportStoryFCPXML() {
     //
     // NOTE: see exportFCPXML — top-level `const PROJECT` lives in the
     // lexical global, not on `window`, so we check the binding directly.
+    // Plain asset-clip imports honor the chosen editing platform; multicam/
+    // sync-clip containers are FCP-only by nature, so those always round-trip.
     const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
-    if (hasFcpxmlSource) {
+    const rtContainer = (hasFcpxmlSource ? (PROJECT.fcpxml_source || {}) : {}).container_type || '';
+    const rtIsFcpOnly = hasFcpxmlSource && rtContainer !== 'asset-clip';
+    const useRoundTrip = hasFcpxmlSource && (EDITING_PLATFORM === 'fcp' || rtIsFcpOnly);
+    if (useRoundTrip) {
         return _exportFCPXMLRoundTrip({
             sources: ['story_build'],
             mode: 'selects_project',
@@ -5234,6 +5259,7 @@ async function exportStoryFCPXML() {
         } else {
             showToast(`Exported to ${data.file || data.filename || 'disk'}`);
         }
+        if (data.media_warning) showToast(data.media_warning, true);
     } catch (err) { showToast('Export error: ' + err.message, true); }
 }
 

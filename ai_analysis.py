@@ -558,6 +558,11 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     # titles whose words won't literally appear in the transcript, so the
     # title-anchor validator sub-check would drop legitimate clips.
     directive = language_directive(output_language, chat=True)
+    # The chat clause is for prose replies only — JSON-only sub-calls
+    # (layer-2 chunked search, salvage) get the plain directive so the
+    # "reply in the user's language" sentence can't fight their
+    # "Return ONLY JSON" contracts.
+    directive_plain = language_directive(output_language)
     skip_title_anchor = bool(output_language) and \
         output_language != (transcript or {}).get('language', 'en')
     phrases, words = _extract_query_keywords(message)
@@ -602,7 +607,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
             phrases, words, profile_id, analysis,
             segment_vectors=segment_vectors, theme_phrases=theme_phrases,
             tfidf_hits=tfidf_hits, speaker_names=speaker_names,
-            language_directive_text=directive,
+            language_directive_text=directive_plain,
         )
 
     formatted = _format_transcript_for_ai(transcript, speaker_names)
@@ -647,7 +652,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
-            language_directive_text=directive,
+            language_directive_text=directive_plain,
             skip_title_anchor=skip_title_anchor,
         )
     # Enforce explicit clip count from the user message. Gemma 4B
@@ -721,6 +726,11 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     # Mirror of the non-streaming path: resolved language directive ('' for
     # English) plus the cross-language title-anchor skip for the validator.
     directive = language_directive(output_language, chat=True)
+    # The chat clause is for prose replies only — JSON-only sub-calls
+    # (layer-2 chunked search, salvage) get the plain directive so the
+    # "reply in the user's language" sentence can't fight their
+    # "Return ONLY JSON" contracts.
+    directive_plain = language_directive(output_language)
     skip_title_anchor = bool(output_language) and \
         output_language != (transcript or {}).get('language', 'en')
     # Each retrieval step is wrapped so a single misbehaving helper can't
@@ -772,7 +782,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             phrases, words, profile_id, analysis,
             segment_vectors=segment_vectors, theme_phrases=theme_phrases,
             tfidf_hits=tfidf_hits, speaker_names=speaker_names,
-            language_directive_text=directive,
+            language_directive_text=directive_plain,
         ):
             yield event
         return
@@ -905,7 +915,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
-            language_directive_text=directive,
+            language_directive_text=directive_plain,
             skip_title_anchor=skip_title_anchor,
         )
     # Enforce explicit clip count from the user message — same defense

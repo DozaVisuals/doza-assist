@@ -2785,9 +2785,9 @@ def chat(project_id):
                 project_name=' + '.join(project_names),
                 analysis=None,
                 profile_id=profile_id,
-                # Multi-project: resolve from the FIRST project's meta — cheap
-                # and consistent (no cross-project language reconciliation).
-                output_language=resolve_output_language(projects_for_chat[0]),
+                # Multi-project chat is explicitly OUT OF SCOPE for the
+                # output-language feature (combined transcripts keep their
+                # historical behavior) — no output_language passed.
             )
 
         # Persist chat history on single-project chats. Multi-project sessions
@@ -2874,7 +2874,6 @@ def chat_stream(project_id):
             'profile_id': profile_id,
             # Multi-project: resolve from the FIRST project's meta — cheap
             # and consistent (no cross-project language reconciliation).
-            'output_language': resolve_output_language(projects_for_chat[0]),
         }
         single_pid = None
 
@@ -4030,7 +4029,8 @@ def retranscribe(project_id):
                 os.remove(stale)
             except OSError:
                 pass
-    update_project(project_id, {}, remove=['diarization', 'speaker_names'])
+    update_project(project_id, {},
+                   remove=['diarization', 'speaker_names', 'detected_language'])
 
     # Drop the cached paragraph_index + segment_vectors — they reference the
     # OLD transcript text. Letting them survive a retranscribe means the

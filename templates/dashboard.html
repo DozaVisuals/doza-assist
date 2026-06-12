@@ -182,12 +182,13 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                     <div class="form-group">
                         <label class="form-label">Language</label>
                         <select class="form-input" id="language" onchange="updateLanguageHint()">
-                            {# Canonical list from doza_assist.output_language.LANGUAGES
-                               ('en' first, then alphabetical). 'auto' is a UI
-                               sentinel spliced in after English — visual parity
-                               with the old hardcoded list. #}
-                            <option value="en" selected>English</option>
+                            {# Canonical list from doza_assist.output_language.LANGUAGES.
+                               Auto-detect leads (newsroom flows) — the
+                               'selected' attr on English is only the no-JS
+                               fallback; the sticky last-used default below
+                               picks the real initial value. #}
                             <option value="auto">Auto-detect</option>
+                            <option value="en" selected>English</option>
                             <option disabled>──────────</option>
                             {% for code, name in languages if code != 'en' %}
                             <option value="{{ code }}">{{ name }}</option>
@@ -429,6 +430,8 @@ async function createFromPath() {
     btn.textContent = 'Creating...';
 
     try {
+        const chosenLanguage = document.getElementById('language').value || 'en';
+        rememberDefaultLanguage(chosenLanguage);  // sticky last-used default
         const res = await fetch('/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -439,7 +442,7 @@ async function createFromPath() {
                 interviewer_name: document.getElementById('interviewerName').value || 'Interviewer',
                 subject_name: document.getElementById('subjectName').value || 'Subject',
                 num_speakers: parseInt(document.getElementById('numSpeakers').value) || 2,
-                language: document.getElementById('language').value || 'en',
+                language: chosenLanguage,
                 output_language: (document.getElementById('outputLanguage') && document.getElementById('outputLanguage').value) || 'match',
             }),
         });
@@ -983,8 +986,28 @@ function updateLanguageHint() {
     const sel = document.getElementById('language');
     const hint = document.getElementById('languageHint');
     if (!sel || !hint) return;
+    // 'auto' included: auto-detect runs through Whisper as well.
     hint.style.display = (sel.value !== 'en') ? 'block' : 'none';
 }
+
+// Sticky last-used transcription language (shared key with the Pro import
+// queue, which is injected into this page). Seeded English so existing
+// English-first installs keep their instant Parakeet first run; a newsroom
+// that picks Auto-detect once keeps it forever.
+const DOZA_LANG_KEY = 'dozaDefaultLanguage';
+function getDefaultLanguage() {
+    const v = localStorage.getItem(DOZA_LANG_KEY);
+    const sel = document.getElementById('language');
+    if (!v || !sel) return 'en';
+    return [...sel.options].some(o => o.value === v && !o.disabled) ? v : 'en';
+}
+function rememberDefaultLanguage(v) {
+    if (v) try { localStorage.setItem(DOZA_LANG_KEY, v); } catch (e) {}
+}
+(function applyStickyLanguage() {
+    const sel = document.getElementById('language');
+    if (sel) sel.value = getDefaultLanguage();
+})();
 updateLanguageHint();
 </script>
 

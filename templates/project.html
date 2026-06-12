@@ -4519,8 +4519,7 @@ function showRetranscribe() {
     const currentLang = PROJECT.language || 'en';
     // Canonical list (LANGS, 'en' first) with the 'auto' UI sentinel spliced
     // in after English — same order as the old hardcoded array.
-    const langs = LANGS.slice(0, 1)
-        .concat([['auto', 'Auto-detect']], LANGS.slice(1));
+    const langs = [['auto', 'Auto-detect']].concat(LANGS);
     const options = langs.map(([v,l]) =>
         `<option value="${v}"${v === currentLang ? ' selected' : ''}>${l}</option>`
     ).join('');

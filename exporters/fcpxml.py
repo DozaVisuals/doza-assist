@@ -93,7 +93,7 @@ class FCPXMLExporter(BaseExporter):
         )
         file_path = os.path.join(exports_dir, filename)
         os.makedirs(exports_dir, exist_ok=True)
-        with open(file_path, "w") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         return ExportResult(
@@ -138,7 +138,7 @@ class FCPXMLExporter(BaseExporter):
         )
         file_path = os.path.join(exports_dir, filename)
         os.makedirs(exports_dir, exist_ok=True)
-        with open(file_path, "w") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         return ExportResult(

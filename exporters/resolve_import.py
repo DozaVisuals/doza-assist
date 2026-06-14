@@ -47,8 +47,43 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
+
+
+# Resolve's scripting IPC calls have NO built-in timeout: a Resolve that
+# hangs reconnecting media or chewing on a large XML would block the
+# caller's thread forever (the Send-to-Resolve "beachball"). Run such a
+# call on a DAEMON worker and give up after a hard cap so the export
+# request always returns. A daemon thread is used deliberately — on
+# timeout it is abandoned (the call keeps running inside Resolve) and
+# dies with the process, so it can never block the request OR app exit
+# (unlike a ThreadPoolExecutor, whose shutdown joins the hung worker).
+_RESOLVE_CALL_TIMEOUT = 120.0
+
+
+def _call_with_timeout(fn, *args, timeout=_RESOLVE_CALL_TIMEOUT, **kwargs):
+    """Run a blocking Resolve scripting call with a hard wall-clock cap.
+
+    Returns the call's value, re-raises whatever it raised, or raises
+    ``TimeoutError`` if it doesn't return within ``timeout`` seconds."""
+    box = {}
+
+    def _runner():
+        try:
+            box['value'] = fn(*args, **kwargs)
+        except BaseException as exc:  # propagate to the caller below
+            box['error'] = exc
+
+    worker = threading.Thread(target=_runner, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError('Resolve scripting call timed out')
+    if 'error' in box:
+        raise box['error']
+    return box.get('value')
 
 
 # Resolve's bundled scripting module. Paths are stable across recent
@@ -307,10 +342,11 @@ def import_timeline(
         # cuts and structure land.
         if source_media_path and os.path.isfile(source_media_path):
             try:
-                handle.GetMediaStorage().AddItemListToMediaPool(
-                    [source_media_path]
+                _call_with_timeout(
+                    handle.GetMediaStorage().AddItemListToMediaPool,
+                    [source_media_path], timeout=60.0,
                 )
-            except Exception:
+            except (Exception, TimeoutError):
                 pass
 
         media_pool = project.GetMediaPool()
@@ -318,7 +354,18 @@ def import_timeline(
         if source_media_path:
             import_opts['sourceClipsPath'] = os.path.dirname(source_media_path)
 
-        timeline = media_pool.ImportTimelineFromFile(timeline_path, import_opts)
+        try:
+            timeline = _call_with_timeout(
+                media_pool.ImportTimelineFromFile, timeline_path, import_opts,
+            )
+        except TimeoutError:
+            return ImportResult(
+                ok=False, reason='import_timeout',
+                hint=('Resolve did not finish importing in time (it may be '
+                      'reconnecting media or busy). The timeline file is in '
+                      'Finder — import it manually with File → Import → '
+                      'Timeline once Resolve is responsive.'),
+            )
         if timeline is None:
             return ImportResult(
                 ok=False, reason='import_failed',

@@ -3573,8 +3573,10 @@ async function exportSelectedClips() {
         const d = await r.json().catch(() => ({}));
         return { res: r, data: d };
     };
+    maybeShowExportBusy(delivery, nle);
     try {
         const { res, data } = await runLabelsExport();
+        hideBusy();
         if (res.ok) {
             if (data.delivery === 'nle') {
                 showToast(formatExportToast(data, `Exported ${checkedIds.size} clips`));
@@ -4059,8 +4061,10 @@ async function exportFCPXML(category) {
         const d = await r.json().catch(() => ({}));
         return { res: r, data: d };
     };
+    maybeShowExportBusy(delivery, nle);
     try {
         const { res, data } = await runExport();
+        hideBusy();
         if (!res.ok) {
             showToast((data && data.error) || 'Export failed', true);
             return;
@@ -4086,6 +4090,7 @@ async function _exportFCPXMLRoundTrip(opts) {
         { mode: 'selects_project', deliver_to: delivery },
         opts || {},
     );
+    maybeShowExportBusy(delivery, 'fcp');  // round-trip always targets FCP
     try {
         const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
             method: 'POST',
@@ -4093,6 +4098,7 @@ async function _exportFCPXMLRoundTrip(opts) {
             body: JSON.stringify(body),
         });
         const data = await res.json().catch(() => ({}));
+        hideBusy();
         if (!res.ok) {
             showToast((data && data.error) || 'Export failed', true);
             return;
@@ -4216,6 +4222,7 @@ async function exportFCPXMLMulticam() {
     const delivery = getDelivery();
     const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
 
+    maybeShowExportBusy(delivery, 'fcp');  // multicam round-trip targets FCP
     try {
         const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
             method: 'POST',
@@ -4223,6 +4230,7 @@ async function exportFCPXMLMulticam() {
             body: JSON.stringify({ mode, sources, deliver_to: delivery }),
         });
         const data = await res.json().catch(() => ({}));
+        hideBusy();
         if (!res.ok) {
             showToast((data && data.error) || 'Export failed', true);
             return;
@@ -4692,6 +4700,34 @@ function showToast(msg, isError = false) {
     toast.classList.toggle('error', isError);
     toast.classList.add('show');
     setTimeout(() => toast.classList.remove('show'), 5000);
+}
+
+// Persistent "working" toast for the Send-to-NLE handoff. The Resolve
+// scripting import can take 30s+ (launching Resolve, conforming media);
+// without visible feedback the silent wait reads as a frozen/beachballed
+// app. showBusy holds the toast open until hideBusy (or the next toast).
+function showBusy(msg) {
+    const toast = document.getElementById('toast');
+    if (!toast) return;
+    toast.textContent = msg;
+    toast.classList.remove('error');
+    toast.classList.add('show');
+}
+function hideBusy() {
+    const toast = document.getElementById('toast');
+    if (toast) toast.classList.remove('show');
+}
+// "Sending to DaVinci Resolve…" only matters for the NLE handoff (the slow
+// scripted path); file delivery is instant. Returns true when a busy
+// indicator was shown.
+function maybeShowExportBusy(delivery, nle) {
+    if (delivery !== 'nle') return false;
+    const name = (typeof PLATFORM_NAMES !== 'undefined' && PLATFORM_NAMES[nle]) || 'your editor';
+    const tail = nle === 'resolve'
+        ? ' — Resolve can take a moment to launch and import.'
+        : '…';
+    showBusy('Sending to ' + name + tail);
+    return true;
 }
 
 // Compose an NLE-export toast that's honest about what actually happened.
@@ -5246,8 +5282,10 @@ async function exportStoryFCPXML() {
         const d = await r.json().catch(() => ({}));
         return { res: r, data: d };
     };
+    maybeShowExportBusy(delivery, nle);
     try {
         const { res, data } = await runStoryExport();
+        hideBusy();
         if (!res.ok) {
             showToast((data && data.error) || 'Export failed', true);
             return;

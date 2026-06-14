@@ -322,3 +322,56 @@ class TestDirectiveInjectionCoreSurfaces:
             text, segments, skip_title_anchor=True)
         assert '[CLIP:' not in kept_default
         assert '[CLIP:' in kept_skip
+
+
+class TestCollectionLanguageInheritance:
+    """Collections inherit the member projects' output language (the tester
+    fix): a Norwegian folder must produce Norwegian collection prose, not
+    English. Explicit collection setting still wins; no members → English."""
+
+    def test_inherits_majority_member_language(self):
+        members = [
+            {'language': 'no'},
+            {'language': 'auto', 'detected_language': 'no'},
+            {'language': 'en'},
+        ]
+        assert resolve_collection_output_language({}, members) == 'no'
+
+    def test_all_english_members_stay_english(self):
+        members = [{'language': 'en'}, {'language': 'en'}]
+        assert resolve_collection_output_language({}, members) == 'en'
+        # English → empty directive → byte-identical prompts.
+        assert language_directive(
+            resolve_collection_output_language({}, members)) == ''
+
+    def test_explicit_collection_setting_wins_over_members(self):
+        members = [{'language': 'no'}, {'language': 'no'}]
+        assert resolve_collection_output_language(
+            {'output_language': 'de'}, members) == 'de'
+
+    def test_explicit_match_falls_through_to_members(self):
+        members = [{'language': 'sv'}]
+        assert resolve_collection_output_language(
+            {'output_language': 'match'}, members) == 'sv'
+
+    def test_no_members_defaults_english(self):
+        assert resolve_collection_output_language({}, []) == 'en'
+        assert resolve_collection_output_language({}, None) == 'en'
+
+    def test_tie_breaks_to_first_member_order(self):
+        # one 'no', one 'de' — tie; first-seen ('no') wins deterministically.
+        members = [{'language': 'no'}, {'language': 'de'}]
+        assert resolve_collection_output_language({}, members) == 'no'
+
+    def test_english_members_never_outvote_non_english(self):
+        # Norwegian + two undetected/English members must stay Norwegian:
+        # English is the fallback, not a content vote.
+        members = [{'language': 'no'},
+                   {'language': 'auto'},  # not yet detected → 'en'
+                   {'language': 'en'}]
+        assert resolve_collection_output_language({}, members) == 'no'
+
+    def test_unknown_member_codes_do_not_force_english(self):
+        members = [{'language': 'no'}, {'language': 'xx'}, {'language': 'zz'}]
+        # 'xx'/'zz' resolve to 'en' (unknown) and are not counted → 'no' wins.
+        assert resolve_collection_output_language({}, members) == 'no'

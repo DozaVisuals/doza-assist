@@ -375,3 +375,28 @@ class TestCollectionLanguageInheritance:
         members = [{'language': 'no'}, {'language': 'xx'}, {'language': 'zz'}]
         # 'xx'/'zz' resolve to 'en' (unknown) and are not counted → 'no' wins.
         assert resolve_collection_output_language({}, members) == 'no'
+
+
+class TestStyleExemplarCarveOut:
+    """Fix #2: the directive must tell the model the My Style / STYLE CONTEXT
+    exemplars are style-only and may be another language, so English-trained
+    exemplars can't pull non-English output back to English. English stays
+    byte-identical (empty directive)."""
+
+    def test_non_english_directive_has_style_carveout(self):
+        d = language_directive('no')
+        assert 'STYLE CONTEXT' in d
+        assert 'STYLE and STRUCTURE' in d
+        assert 'regardless of the language of those examples' in d
+        # The carve-out names the target language so the override is concrete.
+        assert 'Norwegian' in d
+
+    def test_carveout_present_for_chat_variant_too(self):
+        d = language_directive('de', chat=True)
+        assert 'STYLE CONTEXT' in d and 'German' in d
+
+    def test_english_unchanged_no_carveout(self):
+        # English (and unknown) → empty directive, byte-identical to before.
+        assert language_directive('en') == ''
+        assert language_directive('en', chat=True) == ''
+        assert 'STYLE CONTEXT' not in language_directive('en')

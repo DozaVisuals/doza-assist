@@ -164,7 +164,16 @@ def language_directive(code, chat=False):
         f'Never translate verbatim quotes from the transcript: quote them '
         f'exactly as they appear, in their original language. '
         f'Never translate speaker labels, project or clip IDs, timecodes, '
-        f'or fixed field values/enums — copy those exactly as given.'
+        f'or fixed field values/enums — copy those exactly as given. '
+        # Counterweight to the My Style / STYLE CONTEXT exemplars, which are
+        # verbatim passages from the editor's own (often English) finished
+        # work and sit at peak-attention positions — without this they pull
+        # a small model back toward English regardless of the instruction.
+        f'Any MY STYLE or STYLE CONTEXT exemplar passages or example quotes '
+        f'shown elsewhere in this prompt are provided for STYLE and STRUCTURE '
+        f'ONLY and may be written in a different language — do not let their '
+        f'language influence your output. Write your generated prose in '
+        f'{name} regardless of the language of those examples.'
     )
     if chat:
         directive += (

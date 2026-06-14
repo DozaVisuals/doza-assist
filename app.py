@@ -1315,21 +1315,25 @@ def find_file():
     if not filename:
         return jsonify({'error': 'No filename provided'}), 400
 
-    # Home folders FIRST, /Volumes last: mounted network shares (newsroom
-    # NAS volumes) can take minutes to walk, and the browser fetch dies long
-    # before that ("Failed to fetch"). Most dropped files live in the home
-    # dirs; finding one there ends the search before /Volumes is touched.
+    # /Volumes FIRST: broadcast/newsroom masters (incl. .mxf) live on mounted
+    # NAS shares, not in home dirs. 1.0.17 (1cc6504) moved /Volumes last under
+    # a 15s cap, which cut the NAS walk off before it reached those masters —
+    # the .mxf-not-found regression. Search /Volumes first again so they
+    # resolve, then home dirs. Early-exit on first match (below) keeps the
+    # common case fast — as soon as the file is found on the NAS we stop.
+    # (Most drops never reach this route at all: the dashboard uses the
+    # Electron real path first; this is the browser / null-path fallback.)
     home = str(Path.home())
-    search_roots = []
+    search_roots = ['/Volumes']
     for d in ['Desktop', 'Documents', 'Movies', 'Downloads', 'Music']:
         p = os.path.join(home, d)
         if os.path.exists(p):
             search_roots.append(p)
-    search_roots.append('/Volumes')
 
-    # Hard wall-clock budget so a huge/slow volume returns a usable answer
-    # instead of hanging the request indefinitely.
-    deadline = time.monotonic() + 15.0
+    # Generous wall-clock ceiling so a slow NAS walk is not cut off before it
+    # finds the file (the 15s cap was the regression), while still bounding a
+    # pathological/never-ending mount rather than hanging the request forever.
+    deadline = time.monotonic() + 120.0
 
     matches = []
     seen = set()
@@ -1341,8 +1345,8 @@ def find_file():
     is_bundle = filename.lower().endswith(('.fcpxmld', '.fcpbundle'))
 
     for root_dir in search_roots:
-        # A match found in an earlier (home) root is the answer — never pay
-        # the /Volumes walk on top of it.
+        # A match found in an earlier root is the answer — stop before walking
+        # the rest (e.g. don't crawl home dirs once /Volumes matched).
         if matches or time.monotonic() > deadline:
             break
         try:

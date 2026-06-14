@@ -98,11 +98,45 @@ def resolve_output_language(meta):
     return lang if language_name(lang) else 'en'
 
 
-def resolve_collection_output_language(collection_meta):
-    """Collections default to English unless the collection itself carries
-    an explicit output_language."""
+def resolve_collection_output_language(collection_meta, member_metas=None):
+    """The output language for a collection's AI prose.
+
+    Resolution order:
+      1. An explicit, non-'match' ``output_language`` on the collection
+         itself wins (future-proofing a per-collection override UI).
+      2. Otherwise INHERIT from the member projects: the majority of the
+         members' own resolved output languages, counting only NON-English
+         languages (ties broken by member order). A folder of Norwegian
+         interviews therefore produces Norwegian collection summaries /
+         recommended stories / Story Builder output, matching the
+         per-project behaviour — which the original "default English" rule
+         got wrong. English is the FALLBACK, not a content language: it is
+         deliberately not counted, so members that resolve to English
+         (genuinely English, or 'auto' not yet transcribed/detected)
+         cannot drag a Norwegian collection back to English.
+      3. English only when no member resolves to a non-English language.
+
+    ``member_metas`` is an iterable of member project meta dicts; each is
+    run through :func:`resolve_output_language` (so 'match'/'auto'/detected
+    all work per member).
+    """
     out = ((collection_meta or {}).get('output_language') or '').strip().lower()
-    return out if language_name(out) else 'en'
+    if out and out != 'match' and language_name(out):
+        return out
+
+    votes = {}
+    order = []
+    for meta in (member_metas or []):
+        code = resolve_output_language(meta)
+        if code == 'en':
+            continue  # fallback, never a content vote (see docstring)
+        if code not in votes:
+            order.append(code)
+        votes[code] = votes.get(code, 0) + 1
+    if votes:
+        # Highest vote count; tie → earliest in member order (deterministic).
+        return max(order, key=lambda c: (votes[c], -order.index(c)))
+    return 'en'
 
 
 def language_directive(code, chat=False):

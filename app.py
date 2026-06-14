@@ -330,6 +330,16 @@ def _valid_output_language(value):
     return value if (value == 'match' or language_name(value)) else 'match'
 
 
+def _valid_audio_channel(value):
+    """Clamp an audio_channel input to 'all' or a 0-based track index string.
+
+    Mirrors transcribe.normalize_audio_channel: None → that None maps back to
+    the stored sentinel 'all'; a valid index is stored as its string form."""
+    from transcribe import normalize_audio_channel
+    n = normalize_audio_channel(value)
+    return 'all' if n is None else str(n)
+
+
 def _resolve_fcpxml_path(source_path: str) -> str:
     """Given either a .fcpxml file or a .fcpxmld bundle directory, return the
     path to the actual FCPXML document inside.
@@ -1082,6 +1092,7 @@ def create_project_from_path(
     num_speakers=2,
     language='en',
     output_language='match',
+    audio_channel='all',
     project_id=None,
 ):
     """Create a new project from a file already on disk. Returns project_id.
@@ -1154,6 +1165,9 @@ def create_project_from_path(
         # AI prose language: 'match' (follow the interview language)
         # or an explicit code from doza_assist.output_language.LANGUAGES.
         'output_language': _valid_output_language(output_language),
+        # Which source audio track feeds the transcript: 'all' (mix/default)
+        # or a 0-based track index as a string. Picker for camera-mic-vs-lav.
+        'audio_channel': _valid_audio_channel(audio_channel),
         'filename': os.path.basename(media_source_path),
         'source_path': media_source_path,
         'filepath': media_source_path,
@@ -1198,6 +1212,7 @@ def create_project():
             num_speakers=int(data.get('num_speakers', 2)),
             language=data.get('language', 'en').strip(),
             output_language=data.get('output_language', 'match').strip(),
+            audio_channel=data.get('audio_channel', 'all'),
         )
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
@@ -1221,6 +1236,7 @@ def upload():
     subject_name = request.form.get('subject_name', 'Subject').strip()
     language = request.form.get('language', 'en').strip()
     output_language = request.form.get('output_language', 'match').strip()
+    audio_channel = request.form.get('audio_channel', 'all').strip()
 
     if not project_name:
         project_name = file.filename.rsplit('.', 1)[0]
@@ -1257,6 +1273,7 @@ def upload():
             subject_name=subject_name,
             language=language,
             output_language=output_language,
+            audio_channel=audio_channel,
             project_id=project_id,
         )
     except ValueError as e:
@@ -1266,6 +1283,26 @@ def upload():
         return jsonify({'error': str(e)}), 400
 
     return jsonify({'project_id': project_id, 'status': 'uploaded'})
+
+
+@app.route('/probe-audio-tracks', methods=['POST'])
+def probe_audio_tracks():
+    """Number of audio tracks in a source file, for the channel picker.
+
+    Body: ``{"path": "/abs/path"}``. Returns ``{"count": N}`` — the count
+    extraction will see (program containers like MPEG-TS collapse to 1).
+    Fails open to ``{"count": 1}`` so the picker never blocks creation; the
+    UI shows only "All channels" when count <= 1."""
+    data = request.json or {}
+    path = (data.get('path') or '').strip()
+    path = os.path.expanduser(path)
+    if not path or not os.path.isfile(path):
+        return jsonify({'count': 1})
+    try:
+        from transcribe import count_audio_streams
+        return jsonify({'count': count_audio_streams(path)})
+    except Exception:
+        return jsonify({'count': 1})
 
 
 @app.route('/find-file', methods=['POST'])
@@ -1791,7 +1828,11 @@ def serve_media_audio(project_id):
     if source_path and os.path.exists(source_path):
         from transcribe import extract_audio
         try:
-            wav_path = extract_audio(source_path, project_dir=project_dir)
+            # Same channel selection the transcript used, so playback is the
+            # exact track the timestamps were built from.
+            wav_path = extract_audio(
+                source_path, project_dir=project_dir,
+                audio_channel=project.get('audio_channel', 'all'))
             return _send_audio(wav_path)
         except Exception:
             pass
@@ -2039,7 +2080,7 @@ def _make_transcribe_progress_writer(project_id):
 
 
 def _run_transcribe_job(project_id, source_path, num_speakers, language,
-                       interviewer_name, subject_name):
+                       interviewer_name, subject_name, audio_channel=None):
     """Background worker that runs transcribe_file under a per-project
     progress writer. Final state (done / error) lands in
     transcribe_status.json so the frontend can stop polling."""
@@ -2066,6 +2107,7 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             num_speakers=num_speakers,
             language=language,
             progress_cb=progress_cb,
+            audio_channel=audio_channel,
         )
         # An empty transcript is a failure, not a success. Saving zero
         # segments as status='transcribed' used to present a blank
@@ -2263,10 +2305,12 @@ def transcribe(project_id):
     language = project.get('language', 'en')
     interviewer_name = project.get('interviewer_name', 'Interviewer')
     subject_name = project.get('subject_name', 'Subject')
+    audio_channel = project.get('audio_channel', 'all')
 
     thread = threading.Thread(
         target=_run_transcribe_job,
-        args=(project_id, source_path, num_speakers, language, interviewer_name, subject_name),
+        args=(project_id, source_path, num_speakers, language, interviewer_name,
+              subject_name, audio_channel),
         daemon=True,
     )
     thread.start()
@@ -4059,6 +4103,10 @@ def retranscribe(project_id):
     data = request.get_json() or {}
     language = data.get('language', project.get('language', 'en')).strip()
     project['language'] = language
+    # Allow changing the source audio track on retranscribe (camera-mic vs
+    # lav). A change invalidates the cached WAV via the recipe sidecar.
+    if 'audio_channel' in data:
+        project['audio_channel'] = _valid_audio_channel(data.get('audio_channel'))
 
     # Clear existing transcript/analysis
     project['transcript'] = None

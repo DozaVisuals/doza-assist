@@ -189,55 +189,63 @@ def _ffmpeg_error_excerpt(stderr, limit=500):
     return text[-limit:]
 
 
-def _audio_stream_plan(filepath):
+def count_audio_streams(filepath):
+    """Distinct audio-stream (track) count for *filepath* via ffprobe.
+
+    Program containers (MPEG-TS) list every stream once per enclosing
+    section, so a one-audio TS shows up twice — those collapse to 1 (their
+    multi-audio is alternate services/languages, not separate mics). Fails
+    open to 1 so a probe failure never blocks extraction or the UI. Shared
+    by ``_audio_stream_plan`` and the ``/probe-audio-tracks`` endpoint so
+    the channel the user picks lines up with what extraction sees.
+    """
+    from exporters.media_probe import _find_ffprobe
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return 1
+    try:
+        result = subprocess.run(
+            [ffprobe, '-v', 'quiet', '-select_streams', 'a',
+             '-show_entries', 'stream=index', '-of', 'csv=p=0', filepath],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return 1
+        tokens = result.stdout.split()
+        distinct = set(tokens)
+        if len(tokens) > len(distinct):
+            # Duplicated listings = program container (see docstring).
+            return 1 if distinct else 0
+        return len(distinct)
+    except Exception:
+        return 1
+
+
+def _audio_stream_plan(filepath, channel=None):
     """Probe the source's audio streams once per extraction.
 
     Returns (stream_count, extra_ffmpeg_args).
 
-    - 0 streams -> the caller raises a clear "no audio track" error instead
-      of surfacing ffmpeg's raw "Output file does not contain any stream".
-    - 1 stream  -> no extra args (ffmpeg's default selection is correct).
-    - N streams -> mix them all: camera MXF/MOV records the real interview
-      mic on track 2+ with scratch on track 1, and ffmpeg's default picks
-      exactly ONE stream — the wrong-mic (or near-empty) transcript class
-      of bug. amix is enabled in the bundled LGPL ffmpeg build.
-    - Program containers (MPEG-TS) are exempt from the mixdown: their
-      multi-audio is alternate services/languages, so ffmpeg's default
-      best-stream pick applies regardless of stream count.
+    ``channel`` selects which audio track feeds the transcript:
+    - ``None`` (the "All" default): keep the historical behaviour —
+        - 0 streams -> caller raises a clear "no audio track" error;
+        - 1 stream  -> no extra args (ffmpeg's default selection is right);
+        - N streams -> mix them all (``amix``): camera MXF/MOV records the
+          real mic on track 2+ with scratch on track 1, and ffmpeg's
+          default picks exactly ONE — the wrong-mic class of bug. Program
+          containers (MPEG-TS) are exempt; their multi-audio is alternate
+          services/languages, so the default best-stream pick applies.
+    - an int N (0-based): map ONLY that track (``-map 0:a:N``) — the
+      camera-mic-vs-lav picker. An out-of-range N (e.g. a stale selection
+      after the source changed) falls back to the "All" behaviour so
+      extraction never fails on the channel choice alone.
     """
-    from exporters.media_probe import _find_ffprobe
-    ffprobe = _find_ffprobe()
-    count = 1  # fail open: assume one stream if probing is impossible
-    if ffprobe:
-        try:
-            result = subprocess.run(
-                [ffprobe, '-v', 'quiet', '-select_streams', 'a',
-                 '-show_entries', 'stream=index', '-of', 'csv=p=0', filepath],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                # ffprobe prints each stream once per enclosing section,
-                # and containers with programs (MPEG-TS broadcast files,
-                # often misnamed .mp4 by newsroom systems) list every
-                # stream under its program AND in the top-level stream
-                # list. Line-counting doubled a one-audio TS to 2, and the
-                # amix map then referenced a nonexistent [0:a:1] — "Stream
-                # specifier matches no streams" — failing the whole
-                # extraction.
-                tokens = result.stdout.split()
-                distinct = set(tokens)
-                if len(tokens) > len(distinct):
-                    # Duplicated listings = program container. Multi-audio
-                    # there means alternate services or languages — not the
-                    # multi-mic camera case amix exists for — and mixing
-                    # those transcribes unrelated speech over each other.
-                    # ffmpeg's default best-stream pick is the honest
-                    # choice.
-                    count = 1 if distinct else 0
-                else:
-                    count = len(distinct)
-        except Exception:
-            count = 1
+    count = count_audio_streams(filepath)
+    if count == 0:
+        return 0, []
+    if channel is not None and 0 <= channel < count:
+        return count, ['-map', f'0:a:{channel}']
+    # "All" (or out-of-range channel → safe fallback).
     if count <= 1:
         return count, []
     pads = ''.join(f'[0:a:{i}]' for i in range(count))
@@ -254,7 +262,30 @@ def _audio_stream_plan(filepath):
 # extracted by pre-port builds including truncated non-atomic-era files and
 # silent wrong-stream picks — are discarded and re-extracted once.
 # [Ported from OSS v3.5.12 / 61c8ae5.]
-_EXTRACT_RECIPE = 2
+# Recipe 3: the extraction is now audio-channel aware (the sidecar records
+# which track was selected), so a channel change re-extracts.
+_EXTRACT_RECIPE = 3
+
+
+def normalize_audio_channel(value):
+    """Coerce a UI / meta audio-channel value to None ('All') or a 0-based int.
+
+    Accepts 'all'/''/None (→ None), and '0'/'1'/0/1/… (→ that track index).
+    Anything unparseable → None (the safe All default)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):  # guard: bool is an int subclass
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    text = str(value).strip().lower()
+    if text in ('', 'all'):
+        return None
+    try:
+        n = int(text)
+        return n if n >= 0 else None
+    except ValueError:
+        return None
 
 
 def _audio_meta_path(audio_path):
@@ -273,15 +304,19 @@ def _wav_duration_seconds(audio_path):
         return 0.0
 
 
-def _cached_audio_valid(audio_path, filepath):
+def _cached_audio_valid(audio_path, filepath, channel=None):
     """True iff the cached WAV was produced by the CURRENT extraction recipe
-    from the CURRENT source file and still matches the duration recorded at
-    write time. Anything else — no sidecar (pre-port builds), older recipe,
-    source replaced, suspiciously tiny file, or a WAV that shrank since the
+    from the CURRENT source file with the CURRENT audio-channel selection and
+    still matches the duration recorded at write time. Anything else — no
+    sidecar (pre-port builds), older recipe, source replaced, a DIFFERENT
+    channel picked, suspiciously tiny file, or a WAV that shrank since the
     sidecar was written (truncation) — is treated as poisoned."""
     from doza_assist.jsonio import load_json
     meta = load_json(_audio_meta_path(audio_path))
     if not isinstance(meta, dict) or meta.get('recipe') != _EXTRACT_RECIPE:
+        return False
+    # A different channel selection means a different WAV — re-extract.
+    if meta.get('channel') != channel:
         return False
     try:
         st = os.stat(filepath)
@@ -306,7 +341,7 @@ def _cached_audio_valid(audio_path, filepath):
     return True
 
 
-def extract_audio(filepath, project_dir=None):
+def extract_audio(filepath, project_dir=None, audio_channel=None):
     """
     Extract / convert any media file to a 16 kHz mono WAV for processing.
 
@@ -320,10 +355,17 @@ def extract_audio(filepath, project_dir=None):
     If *project_dir* is provided the WAV is written to
     ``projects/<id>/audio.wav``; otherwise it lands next to the source.
 
+    ``audio_channel`` chooses which source audio track feeds the WAV:
+    ``None``/``'all'`` keeps the historical behaviour (mix all tracks /
+    default pick); an index (0-based, or its string form) maps just that
+    track — the camera-mic-vs-lav picker. The selection is part of the
+    cache key, so changing it re-extracts.
+
     The cache is recipe-versioned and self-healing: WAVs from older builds
     (truncated, or silent wrong-stream picks from before the amix mixdown)
     are detected and re-extracted automatically — no uninstall needed.
     """
+    channel = normalize_audio_channel(audio_channel)
     # Determine output path for extracted audio
     if project_dir:
         audio_path = os.path.join(project_dir, 'audio.wav')
@@ -339,7 +381,7 @@ def extract_audio(filepath, project_dir=None):
     # through to the 16k-mono passthrough.
     if os.path.exists(audio_path) and \
             os.path.abspath(filepath) != os.path.abspath(audio_path):
-        if _cached_audio_valid(audio_path, filepath):
+        if _cached_audio_valid(audio_path, filepath, channel):
             return audio_path
         # Stale, truncated, wrong-recipe, or silent-wrong-stream cache —
         # remove and re-extract. This is the no-uninstall-needed self-heal.
@@ -370,7 +412,7 @@ def extract_audio(filepath, project_dir=None):
     # complete — silently cutting every future transcript short. `-y` moves
     # BEFORE the output path: as a trailing arg it was a no-op, so a stale
     # .part from a prior crash wasn't even overwritten.
-    stream_count, mix_args = _audio_stream_plan(filepath)
+    stream_count, mix_args = _audio_stream_plan(filepath, channel)
     if stream_count == 0:
         raise RuntimeError('This file has no audio track to transcribe.')
     # Unique temp suffix: the background transcribe job, /media/audio's
@@ -428,6 +470,7 @@ def extract_audio(filepath, project_dir=None):
         st = os.stat(filepath)
         atomic_write_json(_audio_meta_path(audio_path), {
             'recipe': _EXTRACT_RECIPE,
+            'channel': channel,
             'source_size': st.st_size,
             'source_mtime': int(st.st_mtime),
             'wav_duration': wav_dur,
@@ -447,7 +490,7 @@ def format_timestamp(seconds):
 
 
 def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speakers=2,
-                    language='en', progress_cb=None):
+                    language='en', progress_cb=None, audio_channel=None):
     """
     Transcribe an audio/video file.
 
@@ -491,7 +534,8 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
 
     _emit("extract_audio", 0)
     # Extract audio first — needed for all engines (video files are too large for direct processing)
-    audio_path = extract_audio(filepath, project_dir=project_dir)
+    audio_path = extract_audio(filepath, project_dir=project_dir,
+                               audio_channel=audio_channel)
 
     # Try Parakeet MLX first (fastest on Apple Silicon) — English only
     # NOTE: the engines receive the RAW progress_cb (an event-dict callable),

@@ -199,6 +199,18 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                         </p>
                     </div>
                 </div>
+                <!-- Audio Channel: shown only when the source has 2+ audio
+                     tracks (camera mic on one, lav on another). Populated by
+                     populateAudioChannels() after a file is chosen. -->
+                <div class="form-group" id="audioChannelGroup" style="display:none;">
+                    <label class="form-label">Audio Channel</label>
+                    <select class="form-input" id="audioChannel">
+                        <option value="all" selected>All channels (default)</option>
+                    </select>
+                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
+                        This file has multiple audio tracks. Pick one (e.g. the lav mic) or keep <strong>All</strong> to mix every track.
+                    </p>
+                </div>
                 <div class="form-group">
                     <label class="form-label">Output Language</label>
                     <select class="form-input" id="outputLanguage">
@@ -303,6 +315,38 @@ function selectFilePath() {
     document.getElementById('projectName').value = filename.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ');
     document.getElementById('createBtn').textContent = 'Create Project';
     document.getElementById('uploadModal').classList.add('active');
+    populateAudioChannels(path);
+}
+
+// Probe the source for multiple audio tracks and, when there are 2+, show
+// the Audio Channel picker (camera mic vs. lav). Single-track / probe
+// failure → only "All channels" (group hidden), i.e. unchanged behaviour.
+async function populateAudioChannels(path) {
+    const group = document.getElementById('audioChannelGroup');
+    const sel = document.getElementById('audioChannel');
+    if (!group || !sel) return;
+    // Reset to the safe default while we probe.
+    sel.innerHTML = '<option value="all" selected>All channels (default)</option>';
+    group.style.display = 'none';
+    let count = 1;
+    try {
+        const res = await fetch('/probe-audio-tracks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+        const data = await res.json().catch(() => ({}));
+        count = (data && Number(data.count)) || 1;
+    } catch (e) { count = 1; }
+    if (count > 1) {
+        for (let i = 0; i < count; i++) {
+            const opt = document.createElement('option');
+            opt.value = String(i);            // 0-based ffmpeg track index
+            opt.textContent = 'Channel ' + (i + 1);  // 1-based, user-facing
+            sel.appendChild(opt);
+        }
+        group.style.display = '';
+    }
 }
 
 // ── Drag and Drop (finds file path, never uploads) ──
@@ -444,6 +488,7 @@ async function createFromPath() {
                 num_speakers: parseInt(document.getElementById('numSpeakers').value) || 2,
                 language: chosenLanguage,
                 output_language: (document.getElementById('outputLanguage') && document.getElementById('outputLanguage').value) || 'match',
+                audio_channel: (document.getElementById('audioChannel') && document.getElementById('audioChannel').value) || 'all',
             }),
         });
         const data = await res.json();

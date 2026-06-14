@@ -211,6 +211,12 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                         This file has multiple audio tracks. Pick one (e.g. the lav mic) or keep <strong>All</strong> to mix every track.
                     </p>
                 </div>
+                <!-- Always-visible expectation-setter: the picker above is
+                     hidden for single-track sources, so this explains why it
+                     may not appear (a stereo file is ONE track, not two). -->
+                <p id="audioChannelHint" style="font-size: 0.72rem; color: var(--text-muted); margin: -0.5rem 0 0.25rem 0;">
+                    An audio-track picker appears here only when your file has 2 or more separate audio tracks (e.g. camera mic + lav). A single stereo track counts as one track.
+                </p>
                 <div class="form-group">
                     <label class="form-label">Output Language</label>
                     <select class="form-input" id="outputLanguage">

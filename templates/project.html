@@ -3540,7 +3540,7 @@ async function exportSelectedClips() {
             });
             showToast(`Exported ${checkedIds.size} clips!`);
         } catch (err) {
-            showToast('Export error: ' + err.message, true);
+            reportExportError(err);
         }
         // Restore full labels after export
         const allSections = labelSections.map(s => ({
@@ -3565,7 +3565,7 @@ async function exportSelectedClips() {
         deliver_to: delivery, nle,
     };
     const runLabelsExport = async () => {
-        const r = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+        const r = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(exportBody),
@@ -3589,7 +3589,7 @@ async function exportSelectedClips() {
             showToast((data && data.error) || 'Export failed', true);
         }
     } catch (err) {
-        showToast('Export error: ' + err.message, true);
+        reportExportError(err);
     }
 
     // Restore full labels after export
@@ -4053,7 +4053,7 @@ async function exportFCPXML(category) {
         deliver_to: delivery, nle,
     };
     const runExport = async () => {
-        const r = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+        const r = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(exportBody),
@@ -4077,7 +4077,7 @@ async function exportFCPXML(category) {
         }
         if (data.media_warning) showToast(data.media_warning);  // info, not error
     } catch (err) {
-        showToast('Export error: ' + err.message, true);
+        reportExportError(err);
     }
 }
 
@@ -4092,7 +4092,7 @@ async function _exportFCPXMLRoundTrip(opts) {
     );
     maybeShowExportBusy(delivery, 'fcp');  // round-trip always targets FCP
     try {
-        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
+        const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -4125,7 +4125,7 @@ async function _exportFCPXMLRoundTrip(opts) {
                 (names ? `: ${names}` : ''), true);
         }
     } catch (err) {
-        showToast('Export error: ' + err.message, true);
+        reportExportError(err);
     }
 }
 
@@ -4224,7 +4224,7 @@ async function exportFCPXMLMulticam() {
 
     maybeShowExportBusy(delivery, 'fcp');  // multicam round-trip targets FCP
     try {
-        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
+        const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ mode, sources, deliver_to: delivery }),
@@ -4242,7 +4242,7 @@ async function exportFCPXMLMulticam() {
         }
         if (data.media_warning) showToast(data.media_warning);  // info, not error
     } catch (err) {
-        showToast('Export error: ' + err.message, true);
+        reportExportError(err);
     }
 }
 
@@ -4545,6 +4545,13 @@ function showRetranscribe() {
                 <label class="form-label">Language</label>
                 <select class="form-input" id="retranscribeLang" onchange="updateWhisperBanner()">${options}</select>
             </div>
+            <div class="form-group" id="retranscribeAudioGroup" style="display:none;">
+                <label class="form-label">Audio track</label>
+                <select class="form-input" id="retranscribeAudioChannel"></select>
+                <p style="font-size:0.72rem; color:var(--text-muted); margin:0.35rem 0 0; line-height:1.4;">
+                    This source has more than one separate audio track (e.g. separate mics on discrete tracks). Transcribe a single track for the cleanest per-voice result; mixing all tracks together is also available.
+                </p>
+            </div>
             <div id="whisperBanner" style="display:none; padding: 0.75rem; margin: 0.5rem 0 0; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
             <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
                 <button class="btn btn-sm" onclick="document.getElementById('retranscribeOverlay').remove()">Cancel</button>
@@ -4553,6 +4560,11 @@ function showRetranscribe() {
         </div>`;
     document.body.appendChild(overlay);
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+    // Surface the audio-track picker for multi-track sources (separate mics
+    // on discrete tracks) so the user can re-run on a single track here —
+    // the picker only existed at project creation before.
+    populateRetranscribeTracks();
 
     // Fetch engine availability so the banner can render before any selection.
     fetch('/api/transcription-engines')
@@ -4660,17 +4672,68 @@ async function runWhisperInstall(container, onDone) {
     }, 2000);
 }
 
+// Probe the project's source and, when it has more than one separate audio
+// track, show a picker in the Retranscribe modal. DEFAULT is the single
+// PRIMARY track (track 1), never "all tracks (mixed)": separate mono tracks
+// are discrete mics, and mixing them down corrupts per-voice separation and
+// degrades the transcript for exactly the broadcast workflow this serves. An
+// explicit prior per-track choice on the project is honored; "All tracks
+// (mixed)" stays available but is never the default.
+async function populateRetranscribeTracks() {
+    const group = document.getElementById('retranscribeAudioGroup');
+    const sel = document.getElementById('retranscribeAudioChannel');
+    if (!group || !sel) return;
+    const path = (typeof PROJECT !== 'undefined' && PROJECT &&
+                  (PROJECT.source_path || PROJECT.filepath)) || '';
+    if (!path) return;
+    let count = 1;
+    try {
+        const res = await fetch('/probe-audio-tracks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+        const data = await res.json().catch(() => ({}));
+        count = (data && Number(data.count)) || 1;
+    } catch (e) { count = 1; }
+    if (count <= 1) { group.style.display = 'none'; return; }
+
+    // Honor an explicit prior per-track choice; otherwise default to the
+    // single primary track ('0'). Never default to 'all' (mixed).
+    const cur = (typeof PROJECT !== 'undefined' && PROJECT &&
+                 PROJECT.audio_channel != null) ? String(PROJECT.audio_channel) : 'all';
+    const explicitIdx = (/^\d+$/.test(cur) && Number(cur) < count) ? cur : null;
+    const defaultVal = explicitIdx !== null ? explicitIdx : '0';
+
+    let html = '';
+    for (let i = 0; i < count; i++) {
+        html += `<option value="${i}"${String(i) === defaultVal ? ' selected' : ''}>` +
+                `Track ${i + 1}${i === 0 ? ' (primary)' : ''}</option>`;
+    }
+    html += `<option value="all"${defaultVal === 'all' ? ' selected' : ''}>All tracks (mixed)</option>`;
+    sel.innerHTML = html;
+    group.style.display = '';
+}
+
 async function doRetranscribe() {
     const lang = document.getElementById('retranscribeLang').value;
+    // Include the chosen audio track only when the multi-track picker is
+    // actually shown — single-track sources keep the existing behavior.
+    const audioGroup = document.getElementById('retranscribeAudioGroup');
+    const audioSel = document.getElementById('retranscribeAudioChannel');
+    const audioChannel = (audioGroup && audioGroup.style.display !== 'none' && audioSel)
+        ? audioSel.value : null;
     // One shot: the POST clears project state server-side, so a double-click
     // would just queue a redundant destructive call during the 3s reload wait.
     const confirmBtn = document.getElementById('retranscribeBtn');
     if (confirmBtn) confirmBtn.disabled = true;
     try {
+        const body = { language: lang };
+        if (audioChannel !== null) body.audio_channel = audioChannel;
         const res = await fetch(`/project/${PROJECT_ID}/retranscribe`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ language: lang })
+            body: JSON.stringify(body)
         });
         if (res.ok) {
             showToast('Retranscribing with ' + document.getElementById('retranscribeLang').selectedOptions[0].text + '...');
@@ -4728,6 +4791,36 @@ function maybeShowExportBusy(delivery, nle) {
         : '…';
     showBusy('Sending to ' + name + tail);
     return true;
+}
+
+// Client-side safety net for the NLE export handoff. The backend Resolve
+// import is bounded (resolve_import._IMPORT_TIMEOUT, ~180s), but if anything
+// upstream wedges we abort here so the "Sending to…" busy toast can never
+// become a permanent beachball. Slightly longer than the backend cap so a
+// legitimately-slow-but-succeeding import still wins.
+const EXPORT_FETCH_TIMEOUT_MS = 200000;
+async function exportFetch(url, opts) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), EXPORT_FETCH_TIMEOUT_MS);
+    try {
+        return await fetch(url, Object.assign({}, opts, { signal: controller.signal }));
+    } finally {
+        clearTimeout(timer);
+    }
+}
+// Always clear the busy toast and surface an actionable message when an
+// export fetch fails or times out — so a stalled Resolve never leaves the UI
+// stuck on "Sending to…". Returns true when the failure was a timeout/abort.
+function reportExportError(err) {
+    hideBusy();
+    if (err && err.name === 'AbortError') {
+        showToast('Resolve isn\'t responding — the export file was saved. '
+            + 'Reveal it in Finder and import it manually '
+            + '(Resolve: File → Import → Timeline).', true);
+        return true;
+    }
+    showToast('Export error: ' + (err && err.message ? err.message : err), true);
+    return false;
 }
 
 // Compose an NLE-export toast that's honest about what actually happened.

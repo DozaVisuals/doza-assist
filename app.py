@@ -3415,14 +3415,50 @@ def _mdfind_app_by_bundle_id(bundle_id: str) -> list[str]:
     return [line for line in out.strip().splitlines() if line and os.path.isdir(line)]
 
 
+def _app_short_version(app_path: str) -> tuple:
+    """CFBundleShortVersionString of an .app as a comparable int tuple.
+
+    e.g. "21.0.1" -> (21, 0, 1). Returns () when unreadable, so an
+    unknown-version copy sorts AFTER any known one within its tier (a
+    discoverable v21 always beats a sibling we can't read). Runs out of
+    process; cheap.
+    """
+    plist = os.path.join(app_path, 'Contents', 'Info.plist')
+    if not os.path.isfile(plist):
+        return ()
+    try:
+        out = subprocess.check_output(
+            ['defaults', 'read', plist, 'CFBundleShortVersionString'],
+            text=True, timeout=2, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ()
+    parts = []
+    for tok in out.split('.'):
+        digits = ''
+        for ch in tok:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
 def _rank_app_paths(paths: list[str]) -> list[str]:
     """Order discovered .app paths most-preferred first.
 
-    Heuristic: a copy under /Applications beats one under ~/Applications,
-    which beats anything else (Setapp subdirs, external volumes). Users
-    who keep multiple copies typically want the system-wide one driven.
+    Primary key — install location: a copy under /Applications beats one
+    under ~/Applications, which beats anything else (Setapp subdirs,
+    external volumes). Tiebreak — version: the NEWEST install wins within a
+    tier, so a user with both Resolve 20 and 21 in /Applications gets 21
+    driven on a COLD launch (v20-not-v21 bug). When a Resolve is already
+    running we attach to it and never call this (see _find_nle_app_path /
+    resolve_import.running_app_path) — so this governs cold launch only.
     """
-    def rank(p: str) -> int:
+    def location_rank(p: str) -> int:
         if p.startswith('/Applications/'):
             return 0
         if '/Applications/' in p and 'Setapp' not in p:
@@ -3430,7 +3466,13 @@ def _rank_app_paths(paths: list[str]) -> list[str]:
         if 'Setapp' in p:
             return 3
         return 2
-    return sorted(paths, key=rank)
+
+    def sort_key(p: str):
+        v = _app_short_version(p)
+        # location asc; known-version before unknown; newest version first.
+        return (location_rank(p), 0 if v else 1, tuple(-n for n in v))
+
+    return sorted(paths, key=sort_key)
 
 
 def _find_nle_app_path(nle: str):
@@ -3442,6 +3484,21 @@ def _find_nle_app_path(nle: str):
     export. Falls back to a known-path list if Spotlight returns nothing.
     Result is cached per process — these paths don't move at runtime.
     """
+    # CONNECT-BEFORE-LAUNCH (Resolve): if a Resolve is already running, drive
+    # THAT instance and short-circuit version selection entirely — no mdfind,
+    # no version-rank, no relaunch. The user's project is open in the running
+    # copy (even an older v20 when v21 is "preferred"); attaching to it is
+    # correct, relaunching a second version alongside it is a regression.
+    # Not cached: running state changes at runtime.
+    if nle == 'resolve':
+        try:
+            from exporters import resolve_import
+            running = resolve_import.running_app_path()
+        except Exception:
+            running = None
+        if running:
+            return running
+
     if nle in _nle_path_cache:
         return _nle_path_cache[nle]
 
@@ -3559,6 +3616,7 @@ def _hand_file_to_resolve(file_path: str, *,
         source_media_path=source_media_path or None,
         project_name=project_name or 'Doza Assist Import',
         timeline_name=timeline_name or os.path.splitext(os.path.basename(file_path))[0],
+        app_path=app_path,
     )
 
     if result.ok:
@@ -3657,8 +3715,16 @@ def send_to_nle():
     # Use the shared scripted handoff: FCP gets the bundle-ID launch, Resolve
     # gets the scripting-API import (launching Resolve with plain `open -a`
     # imports NOTHING - see exporters/resolve_import.py), Premiere reveals in
-    # Finder. Same path the first-party export routes use.
-    opened_in, info = _hand_file_to_nle(file_path, nle)
+    # Finder. Same path the first-party export routes use — and like them,
+    # forward source_media_path/project_name/timeline_name so Resolve can add
+    # the source clip to the Media Pool and name the timeline (this route
+    # previously dropped them, so Clips/Send-to-NLE imports landed offline).
+    opened_in, info = _hand_file_to_nle(
+        file_path, nle,
+        source_media_path=project.get('source_path') or project.get('filepath'),
+        project_name=project.get('name') or '',
+        timeline_name=os.path.splitext(filename)[0] if filename else '',
+    )
     if opened_in is None:
         return jsonify({
             'error': info.get('error', f'Could not launch {NLE_DISPLAY_NAMES[nle]}'),

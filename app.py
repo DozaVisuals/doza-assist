@@ -5294,9 +5294,16 @@ def my_style_import():
                     audio_path = extract_audio(tmp_path, project_dir=tmp_dir)
                     file_duration_hint = None
 
-                # Transcribe (same path for both source types)
+                # Transcribe (same path for both source types — raw media and
+                # the FCPXML-rendered WAV converge here). language='auto' so a
+                # non-English finished cut auto-detects onto WhisperX instead of
+                # being forced through English-only Parakeet (the default 'en'),
+                # which garbled non-English sources and poisoned the profile.
+                # Matches the project-creation flow, where 'auto' triggers
+                # detection.
                 yield json.dumps({'file': fname, 'status': 'processing', 'step': 'transcribing'}) + '\n'
-                transcript = transcribe_file(audio_path, project_dir=tmp_dir)
+                transcript = transcribe_file(audio_path, project_dir=tmp_dir,
+                                             language='auto')
 
                 # Analyze
                 yield json.dumps({'file': fname, 'status': 'processing', 'step': 'analyzing'}) + '\n'

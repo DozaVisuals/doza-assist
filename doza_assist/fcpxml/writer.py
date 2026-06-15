@@ -305,25 +305,22 @@ def _set_clip_note(clip_el: etree._Element, note_text: str) -> None:
     """Put our select note on a deep-copied clip at a DTD-valid position.
 
     ``<note>`` is a 0-or-1 child in the FCPXML DTD, so any note inherited from
-    the source clip is dropped first (two notes would fail import). It then
-    belongs at the front for ``<sync-clip>`` / ``<mc-clip>``, but after the
-    required-leading ``<conform-rate>`` / ``<timeMap>`` for ``<asset-clip>`` —
-    skipping those lands the note in the first slot the DTD allows for every
-    clip kind.
+    the source clip is dropped first (two notes would fail import). It then goes
+    FIRST — the content model for every clip kind we copy here (``asset-clip``,
+    ``sync-clip``) leads with ``(note?, (conform-rate?, timeMap?), …)``, so the
+    note must PRECEDE a leading ``<conform-rate>`` / ``<timeMap>``, not follow
+    it. Inserting after them (the previous behavior) produced
+    ``<conform-rate/><note/>`` on rate-conformed clips — e.g. 25fps footage in a
+    23.976 timeline — which FCP rejects with "Element asset-clip content does
+    not follow the DTD, expecting (note?, (conform-rate?, timeMap?), …)".
     """
     for existing in clip_el.findall("note"):
         clip_el.remove(existing)
     if not note_text:
         return
-    idx = 0
-    for child in clip_el:
-        if child.tag in ("conform-rate", "timeMap"):
-            idx += 1
-        else:
-            break
     note = etree.Element("note")
     note.text = note_text
-    clip_el.insert(idx, note)
+    clip_el.insert(0, note)
 
 
 # Direct-child elements that carry their own position inside the clip's (asset)

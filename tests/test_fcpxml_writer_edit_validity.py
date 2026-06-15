@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from doza_assist.fcpxml import Select, parse_fcpxml, write_selects_as_new_project  # noqa: E402
 from doza_assist.fcpxml.timecode import parse_rational  # noqa: E402
-from doza_assist.fcpxml.writer import _snap_clip_times  # noqa: E402
+from doza_assist.fcpxml.writer import _set_clip_note, _snap_clip_times  # noqa: E402
 
 FD = Fraction(1001, 24000)  # 23.976 fps frame duration
 
@@ -153,3 +153,95 @@ def test_writer_in_range_edits_stay_within_source(parsed):
         start = parse_rational(clip.get("start"))
         dur = parse_rational(clip.get("duration"))
         assert start + dur <= asset_dur, "edit out point exceeds source media"
+
+
+# ── DTD child-order validity: <note> must lead, before <conform-rate> ────────
+#
+# FCPXML's content model for every clip kind we copy here leads with
+#   (note?, (conform-rate?, timeMap?), …)
+# so the select note must be inserted BEFORE a leading <conform-rate>/<timeMap>.
+# Rate-conformed sources (e.g. 25fps footage dropped into a 23.976 timeline)
+# carry a <conform-rate> child; the old writer inserted the note AFTER it,
+# producing <conform-rate/><note/>, which FCP rejects on import with
+# "Element asset-clip content does not follow the DTD, expecting
+#  (note?, (conform-rate?, timeMap?), …)".
+
+def test_set_clip_note_precedes_leading_conform_rate():
+    clip = etree.fromstring(
+        '<asset-clip ref="r2" start="0s" duration="100s">'
+        '<conform-rate srcFrameRate="25"/>'
+        '<keyword start="0s" duration="100s" value="k"/>'
+        '</asset-clip>'
+    )
+    _set_clip_note(clip, "Opening Hook — Jack")
+    tags = [c.tag for c in clip]
+    assert tags[0] == "note", f"<note> must be first child, got order {tags}"
+    assert tags.index("note") < tags.index("conform-rate"), (
+        "<note> must precede <conform-rate> per the FCPXML DTD"
+    )
+
+
+def test_set_clip_note_replaces_inherited_note_at_front():
+    # An inherited note is dropped (0-or-1 in the DTD) and ours lands first,
+    # still before conform-rate.
+    clip = etree.fromstring(
+        '<asset-clip ref="r2" start="0s" duration="100s">'
+        '<note>old</note>'
+        '<conform-rate srcFrameRate="25"/>'
+        '</asset-clip>'
+    )
+    _set_clip_note(clip, "new")
+    notes = clip.findall("note")
+    assert len(notes) == 1 and notes[0].text == "new"
+    assert list(clip)[0].tag == "note"
+
+
+# Single-source plain <asset-clip> spine whose clip is rate-conformed (25fps
+# source in a 23.976 timeline) — exactly the shape that broke a real NEC export.
+CONFORM_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.14">
+        <resources>
+            <format id="r1" name="FFVideoFormat1080p2398" frameDuration="1001/24000s" width="1920" height="1080"/>
+            <format id="r3" name="FFVideoFormat1080p25" frameDuration="1/25s" width="1920" height="1080"/>
+            <asset id="r2" name="rebecca" start="0s" duration="240000/24000s" hasVideo="1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000" format="r3">
+                <media-rep kind="original-media" src="file:///tmp/rebecca.mov"/>
+            </asset>
+        </resources>
+        <library>
+            <event name="E">
+                <project name="Conform Test">
+                    <sequence format="r1" duration="240000/24000s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                        <spine>
+                            <asset-clip ref="r2" offset="0s" name="Rebecca" start="0s" duration="240000/24000s" format="r3" tcFormat="NDF" audioRole="dialogue">
+                                <conform-rate srcFrameRate="25"/>
+                            </asset-clip>
+                        </spine>
+                    </sequence>
+                </project>
+            </event>
+        </library>
+    </fcpxml>
+""")
+
+
+@pytest.fixture
+def conform_parsed(tmp_path):
+    p = tmp_path / "conform.fcpxml"
+    p.write_text(CONFORM_FIXTURE)
+    return parse_fcpxml(p)
+
+
+def test_writer_note_before_conform_rate_through_full_writer(conform_parsed):
+    out = write_selects_as_new_project(conform_parsed, [
+        Select(start_seconds=1.0, end_seconds=3.0, label="green",
+               note="for me, NEC Prep was kind of where I found"),
+    ])
+    clip = etree.fromstring(out).find(".//spine/asset-clip")
+    assert clip is not None
+    tags = [c.tag for c in clip]
+    assert tags[0] == "note", f"<note> must lead the asset-clip, got {tags}"
+    assert tags.index("note") < tags.index("conform-rate"), (
+        "DTD-invalid: <conform-rate> emitted before <note>"
+    )

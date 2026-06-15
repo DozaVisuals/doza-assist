@@ -1795,6 +1795,13 @@ def serve_media_audio(project_id):
 
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
 
+    # Track audition (player dropdown): ?track=<index|all> plays that specific
+    # source track on demand, independent of the transcribed track — so the
+    # editor can hear each mic without a destructive re-transcribe.
+    track_param = request.args.get('track')
+    if track_param is not None and track_param.strip() != '':
+        return _serve_audio_track(project, project_dir, track_param.strip())
+
     def _send_audio(path):
         # conditional=True enables HTTP Range (206) responses — this route
         # is now the automatic fallback player for browser-undecodable
@@ -1822,9 +1829,17 @@ def serve_media_audio(project_id):
     # through and re-extracts.
     audio_wav = os.path.join(project_dir, 'audio.wav')
     if os.path.exists(audio_wav):
-        from transcribe import _cached_audio_valid
+        from transcribe import _cached_audio_valid, normalize_audio_channel
+        # Validate against the project's CURRENT track selection, not just the
+        # recipe/source. Omitting the channel made this check pass for a
+        # cached all-mix WAV (sidecar channel=None) even when the project had
+        # since selected a single track — so playback served the mix while the
+        # transcript was a single track. Passing the channel makes a stale
+        # mismatched WAV fail validation and fall through to a re-extract of
+        # the selected track below (self-heals that exact state).
+        channel = normalize_audio_channel(project.get('audio_channel'))
         if not (source_path and os.path.exists(source_path)) or \
-                _cached_audio_valid(audio_wav, source_path):
+                _cached_audio_valid(audio_wav, source_path, channel):
             return _send_audio(audio_wav)
 
     # Extract on the fly (not yet transcribed, or the cache failed
@@ -1842,6 +1857,179 @@ def serve_media_audio(project_id):
             pass
 
     return jsonify({'error': 'Audio not available'}), 404
+
+
+def _serve_audio_track(project, project_dir, track):
+    """Serve ONE source audio track on demand, for the player's track-audition
+    dropdown — independent of the project's transcribed track.
+
+    Each selection is extracted into its own cache subdir so auditioning a
+    track never clobbers the transcribed ``audio.wav`` the timestamps were
+    built from. extract_audio's recipe/channel/source validation does the
+    caching and self-heal. ``track`` is a 0-based index string or ``'all'``.
+    """
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if not source_path or not os.path.exists(source_path):
+        return jsonify({'error': 'Source file not found'}), 404
+    from transcribe import extract_audio, normalize_audio_channel
+    norm = normalize_audio_channel(track)
+    tag = 'all' if norm is None else str(norm)
+    sub = os.path.join(project_dir, f'_audition_{tag}')
+    os.makedirs(sub, exist_ok=True)
+    try:
+        wav = extract_audio(source_path, project_dir=sub, audio_channel=track)
+    except Exception as e:
+        app.logger.warning('audition extract failed (track=%s): %s', track, e)
+        return jsonify({'error': 'Could not extract that track'}), 500
+    resp = send_file(wav, mimetype='audio/wav', conditional=True)
+    resp.headers['Accept-Ranges'] = 'bytes'
+    resp.headers['Cache-Control'] = 'private, no-cache'
+    return resp
+
+
+# ── Video preview proxy ─────────────────────────────────────────────────────
+# Browser-undecodable masters (MXF AVC-Intra 10-bit 4:2:2, ProRes, DNxHD,
+# HEVC, MPEG-2) get an on-demand H.264 8-bit mp4 proxy via the bundled
+# ffmpeg's hardware encoder (h264_videotoolbox, LGPL), so the project page
+# shows real video instead of the audio-only placeholder. Cached per project;
+# EXPORTS ALWAYS USE THE ORIGINAL FILE — the proxy is preview-only.
+
+_proxy_jobs = {}
+_proxy_jobs_lock = threading.Lock()
+_PROXY_RECIPE = 1
+
+
+def _proxy_path(project_dir):
+    return os.path.join(project_dir, 'preview_proxy.mp4')
+
+
+def _proxy_meta_path(project_dir):
+    return _proxy_path(project_dir) + '.meta.json'
+
+
+def _proxy_cache_valid(project_dir, source_path):
+    """True iff a cached proxy exists for the CURRENT source (size+mtime) and
+    recipe. A replaced/edited source or a recipe bump rebuilds."""
+    from doza_assist.jsonio import load_json
+    p = _proxy_path(project_dir)
+    if not os.path.exists(p) or os.path.getsize(p) <= 1024:
+        return False
+    meta = load_json(_proxy_meta_path(project_dir))
+    if not isinstance(meta, dict) or meta.get('recipe') != _PROXY_RECIPE:
+        return False
+    try:
+        st = os.stat(source_path)
+    except OSError:
+        return False
+    return (meta.get('source_size') == st.st_size
+            and meta.get('source_mtime') == int(st.st_mtime))
+
+
+def _build_preview_proxy(project_id, source_path, project_dir, audio_channel):
+    """Transcode the source to a Chromium-playable 720p H.264 8-bit mp4.
+
+    Runs on a worker thread. Video → h264_videotoolbox (hardware, 8-bit
+    4:2:0, capped at 1280px wide); audio → aac from the selected track (or
+    track 0 for an 'all' project — precise per-track audio lives in the
+    /media/audio?track= audition path). +faststart for progressive play.
+    """
+    from transcribe import _find_ffmpeg, normalize_audio_channel
+    from doza_assist.jsonio import atomic_write_json
+
+    def _set(phase, **extra):
+        with _proxy_jobs_lock:
+            _proxy_jobs[project_id] = {'phase': phase, **extra}
+
+    try:
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            _set('error', error='ffmpeg not available')
+            return
+        chan = normalize_audio_channel(audio_channel)
+        amap = ['-map', f'0:a:{chan}?'] if chan is not None else ['-map', '0:a:0?']
+        out = _proxy_path(project_dir)
+        tmp = f'{out}.part-{os.getpid()}-{threading.get_ident()}.mp4'
+        cmd = [
+            ffmpeg, '-nostdin', '-y', '-i', source_path,
+            '-map', '0:v:0', *amap,
+            '-vf', "scale='min(1280,iw)':-2:flags=bicubic,format=yuv420p",
+            '-c:v', 'h264_videotoolbox', '-b:v', '5M',
+            '-c:a', 'aac', '-b:a', '160k',
+            '-movflags', '+faststart',
+            tmp,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not os.path.exists(tmp):
+            app.logger.warning('[proxy] ffmpeg rc=%s stderr: %s',
+                               result.returncode, (result.stderr or '')[-1500:])
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            _set('error', error='Transcode failed')
+            return
+        os.replace(tmp, out)
+        try:
+            st = os.stat(source_path)
+            atomic_write_json(_proxy_meta_path(project_dir), {
+                'recipe': _PROXY_RECIPE,
+                'source_size': st.st_size,
+                'source_mtime': int(st.st_mtime),
+            })
+        except OSError:
+            pass
+        _set('done')
+    except Exception as e:
+        app.logger.warning('[proxy] build error: %s', e)
+        _set('error', error=str(e))
+
+
+@app.route('/project/<project_id>/media/proxy')
+def serve_media_proxy(project_id):
+    """Serve the preview proxy; build it on demand if missing.
+
+    200 + mp4 when ready; 202 {status:'building'} while transcoding;
+    503 {status:'error'} if the transcode failed (player falls back to the
+    audio-only placeholder)."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if not source_path or not os.path.exists(source_path):
+        return jsonify({'error': 'Source file not found'}), 404
+
+    if _proxy_cache_valid(project_dir, source_path):
+        resp = send_file(_proxy_path(project_dir), mimetype='video/mp4',
+                         conditional=True)
+        resp.headers['Accept-Ranges'] = 'bytes'
+        resp.headers['Cache-Control'] = 'private, no-cache'
+        return resp
+
+    with _proxy_jobs_lock:
+        job = _proxy_jobs.get(project_id)
+        running = job and job.get('phase') == 'building'
+        if not running:
+            _proxy_jobs[project_id] = {'phase': 'building'}
+            threading.Thread(
+                target=_build_preview_proxy,
+                args=(project_id, source_path, project_dir,
+                      project.get('audio_channel', 'all')),
+                daemon=True,
+            ).start()
+    return jsonify({'status': 'building'}), 202
+
+
+@app.route('/project/<project_id>/media/proxy/status')
+def media_proxy_status(project_id):
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    project = get_project(project_id)
+    source_path = (project or {}).get('source_path', (project or {}).get('filepath', ''))
+    if source_path and os.path.exists(source_path) and _proxy_cache_valid(project_dir, source_path):
+        return jsonify({'phase': 'done'})
+    with _proxy_jobs_lock:
+        job = _proxy_jobs.get(project_id) or {'phase': 'idle'}
+    return jsonify(job)
 
 
 # ── Optional non-English (Whisper) engine, installed on demand ─────────────

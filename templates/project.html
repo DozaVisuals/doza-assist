@@ -316,6 +316,7 @@
                 </div>
                 <span class="player-time" id="playerDuration">00:00</span>
                 <button class="player-speed-btn" id="speedBtn" onclick="cycleSpeed()" title="Playback speed">1x</button>
+                <select class="player-speed-btn" id="trackSelect" onchange="onTrackAudition()" style="display:none; max-width:160px; padding:0 4px;" title="Audio track to play"></select>
                 {% if is_video %}
                 <button class="player-speed-btn" id="audioOnlyBtn" onclick="toggleAudioOnly()" title="Audio-only mode (lighter playback for heavy footage)">🔊</button>
                 {% if projects_meta | selectattr('start_tc') | list %}
@@ -1486,24 +1487,151 @@ videoEl.src = "/project/{{ project.id }}/media";
 videoEl.addEventListener('error', () => {
     const err = videoEl.error;
     if (!err) return;
-    // MEDIA_ERR_DECODE (3) / MEDIA_ERR_SRC_NOT_SUPPORTED (4): Chromium
-    // can't demux or decode this container/codec — MXF always, many
-    // 10-bit 4:2:2 camera MP4s. The viewer used to sit black with a dead
-    // progress bar and no message. Fall back to the extracted audio
-    // (waveform view) automatically and say so.
+    // MEDIA_ERR_DECODE (3) / MEDIA_ERR_SRC_NOT_SUPPORTED (4): Chromium can't
+    // demux or decode this container/codec — MXF/AVC-Intra always, many
+    // 10-bit 4:2:2 camera MP4s. Try an on-demand H.264 8-bit preview PROXY
+    // first; only if the proxy itself can't be built/decoded do we fall back
+    // to the audio-only waveform.
     if (err.code !== 3 && err.code !== 4) return;
+    if (audioOnlyMode) return;
+    if (videoEl.dataset.proxyActive === '1') { _fallbackToAudioOnly(); return; }
+    if (videoEl.dataset.proxyTried === '1') { _fallbackToAudioOnly(); return; }
+    _tryPreviewProxy();
+});
+
+function _fallbackToAudioOnly() {
     if (audioOnlyMode) return;
     if (enterAudioOnly()) {
         const note = document.getElementById('videoUnplayableNote');
-        if (note) note.style.display = '';
+        if (note) {
+            note.textContent = "This camera format can't be previewed as video — playing audio only. Exports always use the original file.";
+            note.style.display = '';
+        }
         showToast("This camera format can't be previewed as video — playing audio only");
     }
-});
+}
+
+function _tryPreviewProxy() {
+    videoEl.dataset.proxyTried = '1';
+    const note = document.getElementById('videoUnplayableNote');
+    if (note) { note.textContent = 'Preparing a preview for this camera format…'; note.style.display = ''; }
+    showBusy('Preparing video preview — this can take a moment for camera masters…');
+    // HEAD kicks the on-demand transcode without downloading the mp4.
+    fetch(`/project/${PROJECT_ID}/media/proxy`, { method: 'HEAD' }).catch(() => {});
+    let tries = 0;
+    const poll = () => {
+        fetch(`/project/${PROJECT_ID}/media/proxy/status`)
+            .then(r => r.json())
+            .then(s => {
+                if (s.phase === 'done') {
+                    hideBusy();
+                    if (note) note.style.display = 'none';
+                    videoEl.dataset.proxyActive = '1';
+                    videoEl.src = `/project/${PROJECT_ID}/media/proxy`;
+                    videoEl.load();
+                    showToast('Video preview ready');
+                } else if (s.phase === 'error') {
+                    hideBusy(); _fallbackToAudioOnly();
+                } else if (tries++ < 160) {
+                    setTimeout(poll, 1500);
+                } else {
+                    hideBusy(); _fallbackToAudioOnly();
+                }
+            })
+            .catch(() => { hideBusy(); _fallbackToAudioOnly(); });
+    };
+    setTimeout(poll, 800);
+}
 {% else %}
 // Audio-only project: kick the waveform on so the player box isn't a
 // blank black rectangle while the editor scrubs through interview audio.
 setPlayerView('waveform');
 {% endif %}
+
+// ── Audio-track audition dropdown (player control bar) ──
+// Multi-track sources (separate mics on discrete tracks) get a Track selector
+// in the player so the editor can HEAR each track instantly — no destructive
+// re-transcribe just to check a mic. The transcribed track is marked;
+// auditioning a different track surfaces a one-click "Transcribe this track".
+const TRANSCRIBED_CHANNEL = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.audio_channel != null)
+    ? String(PROJECT.audio_channel) : 'all';
+
+async function initTrackDropdown() {
+    const sel = document.getElementById('trackSelect');
+    if (!sel) return;
+    const path = (typeof PROJECT !== 'undefined' && PROJECT && (PROJECT.source_path || PROJECT.filepath)) || '';
+    if (!path) return;
+    let count = 1;
+    try {
+        const res = await fetch('/probe-audio-tracks', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }) });
+        const d = await res.json().catch(() => ({}));
+        count = (d && Number(d.count)) || 1;
+    } catch (e) { count = 1; }
+    if (count <= 1) return;  // single track: no dropdown
+    let html = '';
+    for (let i = 0; i < count; i++) {
+        const tx = String(i) === TRANSCRIBED_CHANNEL ? ' • transcript' : '';
+        html += `<option value="${i}"${String(i) === TRANSCRIBED_CHANNEL ? ' selected' : ''}>` +
+                `Track ${i + 1}${i === 0 ? ' (primary)' : ''}${tx}</option>`;
+    }
+    const allTx = TRANSCRIBED_CHANNEL === 'all' ? ' • transcript' : '';
+    html += `<option value="all"${TRANSCRIBED_CHANNEL === 'all' ? ' selected' : ''}>All tracks (mixed)${allTx}</option>`;
+    sel.innerHTML = html;
+    sel.style.display = '';
+}
+
+function onTrackAudition() {
+    const sel = document.getElementById('trackSelect');
+    if (!sel || !audioEl) return;
+    const track = sel.value;
+    // Audition is an audio operation — play the chosen track via the audio
+    // element. On a video project this drops to audio-only while auditioning.
+    if (typeof enterAudioOnly === 'function' && !audioOnlyMode) enterAudioOnly();
+    const wasPlaying = audio && !audio.paused;
+    const at = audio ? audio.currentTime : 0;
+    audioEl.src = `/project/${PROJECT_ID}/media/audio?track=${encodeURIComponent(track)}`;
+    audio = audioEl;
+    audioEl.load();
+    const resume = () => {
+        try { audioEl.currentTime = at; } catch (e) {}
+        if (wasPlaying) audioEl.play().catch(() => {});
+        audioEl.removeEventListener('loadedmetadata', resume);
+    };
+    audioEl.addEventListener('loadedmetadata', resume);
+    _updateTrackAuditionBanner(track);
+}
+
+function _updateTrackAuditionBanner(track) {
+    let b = document.getElementById('trackAuditionBanner');
+    if (!b) {
+        b = document.createElement('div');
+        b.id = 'trackAuditionBanner';
+        b.style.cssText = 'display:none; margin:0.4rem 0 0; padding:0.5rem 0.75rem; border-radius:8px; font-size:0.78rem; line-height:1.45; background:color-mix(in srgb, var(--accent) 8%, transparent); border:1px solid color-mix(in srgb, var(--accent) 25%, transparent);';
+        const col = document.getElementById('playerCol');
+        if (col) col.appendChild(b);
+    }
+    if (track === TRANSCRIBED_CHANNEL) { b.style.display = 'none'; return; }
+    const label = track === 'all' ? 'all tracks (mixed)' : ('Track ' + (parseInt(track, 10) + 1));
+    b.innerHTML = `You're hearing <b>${label}</b>, but the transcript was built from a different track. ` +
+        `<button class="btn btn-sm" style="margin-left:6px; padding:3px 8px; font-size:0.75rem;" onclick="transcribeAuditionTrack('${track}')">Transcribe this track</button>`;
+    b.style.display = '';
+}
+
+function transcribeAuditionTrack(track) {
+    const lang = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.language) || 'auto';
+    fetch(`/project/${PROJECT_ID}/retranscribe`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ language: lang, audio_channel: track }) })
+        .then(r => {
+            if (r.ok) { showToast('Retranscribing on the selected track…'); setTimeout(() => reloadAndKeepTab('transcript'), 2000); }
+            else { showToast('Could not start retranscription', true); }
+        })
+        .catch(err => showToast('Error: ' + err.message, true));
+}
+
+window.addEventListener('DOMContentLoaded', initTrackDropdown);
 
 // ── Extension bridges ──
 // Expose player and Story Builder hooks for Pro extension tabs (Story

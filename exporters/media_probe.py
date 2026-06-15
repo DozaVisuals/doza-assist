@@ -188,6 +188,61 @@ def get_audio_sample_rate(path: str) -> int | None:
     return None
 
 
+def get_audio_layout(path: str):
+    """``(num_audio_streams, total_channels)`` across ALL audio streams, or None.
+
+    FCP declares a clip's asset as ``audioSources=<#streams> audioChannels=<total>``:
+    a stereo camera file is ``(1, 2)``, a mono file ``(1, 1)``, and a 4-mono-track
+    MXF ``(4, 4)``. Resolve needs the TOTAL channel count to bring every track's
+    audio onto the timeline — declaring only the FIRST stream's channels
+    (``get_audio_channels`` → 1 for multi-mono MXF) imports just track 1, which is
+    silent when the dialogue is on another mono track or the editor transcribed
+    "all tracks (mixed)" and the lav lives elsewhere.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        # Query the stream INDEX alongside channels so we can dedup: MPEG-TS
+        # lists each stream twice (top-level + program section), which would
+        # otherwise double the source/channel count for the .ts (and
+        # .ts-content-named-.mp4) media this app ingests — the same double-
+        # listing _first_csv_row guards against for the single-row probes.
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-select_streams", "a",
+                "-show_entries", "stream=index,channels",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        by_index = {}  # stream index -> channel count (dedups TS double-listing)
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            try:
+                idx, ch = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            if ch > 0:
+                by_index[idx] = ch
+        if not by_index:
+            return None
+        return (len(by_index), sum(by_index.values()))
+    except Exception:
+        return None
+
+
 def get_media_container_format(path: str) -> str | None:
     """Container format name(s) via ffprobe, or None on any probe trouble.
 

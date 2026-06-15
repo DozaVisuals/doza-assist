@@ -112,7 +112,7 @@ def _probe_audio_decl(source_path):
     """Probe the source's audio for FCPXML declaration.
 
     Returns ``(asset_audio_attrs, clip_audio_attr)``:
-      - asset_audio_attrs: e.g. ``' audioSources="1" audioChannels="1" audioRate="48000"'``
+      - asset_audio_attrs: e.g. ``' audioSources="4" audioChannels="4" audioRate="48000"'``
       - clip_audio_attr:   ``' audioRole="dialogue"'``
     or ``('', '')`` when the source has no detectable audio.
 
@@ -120,9 +120,14 @@ def _probe_audio_decl(source_path):
     media file's track table — an asset with a bare ``hasAudio="1"`` and an
     asset-clip with no ``audioRole`` imports the picture SILENT (the round-
     trip writer doesn't hit this because it reuses FCP's original asset,
-    which already carries these attributes). Channels come from the first
-    audio stream (the primary/dialogue track Doza transcribes by default);
-    multi-mono MXF reports 1, so Resolve brings that track's audio.
+    which already carries these attributes).
+
+    We declare the source's REAL audio layout — ``audioSources`` = number of
+    audio streams, ``audioChannels`` = total channels across them (a stereo
+    file → 1/2, a 4-mono-track MXF → 4/4). Declaring only the first stream's
+    channels imported just track 1, which is silent when the editor mixed
+    "all tracks" (lav on an unknown track). Bringing every track guarantees
+    the dialogue is present on the timeline; the editor solos/mutes the rest.
 
     Imported lazily: the exporters package __init__ eagerly loads this
     module for VIDEO_EXTS, so a module-level import would be a cycle.
@@ -130,12 +135,13 @@ def _probe_audio_decl(source_path):
     if not source_path:
         return '', ''
     try:
-        from exporters.media_probe import get_audio_channels, get_audio_sample_rate
-        ch = get_audio_channels(source_path)
-        if not ch or ch < 1:
+        from exporters.media_probe import get_audio_layout, get_audio_sample_rate
+        layout = get_audio_layout(source_path)
+        if not layout or layout[1] < 1:
             return '', ''
+        n_sources, n_channels = layout
         rate = get_audio_sample_rate(source_path) or 48000
-        return (f' audioSources="1" audioChannels="{ch}" audioRate="{rate}"',
+        return (f' audioSources="{n_sources}" audioChannels="{n_channels}" audioRate="{rate}"',
                 ' audioRole="dialogue"')
     except Exception:
         return '', ''

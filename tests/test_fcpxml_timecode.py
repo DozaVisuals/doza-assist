@@ -333,8 +333,9 @@ class TestMxfTimecode:
 # source audio and declares it; these pin that contract.
 
 class TestFcpxmlAudioDecl:
-    def _gen(self, monkeypatch, source, channels, rate, fn=generate_fcpxml, **kw):
-        monkeypatch.setattr(_mp, "get_audio_channels", lambda p: channels)
+    def _gen(self, monkeypatch, source, layout, rate, fn=generate_fcpxml, **kw):
+        # layout = (num_audio_streams, total_channels) | None
+        monkeypatch.setattr(_mp, "get_audio_layout", lambda p: layout)
         monkeypatch.setattr(_mp, "get_audio_sample_rate", lambda p: rate)
         markers = [{"start": 1.0, "end": 5.0, "text": "a", "category": "Soundbite"}]
         if fn is generate_fcpxml:
@@ -343,23 +344,27 @@ class TestFcpxmlAudioDecl:
         return fn(markers, "T", story_title="S", framerate=23.976,
                   source_path=source, media_duration=60.0, **kw)
 
-    def test_audio_declared_when_source_has_audio(self, monkeypatch, source):
-        xml = self._gen(monkeypatch, source, 1, 48000)
+    def test_multimono_mxf_declares_all_tracks(self, monkeypatch, source):
+        # 4 discrete mono tracks -> audioSources="4" audioChannels="4" so
+        # Resolve brings every track (dialogue guaranteed present).
+        xml = self._gen(monkeypatch, source, (4, 4), 48000)
         asset = re.search(r'<asset id="r2"[^>]*>', xml).group(0)
         assert 'hasAudio="1"' in asset
-        assert 'audioSources="1"' in asset
-        assert 'audioChannels="1"' in asset
+        assert 'audioSources="4"' in asset
+        assert 'audioChannels="4"' in asset
         assert 'audioRate="48000"' in asset
-        # Every asset-clip routes a dialogue role so Resolve brings the audio.
         clips = re.findall(r'<asset-clip [^>]*>', xml)
         assert clips and all('audioRole="dialogue"' in c for c in clips)
         seq = re.search(r'<sequence [^>]*>', xml).group(0)
         assert 'audioLayout="stereo"' in seq and 'audioRate="48k"' in seq
 
-    def test_channels_and_rate_follow_the_source(self, monkeypatch, source):
-        xml = self._gen(monkeypatch, source, 2, 44100)
+    def test_layout_and_rate_follow_the_source(self, monkeypatch, source):
+        # A stereo file is one 2-channel stream -> 1/2; rate is carried through.
+        xml = self._gen(monkeypatch, source, (1, 2), 44100)
         asset = re.search(r'<asset id="r2"[^>]*>', xml).group(0)
-        assert 'audioChannels="2"' in asset and 'audioRate="44100"' in asset
+        assert 'audioSources="1"' in asset
+        assert 'audioChannels="2"' in asset
+        assert 'audioRate="44100"' in asset
 
     def test_no_audio_decl_when_source_has_none(self, monkeypatch, source):
         # Video-only source (or probe fail): keep the legacy bare asset — no
@@ -370,5 +375,38 @@ class TestFcpxmlAudioDecl:
         assert 'audioLayout=' not in xml
 
     def test_story_export_also_declares_audio(self, monkeypatch, source):
-        xml = self._gen(monkeypatch, source, 1, 48000, fn=generate_story_fcpxml)
-        assert 'audioChannels="1"' in xml and 'audioRole="dialogue"' in xml
+        xml = self._gen(monkeypatch, source, (4, 4), 48000, fn=generate_story_fcpxml)
+        assert 'audioSources="4"' in xml and 'audioChannels="4"' in xml
+        assert 'audioRole="dialogue"' in xml
+
+
+# ── get_audio_layout (multi-stream count + MPEG-TS dedup) ────────────────────
+
+class TestGetAudioLayout:
+    def _layout(self, monkeypatch, stdout):
+        monkeypatch.setattr(_mp, "_find_ffprobe", lambda: "/fake/ffprobe")
+        monkeypatch.setattr(_mp.os.path, "exists", lambda p: True)
+        monkeypatch.setattr(_mp.subprocess, "run",
+            lambda *a, **k: _subprocess.CompletedProcess([], 0, stdout, ""))
+        return _mp.get_audio_layout("/fake/x")
+
+    def test_stereo_single_stream(self, monkeypatch):
+        assert self._layout(monkeypatch, "0,2\n") == (1, 2)
+
+    def test_mono_single_stream(self, monkeypatch):
+        assert self._layout(monkeypatch, "0,1\n") == (1, 1)
+
+    def test_four_mono_tracks(self, monkeypatch):
+        assert self._layout(monkeypatch, "1,1\n2,1\n3,1\n4,1\n") == (4, 4)
+
+    def test_mpegts_double_listing_deduped(self, monkeypatch):
+        # MPEG-TS lists each stream twice (same index) — must NOT double-count.
+        assert self._layout(monkeypatch, "0,2\n\n0,2\n") == (1, 2)
+        # 4-mono TS doubled stays 4/4, not 8/8.
+        assert self._layout(monkeypatch, "1,1\n1,1\n2,1\n2,1\n3,1\n3,1\n4,1\n4,1\n") == (4, 4)
+
+    def test_no_audio_returns_none(self, monkeypatch):
+        assert self._layout(monkeypatch, "") is None
+
+    def test_na_channels_skipped(self, monkeypatch):
+        assert self._layout(monkeypatch, "0,N/A\n1,1\n") == (1, 1)

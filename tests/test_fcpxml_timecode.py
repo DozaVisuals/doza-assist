@@ -322,3 +322,53 @@ class TestMxfTimecode:
             "format": {"format_name": "mpegts", "tags": {"timecode": "05:26:30:20"}},
         }
         assert _run_probe(monkeypatch, payload, "/fake/clip.ts") == 0
+
+
+# ── Audio declaration (Resolve imports clips with audio, not silent) ─────────
+#
+# The from-scratch FCPXML exporter used to write a bare `<asset hasAudio="1">`
+# with no audioSources/audioChannels/audioRate and asset-clips with no
+# audioRole. Resolve maps FCPXML clip audio from those DECLARATIONS (not the
+# file's track table), so the timeline imported SILENT. The fix probes the
+# source audio and declares it; these pin that contract.
+
+class TestFcpxmlAudioDecl:
+    def _gen(self, monkeypatch, source, channels, rate, fn=generate_fcpxml, **kw):
+        monkeypatch.setattr(_mp, "get_audio_channels", lambda p: channels)
+        monkeypatch.setattr(_mp, "get_audio_sample_rate", lambda p: rate)
+        markers = [{"start": 1.0, "end": 5.0, "text": "a", "category": "Soundbite"}]
+        if fn is generate_fcpxml:
+            return fn(markers, "T", framerate=23.976, source_path=source,
+                     media_duration=60.0, mode="cuts", **kw)
+        return fn(markers, "T", story_title="S", framerate=23.976,
+                  source_path=source, media_duration=60.0, **kw)
+
+    def test_audio_declared_when_source_has_audio(self, monkeypatch, source):
+        xml = self._gen(monkeypatch, source, 1, 48000)
+        asset = re.search(r'<asset id="r2"[^>]*>', xml).group(0)
+        assert 'hasAudio="1"' in asset
+        assert 'audioSources="1"' in asset
+        assert 'audioChannels="1"' in asset
+        assert 'audioRate="48000"' in asset
+        # Every asset-clip routes a dialogue role so Resolve brings the audio.
+        clips = re.findall(r'<asset-clip [^>]*>', xml)
+        assert clips and all('audioRole="dialogue"' in c for c in clips)
+        seq = re.search(r'<sequence [^>]*>', xml).group(0)
+        assert 'audioLayout="stereo"' in seq and 'audioRate="48k"' in seq
+
+    def test_channels_and_rate_follow_the_source(self, monkeypatch, source):
+        xml = self._gen(monkeypatch, source, 2, 44100)
+        asset = re.search(r'<asset id="r2"[^>]*>', xml).group(0)
+        assert 'audioChannels="2"' in asset and 'audioRate="44100"' in asset
+
+    def test_no_audio_decl_when_source_has_none(self, monkeypatch, source):
+        # Video-only source (or probe fail): keep the legacy bare asset — no
+        # audioSources/audioRole/audioLayout, no spurious silent audio track.
+        xml = self._gen(monkeypatch, source, None, None)
+        assert 'audioSources=' not in xml
+        assert 'audioRole=' not in xml
+        assert 'audioLayout=' not in xml
+
+    def test_story_export_also_declares_audio(self, monkeypatch, source):
+        xml = self._gen(monkeypatch, source, 1, 48000, fn=generate_story_fcpxml)
+        assert 'audioChannels="1"' in xml and 'audioRole="dialogue"' in xml

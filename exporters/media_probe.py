@@ -156,6 +156,38 @@ def get_audio_channels(path: str) -> int | None:
     return None
 
 
+def get_audio_sample_rate(path: str) -> int | None:
+    """Sample rate (Hz) of the first audio stream, or None if no audio/probe fail.
+
+    Used to declare an FCPXML asset's ``audioRate`` so Resolve routes the
+    clip audio (Resolve maps FCPXML audio from the declared rate/channels,
+    not the file's track table). Pro media is overwhelmingly 48000.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            rate = int(_first_csv_row(result.stdout).split(",")[0])
+            if rate > 0:
+                return rate
+    except Exception:
+        pass
+    return None
+
+
 def get_media_container_format(path: str) -> str | None:
     """Container format name(s) via ffprobe, or None on any probe trouble.
 

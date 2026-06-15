@@ -108,6 +108,39 @@ MARKER_COLORS = {
 }
 
 
+def _probe_audio_decl(source_path):
+    """Probe the source's audio for FCPXML declaration.
+
+    Returns ``(asset_audio_attrs, clip_audio_attr)``:
+      - asset_audio_attrs: e.g. ``' audioSources="1" audioChannels="1" audioRate="48000"'``
+      - clip_audio_attr:   ``' audioRole="dialogue"'``
+    or ``('', '')`` when the source has no detectable audio.
+
+    Resolve maps FCPXML clip audio from these DECLARATIONS, not from the
+    media file's track table — an asset with a bare ``hasAudio="1"`` and an
+    asset-clip with no ``audioRole`` imports the picture SILENT (the round-
+    trip writer doesn't hit this because it reuses FCP's original asset,
+    which already carries these attributes). Channels come from the first
+    audio stream (the primary/dialogue track Doza transcribes by default);
+    multi-mono MXF reports 1, so Resolve brings that track's audio.
+
+    Imported lazily: the exporters package __init__ eagerly loads this
+    module for VIDEO_EXTS, so a module-level import would be a cycle.
+    """
+    if not source_path:
+        return '', ''
+    try:
+        from exporters.media_probe import get_audio_channels, get_audio_sample_rate
+        ch = get_audio_channels(source_path)
+        if not ch or ch < 1:
+            return '', ''
+        rate = get_audio_sample_rate(source_path) or 48000
+        return (f' audioSources="1" audioChannels="{ch}" audioRate="{rate}"',
+                ' audioRole="dialogue"')
+    except Exception:
+        return '', ''
+
+
 def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
                     source_path=None, media_duration=None, mode="cuts",
                     width=1920, height=1080, start_tc_frames=0, tc_format="NDF"):
@@ -182,6 +215,12 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     # Determine if video or audio-only
     is_video = ext in VIDEO_EXTS
 
+    # Declare the source audio so Resolve routes it onto the timeline. Without
+    # these the clips import SILENT (Resolve maps FCPXML audio from the
+    # declarations, not the file's track table).
+    asset_audio_attrs, clip_audio_attr = _probe_audio_decl(source_path)
+    seq_audio_attrs = ' audioLayout="stereo" audioRate="48k"' if asset_audio_attrs else ''
+
     # Build the spine — each marker becomes an asset-clip on the timeline
     spine_clips = []
     offset_frames = 0
@@ -242,7 +281,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         spine_clips.append(
             f'                        <asset-clip name="{clip_name}" ref="r2" '
             f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
-            f'format="r1" tcFormat="{tc_format}">'
+            f'format="r1" tcFormat="{tc_format}"{clip_audio_attr}>'
             f'{keyword_xml}{marker_xml}'
             f'\n                        </asset-clip>'
         )
@@ -266,14 +305,14 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 <fcpxml version="1.11">
     <resources>
         <format id="r1"{_format_name_attr(width, height, framerate)} frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
-        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
+        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1"{asset_audio_attrs} format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
     </resources>
     <library>
         <event name="{safe_name}">
             <project name="{safe_name} - Selects" uid="{uid}">
-                <sequence format="r1" duration="{timeline_dur_str}" tcStart="0/1s" tcFormat="NDF">
+                <sequence format="r1" duration="{timeline_dur_str}" tcStart="0/1s" tcFormat="NDF"{seq_audio_attrs}>
                     <spine>
 {spine_block}
                     </spine>
@@ -320,6 +359,11 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
     ext = os.path.splitext(source_path)[1].lower()
     is_video = ext in VIDEO_EXTS
 
+    # Declare source audio so Resolve routes it (else clips import silent) —
+    # see generate_fcpxml.
+    asset_audio_attrs, clip_audio_attr = _probe_audio_decl(source_path)
+    seq_audio_attrs = ' audioLayout="stereo" audioRate="48k"' if asset_audio_attrs else ''
+
     spine_clips = []
     offset_frames = 0
 
@@ -365,7 +409,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
         spine_clips.append(
             f'                        <asset-clip name="{clip_name}" ref="r2" '
             f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
-            f'format="r1" tcFormat="{tc_format}">{speaker_kw}{marker_xml}'
+            f'format="r1" tcFormat="{tc_format}"{clip_audio_attr}>{speaker_kw}{marker_xml}'
             f'\n                        </asset-clip>'
         )
 
@@ -388,14 +432,14 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 <fcpxml version="1.11">
     <resources>
         <format id="r1"{_format_name_attr(width, height, framerate)} frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
-        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1" format="r1">
+        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1"{asset_audio_attrs} format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
     </resources>
     <library>
         <event name="{safe_name}">
             <project name="{safe_title}" uid="{uid}">
-                <sequence format="r1" duration="{timeline_dur_str}" tcStart="0/1s" tcFormat="NDF">
+                <sequence format="r1" duration="{timeline_dur_str}" tcStart="0/1s" tcFormat="NDF"{seq_audio_attrs}>
                     <spine>
 {spine_block}
                     </spine>

@@ -47,6 +47,23 @@ def _find_ffprobe() -> str | None:
     return None
 
 
+def _find_ffmpeg() -> str | None:
+    """Resolve ffmpeg (bundled first), mirroring _find_ffprobe. Needed for the
+    per-stream loudness probe (volumedetect) that finds the dialogue channel."""
+    bundled_dir = os.environ.get("DOZA_FFMPEG_DIR")
+    if bundled_dir:
+        candidate = os.path.join(bundled_dir, "ffmpeg")
+        if os.path.isfile(candidate):
+            return candidate
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _first_csv_row(stdout: str) -> str:
     """First non-empty row of ffprobe csv output.
 
@@ -241,6 +258,94 @@ def get_audio_layout(path: str):
         return (len(by_index), sum(by_index.values()))
     except Exception:
         return None
+
+
+# Per-(path,size,mtime) memo so re-exporting a source doesn't re-probe loudness.
+_dialogue_channel_cache: dict = {}
+
+
+def _mean_volume_db(ffmpeg: str, path: str, stream_idx: int,
+                    start: float, seg: float):
+    """Mean volume (dB) of ONE audio stream over a sample window, via ffmpeg
+    `volumedetect`. None on failure. Digital silence reads ≈ -91 dB / -inf.
+
+    Input-seek (`-ss` before `-i`) so a multi-GB master isn't decoded from the
+    top — sample-window accuracy is irrelevant for a loudness average."""
+    try:
+        cmd = [ffmpeg, "-nostdin", "-hide_banner", "-nostats"]
+        if start and start > 0:
+            cmd += ["-ss", f"{start:.3f}"]
+        cmd += ["-t", f"{max(1.0, seg):.3f}", "-i", path,
+                "-map", f"0:a:{stream_idx}", "-af", "volumedetect",
+                "-f", "null", "-"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        m = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", result.stderr or "")
+        if m:
+            return float(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def detect_dialogue_channels(path: str, sample_seconds: float = 90.0,
+                             floor_db: float = -60.0, rel_db: float = 25.0):
+    """0-based indices of the audio streams carrying usable audio (the lav /
+    dialogue track[s]), loudest first — or None.
+
+    For a broadcast multi-mono MXF (e.g. 4 discrete mono tracks, lav on one,
+    the rest silent scratch/room), this returns the speech-bearing track(s) so
+    the FCPXML export can route ONLY them and the editor gets clean dialogue
+    instead of an empty channel. Returns None for single-stream sources (no
+    disambiguation needed) and when nothing can be measured.
+
+    Method: ffmpeg `volumedetect` on a ~90s window per stream (export-time
+    cost, not a full decode). "Active" = the loudest stream plus any within
+    `rel_db` of it and above `floor_db`; empty PCM tracks read ≈ -91 dB and
+    drop out. Loudness can't separate speech from music — but it cleanly
+    separates SILENT tracks, which is the multi-mono case here; the editor can
+    always override via the audio selector. Result is memoized per file.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    layout = get_audio_layout(path)
+    if not layout or layout[0] <= 1:
+        return None  # single audio stream — nothing to disambiguate
+    n_streams, n_channels = layout
+    # Only the all-mono case maps stream index -> source channel cleanly
+    # (stream i == srcCh i+1). Mixed/multi-channel streams: leave alone.
+    if n_streams != n_channels:
+        return None
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return None
+    try:
+        st = os.stat(path)
+        key = (path, st.st_size, int(st.st_mtime))
+    except OSError:
+        key = None
+    if key is not None and key in _dialogue_channel_cache:
+        return _dialogue_channel_cache[key]
+
+    dur = get_media_duration(path) or 0.0
+    start = max(0.0, dur * 0.15) if dur else 0.0
+    seg = min(sample_seconds, max(10.0, dur - start)) if dur else sample_seconds
+
+    measured = []  # (stream_idx, mean_db)
+    for i in range(n_streams):
+        db = _mean_volume_db(ffmpeg, path, i, start, seg)
+        if db is not None:
+            measured.append((i, db))
+
+    result = None
+    if measured:
+        loudest = max(db for _, db in measured)
+        active = [i for (i, db) in measured
+                  if db >= loudest - rel_db and db > floor_db]
+        active.sort(key=lambda i: dict(measured)[i], reverse=True)
+        result = active or None
+    if key is not None:
+        _dialogue_channel_cache[key] = result
+    return result
 
 
 def get_media_container_format(path: str) -> str | None:

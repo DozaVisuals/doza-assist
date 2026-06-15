@@ -2266,6 +2266,11 @@ def project_audio_duration(project_id):
 
 _transcribe_jobs: dict = {}
 _transcribe_jobs_lock = threading.Lock()
+# Snapshot of a project's working transcript taken when /retranscribe clears
+# it, so an empty-channel re-run can be ROLLED BACK instead of locking the
+# user out of the project. Keyed by project_id; guarded by the lock above.
+# Consumed (popped) by the worker on no-speech-restore or on success.
+_retranscribe_backups: dict = {}
 
 # Process-global "only one transcription at a time" gate. Transcription
 # engines share a single in-process model singleton (Parakeet/WhisperX/
@@ -2359,6 +2364,48 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
         # track being the usual cause).
         seg_count = len((result or {}).get('segments', []))
         if seg_count == 0:
+            # Roll back if this empty run was a RETRANSCRIBE: restore the prior
+            # working transcript (snapshotted by /retranscribe) so the user
+            # isn't stranded on a dead error screen with their good transcript
+            # destroyed. A fresh first transcribe has no backup -> real error.
+            with _transcribe_jobs_lock:
+                backup = _retranscribe_backups.pop(project_id, None)
+            if backup and backup.get('transcript'):
+                try:
+                    ch_n = int(audio_channel)
+                except (TypeError, ValueError):
+                    ch_n = None
+                where = f"Track {ch_n + 1}" if ch_n is not None else "that track"
+                notice = (f"{where} had no audio — kept your previous transcript. "
+                          "Pick a different track and retry.")
+                restore = {
+                    'transcript': backup['transcript'],
+                    'analysis': backup.get('analysis'),
+                    'client_selects': backup.get('client_selects') or [],
+                    'social_clips': backup.get('social_clips') or [],
+                    'audio_channel': backup.get('audio_channel'),
+                    'status': 'transcribed',
+                }
+                if backup.get('detected_language'):
+                    restore['detected_language'] = backup['detected_language']
+                if backup.get('speaker_names'):
+                    restore['speaker_names'] = backup['speaker_names']
+                if backup.get('diarization'):
+                    restore['diarization'] = backup['diarization']
+                update_project(project_id, restore, remove=['error'])
+                ok_payload = {
+                    "started_at": _transcribe_jobs.get(project_id, {}).get("started_at"),
+                    "updated_at": datetime.now().isoformat(),
+                    "phase": "done",      # frontend reloads into the restored transcript
+                    "pct": 100,
+                    "message": notice,
+                    "notice": notice,     # flashed as a toast across the reload
+                    "restored": True,
+                }
+                with _transcribe_jobs_lock:
+                    _transcribe_jobs[project_id] = ok_payload
+                _write_transcribe_status(project_id, ok_payload)
+                return
             err_text = ('Transcription produced no speech — the audio track '
                         'may be silent. Check that the source plays sound, '
                         'then use Retry.')
@@ -2375,6 +2422,10 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
                 _transcribe_jobs[project_id] = err_payload
             _write_transcribe_status(project_id, err_payload)
             return
+
+        # New transcript is good — discard the rollback snapshot.
+        with _transcribe_jobs_lock:
+            _retranscribe_backups.pop(project_id, None)
 
         # Persist only the keys this job owns, re-reading current state under
         # the project lock — so chat history / labels / a rename saved while
@@ -4411,6 +4462,26 @@ def retranscribe(project_id):
 
     data = request.get_json() or {}
     language = data.get('language', project.get('language', 'en')).strip()
+    # Snapshot the working transcript + its audio-track choice BEFORE we change
+    # anything, so an empty-channel re-run (e.g. user picks a silent scratch
+    # track) can be rolled back instead of stranding the project on a dead
+    # error screen. In-memory only (no meta.json bloat); the worker pops it on
+    # restore/success.
+    if project.get('transcript'):
+        with _transcribe_jobs_lock:
+            _retranscribe_backups[project_id] = {
+                'transcript': project.get('transcript'),
+                'analysis': project.get('analysis'),
+                'client_selects': project.get('client_selects') or [],
+                'social_clips': project.get('social_clips') or [],
+                'detected_language': project.get('detected_language'),
+                'audio_channel': project.get('audio_channel'),  # the channel that worked
+                # Diarized/Pro projects: keep the speaker map + diarization so a
+                # rollback doesn't silently lose the editor's speaker names.
+                'speaker_names': project.get('speaker_names'),
+                'diarization': project.get('diarization'),
+            }
+
     project['language'] = language
     # Allow changing the source audio track on retranscribe (camera-mic vs
     # lav). A change invalidates the cached WAV via the recipe sidecar.

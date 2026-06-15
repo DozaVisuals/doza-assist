@@ -94,3 +94,45 @@ class TestRetranscribeDefaultNotMixed:
         assert "value=\"all\"${defaultVal === 'all' ? ' selected' : ''}" in html
         # And the picker POSTs the chosen channel.
         assert 'body.audio_channel = audioChannel;' in html
+
+
+# ── Empty-channel retranscribe recovery (don't strand the project) ───────────
+#
+# Retranscribing onto a silent/scratch track produced 0 segments -> status=
+# 'error' with the transcript ALREADY destroyed, locking the user out. Now the
+# route snapshots the working transcript and the worker rolls back to it.
+
+class TestRetranscribeEmptyChannelRecovery:
+    def _run_empty(self, monkeypatch, pid, with_backup):
+        import transcribe as t
+        monkeypatch.setattr(t, 'transcribe_file', lambda *a, **k: {'segments': []})
+        if with_backup:
+            with app_module._transcribe_jobs_lock:
+                app_module._retranscribe_backups[pid] = {
+                    'transcript': {'segments': [{'start': 0, 'end': 1, 'text': 'hi'}],
+                                   'language': 'no'},
+                    'analysis': None, 'client_selects': [], 'social_clips': [],
+                    'detected_language': 'no', 'audio_channel': 'all',
+                }
+        # audio_channel=1 (0-based) -> the notice should say "Track 2"
+        app_module._run_transcribe_job(pid, '/x.mxf', None, 'no', 'Int', 'Subj',
+                                       audio_channel=1)
+
+    def test_empty_retranscribe_restores_prior_transcript(self, client, tmp_path, monkeypatch):
+        _make_project('r1', str(tmp_path / 'm.mxf'))
+        self._run_empty(monkeypatch, 'r1', with_backup=True)
+        meta = _saved_meta('r1')
+        assert meta['status'] == 'transcribed'
+        assert meta.get('transcript') and meta['transcript']['segments']
+        assert meta.get('audio_channel') == 'all'  # rolled back to the working channel
+        assert 'r1' not in app_module._retranscribe_backups  # snapshot consumed
+        st = app_module._transcribe_jobs.get('r1', {})
+        assert st.get('phase') == 'done'  # frontend reloads into the restored transcript
+        assert 'Track 2' in (st.get('notice') or '')
+
+    def test_empty_fresh_transcribe_still_errors(self, client, tmp_path, monkeypatch):
+        _make_project('r2', str(tmp_path / 'm.mxf'))
+        self._run_empty(monkeypatch, 'r2', with_backup=False)
+        meta = _saved_meta('r2')
+        assert meta['status'] == 'error'
+        assert 'no speech' in (meta.get('error') or '').lower()

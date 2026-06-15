@@ -121,6 +121,23 @@
        project header. The auto-start script is gated on status == 'uploaded'
        so we don't fire startTranscription() again for projects already
        transcribing in the background. #}
+    <script>
+    // One-shot flash set in sessionStorage before a reload (e.g. the
+    // retranscribe rollback notice: "Track N had no audio — kept your previous
+    // transcript"). Surfaced once on the page we land on. Always rendered so it
+    // works regardless of transcript/error state after the reload.
+    window.addEventListener('DOMContentLoaded', function () {
+        try {
+            var f = sessionStorage.getItem('dozaFlash');
+            if (f) {
+                sessionStorage.removeItem('dozaFlash');
+                if (typeof showToast === 'function') showToast(f);
+                else alert(f);
+            }
+        } catch (e) {}
+    });
+    </script>
+
     {% if not project.transcript %}
     <!-- Auto-transcription state -->
     <div class="card">
@@ -213,7 +230,15 @@
                     }
                     if (phase === 'done' || state.transcribed) {
                         if (fill) fill.style.width = '100%';
-                        if (statusText) statusText.textContent = 'Done!';
+                        // A retranscribe that found no speech rolls back to the
+                        // prior transcript and ships a notice — stash it so it
+                        // surfaces as a toast on the (restored) page after reload.
+                        if (state.notice) {
+                            try { sessionStorage.setItem('dozaFlash', state.notice); } catch (e) {}
+                            if (statusText) statusText.textContent = state.notice;
+                        } else if (statusText) {
+                            statusText.textContent = 'Done!';
+                        }
                         if (typeof reloadAndKeepTab === 'function') {
                             setTimeout(() => reloadAndKeepTab('transcript'), 800);
                         } else {

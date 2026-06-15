@@ -333,10 +333,14 @@ class TestMxfTimecode:
 # source audio and declares it; these pin that contract.
 
 class TestFcpxmlAudioDecl:
-    def _gen(self, monkeypatch, source, layout, rate, fn=generate_fcpxml, **kw):
+    def _gen(self, monkeypatch, source, layout, rate, dialogue=None,
+             fn=generate_fcpxml, **kw):
         # layout = (num_audio_streams, total_channels) | None
+        # dialogue = list of 0-based speech-bearing stream indices | None
         monkeypatch.setattr(_mp, "get_audio_layout", lambda p: layout)
         monkeypatch.setattr(_mp, "get_audio_sample_rate", lambda p: rate)
+        monkeypatch.setattr(_mp, "detect_dialogue_channels",
+                            lambda p, *a, **k: dialogue)
         markers = [{"start": 1.0, "end": 5.0, "text": "a", "category": "Soundbite"}]
         if fn is generate_fcpxml:
             return fn(markers, "T", framerate=23.976, source_path=source,
@@ -344,40 +348,57 @@ class TestFcpxmlAudioDecl:
         return fn(markers, "T", story_title="S", framerate=23.976,
                   source_path=source, media_duration=60.0, **kw)
 
-    def test_multimono_mxf_declares_all_tracks(self, monkeypatch, source):
-        # 4 discrete mono tracks -> audioSources="4" audioChannels="4" so
-        # Resolve brings every track (dialogue guaranteed present).
-        xml = self._gen(monkeypatch, source, (4, 4), 48000)
-        asset = re.search(r'<asset id="r2"[^>]*>', xml).group(0)
-        assert 'hasAudio="1"' in asset
-        assert 'audioSources="4"' in asset
-        assert 'audioChannels="4"' in asset
-        assert 'audioRate="48000"' in asset
-        clips = re.findall(r'<asset-clip [^>]*>', xml)
-        assert clips and all('audioRole="dialogue"' in c for c in clips)
-        seq = re.search(r'<sequence [^>]*>', xml).group(0)
-        assert 'audioLayout="stereo"' in seq and 'audioRate="48k"' in seq
-
-    def test_layout_and_rate_follow_the_source(self, monkeypatch, source):
-        # A stereo file is one 2-channel stream -> 1/2; rate is carried through.
-        xml = self._gen(monkeypatch, source, (1, 2), 44100)
+    def test_asset_declares_one_source_total_channels(self, monkeypatch, source):
+        # A single media file is ONE source with N channels (FCP convention).
+        xml = self._gen(monkeypatch, source, (4, 4), 48000, dialogue=[1])
         asset = re.search(r'<asset id="r2"[^>]*>', xml).group(0)
         assert 'audioSources="1"' in asset
-        assert 'audioChannels="2"' in asset
+        assert 'audioChannels="4"' in asset
+        assert 'audioRate="48000"' in asset
+
+    def test_multimono_routes_detected_channel_via_connected_audio(self, monkeypatch, source):
+        # lav detected on stream index 1 -> Resolve-honored connected-clip
+        # form (<clip><video><audio srcCh="2">), NOT a flat <asset-clip>.
+        xml = self._gen(monkeypatch, source, (4, 4), 48000, dialogue=[1])
+        assert '<clip ' in xml and '<video ref="r2"' in xml
+        assert '<asset-clip' not in xml
+        audios = re.findall(r'<audio [^>]*/>', xml)
+        assert audios and all('srcCh="2"' in a for a in audios)
+        # the silent tracks (1, 3, 4) are NOT routed, and the discredited
+        # audio-channel-source element is gone.
+        assert 'srcCh="1"' not in xml and 'srcCh="3"' not in xml and 'srcCh="4"' not in xml
+        assert '<audio-channel-source' not in xml
+
+    def test_two_live_mics_route_both(self, monkeypatch, source):
+        xml = self._gen(monkeypatch, source, (4, 4), 48000, dialogue=[1, 2])
+        assert 'srcCh="2"' in xml and 'srcCh="3"' in xml
+
+    def test_multimono_no_detection_uses_asset_clip(self, monkeypatch, source):
+        # Detection found nothing -> compact asset-clip + audioRole (no guess).
+        xml = self._gen(monkeypatch, source, (4, 4), 48000, dialogue=None)
+        assert '<asset-clip ' in xml and 'audioRole="dialogue"' in xml
+        assert '<clip ' not in xml and '<audio ' not in xml
+
+    def test_single_stream_uses_asset_clip(self, monkeypatch, source):
+        # Stereo single stream -> 1/2, asset-clip + audioRole, no routing.
+        xml = self._gen(monkeypatch, source, (1, 2), 44100, dialogue=None)
+        asset = re.search(r'<asset id="r2"[^>]*>', xml).group(0)
+        assert 'audioSources="1"' in asset and 'audioChannels="2"' in asset
         assert 'audioRate="44100"' in asset
+        assert '<asset-clip ' in xml and '<audio ' not in xml
 
     def test_no_audio_decl_when_source_has_none(self, monkeypatch, source):
-        # Video-only source (or probe fail): keep the legacy bare asset — no
-        # audioSources/audioRole/audioLayout, no spurious silent audio track.
         xml = self._gen(monkeypatch, source, None, None)
         assert 'audioSources=' not in xml
         assert 'audioRole=' not in xml
         assert 'audioLayout=' not in xml
+        assert '<audio ' not in xml
 
-    def test_story_export_also_declares_audio(self, monkeypatch, source):
-        xml = self._gen(monkeypatch, source, (4, 4), 48000, fn=generate_story_fcpxml)
-        assert 'audioSources="4"' in xml and 'audioChannels="4"' in xml
-        assert 'audioRole="dialogue"' in xml
+    def test_story_export_routes_dialogue(self, monkeypatch, source):
+        xml = self._gen(monkeypatch, source, (4, 4), 48000, dialogue=[1],
+                        fn=generate_story_fcpxml)
+        assert '<clip ' in xml and '<video ref="r2"' in xml
+        assert re.search(r'<audio [^>]*srcCh="2"', xml)
 
 
 # ── get_audio_layout (multi-stream count + MPEG-TS dedup) ────────────────────
@@ -410,3 +431,43 @@ class TestGetAudioLayout:
 
     def test_na_channels_skipped(self, monkeypatch):
         assert self._layout(monkeypatch, "0,N/A\n1,1\n") == (1, 1)
+
+
+# ── detect_dialogue_channels (loudness-based speech-track picker) ────────────
+
+class TestDetectDialogueChannels:
+    def _detect(self, monkeypatch, layout, levels, **kw):
+        # levels = {stream_idx: mean_db}; missing idx -> None (probe failed)
+        monkeypatch.setattr(_mp.os.path, "exists", lambda p: True)
+        monkeypatch.setattr(_mp, "get_audio_layout", lambda p: layout)
+        monkeypatch.setattr(_mp, "_find_ffmpeg", lambda: "/fake/ffmpeg")
+        monkeypatch.setattr(_mp, "get_media_duration", lambda p: 600.0)
+        monkeypatch.setattr(_mp, "_mean_volume_db",
+                            lambda ff, p, i, s, g: levels.get(i))
+        return _mp.detect_dialogue_channels("/fake/x.mxf", **kw)
+
+    def test_single_loud_track_wins(self, monkeypatch):
+        # lav on stream 1; 0/2/3 are silent scratch -> only [1]
+        assert self._detect(monkeypatch, (4, 4),
+                            {0: -91.0, 1: -24.0, 2: -91.0, 3: -90.0}) == [1]
+
+    def test_two_live_mics_both_returned_loudest_first(self, monkeypatch):
+        assert self._detect(monkeypatch, (4, 4),
+                            {0: -91.0, 1: -30.0, 2: -24.0, 3: -91.0}) == [2, 1]
+
+    def test_quiet_track_beyond_rel_db_dropped(self, monkeypatch):
+        # -55 is 31 dB below the -24 lead (>25) -> excluded
+        assert self._detect(monkeypatch, (4, 4),
+                            {0: -24.0, 1: -55.0, 2: -91.0, 3: -91.0}) == [0]
+
+    def test_all_silent_returns_none(self, monkeypatch):
+        assert self._detect(monkeypatch, (4, 4),
+                            {0: -91.0, 1: -92.0, 2: -91.0, 3: -90.0}) is None
+
+    def test_single_stream_returns_none(self, monkeypatch):
+        assert self._detect(monkeypatch, (1, 1), {0: -24.0}) is None
+
+    def test_multichannel_streams_skipped(self, monkeypatch):
+        # 2 streams / 4 channels (stereo pairs) — stream->srcCh mapping is not
+        # 1:1, so we don't guess; returns None.
+        assert self._detect(monkeypatch, (2, 4), {0: -24.0, 1: -91.0}) is None

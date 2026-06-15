@@ -111,10 +111,14 @@ MARKER_COLORS = {
 def _probe_audio_decl(source_path):
     """Probe the source's audio for FCPXML declaration.
 
-    Returns ``(asset_audio_attrs, clip_audio_attr)``:
-      - asset_audio_attrs: e.g. ``' audioSources="4" audioChannels="4" audioRate="48000"'``
+    Returns ``(asset_audio_attrs, clip_audio_attr, dialogue_srcch)``:
+      - asset_audio_attrs: e.g. ``' audioSources="1" audioChannels="4" audioRate="48000"'``
       - clip_audio_attr:   ``' audioRole="dialogue"'``
-    or ``('', '')`` when the source has no detectable audio.
+      - dialogue_srcch:    list of 1-based source channels to route as the
+                           dialogue (the detected speech track[s] of a
+                           multi-mono source), or ``None`` — meaning emit the
+                           compact ``<asset-clip>`` and let the asset carry it.
+    or ``('', '', None)`` when the source has no detectable audio.
 
     Resolve maps FCPXML clip audio from these DECLARATIONS, not from the
     media file's track table — an asset with a bare ``hasAudio="1"`` and an
@@ -133,18 +137,79 @@ def _probe_audio_decl(source_path):
     module for VIDEO_EXTS, so a module-level import would be a cycle.
     """
     if not source_path:
-        return '', ''
+        return '', '', None
     try:
-        from exporters.media_probe import get_audio_layout, get_audio_sample_rate
+        from exporters.media_probe import (
+            get_audio_layout, get_audio_sample_rate, detect_dialogue_channels)
         layout = get_audio_layout(source_path)
         if not layout or layout[1] < 1:
-            return '', ''
+            return '', '', None
         n_sources, n_channels = layout
         rate = get_audio_sample_rate(source_path) or 48000
-        return (f' audioSources="{n_sources}" audioChannels="{n_channels}" audioRate="{rate}"',
-                ' audioRole="dialogue"')
+        # A single media file is ONE audio source with N channels — matches
+        # FCP's own exports, which always emit audioSources="1".
+        asset_attrs = (f' audioSources="1" audioChannels="{n_channels}"'
+                       f' audioRate="{rate}"')
+        clip_attr = ' audioRole="dialogue"'
+        # Multi-mono broadcast source (e.g. 4 discrete tracks, lav on one, the
+        # rest silent scratch): detect the speech-bearing track(s) so the spine
+        # routes ONLY them. Resolve honors srcCh on a connected <audio> element
+        # inside <clip><video> — NOT audioRole/audio-channel-source on an
+        # <asset-clip> (verified by reverse-engineering Resolve's own FCPXML).
+        # Returns 1-based source channels, or None -> compact asset-clip form.
+        dialogue_srcch = None
+        if n_sources > 1:
+            active = detect_dialogue_channels(source_path)
+            if active:
+                dialogue_srcch = [idx + 1 for idx in active]
+        return asset_attrs, clip_attr, dialogue_srcch
     except Exception:
-        return '', ''
+        return '', '', None
+
+
+def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
+                anchored_xml, clip_audio_attr, dialogue_srcch,
+                asset_start_str, media_dur_str):
+    """One spine edit on the shared asset ``r2``.
+
+    With a detected dialogue channel, emit Resolve's connected-clip form: a
+    ``<clip>`` windowing the edit, holding a ``<video>`` over the asset's full
+    span with a nested ``<audio srcCh="N">`` that routes ONLY the speech
+    track(s). This is the form Resolve honors for source-channel selection — a
+    flat ``<asset-clip>`` with ``audioRole``/``audio-channel-source`` is
+    ignored and defaults to embedded channel 1 (verified by reverse-
+    engineering Resolve's own FCPXML export of a 4-mono MXF). Without a detected
+    channel (single-stream / normal media) emit the compact ``<asset-clip>``.
+
+    ``anchored_xml`` is the clip's keyword/chapter-marker children (already
+    indented); they follow the ``<video>`` per the content model (marker items
+    after anchorable items), which also keeps the doc DTD-valid for FCP.
+    """
+    if dialogue_srcch:
+        audio = ''.join(
+            f'\n                                <audio lane="-1" ref="r2" '
+            f'srcCh="{ch}" offset="{asset_start_str}" '
+            f'duration="{media_dur_str}" start="{asset_start_str}"/>'
+            for ch in dialogue_srcch)
+        return (
+            f'                        <clip name="{clip_name}" '
+            f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
+            f'format="r1" tcFormat="{tc_format}" enabled="1">'
+            f'\n                            <video ref="r2" '
+            f'offset="{asset_start_str}" duration="{media_dur_str}" '
+            f'start="{asset_start_str}">'
+            f'{audio}'
+            f'\n                            </video>'
+            f'{anchored_xml}'
+            f'\n                        </clip>'
+        )
+    return (
+        f'                        <asset-clip name="{clip_name}" ref="r2" '
+        f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
+        f'format="r1" tcFormat="{tc_format}"{clip_audio_attr}>'
+        f'{anchored_xml}'
+        f'\n                        </asset-clip>'
+    )
 
 
 def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
@@ -224,8 +289,11 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     # Declare the source audio so Resolve routes it onto the timeline. Without
     # these the clips import SILENT (Resolve maps FCPXML audio from the
     # declarations, not the file's track table).
-    asset_audio_attrs, clip_audio_attr = _probe_audio_decl(source_path)
+    asset_audio_attrs, clip_audio_attr, dialogue_srcch = _probe_audio_decl(source_path)
     seq_audio_attrs = ' audioLayout="stereo" audioRate="48k"' if asset_audio_attrs else ''
+    # Asset source-TC origin (= embedded start TC). Computed before the spine
+    # loop because the connected-clip audio routing references it per edit.
+    asset_start_str = frames_to_fcpxml_time(start_tc_frames, framerate) if start_tc_frames else "0/1s"
 
     # Build the spine — each marker becomes an asset-clip on the timeline
     spine_clips = []
@@ -284,13 +352,10 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
                 f'duration="{dur_str}" value="Speaker: {_escape_xml(speaker)}"/>'
             )
 
-        spine_clips.append(
-            f'                        <asset-clip name="{clip_name}" ref="r2" '
-            f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
-            f'format="r1" tcFormat="{tc_format}"{clip_audio_attr}>'
-            f'{keyword_xml}{marker_xml}'
-            f'\n                        </asset-clip>'
-        )
+        spine_clips.append(_spine_clip(
+            clip_name, offset_str, dur_str, src_start_str, tc_format,
+            f'{keyword_xml}{marker_xml}', clip_audio_attr, dialogue_srcch,
+            asset_start_str, media_dur_str))
 
         # Accumulate the timeline offset in whole frames so each clip butts
         # exactly against the previous one — summing rounded seconds drifts and
@@ -367,8 +432,11 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 
     # Declare source audio so Resolve routes it (else clips import silent) —
     # see generate_fcpxml.
-    asset_audio_attrs, clip_audio_attr = _probe_audio_decl(source_path)
+    asset_audio_attrs, clip_audio_attr, dialogue_srcch = _probe_audio_decl(source_path)
     seq_audio_attrs = ' audioLayout="stereo" audioRate="48k"' if asset_audio_attrs else ''
+    # Asset source-TC origin (= embedded start TC). Computed before the spine
+    # loop because the connected-clip audio routing references it per edit.
+    asset_start_str = frames_to_fcpxml_time(start_tc_frames, framerate) if start_tc_frames else "0/1s"
 
     spine_clips = []
     offset_frames = 0
@@ -412,12 +480,10 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
                 f'duration="{dur_str}" value="Speaker: {_escape_xml(speaker)}"/>'
             )
 
-        spine_clips.append(
-            f'                        <asset-clip name="{clip_name}" ref="r2" '
-            f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
-            f'format="r1" tcFormat="{tc_format}"{clip_audio_attr}>{speaker_kw}{marker_xml}'
-            f'\n                        </asset-clip>'
-        )
+        spine_clips.append(_spine_clip(
+            clip_name, offset_str, dur_str, src_start_str, tc_format,
+            f'{speaker_kw}{marker_xml}', clip_audio_attr, dialogue_srcch,
+            asset_start_str, media_dur_str))
 
         # Accumulate the timeline offset in whole frames so each clip butts
         # exactly against the previous one — summing rounded seconds drifts and

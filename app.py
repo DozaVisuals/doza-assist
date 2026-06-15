@@ -1928,12 +1928,14 @@ def _proxy_cache_valid(project_dir, source_path):
 def _build_preview_proxy(project_id, source_path, project_dir, audio_channel):
     """Transcode the source to a Chromium-playable 720p H.264 8-bit mp4.
 
-    Runs on a worker thread. Video → h264_videotoolbox (hardware, 8-bit
-    4:2:0, capped at 1280px wide); audio → aac from the selected track (or
-    track 0 for an 'all' project — precise per-track audio lives in the
-    /media/audio?track= audition path). +faststart for progressive play.
+    VIDEO-ONLY (``-an``): the picture is the only thing the proxy carries.
+    The audio the user hears is the extracted WAV (the transcribed track, or
+    whatever the player's track dropdown auditions), played from the audio
+    element in sync with this muted video. Baking audio into the proxy was
+    wrong — it pinned playback to one track, so changing the track left the
+    sound stuck. Video → h264_videotoolbox (hardware, 8-bit 4:2:0, ≤1280px).
     """
-    from transcribe import _find_ffmpeg, normalize_audio_channel
+    from transcribe import _find_ffmpeg
     from doza_assist.jsonio import atomic_write_json
 
     def _set(phase, **extra):
@@ -1945,16 +1947,13 @@ def _build_preview_proxy(project_id, source_path, project_dir, audio_channel):
         if not ffmpeg:
             _set('error', error='ffmpeg not available')
             return
-        chan = normalize_audio_channel(audio_channel)
-        amap = ['-map', f'0:a:{chan}?'] if chan is not None else ['-map', '0:a:0?']
         out = _proxy_path(project_dir)
         tmp = f'{out}.part-{os.getpid()}-{threading.get_ident()}.mp4'
         cmd = [
             ffmpeg, '-nostdin', '-y', '-i', source_path,
-            '-map', '0:v:0', *amap,
+            '-map', '0:v:0', '-an',
             '-vf', "scale='min(1280,iw)':-2:flags=bicubic,format=yuv420p",
             '-c:v', 'h264_videotoolbox', '-b:v', '5M',
-            '-c:a', 'aac', '-b:a', '160k',
             '-movflags', '+faststart',
             tmp,
         ]

@@ -137,6 +137,53 @@ def test_audition_serves_specific_track(client, tmp_path, monkeypatch):
     assert r.get_data() == b'TRACK1AUDIO' * 200
 
 
+class _FakeRun:
+    returncode = 0
+    stderr = ''
+
+
+def _capture_proxy_cmd(tmp_path, monkeypatch, source_tc):
+    """Run _build_preview_proxy with ffmpeg + probe mocked; return the argv it
+    would have passed to ffmpeg."""
+    proj_dir = tmp_path / 'proj'
+    proj_dir.mkdir()
+    src = tmp_path / 'master.mxf'
+    src.write_bytes(b'\x00' * 4096)
+    monkeypatch.setattr(transcribe, '_find_ffmpeg', lambda: '/fake/ffmpeg')
+    monkeypatch.setattr(app_module, '_probe_source_timecode', lambda p: source_tc)
+    captured = {}
+
+    def fake_run(cmd, *a, **k):
+        captured['cmd'] = cmd
+        with open(cmd[-1], 'wb') as f:   # create the temp output so os.replace works
+            f.write(b'X' * 4096)
+        return _FakeRun()
+    monkeypatch.setattr(app_module.subprocess, 'run', fake_run)
+
+    app_module._build_preview_proxy('pA', str(src), str(proj_dir), 'all')
+    return captured['cmd'], app_module._proxy_jobs.get('pA', {})
+
+
+def test_proxy_command_is_frame_aligned(tmp_path, monkeypatch):
+    cmd, job = _capture_proxy_cmd(tmp_path, monkeypatch, '01:00:00;00')  # drop-frame TC
+    # 1 output frame per input frame at the same timestamps (rate + count match)
+    assert '-fps_mode' in cmd and cmd[cmd.index('-fps_mode') + 1] == 'passthrough'
+    # carry source metadata (rotation etc.)
+    assert '-map_metadata' in cmd and cmd[cmd.index('-map_metadata') + 1] == '0'
+    # explicit start timecode, verbatim — drop-frame ';' preserved
+    assert '-timecode' in cmd and cmd[cmd.index('-timecode') + 1] == '01:00:00;00'
+    # still video-only
+    assert '-an' in cmd
+    assert job.get('phase') == 'done'
+
+
+def test_proxy_command_omits_timecode_when_source_has_none(tmp_path, monkeypatch):
+    cmd, _ = _capture_proxy_cmd(tmp_path, monkeypatch, None)
+    assert '-timecode' not in cmd          # nothing to carry
+    assert '-fps_mode' in cmd              # alignment still enforced
+    assert '-map_metadata' in cmd
+
+
 def test_audition_does_not_touch_transcribed_wav(client, tmp_path, monkeypatch):
     # The transcribed audio.wav must be untouched by an audition request.
     src = tmp_path / 'mt.mxf'

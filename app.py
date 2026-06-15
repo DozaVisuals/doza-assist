@@ -1896,7 +1896,39 @@ def _serve_audio_track(project, project_dir, track):
 
 _proxy_jobs = {}
 _proxy_jobs_lock = threading.Lock()
-_PROXY_RECIPE = 1
+# Recipe 2: proxy is frame-aligned with the source (fps passthrough + carried
+# timecode). Bumped so proxies built by recipe 1 are rebuilt with alignment.
+_PROXY_RECIPE = 2
+
+
+def _probe_source_timecode(source_path):
+    """The source's start timecode (verbatim — drop-frame ';' preserved), or
+    None. Looked up in the video stream tag, then the container/format tag,
+    then any stream tag (covers MXF's separate tmcd/timecode track). The proxy
+    is scrubbed against but the export cuts the ORIGINAL, so the proxy must
+    carry the same TC origin or cut points land on the wrong frames."""
+    from exporters.media_probe import _find_ffprobe
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    for sel, entry in (
+        (['-select_streams', 'v:0'], 'stream_tags=timecode'),
+        ([], 'format_tags=timecode'),
+        ([], 'stream_tags=timecode'),
+    ):
+        try:
+            out = subprocess.run(
+                [ffprobe, '-v', 'error', *sel, '-show_entries', entry,
+                 '-of', 'default=noprint_wrappers=1:nokey=1', source_path],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+        except Exception:
+            continue
+        for line in out.splitlines():
+            line = line.strip()
+            if line and line != 'N/A':
+                return line
+    return None
 
 
 def _proxy_path(project_dir):
@@ -1949,14 +1981,25 @@ def _build_preview_proxy(project_id, source_path, project_dir, audio_channel):
             return
         out = _proxy_path(project_dir)
         tmp = f'{out}.part-{os.getpid()}-{threading.get_ident()}.mp4'
+        # FRAME-ALIGNMENT GUARANTEE (cuts scrubbed on the proxy export against
+        # the ORIGINAL): -fps_mode passthrough emits exactly one output frame
+        # per input frame at the same timestamps, so frame count + rate match
+        # even for VFR sources; the source's start timecode is carried over
+        # explicitly (covers MXF's tmcd track, and preserves drop-frame), and
+        # -map_metadata 0 carries the rest (e.g. rotation). Verified by
+        # check_frame_alignment.sh.
+        tc = _probe_source_timecode(source_path)
         cmd = [
             ffmpeg, '-nostdin', '-y', '-i', source_path,
             '-map', '0:v:0', '-an',
+            '-fps_mode', 'passthrough',
             '-vf', "scale='min(1280,iw)':-2:flags=bicubic,format=yuv420p",
             '-c:v', 'h264_videotoolbox', '-b:v', '5M',
-            '-movflags', '+faststart',
-            tmp,
+            '-map_metadata', '0',
         ]
+        if tc:
+            cmd += ['-timecode', tc]
+        cmd += ['-movflags', '+faststart', tmp]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0 or not os.path.exists(tmp):
             app.logger.warning('[proxy] ffmpeg rc=%s stderr: %s',

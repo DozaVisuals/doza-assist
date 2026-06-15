@@ -32,6 +32,9 @@ frontend can show the right setup hint):
                            CreateProject() failed.
   - ``import_failed``    — ImportTimelineFromFile returned None;
                            usually a source-media reconnect issue.
+  - ``import_empty``     — the timeline imported but landed zero clips
+                           (silent offline/relink failure); the caller
+                           falls back to the manual reveal-in-Finder path.
   - ``requires_studio`` — Resolve Free is installed (verified via the
                           app's CFBundleName) and the scripting daemon
                           isn't listening. As of Resolve 20, Blackmagic
@@ -161,6 +164,22 @@ class ImportResult:
     timeline_name: str | None = None
 
 
+def _ensure_resolve_env() -> None:
+    """Set the standard Resolve scripting env vars (macOS default install) if
+    the user hasn't already, so ``import DaVinciResolveScript`` can dlopen
+    fusionscript.so on a fresh backend process. Values mirror the exports in
+    Blackmagic's own Scripting README. ``setdefault`` means a user/admin who
+    already exported these (e.g. a non-default install) is never overridden.
+    """
+    api_dir = os.path.dirname(_MODULES_DIR)  # .../Developer/Scripting
+    os.environ.setdefault('RESOLVE_SCRIPT_API', api_dir)
+    os.environ.setdefault('RESOLVE_SCRIPT_LIB', _FUSION_SO)
+    existing = os.environ.get('PYTHONPATH', '')
+    if _MODULES_DIR not in existing.split(os.pathsep):
+        os.environ['PYTHONPATH'] = (
+            existing + os.pathsep + _MODULES_DIR if existing else _MODULES_DIR)
+
+
 def _ensure_modules_on_path() -> bool:
     """Add Resolve's scripting module dir to sys.path if not already there.
 
@@ -175,7 +194,14 @@ def _ensure_modules_on_path() -> bool:
 
 
 def _try_import_module():
-    """Lazy import of DaVinciResolveScript. Returns the module or None."""
+    """Lazy import of DaVinciResolveScript. Returns the module or None.
+
+    Sets the RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB / PYTHONPATH env vars
+    first (if unset) so the import can resolve fusionscript.so. A failed
+    import means no scripting API (Resolve Free, or not installed) — the
+    caller falls through to the manual export path.
+    """
+    _ensure_resolve_env()
     if not _ensure_modules_on_path():
         return None
     try:
@@ -319,6 +345,24 @@ def _get_resolve_handle(dvr_script, timeout_seconds: float = 30.0):
     return None, None
 
 
+def _timeline_clip_count(timeline) -> int:
+    """Total timeline items across all video tracks — used to confirm the
+    import actually landed clips rather than producing an empty/offline
+    timeline. Defensive: any scripting hiccup counts as 0, so the caller
+    treats it as a failed import and falls back to the manual path rather
+    than reporting a false success.
+    """
+    try:
+        total = 0
+        track_count = int(timeline.GetTrackCount('video') or 0)
+        for i in range(1, track_count + 1):
+            items = timeline.GetItemListInTrack('video', i) or []
+            total += len(items)
+        return total
+    except Exception:
+        return 0
+
+
 def _do_import(handle, timeline_path, source_media_path,
                project_name, timeline_name) -> ImportResult:
     """The full Resolve import handshake — run on ONE bounded worker.
@@ -354,7 +398,12 @@ def _do_import(handle, timeline_path, source_media_path,
             pass
 
     media_pool = project.GetMediaPool()
-    import_opts = {'timelineName': timeline_name}
+    # importOptions keys verified against the Resolve Scripting README:
+    # timelineName (name of the created timeline), importSourceClips (import
+    # source clips, True by default), sourceClipsPath (where to look for media
+    # if it isn't at its embedded path). Media was already added to the pool
+    # above, so the timeline relinks to it cleanly.
+    import_opts = {'timelineName': timeline_name, 'importSourceClips': True}
     if source_media_path:
         import_opts['sourceClipsPath'] = os.path.dirname(source_media_path)
 
@@ -365,6 +414,18 @@ def _do_import(handle, timeline_path, source_media_path,
             hint=('Resolve refused the timeline file. The file is in '
                   'Finder — try File → Import → Timeline manually to '
                   'see the underlying error.'),
+        )
+
+    # Confirm the import actually landed clips. A timeline that comes in with
+    # zero items is a silent failure (the classic "timeline imports but has no
+    # clips") — never report it as success; fall back to the manual path so
+    # the user isn't stranded with an empty timeline.
+    if _timeline_clip_count(timeline) <= 0:
+        return ImportResult(
+            ok=False, reason='import_empty',
+            hint=('Resolve created the timeline but it has no clips — the '
+                  'source media did not link. The file is in Finder; import '
+                  'it manually with File → Import → Timeline.'),
         )
 
     try:

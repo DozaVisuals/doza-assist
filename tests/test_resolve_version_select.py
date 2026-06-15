@@ -164,9 +164,17 @@ class TestSendToNleForwardsArgs:
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
+class _FakeTimeline:
+    def GetTrackCount(self, track_type):
+        return 1 if track_type == 'video' else 0
+
+    def GetItemListInTrack(self, track_type, index):
+        return ['clip'] if track_type == 'video' else []
+
+
 class _FakeMediaPool:
     def ImportTimelineFromFile(self, path, opts):
-        return object()  # truthy timeline
+        return _FakeTimeline()  # truthy timeline WITH a clip (passes clip-count check)
 
 
 class _FakeProject:

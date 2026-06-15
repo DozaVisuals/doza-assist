@@ -313,10 +313,18 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
     The inverse bit us on Sony XAVC-S: MP4 containers cannot carry a
     ``tmcd`` track, but Sony stamps a ``timecode`` metadata TAG (alongside
     an ``rtmd`` data track). FCP ignores the tag and treats such files as
-    starting at 0 — so we honor embedded timecode ONLY when the container
-    carries a real ``tmcd`` stream, matching what FCP keys off. The same
-    gate governs the DISPLAY layer so on-screen TC always matches what an
-    export (and FCP) will say.
+    starting at 0 — so for QuickTime-family containers we honor embedded
+    timecode ONLY when a real ``tmcd`` stream exists, matching what FCP
+    keys off. The same gate governs the DISPLAY layer so on-screen TC
+    always matches what an export (and FCP) will say.
+
+    MXF is the exception: it carries SMPTE-12M timecode in its structural
+    metadata, which ffprobe surfaces as a format-level (or data-stream)
+    ``timecode`` tag rather than a ``tmcd`` track. FCP and Resolve both
+    anchor an MXF asset to that embedded TC, so we honor the tag for MXF
+    even without a tmcd stream — broadcast/camera MXF routinely starts at a
+    non-zero record TC (e.g. 00:54:44:12), and exporting 0-based edits
+    against it makes every clip land outside the asset's range.
 
     BWF field-recorder WAV/AIFF stamp time-of-day TC as bext
     time_reference (samples since midnight) — FCP anchors such assets
@@ -333,7 +341,7 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
                 ffprobe, "-v", "quiet",
                 "-print_format", "json",
                 "-show_entries",
-                "stream=codec_type,codec_tag_string,sample_rate:stream_tags=timecode:format_tags=timecode,time_reference",
+                "stream=codec_type,codec_tag_string,sample_rate:format=format_name:stream_tags=timecode:format_tags=timecode,time_reference",
                 path,
             ],
             capture_output=True, text=True, timeout=10,
@@ -342,15 +350,23 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
             return None
         data = json.loads(result.stdout or "{}")
         streams = data.get("streams") or []
-        fmt_tags = (data.get("format") or {}).get("tags") or {}
+        fmt = data.get("format") or {}
+        fmt_tags = fmt.get("tags") or {}
         tmcd_streams = [
             s for s in streams
             if (s.get("codec_tag_string") or "").lower() == "tmcd"
         ]
-        if tmcd_streams:
-            # Prefer the tmcd stream's own tag, then any other stream tag,
-            # then the container-level tag (muxers vary in where they stamp
-            # it). The separator before FF carries drop-frame-ness.
+        # MXF anchors to its embedded SMPTE-12M timecode (surfaced as a
+        # format-/stream-level `timecode` tag, no tmcd track), so honor the
+        # tag for MXF even without tmcd. The tmcd gate stays for QuickTime
+        # containers to keep rejecting the Sony XAVC-S MP4 tag FCP ignores.
+        container = (fmt.get("format_name") or "").lower()
+        is_mxf = ("mxf" in container
+                  or os.path.splitext(path)[1].lower() == ".mxf")
+        if tmcd_streams or is_mxf:
+            # Prefer a tmcd stream's own tag, then any other stream tag, then
+            # the container-level tag (muxers — MXF especially — vary in where
+            # they stamp it). The separator before FF carries drop-frame-ness.
             candidates = []
             for s in tmcd_streams + streams:
                 tc = ((s.get("tags") or {}).get("timecode") or "").strip()
@@ -359,6 +375,7 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
             fmt_tc = (fmt_tags.get("timecode") or "").strip()
             if fmt_tc:
                 candidates.append(fmt_tc)
+            source = "tmcd" if tmcd_streams else "mxf"
             zero_tc = None
             for tc in candidates:
                 frames = timecode_to_frames(tc, framerate)
@@ -371,10 +388,10 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
                     # tag plus the real camera TC on the tmcd stream, or
                     # vice versa) must keep resolving to the real one.
                     return {"frames": frames, "drop": is_drop,
-                            "raw": tc.strip(), "source": "tmcd"}
+                            "raw": tc.strip(), "source": source}
                 if zero_tc is None:
                     zero_tc = {"frames": 0, "drop": is_drop,
-                               "raw": tc.strip(), "source": "tmcd"}
+                               "raw": tc.strip(), "source": source}
             # Only zero tags found: the media genuinely starts at zero TC.
             return zero_tc
         # No tmcd track — BWF bext time_reference (samples since midnight).

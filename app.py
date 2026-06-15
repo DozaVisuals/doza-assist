@@ -1651,9 +1651,10 @@ def project_view(project_id):
         # never leak into meta.json. `start_tc: None` is persisted on a
         # failed/absent probe so we don't re-probe every view; a missing
         # source skips persisting so the probe retries when the drive
-        # remounts. Gated on the same tmcd/BWF rules as exports, so the
-        # display always matches what FCP will say.
-        if 'start_tc' not in p:
+        # remounts. Gated on the same tmcd/MXF/BWF rules as exports, so the
+        # display always matches what FCP will say. `start_tc_v` versions the
+        # probe so a bump (e.g. MXF TC support) re-reads a stale cache once.
+        if 'start_tc' not in p or p.get('start_tc_v') != _START_TC_PROBE_V:
             src = p.get('source_path', p.get('filepath', ''))
             if src and os.path.exists(src):
                 tc_fps = get_video_framerate(src)
@@ -1661,7 +1662,9 @@ def project_view(project_id):
                 p['start_tc'] = ({'frames': tc['frames'], 'fps': tc_fps,
                                   'drop': tc['drop'], 'raw': tc['raw']}
                                  if tc else None)
-                update_project(p['id'], {'start_tc': p['start_tc']})
+                p['start_tc_v'] = _START_TC_PROBE_V
+                update_project(p['id'], {'start_tc': p['start_tc'],
+                                         'start_tc_v': _START_TC_PROBE_V})
         projects_meta.append({
             'id': p['id'],
             'name': p.get('name', 'Untitled'),
@@ -1899,6 +1902,12 @@ _proxy_jobs_lock = threading.Lock()
 # Recipe 2: proxy is frame-aligned with the source (fps passthrough + carried
 # timecode). Bumped so proxies built by recipe 1 are rebuilt with alignment.
 _PROXY_RECIPE = 2
+
+# Bumped when the start-timecode probe logic changes so a stale cached value
+# (persisted by an older probe) is re-read once instead of sticking forever.
+# v2: MXF embedded TC is now honored (format/stream `timecode` tag, no tmcd
+# stream) — projects probed by v1 cached start_tc=None for such masters.
+_START_TC_PROBE_V = 2
 
 
 def _probe_source_timecode(source_path):

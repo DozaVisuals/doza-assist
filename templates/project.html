@@ -975,12 +975,11 @@
             <li>Switch to <strong>DaVinci Resolve</strong>.</li>
             <li>Open <strong>File → Import → Timeline…</strong> (or press <kbd>⇧⌘I</kbd>).</li>
             <li>Pick the highlighted <strong>.fcpxml</strong> file in Finder.</li>
-            <li>Accept the defaults in Resolve's import dialog.</li>
-            <li>If Resolve asks <em>"The clip was not found"</em>, click <strong>No</strong> — the timeline still imports.</li>
-            <li>Close any warning log. Your timeline + media + audio are in the Media Pool.</li>
+            <li>Leave <strong>"Automatically import source clips into media pool"</strong> checked and click <strong>OK</strong>.</li>
+            <li>The timeline imports and your source media links automatically — clips come in online with per-clip audio.</li>
         </ol>
         <p id="resolveSetupFreeWhy" style="display:none; font-size:0.85rem; line-height:1.5; color:var(--text-muted); margin:0.5rem 0 0.75rem;">
-            Heads-up: Resolve's import flow may show a "clip not found" prompt and a list of warnings, but the timeline imports correctly anyway — it's matching on the absolute source-media path in the FCPXML. Dragging the file into the Media Pool doesn't work because Resolve treats it as a media file rather than a timeline; File → Import → Timeline is the supported route.
+            Doza Assist writes the source media's real path and its embedded start timecode into the FCPXML, so Resolve relinks the clips to your footage automatically on import. Dragging the .fcpxml into the Media Pool doesn't work — Resolve treats it as a media file rather than a timeline; File → Import → Timeline is the supported route. (If a clip ever shows offline because the media moved, right-click it → Relink and point at the source file.)
         </p>
         <p id="resolveSetupTrailer" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
             Your export is already in Finder — drop it into Resolve's Media Pool if you'd rather skip auto-import this time.
@@ -1514,25 +1513,55 @@ function _fallbackToAudioOnly() {
 // True once the video-only preview proxy is the picture source; audio then
 // comes from the audio element (track-selectable), synced to this muted video.
 let videoProxyMode = false;
+// True while we're auto-showing the waveform (audio-only) ONLY because the
+// proxy isn't built yet — distinct from the editor pressing 🔊. Lets us
+// promote the picture automatically the moment the background transcode lands.
+let proxyAutoAudio = false;
 function _bindProxyAVSync() {
     if (audioEl._proxySyncBound) return;
     audioEl._proxySyncBound = true;
-    audioEl.addEventListener('play', () => { try { videoEl.currentTime = audioEl.currentTime; } catch (e) {} videoEl.play().catch(() => {}); });
-    audioEl.addEventListener('pause', () => { try { videoEl.pause(); } catch (e) {} });
-    audioEl.addEventListener('seeking', () => { try { videoEl.currentTime = audioEl.currentTime; } catch (e) {} });
-    audioEl.addEventListener('ratechange', () => { try { videoEl.playbackRate = audioEl.playbackRate; } catch (e) {} });
-    audioEl.addEventListener('ended', () => { try { videoEl.pause(); } catch (e) {} });
+    // These six handlers stay bound for the page's life (anonymous — can't be
+    // removed), so they MUST no-op unless videoEl is actually showing the
+    // PROXIED project's picture. In a multi-project (collection) view, after
+    // jumping to another project they'd otherwise drive the stale proxy
+    // <video> off the new project's audio. Live only when audio AND picture
+    // are both on PROJECT_ID (always true in the single-project view).
+    const live = () => videoProxyMode
+        && currentAudioProject === PROJECT_ID
+        && currentVideoProject === PROJECT_ID;
+    audioEl.addEventListener('play', () => { if (!live()) return; try { videoEl.currentTime = audioEl.currentTime; } catch (e) {} videoEl.play().catch(() => {}); });
+    audioEl.addEventListener('pause', () => { if (!live()) return; try { videoEl.pause(); } catch (e) {} });
+    audioEl.addEventListener('seeking', () => { if (!live()) return; try { videoEl.currentTime = audioEl.currentTime; } catch (e) {} });
+    audioEl.addEventListener('ratechange', () => { if (!live()) return; try { videoEl.playbackRate = audioEl.playbackRate; } catch (e) {} });
+    audioEl.addEventListener('ended', () => { if (!live()) return; try { videoEl.pause(); } catch (e) {} });
     // Drift correction during playback.
     audioEl.addEventListener('timeupdate', () => {
+        if (!live()) return;
         try { if (Math.abs(videoEl.currentTime - audioEl.currentTime) > 0.25) videoEl.currentTime = audioEl.currentTime; } catch (e) {}
     });
 }
 
 function _tryPreviewProxy() {
     videoEl.dataset.proxyTried = '1';
+    // Don't make the editor wait on the transcode. The picture for a camera
+    // master (MXF/AVC-Intra) can take a while to build, but the extracted
+    // audio is already on disk — so drop to the waveform and start audio
+    // IMMEDIATELY, build the proxy in the BACKGROUND, and promote the picture
+    // automatically the moment it's ready. (Previously a blocking spinner sat
+    // over a dead video element, so the editor couldn't listen meanwhile.)
+    proxyAutoAudio = enterAudioOnly();   // true once audio is playable + visible
     const note = document.getElementById('videoUnplayableNote');
-    if (note) { note.textContent = 'Preparing a preview for this camera format…'; note.style.display = ''; }
-    showBusy('Preparing video preview — this can take a moment for camera masters…');
+    if (note) {
+        note.textContent = proxyAutoAudio
+            ? 'Playing audio now — building the video preview in the background…'
+            : 'Preparing a preview for this camera format…';
+        note.style.display = '';
+    }
+    // No audio element to fall back to (rare) — keep a visible affordance so
+    // the box isn't a silent black rectangle while the transcode runs.
+    if (!proxyAutoAudio) {
+        showBusy('Preparing video preview — this can take a moment for camera masters…');
+    }
     // HEAD kicks the on-demand transcode without downloading the mp4.
     fetch(`/project/${PROJECT_ID}/media/proxy`, { method: 'HEAD' }).catch(() => {});
     let tries = 0;
@@ -1541,42 +1570,79 @@ function _tryPreviewProxy() {
             .then(r => r.json())
             .then(s => {
                 if (s.phase === 'done') {
-                    hideBusy();
-                    if (note) note.style.display = 'none';
+                    if (!proxyAutoAudio) hideBusy();
                     videoEl.dataset.proxyActive = '1';
-                    videoProxyMode = true;
-                    // The proxy is video-only. Show its (muted) picture and
-                    // drive the SOUND from the audio element — the transcribed
-                    // track by default, or whatever the Track dropdown
-                    // auditions — kept in sync. So changing tracks changes
-                    // what you hear while the video keeps playing.
-                    videoEl.muted = true;
-                    videoEl.src = `/project/${PROJECT_ID}/media/proxy`;
-                    videoEl.load();
-                    if (audioEl) {
-                        const t = audio ? audio.currentTime : 0;
-                        audioEl.src = `/project/${PROJECT_ID}/media/audio`;
-                        audio = audioEl;
-                        _bindProxyAVSync();
-                        if (typeof bindPlayerEvents === 'function') bindPlayerEvents();
-                        audioEl.load();
-                        audioEl.addEventListener('loadedmetadata', function _r() {
-                            try { audioEl.currentTime = t; } catch (e) {}
-                            audioEl.removeEventListener('loadedmetadata', _r);
-                        });
-                    }
-                    showToast('Video preview ready');
+                    _activateVideoProxy();
                 } else if (s.phase === 'error') {
-                    hideBusy(); _fallbackToAudioOnly();
+                    _onProxyUnavailable();
                 } else if (tries++ < 160) {
                     setTimeout(poll, 1500);
                 } else {
-                    hideBusy(); _fallbackToAudioOnly();
+                    _onProxyUnavailable();
                 }
             })
-            .catch(() => { hideBusy(); _fallbackToAudioOnly(); });
+            .catch(() => { _onProxyUnavailable(); });
     };
     setTimeout(poll, 800);
+}
+
+function _onProxyUnavailable() {
+    // Transcode failed or timed out. If we already dropped to the audio
+    // waveform (the common path) audio keeps playing — just settle the note.
+    // Only if we never made it to audio do we run the hard fallback.
+    const note = document.getElementById('videoUnplayableNote');
+    if (!proxyAutoAudio) { hideBusy(); _fallbackToAudioOnly(); return; }
+    proxyAutoAudio = false;
+    if (note) {
+        note.textContent = "Couldn't build a video preview for this camera format — playing audio only. Exports always use the original file.";
+        note.style.display = '';
+    }
+}
+
+// Swap the freshly-built proxy in as the picture source and, unless the editor
+// has since chosen to stay on audio, switch the visual back on automatically.
+// The proxy is video-only: it shows the (muted) picture while SOUND comes from
+// the audio element (transcribed track by default, or whatever the Track
+// dropdown auditions), kept in sync — so changing tracks changes what you hear
+// while the picture keeps playing.
+function _activateVideoProxy() {
+    const wasPlaying = audio && !audio.paused;
+    const t = audio ? audio.currentTime : 0;
+    videoProxyMode = true;
+    currentVideoProject = PROJECT_ID;   // videoEl now holds PROJECT_ID's proxy
+    videoEl.muted = true;
+    videoEl.src = `/project/${PROJECT_ID}/media/proxy`;
+    videoEl.load();
+    if (audioEl) {
+        if (!audioEl.src || audioEl.src.indexOf('/media/audio') === -1) {
+            audioEl.src = `/project/${PROJECT_ID}/media/audio`;
+        }
+        audio = audioEl;
+        currentPlayerIsVideo = false;
+        _bindProxyAVSync();
+        if (typeof bindPlayerEvents === 'function') bindPlayerEvents();
+    }
+    const note = document.getElementById('videoUnplayableNote');
+    if (note) note.style.display = 'none';
+    // Promote the picture: we were auto-showing the waveform only because the
+    // proxy wasn't ready. (If audioEl is absent we were never in audio-only.)
+    if (proxyAutoAudio || !audioEl) {
+        audioOnlyMode = false;
+        setPlayerView('video');
+        const btn = document.getElementById('audioOnlyBtn');
+        if (btn) { btn.style.background = ''; btn.style.color = ''; btn.title = 'Audio-only mode (lighter playback for heavy footage)'; }
+    }
+    proxyAutoAudio = false;
+    // Restore position + resume on the audio element (the sound + sync driver).
+    if (audioEl) {
+        audioEl.addEventListener('loadedmetadata', function _r() {
+            try { audioEl.currentTime = t; } catch (e) {}
+            audioEl.removeEventListener('loadedmetadata', _r);
+            if (wasPlaying) audioEl.play().catch(() => {});
+        });
+        audioEl.load();
+    }
+    showToast('Video preview ready');
 }
 {% else %}
 // Audio-only project: kick the waveform on so the player box isn't a
@@ -1839,6 +1905,17 @@ function enterAudioOnly() {
 
 function exitAudioOnly() {
     if (!audioOnlyMode) return;
+    // Proxy mode: the picture is a video-only proxy and the SOUND lives on the
+    // audio element. "Exit audio-only" here means reveal the proxy picture
+    // again while KEEPING the audio element as the (synced) sound source —
+    // binding playback to the muted, audio-less proxy video would play silent.
+    if (videoProxyMode && audioEl) {
+        audioOnlyMode = false;
+        setPlayerView('video');
+        const btn = document.getElementById('audioOnlyBtn');
+        if (btn) { btn.style.background = ''; btn.style.color = ''; btn.title = 'Audio-only mode (lighter playback for heavy footage)'; }
+        return;
+    }
     // Chromium can't decode this source at all (that's why the auto-
     // fallback engaged). Exiting would bind playback to a permanently
     // errored video element — black box, note gone, and since the src
@@ -1916,6 +1993,17 @@ function jumpTo(seconds, projectId) {
     // Switch media source if needed (multi-project)
     if (projectId && projectId !== currentAudioProject) {
         audio.pause();
+
+        // Leaving the proxied (PROJECT_ID) project: neutralize proxy state so
+        // the muted picture + A/V-sync don't bleed onto another project — a
+        // native video would otherwise play muted, and an audio-only project
+        // would drive the stale proxy <video>. Self-restores if we jump back
+        // (PROJECT_ID's master re-errors and rebuilds the proxy).
+        if (projectId !== PROJECT_ID && videoProxyMode) {
+            videoProxyMode = false;
+            videoEl.muted = false;
+            delete videoEl.dataset.proxyActive;
+        }
 
         // Check if this project is video or audio and switch player if needed
         const meta = PROJECTS_META.find(p => p.id === projectId);

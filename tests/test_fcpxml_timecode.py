@@ -243,3 +243,82 @@ class TestTmcdGating:
             _mp.subprocess, "run",
             lambda *a, **k: _subprocess.CompletedProcess([], 0, "not json", ""))
         assert _mp.get_video_start_timecode_frames("/fake/x.mp4", 23.976) == 0
+
+
+# ── MXF embedded timecode (broadcast/camera record TC) ───────────────
+#
+# MXF carries SMPTE-12M timecode in structural metadata — ffprobe surfaces it
+# as a format-level (or data-stream) `timecode` tag, NOT a `tmcd` track. FCP
+# and Resolve both anchor an MXF asset to that embedded TC, so honoring it is
+# what keeps a real-world master (e.g. Clip0024-003.MXF, start 00:54:44:12)
+# from exporting 0-based edits that land outside the asset and import offline /
+# "Invalid edit with no respective media" in both NLEs.
+
+def _run_probe(monkeypatch, payload, path, framerate=23.976):
+    monkeypatch.setattr(_mp, "_find_ffprobe", lambda: "/fake/ffprobe")
+    monkeypatch.setattr(_mp.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(
+        _mp.subprocess, "run", lambda *a, **k: _fake_probe_result(payload))
+    return _mp.get_video_start_timecode_frames(path, framerate)
+
+
+class TestMxfTimecode:
+    # h264 + 4×pcm_s24le + smpte_436m_anc, TC in the FORMAT tag. No tmcd track.
+    MXF_036M = {
+        "streams": [
+            {"codec_type": "video", "codec_tag_string": ""},
+            {"codec_type": "audio", "codec_tag_string": ""},
+            {"codec_type": "audio", "codec_tag_string": ""},
+            {"codec_type": "data", "codec_tag_string": ""},
+        ],
+        "format": {"format_name": "mxf", "tags": {"timecode": "00:54:44:12"}},
+    }
+
+    def test_mxf_format_tag_honored_via_format_name(self, monkeypatch):
+        expected = timecode_to_frames("00:54:44:12", 23.976)  # 78828
+        assert expected == 78828
+        assert _run_probe(monkeypatch, self.MXF_036M, "/fake/clip.mxf") == expected
+
+    def test_mxf_honored_via_extension_when_format_name_absent(self, monkeypatch):
+        # Some builds/probes omit format_name; the .mxf extension still gates in.
+        payload = {"streams": [{"codec_type": "video", "codec_tag_string": ""}],
+                   "format": {"tags": {"timecode": "01:00:00:00"}}}
+        assert _run_probe(monkeypatch, payload, "/fake/clip.MXF", 25.0) == 25 * 3600
+
+    def test_mxf_zero_tc_tag_returns_zero(self, monkeypatch):
+        payload = {"streams": [{"codec_type": "video", "codec_tag_string": ""}],
+                   "format": {"format_name": "mxf", "tags": {"timecode": "00:00:00:00"}}}
+        # A genuine 00:00:00:00 MXF tag -> 0 frames (legacy asset start="0/1s").
+        assert _run_probe(monkeypatch, payload, "/fake/clip.mxf") == 0
+
+    def test_mxf_no_timecode_tag_returns_zero(self, monkeypatch):
+        payload = {"streams": [{"codec_type": "video", "codec_tag_string": ""}],
+                   "format": {"format_name": "mxf", "tags": {}}}
+        assert _run_probe(monkeypatch, payload, "/fake/clip.mxf") == 0
+
+    def test_mp4_format_tag_still_ignored_with_format_name(self, monkeypatch):
+        # Adding format=format_name to the probe must NOT regress the Sony
+        # XAVC-S exclusion: an MP4's bare timecode tag stays unhonored.
+        payload = {
+            "streams": [
+                {"codec_type": "video", "codec_tag_string": "avc1"},
+                {"codec_type": "data", "codec_tag_string": "rtmd"},
+            ],
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                       "tags": {"timecode": "05:26:30:20"}},
+        }
+        assert _run_probe(monkeypatch, payload, "/fake/clip.mp4") == 0
+
+    def test_mpegts_format_tag_not_honored(self, monkeypatch):
+        # The MXF widening is `tmcd_streams or is_mxf` — it must NOT start
+        # honoring a bare format timecode tag on OTHER non-tmcd containers.
+        # MPEG-TS (.ts/.m2ts/.mts) is freshly ingestable and surfaces format
+        # metadata oddly (the double-count history), so pin it to 0.
+        payload = {
+            "streams": [
+                {"codec_type": "video", "codec_tag_string": ""},
+                {"codec_type": "audio", "codec_tag_string": ""},
+            ],
+            "format": {"format_name": "mpegts", "tags": {"timecode": "05:26:30:20"}},
+        }
+        assert _run_probe(monkeypatch, payload, "/fake/clip.ts") == 0

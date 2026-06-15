@@ -136,3 +136,20 @@ class TestRetranscribeEmptyChannelRecovery:
         meta = _saved_meta('r2')
         assert meta['status'] == 'error'
         assert 'no speech' in (meta.get('error') or '').lower()
+
+    def test_engine_error_drops_backup(self, client, tmp_path, monkeypatch):
+        # If the engine raises (not an empty result), the rollback snapshot
+        # must NOT leak — else a later genuinely-empty run restores it stale.
+        _make_project('r3', str(tmp_path / 'm.mxf'))
+        with app_module._transcribe_jobs_lock:
+            app_module._retranscribe_backups['r3'] = {
+                'transcript': {'segments': [{'start': 0, 'end': 1, 'text': 'hi'}]},
+            }
+        import transcribe as t
+        def boom(*a, **k):
+            raise RuntimeError("engine crash")
+        monkeypatch.setattr(t, 'transcribe_file', boom)
+        app_module._run_transcribe_job('r3', '/x.mxf', None, 'no', 'Int', 'Subj',
+                                       audio_channel=1)
+        assert 'r3' not in app_module._retranscribe_backups  # finally popped it
+        assert _saved_meta('r3')['status'] == 'error'

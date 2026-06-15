@@ -2537,6 +2537,11 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             pass
     finally:
         _transcribe_run_lock.release()
+        # The rollback snapshot must never outlive the job. The restore/success
+        # branches already consume it; this also drops it on the engine-error
+        # path so a later genuinely-empty run can't restore a stale transcript.
+        with _transcribe_jobs_lock:
+            _retranscribe_backups.pop(project_id, None)
 
 
 @app.route('/project/<project_id>/transcribe', methods=['POST'])

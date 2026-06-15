@@ -400,6 +400,18 @@ class TestFcpxmlAudioDecl:
         assert '<clip ' in xml and '<video ref="r2"' in xml
         assert re.search(r'<audio [^>]*srcCh="2"', xml)
 
+    def test_audio_only_multimono_uses_asset_clip_not_video(self, monkeypatch, tmp_path):
+        # An audio-only source (hasVideo="0", e.g. a multi-stream .m4a) must NOT
+        # emit a <video> on a video-less asset, even with a detected channel —
+        # the connected-clip form is video-only; fall back to <asset-clip>.
+        snd = tmp_path / "poly.m4a"
+        snd.write_bytes(b"\x00")
+        xml = self._gen(monkeypatch, str(snd), (4, 4), 48000, dialogue=[1])
+        assert 'hasVideo="0"' in xml
+        assert '<video ref="r2"' not in xml
+        assert '<clip ' not in xml
+        assert '<asset-clip ' in xml and 'audioRole="dialogue"' in xml
+
 
 # ── get_audio_layout (multi-stream count + MPEG-TS dedup) ────────────────────
 

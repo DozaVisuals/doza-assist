@@ -169,7 +169,7 @@ def _probe_audio_decl(source_path):
 
 def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
                 anchored_xml, clip_audio_attr, dialogue_srcch,
-                asset_start_str, media_dur_str):
+                asset_start_str, media_dur_str, is_video=True):
     """One spine edit on the shared asset ``r2``.
 
     With a detected dialogue channel, emit Resolve's connected-clip form: a
@@ -185,7 +185,11 @@ def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
     indented); they follow the ``<video>`` per the content model (marker items
     after anchorable items), which also keeps the doc DTD-valid for FCP.
     """
-    if dialogue_srcch:
+    # The connected-clip form holds the dialogue under a <video> element, so it
+    # only applies to assets that HAVE video. An audio-only source (hasVideo=0,
+    # e.g. a multi-stream .m4a) would emit a <video> on a video-less asset —
+    # invalid FCPXML — so it falls back to the compact <asset-clip>.
+    if dialogue_srcch and is_video:
         audio = ''.join(
             f'\n                                <audio lane="-1" ref="r2" '
             f'srcCh="{ch}" offset="{asset_start_str}" '
@@ -355,7 +359,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         spine_clips.append(_spine_clip(
             clip_name, offset_str, dur_str, src_start_str, tc_format,
             f'{keyword_xml}{marker_xml}', clip_audio_attr, dialogue_srcch,
-            asset_start_str, media_dur_str))
+            asset_start_str, media_dur_str, is_video))
 
         # Accumulate the timeline offset in whole frames so each clip butts
         # exactly against the previous one — summing rounded seconds drifts and
@@ -483,7 +487,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
         spine_clips.append(_spine_clip(
             clip_name, offset_str, dur_str, src_start_str, tc_format,
             f'{speaker_kw}{marker_xml}', clip_audio_attr, dialogue_srcch,
-            asset_start_str, media_dur_str))
+            asset_start_str, media_dur_str, is_video))
 
         # Accumulate the timeline offset in whole frames so each clip butts
         # exactly against the previous one — summing rounded seconds drifts and

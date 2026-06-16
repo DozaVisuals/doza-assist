@@ -4501,7 +4501,18 @@ async function exportFCPXML(category) {
 // Shared transport for AI Analysis + Story Builder round-trip exports.
 // Mirrors the body shape exportFCPXMLMulticam() uses so the Export tab's
 // existing path stays the source of truth for the round-trip endpoint.
+// Round-trip exports re-emit the FCP multicam/sync-clip container, which only
+// Final Cut Pro can import: Resolve opens the FCPXML but the timeline comes in
+// empty, and Premiere can't read FCPXML at all. If the editor has another NLE
+// selected, say plainly that the file is going to FCP regardless.
+function _warnRoundTripFcpOnly() {
+    if (typeof EDITING_PLATFORM !== 'undefined' && EDITING_PLATFORM !== 'fcp') {
+        showToast('FCPXML round-trips can only be sent back to Final Cut Pro — exporting to Final Cut Pro.', true);
+    }
+}
+
 async function _exportFCPXMLRoundTrip(opts) {
+    _warnRoundTripFcpOnly();
     const delivery = getDelivery();
     const body = Object.assign(
         { mode: 'selects_project', deliver_to: delivery },
@@ -4617,6 +4628,7 @@ function _refreshExportCounts() {
 // "save and reveal" vs "open in Final Cut Pro" but never targets Resolve
 // or Premiere.
 async function exportFCPXMLMulticam() {
+    _warnRoundTripFcpOnly();
     // Persist the latest clip labels before export so "Clip labels" source is fresh.
     if (typeof labelSections !== 'undefined' && labelSections.length) {
         const sections = labelSections.map(s => ({

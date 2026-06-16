@@ -135,7 +135,11 @@ class TestRetranscribeEmptyChannelRecovery:
         self._run_empty(monkeypatch, 'r2', with_backup=False)
         meta = _saved_meta('r2')
         assert meta['status'] == 'error'
-        assert 'no speech' in (meta.get('error') or '').lower()
+        err = (meta.get('error') or '').lower()
+        # An empty/silent fresh transcribe surfaces an actionable "no usable
+        # speech / silent track" error (wording broadened when the guard grew
+        # to also catch silent audio + hallucinated transcripts).
+        assert 'speech' in err and 'silent' in err
 
     def test_engine_error_drops_backup(self, client, tmp_path, monkeypatch):
         # If the engine raises (not an empty result), the rollback snapshot
@@ -153,3 +157,91 @@ class TestRetranscribeEmptyChannelRecovery:
                                        audio_channel=1)
         assert 'r3' not in app_module._retranscribe_backups  # finally popped it
         assert _saved_meta('r3')['status'] == 'error'
+
+
+# ── Silent / degenerate (hallucinated) transcript guards ─────────────────────
+#
+# A silent / speech-empty extract (e.g. a camera proxy whose real mic is only
+# on the master) does NOT yield zero segments — Whisper hallucinates a repeated
+# subtitle-credit line. The old seg_count==0 guard missed it, stored garbage as
+# 'transcribed', then a pyannote pass reported "no segments". The guard now also
+# catches a degenerate (near-all-identical) transcript AND a measurably silent
+# audio.wav, routing both through the same rollback-or-error path.
+
+import wave as _wave
+import struct as _struct
+
+
+def _write_wav(path, samples, rate=16000):
+    with _wave.open(str(path), 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(_struct.pack('<%dh' % len(samples), *samples))
+
+
+def _degenerate_result():
+    # 30 identical "Teksting av …" lines — the reported hallucination shape.
+    return {'segments': [
+        {'start': i * 30, 'end': i * 30 + 30, 'text': 'Teksting av Nicolai Winther'}
+        for i in range(30)
+    ]}
+
+
+class TestUnusableTranscriptGuards:
+    def test_wav_peak_dbfs_silent_vs_loud(self, tmp_path):
+        from transcribe import wav_peak_dbfs
+        sil = tmp_path / 'sil.wav'
+        _write_wav(sil, [0] * 16000)
+        loud = tmp_path / 'loud.wav'
+        _write_wav(loud, [16000, -16000] * 8000)
+        assert wav_peak_dbfs(str(sil)) == float('-inf')
+        assert wav_peak_dbfs(str(loud)) > -10.0
+
+    def test_degenerate_transcript_fresh_errors(self, client, tmp_path, monkeypatch):
+        import transcribe as t
+        monkeypatch.setattr(t, 'transcribe_file', lambda *a, **k: _degenerate_result())
+        _make_project('d1', str(tmp_path / 'm.mxf'))
+        app_module._run_transcribe_job('d1', '/x.mxf', None, 'no', 'Int', 'Subj',
+                                       audio_channel=0)
+        meta = _saved_meta('d1')
+        assert meta['status'] == 'error'
+        err = (meta.get('error') or '').lower()
+        assert 'speech' in err and 'silent' in err
+        # The hallucinated transcript must NOT be saved.
+        assert not (meta.get('transcript') or {}).get('segments')
+
+    def test_degenerate_transcript_retranscribe_rolls_back(self, client, tmp_path, monkeypatch):
+        import transcribe as t
+        monkeypatch.setattr(t, 'transcribe_file', lambda *a, **k: _degenerate_result())
+        _make_project('d2', str(tmp_path / 'm.mxf'))
+        with app_module._transcribe_jobs_lock:
+            app_module._retranscribe_backups['d2'] = {
+                'transcript': {'segments': [{'start': 0, 'end': 1, 'text': 'real speech'}],
+                               'language': 'no'},
+                'analysis': None, 'client_selects': [], 'social_clips': [],
+                'detected_language': 'no', 'audio_channel': 'all',
+            }
+        app_module._run_transcribe_job('d2', '/x.mxf', None, 'no', 'Int', 'Subj',
+                                       audio_channel=1)
+        meta = _saved_meta('d2')
+        # Previous good transcript preserved, not the hallucination.
+        assert meta['status'] == 'transcribed'
+        assert meta['transcript']['segments'][0]['text'] == 'real speech'
+
+    def test_silent_audio_with_distinct_text_errors(self, client, tmp_path, monkeypatch):
+        # Whisper returned plausible DISTINCT text, but the extracted audio.wav
+        # is silent -> still rejected by the peak gate (the degenerate check
+        # alone would pass it).
+        import transcribe as t
+        pdir = _make_project('s1', str(tmp_path / 'm.mxf'))
+        _write_wav(pdir / 'audio.wav', [0] * 16000)  # silent extract
+        distinct = {'segments': [
+            {'start': i, 'end': i + 1, 'text': f'line number {i}'} for i in range(8)
+        ]}
+        monkeypatch.setattr(t, 'transcribe_file', lambda *a, **k: distinct)
+        app_module._run_transcribe_job('s1', '/x.mxf', None, 'no', 'Int', 'Subj',
+                                       audio_channel=0)
+        meta = _saved_meta('s1')
+        assert meta['status'] == 'error'
+        assert 'silent' in (meta.get('error') or '').lower()

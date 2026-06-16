@@ -2112,16 +2112,56 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             language=language,
             progress_cb=progress_cb,
         )
-        # An empty transcript is a failure, not a success. Saving zero
-        # segments as status='transcribed' used to present a blank
-        # transcript page marked Done, enqueue a pointless pyannote pass,
-        # and build a chat index from nothing (a silent/wrong-stream audio
-        # track being the usual cause).
-        seg_count = len((result or {}).get('segments', []))
+        # A transcript with no usable speech is a failure, not a success —
+        # whether it's EMPTY, a DEGENERATE hallucination (silent/scratch audio
+        # makes Whisper repeat one subtitle-credit line per 30 s window), or
+        # the extracted track is simply SILENT. Only the empty case used to be
+        # caught: a hallucination has many (identical) segments, so it was
+        # saved as status='transcribed', shown as Done, handed to a pointless
+        # pyannote pass that then reported "no segments", and a chat index was
+        # built from nothing. Catch all three and route them to the same
+        # rollback-or-error path.
+        segs = (result or {}).get('segments', []) or []
+        seg_count = len(segs)
+
+        def _is_degenerate(_segs):
+            # >=90% identical segment texts over a non-trivial count is a
+            # hallucination loop, not speech. Real transcripts (even short or
+            # repetitive ones) clear this easily.
+            if len(_segs) < 3:
+                return False
+            distinct = {(s.get('text') or '').strip().lower() for s in _segs}
+            distinct.discard('')
+            return len(distinct) <= max(1, len(_segs) // 10)
+
+        unusable = None
         if seg_count == 0:
-            err_text = ('Transcription produced no speech — the audio track '
-                        'may be silent. Check that the source plays sound, '
-                        'then use Retry.')
+            unusable = 'empty'
+        elif _is_degenerate(segs):
+            unusable = 'degenerate'
+        else:
+            # Silent extract that Whisper didn't (or barely) hallucinated on —
+            # measure the WAV peak directly (bundled ffmpeg has no
+            # volumedetect). -55 dBFS is conservative: real speech peaks far
+            # above it, so this only fires on a genuinely silent track.
+            try:
+                from transcribe import wav_peak_dbfs
+                _wav = os.path.join(project_dir, 'audio.wav')
+                if os.path.exists(_wav) and wav_peak_dbfs(_wav) < -55.0:
+                    unusable = 'silent'
+            except Exception:
+                pass
+
+        if unusable:
+            # Studio/gemma27b has no retranscribe-backup rollback (that
+            # machinery isn't on this branch), so an unusable result is a plain
+            # error — same as the original zero-segment path, just now also
+            # catching a degenerate hallucination or a measurably silent track.
+            err_text = ('No usable speech was found — the selected audio track '
+                        'appears silent. This is common with camera proxy clips '
+                        'whose mic is only on the full-resolution master. Check '
+                        'the clip plays sound, then try the full-res clip or a '
+                        'different audio track and use Retry.')
             update_project(project_id, {'status': 'error', 'error': err_text})
             err_payload = {
                 "started_at": _transcribe_jobs.get(project_id, {}).get("started_at"),

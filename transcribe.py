@@ -273,6 +273,45 @@ def _wav_duration_seconds(audio_path):
         return 0.0
 
 
+def wav_peak_dbfs(audio_path):
+    """Peak level of OUR extracted 16 kHz mono s16 WAV, in dBFS.
+
+    Returns ``0.0`` (i.e. "loud — do not gate") when the file can't be
+    measured, and ``-inf`` for pure digital silence. Streams the WAV in chunks
+    so a multi-hour extract isn't read whole into memory.
+
+    Used to catch a full-length but SILENT extract: a camera PROXY whose
+    selected track is a dead/scratch channel (the real mic often lives only on
+    the full-resolution master) produces a valid, full-length WAV that the
+    duration guard can't catch — and silence makes Whisper emit a confident,
+    repeated subtitle-credit HALLUCINATION (and zero diarization segments
+    downstream). Measured in pure Python on purpose: the bundled LGPL ffmpeg is
+    a ``--disable-everything`` build with no volumedetect/silencedetect/astats
+    filter to lean on. Apple-Silicon only, so native-endian 'h' == the s16le we
+    wrote."""
+    import wave
+    import array
+    import math
+    try:
+        with wave.open(audio_path, 'rb') as wf:
+            if wf.getsampwidth() != 2:
+                return 0.0  # only measure our own 16-bit PCM
+            peak = 0
+            while True:
+                chunk = wf.readframes(131072)
+                if not chunk:
+                    break
+                samples = array.array('h')
+                samples.frombytes(chunk)
+                if samples:
+                    peak = max(peak, max(samples), -min(samples))
+    except Exception:
+        return 0.0  # never block transcription on a measurement failure
+    if peak <= 0:
+        return float('-inf')
+    return 20.0 * math.log10(min(peak, 32768) / 32768.0)
+
+
 def _cached_audio_valid(audio_path, filepath):
     """True iff the cached WAV was produced by the CURRENT extraction recipe
     from the CURRENT source file and still matches the duration recorded at
@@ -957,7 +996,24 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
         raise RuntimeError("Could not load any Whisper model")
 
     print(f"Transcribing (language: {language})...")
-    transcribe_kwargs = {"word_timestamps": True}
+    # Anti-hallucination decode params. On silent / speech-empty audio the
+    # plain-Whisper path (which is what non-English actually runs — WhisperX
+    # and its VAD are not bundled) otherwise emits a confident, identical
+    # subtitle-credit line per 30 s window (the Norwegian-Bokmaal
+    # "Teksting av …" failure). Not conditioning on previous text stops the
+    # repetition self-reinforcing; the no-speech / logprob / compression-ratio
+    # thresholds let the decoder drop a degenerate window instead of committing
+    # it; an empty initial_prompt avoids seeding any phrase. These are at or
+    # near Whisper's own defaults, so real speech is unaffected. The app-side
+    # silent-audio + degenerate-transcript guard is the backstop.
+    transcribe_kwargs = {
+        "word_timestamps": True,
+        "condition_on_previous_text": False,
+        "no_speech_threshold": 0.6,
+        "logprob_threshold": -1.0,
+        "compression_ratio_threshold": 2.4,
+        "initial_prompt": "",
+    }
     if language != 'auto':
         transcribe_kwargs["language"] = language
 

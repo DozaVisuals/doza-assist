@@ -220,7 +220,10 @@ class TestZeroSegmentWorker:
         app_module._run_transcribe_job(pid, str(src), 2, 'en', 'I', 'S')
         meta = json.loads((pdir / 'meta.json').read_text())
         assert meta['status'] == 'error'
-        assert 'no speech' in meta['error']
+        # Empty/silent transcript surfaces an actionable "no usable speech /
+        # silent track" error (wording broadened when the zero-segment guard
+        # grew to also catch silent audio + hallucinated transcripts).
+        assert 'speech' in meta['error'].lower() and 'silent' in meta['error'].lower()
         assert 'transcript' not in meta
         # No paragraph index was built from the empty result.
         assert not (pdir / 'paragraph_index.json').exists()

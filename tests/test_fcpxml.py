@@ -158,14 +158,15 @@ class TestStripFileUrl:
         assert strip_file_url("/tmp/foo.wav") == "/tmp/foo.wav"
 
 
-# ---------- proxy-media preference -----------------------------------------
+# ---------- original-media (audio source) preference -----------------------
 
 class TestResolveAssetPath:
-    """``_resolve_asset_path`` prefers ``proxy-media`` when the proxy file
-    exists on disk — high-res 10-bit originals choke software decode on M1/M2,
-    and ProRes Proxy plays back smoothly. Falls back to the first media-rep
-    when no usable proxy is present so behavior is unchanged for the
-    overwhelming majority of FCPXMLs (audio assets, video without proxies)."""
+    """``_resolve_asset_path`` resolves to ``original-media`` so the audio
+    source is the camera/recorder master. Camera proxies (``proxy-media``)
+    routinely carry silent, reference-only audio, so transcribing the proxy
+    yields an empty WAV. Audio is extracted with video disabled, so the
+    proxy's faster decode is irrelevant to the audio path. Falls back to a
+    proxy only when the original is offline but the proxy is on disk."""
 
     def _asset(self, *reps):
         rep_xml = "\n".join(f'    <media-rep kind="{kind}" src="{src}"/>' for kind, src in reps)
@@ -176,7 +177,34 @@ class TestResolveAssetPath:
         asset = self._asset(("original-media", "file:///tmp/clip.mov"))
         assert _resolve_asset_path(asset) == "/tmp/clip.mov"
 
-    def test_prefers_proxy_when_file_exists(self, tmp_path):
+    def test_prefers_original_when_both_exist(self, tmp_path):
+        # The bug fix: both reps on disk -> the ORIGINAL (real mic) wins, not
+        # the silent Sony proxy.
+        original = tmp_path / "LCO.MP4"
+        original.write_bytes(b"")
+        proxy = tmp_path / "LCO.proxy.mov"
+        proxy.write_bytes(b"")
+        asset = self._asset(
+            ("original-media", f"file://{original}"),
+            ("proxy-media", f"file://{proxy}"),
+        )
+        assert _resolve_asset_path(asset) == str(original)
+
+    def test_prefers_original_even_when_proxy_listed_first(self, tmp_path):
+        # Order-independent: a proxy declared first must not win.
+        original = tmp_path / "LCO.MP4"
+        original.write_bytes(b"")
+        proxy = tmp_path / "LCO.proxy.mov"
+        proxy.write_bytes(b"")
+        asset = self._asset(
+            ("proxy-media", f"file://{proxy}"),
+            ("original-media", f"file://{original}"),
+        )
+        assert _resolve_asset_path(asset) == str(original)
+
+    def test_falls_back_to_proxy_when_original_offline(self, tmp_path):
+        # Graceful fallback: original not mounted, proxy on disk -> use proxy
+        # (at least the import succeeds; the silent guard catches it if silent).
         proxy = tmp_path / "clip.proxy.mov"
         proxy.write_bytes(b"")
         asset = self._asset(
@@ -191,6 +219,15 @@ class TestResolveAssetPath:
             ("proxy-media", "file:///tmp/does-not-exist.proxy.mov"),
         )
         assert _resolve_asset_path(asset) == "/tmp/clip.mov"
+
+    def test_returns_original_path_when_nothing_on_disk(self):
+        # Neither on disk -> never raises; returns the declared original so the
+        # app-side existence check produces the "drive not mounted" message.
+        asset = self._asset(
+            ("original-media", "file:///tmp/missing.MP4"),
+            ("proxy-media", "file:///tmp/missing.proxy.mov"),
+        )
+        assert _resolve_asset_path(asset) == "/tmp/missing.MP4"
 
 
 # ---------- multicam parsing: Ella Interview --------------------------------

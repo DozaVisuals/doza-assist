@@ -357,26 +357,54 @@ def _extract_resources_bytes(fcpxml_bytes: bytes) -> bytes:
 def _resolve_asset_path(asset_el) -> str:
     """Extract and decode the filesystem path from an ``<asset>`` element.
 
-    Prefers ``<media-rep kind="proxy-media">`` when present and the proxy
-    file exists on disk. FCP proxies (typically ProRes Proxy) decode much
-    faster on Apple Silicon than 10-bit Long-GOP originals, so high-res
-    Lumix/Sony footage plays back without choking the software-decode path
-    on M1/M2 hardware. Falls back to the first ``<media-rep>`` when no
-    usable proxy is present, preserving the previous behavior.
+    Resolves to the ORIGINAL media, never the proxy. This path feeds audio
+    extraction (``ffmpeg`` run with video disabled) and the preview-proxy
+    build. The audio source MUST be the camera/recorder master: Sony/Lumix
+    camera proxies (``kind="proxy-media"``) routinely carry SILENT,
+    reference-only audio, so transcribing the proxy yields an empty WAV even
+    though the clip plainly has speech in an NLE (which auditions the linked
+    original). Because audio is extracted with video disabled, the proxy's
+    faster Apple-Silicon decode gives the audio path zero benefit; for the
+    rare master the browser cannot decode, the app builds its own playable
+    preview proxy from the original (see ``_build_preview_proxy``).
+
+    [Was proxy-preferred — that fed Whisper the silent Sony FX proxy and, post
+    the 1.0.25 silent-audio guard, hard-errored "audio track appears silent"
+    on footage that clearly has a mic.]
+
+    Preference order: ``kind="original-media"`` → first non-proxy rep → any
+    proxy that exists on disk → first declared rep. The ``os.path.exists``
+    gate preserves the graceful fallback: when the original is offline but a
+    proxy is on disk, the proxy is still used rather than failing the import.
     """
     media_reps = asset_el.findall("media-rep")
     if not media_reps:
         raise ParseError(f"asset {asset_el.get('id')!r} has no <media-rep>")
 
-    chosen = None
-    for mr in media_reps:
-        if mr.get("kind") == "proxy-media":
-            src = mr.get("src")
-            if src and os.path.exists(strip_file_url(src)):
-                chosen = mr
-                break
+    def _on_disk(mr) -> bool:
+        src = mr.get("src")
+        return bool(src) and os.path.exists(strip_file_url(src))
+
+    originals = [mr for mr in media_reps if mr.get("kind") == "original-media"]
+    non_proxy = [mr for mr in media_reps if mr.get("kind") != "proxy-media"]
+    proxies = [mr for mr in media_reps if mr.get("kind") == "proxy-media"]
+
+    # NOTE: do not use ``a or b`` to pick between media-rep elements — an
+    # Element with no children is FALSY, so a found-but-childless <media-rep>
+    # would be skipped. Compare against None explicitly.
+    def _first_on_disk(reps):
+        for mr in reps:
+            if _on_disk(mr):
+                return mr
+        return None
+
+    chosen = _first_on_disk(originals)
     if chosen is None:
-        chosen = media_reps[0]
+        chosen = _first_on_disk(non_proxy)
+    if chosen is None:
+        chosen = _first_on_disk(proxies)
+    if chosen is None:
+        chosen = (originals or non_proxy or media_reps)[0]
 
     src = chosen.get("src")
     if not src:

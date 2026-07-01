@@ -66,9 +66,94 @@ class TestFCPXMLMatrix:
         assert 'hasVideo="1"' in xml  # case-insensitive video detection
 
 
+class TestProbedAssetDecls:
+    """hasVideo/hasAudio come from PROBED streams, not the file extension.
+
+    Extension-only hasVideo declared a video component for audio-only
+    .mp4/.mov sources (AAC podcast, multi-mono field recorder), which
+    FCP/Resolve import offline/invalid — and let the connected-clip audio
+    routing emit a <video> on a video-less asset. hasAudio="1" was
+    hardcoded even for silent B-roll and for probe FAILURES (the silent
+    pre-1.0.20 Resolve import shape). The extension heuristic survives
+    only as a WARNED fallback when the probe can't answer.
+    """
+
+    MARKERS = [{"start": 1.0, "end": 5.0, "text": "a", "category": "x"}]
+
+    def _patch(self, monkeypatch, *, video, layout, rate=48000, dialogue=None):
+        from exporters import media_probe as mp
+        monkeypatch.setattr(mp, "has_video_stream", lambda p: video)
+        monkeypatch.setattr(mp, "get_audio_layout", lambda p: layout)
+        monkeypatch.setattr(mp, "get_audio_sample_rate", lambda p: rate)
+        monkeypatch.setattr(mp, "detect_dialogue_channels",
+                            lambda p, *a, **k: dialogue)
+
+    def test_audio_only_mp4_declares_no_video(self, monkeypatch, tmp_path):
+        # Multi-mono audio-only container: must also NOT take the
+        # connected-clip form (<clip><video>) despite the detected channel.
+        self._patch(monkeypatch, video=False, layout=(4, 4), dialogue=[1])
+        xml = generate_fcpxml(self.MARKERS,
+                              source_path=_touch(tmp_path, "podcast.mp4"),
+                              media_duration=60.0)
+        assert 'hasVideo="0"' in xml
+        assert '<video ' not in xml and '<clip ' not in xml
+        assert '<asset-clip ' in xml
+
+    def test_video_stream_wins_over_audio_extension(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, video=True, layout=(1, 2))
+        xml = generate_fcpxml(self.MARKERS,
+                              source_path=_touch(tmp_path, "x.wav"),
+                              media_duration=60.0)
+        assert 'hasVideo="1"' in xml
+
+    def test_video_probe_failure_falls_back_to_extension_with_warning(
+            self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, video=None, layout=(1, 2))
+        warnings = []
+        xml = generate_fcpxml(self.MARKERS,
+                              source_path=_touch(tmp_path, "x.mov"),
+                              media_duration=60.0, warnings_out=warnings)
+        assert 'hasVideo="1"' in xml
+        assert any("video stream" in w for w in warnings)
+
+    def test_no_audio_streams_declares_has_audio_zero(self, monkeypatch, tmp_path):
+        # Silent B-roll / FX plate probes clean with zero audio streams:
+        # the declaration must not contradict the media.
+        self._patch(monkeypatch, video=True, layout=(0, 0), rate=None)
+        warnings = []
+        xml = generate_fcpxml(self.MARKERS,
+                              source_path=_touch(tmp_path, "plate.mov"),
+                              media_duration=60.0, warnings_out=warnings)
+        assert 'hasAudio="0"' in xml
+        assert 'audioSources=' not in xml and 'audioRole=' not in xml
+        assert any("no audio streams" in w for w in warnings)
+
+    def test_audio_probe_failure_fails_open_with_warning(self, monkeypatch, tmp_path):
+        # ffprobe timeout on an audio-bearing MXF must keep the legacy
+        # hasAudio="1" but WARN — a bare declaration with no layout attrs
+        # is the exact shape that imported silent in Resolve pre-1.0.20.
+        self._patch(monkeypatch, video=True, layout=None, rate=None)
+        warnings = []
+        xml = generate_fcpxml(self.MARKERS,
+                              source_path=_touch(tmp_path, "big.mxf"),
+                              media_duration=60.0, warnings_out=warnings)
+        assert 'hasAudio="1"' in xml
+        assert any("audio layout" in w for w in warnings)
+
+    def test_story_generator_same_decls(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, video=False, layout=(0, 0), rate=None)
+        warnings = []
+        xml = generate_story_fcpxml(
+            self.MARKERS, project_name="P", story_title="S",
+            source_path=_touch(tmp_path, "podcast.mp4"),
+            media_duration=60.0, warnings_out=warnings)
+        assert 'hasVideo="0"' in xml and 'hasAudio="0"' in xml
+        assert any("no audio streams" in w for w in warnings)
+
+
 class TestPremiereMatrix:
     @pytest.mark.parametrize("rate", [23.976, 25.0, 29.97, 119.88])
-    @pytest.mark.parametrize("mode", ["cuts", "markers"])
+    @pytest.mark.parametrize("mode", ["cuts", "markers", "both"])
     def test_modes_parse(self, rate, mode, tmp_path):
         exporter = PremiereXMLExporter()
         result = exporter.export_markers(
@@ -77,8 +162,10 @@ class TestPremiereMatrix:
             export_type="labels", exports_dir=str(tmp_path), export_mode=mode)
         content = open(result.file_path).read()
         minidom.parseString(content)
-        if mode == "markers":
+        if mode in ("markers", "both"):
             assert "<marker>" in content  # mode honored, not silently cuts
+        if mode == "both":
+            assert "<clipitem" in content  # cuts present alongside markers
 
 
 class TestEDLMatrix:

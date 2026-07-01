@@ -157,6 +157,50 @@ class TestStripFileUrl:
     def test_passthrough_when_no_scheme(self):
         assert strip_file_url("/tmp/foo.wav") == "/tmp/foo.wav"
 
+    def test_fcp_triple_slash_form(self):
+        assert strip_file_url("file:///tmp/foo.wav") == "/tmp/foo.wav"
+
+    def test_strips_localhost_authority(self):
+        # Legal RFC 8089 authority form written by some older exporters /
+        # translators. Keeping 'localhost' produced a relative garbage path
+        # that silently failed the on-disk original-media preference.
+        assert (strip_file_url("file://localhost/Volumes/X/a.wav")
+                == "/Volumes/X/a.wav")
+
+    def test_strips_localhost_authority_and_decodes(self):
+        assert (strip_file_url("file://localhost/Volumes/EDIT%20SSD/a.wav")
+                == "/Volumes/EDIT SSD/a.wav")
+
+    def test_windows_drive_letter_authority_kept(self):
+        # FCPXML written on a Windows Resolve/translator box, two-slash
+        # drive form. 'C:' must NOT be swallowed as a URL authority: the
+        # mangled '/Users/ed/a.mov' can silently COLLIDE with a path that
+        # exists on this Mac, while 'C:/Users/...' can never exist here and
+        # errors honestly with the path the XML actually contained.
+        assert (strip_file_url("file://C:/Users/ed/a.mov")
+                == "C:/Users/ed/a.mov")
+
+    def test_windows_standard_triple_slash_drive_passthrough(self):
+        # The standard Windows file URL has an EMPTY authority; the path
+        # (leading slash included) passes through untouched.
+        assert (strip_file_url("file:///C:/Users/ed/a.mov")
+                == "/C:/Users/ed/a.mov")
+
+    def test_slashless_volume_authority_is_first_path_component(self):
+        # Missing-third-slash form: 'Volumes' is the first path component,
+        # not a hostname — re-prepend it instead of dropping it.
+        assert (strip_file_url("file://Volumes/X/a.mov")
+                == "/Volumes/X/a.mov")
+
+    def test_unc_ish_host_reprepended_not_dropped(self):
+        # Any other authority is treated as the first path component too, so
+        # the missing-media error names something traceable to the XML.
+        assert (strip_file_url("file://Server/share/x.mov")
+                == "/Server/share/x.mov")
+
+    def test_bare_scheme_stays_empty(self):
+        assert strip_file_url("file://") == ""
+
 
 # ---------- original-media (audio source) preference -----------------------
 
@@ -228,6 +272,20 @@ class TestResolveAssetPath:
             ("proxy-media", "file:///tmp/missing.proxy.mov"),
         )
         assert _resolve_asset_path(asset) == "/tmp/missing.MP4"
+
+    def test_localhost_authority_original_still_beats_proxy(self, tmp_path):
+        # file://localhost/... used to mangle to 'localhost/...' — the on-disk
+        # check failed and the (possibly silent) proxy won despite the
+        # original being mounted.
+        original = tmp_path / "LCO.MP4"
+        original.write_bytes(b"")
+        proxy = tmp_path / "LCO.proxy.mov"
+        proxy.write_bytes(b"")
+        asset = self._asset(
+            ("original-media", f"file://localhost{original}"),
+            ("proxy-media", f"file://{proxy}"),
+        )
+        assert _resolve_asset_path(asset) == str(original)
 
 
 # ---------- multicam parsing: Ella Interview --------------------------------
@@ -1375,3 +1433,552 @@ class TestCaptionedClipRoundTrip:
             caps = clip.findall("caption")
             assert len(caps) == 1
             assert caps[0].get("name") == "wide"
+
+
+# A sync-clip pairing a camera with a TC-carrying field-recorder WAV: the
+# asset declares start="3600s" (01:00:00:00 jam-sync TC) and the dialogue
+# asset-clip's start attr is TC-based (3610s = 10s into the file).
+SYNC_CLIP_TOD_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="r2" name="recorder" start="3600s" duration="120s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/recorder_tod.wav"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="TOD Sync">
+                <sequence format="r1" duration="20s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <sync-clip offset="0s" name="S" duration="20s">
+                            <asset-clip ref="r2" offset="0s" start="3610s" duration="20s" audioRole="dialogue"/>
+                        </sync-clip>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestSyncClipRecorderTC:
+    """Sync-clip dialogue resolution used to hardcode asset_start=0 while
+    returning the clip's TC-based start attr as angle_start — the renderer
+    then over-seeked by exactly asset@start (an hour for 01:00:00:00 jam-sync
+    TC), silencing that interview in the timeline WAV with no error."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "tod_sync.fcpxml"
+        p.write_text(SYNC_CLIP_TOD_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_asset_start_resolved_from_asset(self, parsed):
+        src = parsed.spine_segments[0].audio_source
+        assert src.angle_start_fraction == Fraction(3610)
+        assert src.asset_start_fraction == Fraction(3600)
+
+    def test_source_seek_is_zero_based(self, parsed):
+        plan = plan_render(parsed)
+        assert len(plan) == 1
+        # start 3610s TC into an asset whose TC origin is 3600s → 10s into
+        # the actual file (was 3610s — hours past EOF of a 120s WAV).
+        assert round(plan[0]["source_start_seconds"], 3) == 10.0
+
+    def test_no_clip_start_attr_keeps_source_time_convention(self, tmp_path):
+        # Without an explicit clip start, sync-clip times already live in
+        # source time; asset@start must NOT be subtracted then.
+        p = tmp_path / "plain_sync.fcpxml"
+        p.write_text(SYNC_CLIP_TOD_FIXTURE.replace(' start="3610s"', ''))
+        parsed = parse_fcpxml(p)
+        src = parsed.spine_segments[0].audio_source
+        assert src.asset_start_fraction == Fraction(0)
+        assert plan_render(parsed)[0]["source_start_seconds"] == 0.0
+
+    def test_single_source_tod_select_locates(self, parsed):
+        # The clip occupies file time [10s, 30s). A select at 12–18s inverts to
+        # container time 12 − 3610 + 3600 = 2s, inside the sync-clip's [0, 20s)
+        # range. With asset_start hardcoded to 0 this came out at −3598s —
+        # outside every segment — and the select was skipped.
+        skipped = []
+        out = write_selects_as_new_project(
+            parsed, [Select(12, 18, label="TOD bit")], skipped_out=skipped)
+        assert skipped == []
+        root = etree.fromstring(out)
+        assert root.find(".//sequence/spine/sync-clip") is not None
+
+
+# Two readable asset-clips with an unsupported <ref-clip> (compound clip) and
+# a spine <title> between them.
+MIXED_UNSUPPORTED_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="rA" name="camA" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1">
+                <media-rep kind="original-media" src="file:///tmp/camA.mov"/>
+            </asset>
+            <asset id="rB" name="camB" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1">
+                <media-rep kind="original-media" src="file:///tmp/camB.mov"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="Mixed">
+                <sequence format="r1" duration="60s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="rA" offset="0s" name="A" start="0s" duration="10s" audioRole="dialogue"/>
+                        <ref-clip ref="rComp" offset="10s" name="Montage" duration="20s"/>
+                        <title ref="rT" offset="30s" name="Lower Third" duration="5s"/>
+                        <asset-clip ref="rB" offset="35s" name="B" start="0s" duration="25s" audioRole="dialogue"/>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestUnsupportedSpineEntryWarning:
+    """A mixed spine (readable clips + a compound <ref-clip>) parses fine, but
+    the dropped clip leaves silence in the timeline WAV and a hole in the
+    transcript — the drop must surface as a parse warning, not vanish."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "mixed_unsupported.fcpxml"
+        p.write_text(MIXED_UNSUPPORTED_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_supported_clips_still_parse(self, parsed):
+        assert [s.name for s in parsed.spine_segments] == ["A", "B"]
+
+    def test_ref_clip_drop_is_warned_with_hint(self, parsed):
+        ref_warnings = [w for w in parsed.parse_warnings if "ref-clip" in w]
+        assert len(ref_warnings) == 1
+        assert "Montage" in ref_warnings[0]
+        assert "Break Apart" in ref_warnings[0]
+
+    def test_titles_do_not_warn(self, parsed):
+        # <title> carries no dialogue; warning on every lower third would
+        # bury the real signal.
+        assert not any("title" in w for w in parsed.parse_warnings)
+
+    def test_warnings_reach_project_metadata(self, parsed):
+        meta = parsed.to_metadata_dict()
+        assert meta["parse_warnings"] == parsed.parse_warnings
+        assert len(meta["parse_warnings"]) == 1
+
+    def test_clean_timeline_has_no_warnings(self, tmp_path):
+        p = tmp_path / "clean.fcpxml"
+        p.write_text(VIDEO_ONLY_FIXTURE)
+        assert parse_fcpxml(p).parse_warnings == []
+
+
+# One readable asset-clip plus a <gap> carrying a connected compound clip —
+# the lane-1 B-roll-gap timeline class. The segment walk descends into gaps
+# only for supported tags, so the ref-clip is dropped; the drop must warn
+# exactly like a top-level one (R7).
+GAP_NESTED_UNSUPPORTED_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="rA" name="camA" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1">
+                <media-rep kind="original-media" src="file:///tmp/camA.mov"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="GapNested">
+                <sequence format="r1" duration="60s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="rA" offset="0s" name="A" start="0s" duration="10s" audioRole="dialogue"/>
+                        <gap name="Gap" offset="10s" duration="20s" start="0s">
+                            <ref-clip ref="rComp" lane="1" offset="0s" name="InterviewCompound" duration="20s"/>
+                            <title ref="rT" lane="2" offset="0s" name="Lower Third" duration="5s"/>
+                        </gap>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestGapNestedUnsupportedClipWarning:
+    """An unsupported dialogue-capable clip connected INSIDE a <gap> is
+    dropped just as silently as a top-level one — the unsupported-spine scan
+    must descend into gaps the same way iter_spine_clip_elements does."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "gap_nested_unsupported.fcpxml"
+        p.write_text(GAP_NESTED_UNSUPPORTED_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_parse_succeeds_without_the_nested_clip(self, parsed):
+        assert [s.name for s in parsed.spine_segments] == ["A"]
+
+    def test_gap_nested_ref_clip_drop_is_warned(self, parsed):
+        ref_warnings = [w for w in parsed.parse_warnings if "ref-clip" in w]
+        assert len(ref_warnings) == 1
+        assert "InterviewCompound" in ref_warnings[0]
+        assert "Break Apart" in ref_warnings[0]
+
+    def test_gap_nested_titles_still_do_not_warn(self, parsed):
+        assert not any("Lower Third" in w for w in parsed.parse_warnings)
+
+
+class TestTimeMapWarning:
+    """<timeMap> retimes are not applied by the renderer/locator (1:1 math),
+    so a speed-changed clip must at least be flagged at parse time."""
+
+    def _fixture(self, tmp_path, clip_xml):
+        p = tmp_path / "retimed.fcpxml"
+        # Dedent BEFORE substituting: a multi-line clip_xml would defeat the
+        # common-prefix dedent and leave the XML declaration indented.
+        template = textwrap.dedent("""\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE fcpxml>
+            <fcpxml version="1.13">
+                <resources>
+                    <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+                    <asset id="r2" name="cam" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1">
+                        <media-rep kind="original-media" src="file:///tmp/cam.mov"/>
+                    </asset>
+                </resources>
+                <library location="file:///Users/x/Movies/X.fcpbundle/">
+                    <event name="E"><project name="Retimed">
+                        <sequence format="r1" duration="60s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                            <spine>
+                            {clip_xml}
+                            </spine>
+                        </sequence>
+                    </project></event>
+                </library>
+            </fcpxml>
+        """)
+        p.write_text(template.format(clip_xml=clip_xml))
+        return parse_fcpxml(p)
+
+    def test_retimed_asset_clip_warns_by_name(self, tmp_path):
+        parsed = self._fixture(tmp_path, textwrap.dedent("""\
+            <asset-clip ref="r2" offset="0s" name="Speed Ramp" start="0s" duration="30s" audioRole="dialogue">
+                <timeMap>
+                    <timept time="0s" value="0s" interp="smooth2"/>
+                    <timept time="30s" value="60s" interp="smooth2"/>
+                </timeMap>
+            </asset-clip>
+        """))
+        warnings = [w for w in parsed.parse_warnings if "retimed" in w]
+        assert len(warnings) == 1
+        assert "Speed Ramp" in warnings[0]
+        assert "misaligned" in warnings[0]
+
+    def test_timemap_on_inner_sync_clip_child_detected(self, tmp_path):
+        # FCP can put the timeMap on the clip nested inside the sync-clip.
+        parsed = self._fixture(tmp_path, textwrap.dedent("""\
+            <sync-clip offset="0s" name="Synced Ramp" duration="30s">
+                <asset-clip ref="r2" offset="0s" start="0s" duration="30s" audioRole="dialogue">
+                    <timeMap>
+                        <timept time="0s" value="0s" interp="smooth2"/>
+                        <timept time="30s" value="60s" interp="smooth2"/>
+                    </timeMap>
+                </asset-clip>
+            </sync-clip>
+        """))
+        assert any("Synced Ramp" in w and "retimed" in w
+                   for w in parsed.parse_warnings)
+
+    def test_normal_speed_clip_does_not_warn(self, tmp_path):
+        parsed = self._fixture(
+            tmp_path,
+            '<asset-clip ref="r2" offset="0s" name="Normal" start="0s" '
+            'duration="30s" audioRole="dialogue"/>',
+        )
+        assert parsed.parse_warnings == []
+
+
+class TestConformRateWarning:
+    """<conform-rate> with scaleEnabled defaulting to "1" means FCP plays the
+    media frame-for-frame at the sequence rate (25p in 23.976 runs ~4.3%
+    slow); our literal-seconds math drifts progressively inside such clips, so
+    a genuine close-rate conform must be flagged."""
+
+    def _fixture(self, tmp_path, conform_xml):
+        p = tmp_path / "conformed.fcpxml"
+        p.write_text(textwrap.dedent(f"""\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE fcpxml>
+            <fcpxml version="1.13">
+                <resources>
+                    <format id="r1" name="FF2398" frameDuration="1001/24000s" width="1920" height="1080"/>
+                    <asset id="r2" name="cam25p" start="0s" duration="1800s" hasVideo="1" hasAudio="1" audioSources="1">
+                        <media-rep kind="original-media" src="file:///tmp/cam25p.mov"/>
+                    </asset>
+                </resources>
+                <library location="file:///Users/x/Movies/X.fcpbundle/">
+                    <event name="E"><project name="Conformed">
+                        <sequence format="r1" duration="60s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                            <spine>
+                                <asset-clip ref="r2" offset="0s" name="PAL Clip" start="0s" duration="30s" audioRole="dialogue">
+                                    {conform_xml}
+                                </asset-clip>
+                            </spine>
+                        </sequence>
+                    </project></event>
+                </library>
+            </fcpxml>
+        """))
+        return parse_fcpxml(p)
+
+    def test_default_scale_enabled_mismatch_warns(self, tmp_path):
+        # 25p media in a 23.976 sequence, scaleEnabled absent (DTD default 1).
+        parsed = self._fixture(tmp_path, '<conform-rate srcFrameRate="25"/>')
+        warnings = [w for w in parsed.parse_warnings if "rate-conformed" in w]
+        assert len(warnings) == 1
+        assert "PAL Clip" in warnings[0]
+        assert "4.3%" in warnings[0]  # 25/23.976 − 1 ≈ 4.27% drift
+
+    def test_scale_disabled_does_not_warn(self, tmp_path):
+        parsed = self._fixture(
+            tmp_path, '<conform-rate scaleEnabled="0" srcFrameRate="25"/>')
+        assert parsed.parse_warnings == []
+
+    def test_matching_rate_token_does_not_warn(self, tmp_path):
+        # FCP writes rounded rate tokens; "23.98" in a 23.976 sequence is not
+        # a conform.
+        parsed = self._fixture(tmp_path, '<conform-rate srcFrameRate="23.98"/>')
+        assert parsed.parse_warnings == []
+
+
+class TestMalformedRationalIsParseError:
+    """Malformed time attributes raised bare ValueError/ZeroDivisionError from
+    Fraction, bypassing the routes' `except ParseError` handlers (HTTP 500
+    with a raw traceback + a leaked half-created project dir)."""
+
+    def _parse(self, tmp_path, offset='0s', duration='10s'):
+        p = tmp_path / "malformed.fcpxml"
+        p.write_text(textwrap.dedent(f"""\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE fcpxml>
+            <fcpxml version="1.13">
+                <resources>
+                    <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+                    <asset id="r2" name="cam" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1">
+                        <media-rep kind="original-media" src="file:///tmp/cam.mov"/>
+                    </asset>
+                </resources>
+                <library location="file:///Users/x/Movies/X.fcpbundle/">
+                    <event name="E"><project name="Bad">
+                        <sequence format="r1" duration="60s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                            <spine>
+                                <asset-clip ref="r2" offset="{offset}" name="C" start="0s" duration="{duration}" audioRole="dialogue"/>
+                            </spine>
+                        </sequence>
+                    </project></event>
+                </library>
+            </fcpxml>
+        """))
+        return parse_fcpxml(p)
+
+    def test_zero_denominator_duration(self, tmp_path):
+        # Fraction(240240, 0) raises ZeroDivisionError — NOT a ValueError
+        # subclass, so it used to escape every handler.
+        with pytest.raises(ParseError, match="duration"):
+            self._parse(tmp_path, duration="240240/0s")
+
+    def test_decimal_offset(self, tmp_path):
+        with pytest.raises(ParseError, match="offset.*1.5"):
+            self._parse(tmp_path, offset="1.5s")
+
+    def test_error_names_offending_value(self, tmp_path):
+        with pytest.raises(ParseError, match="240240/0s"):
+            self._parse(tmp_path, duration="240240/0s")
+
+
+# Interview with audio + B-roll whose asset omits hasAudio entirely — FCP's
+# encoding of a video-only file (it never writes hasAudio="0" itself).
+ABSENT_HASAUDIO_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="r2" name="talker" start="0s" duration="100s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+                <media-rep kind="original-media" src="file:///tmp/has_audio.mp4"/>
+            </asset>
+            <asset id="r3" name="broll" start="0s" duration="100s" hasVideo="1" videoSources="1">
+                <media-rep kind="original-media" src="file:///tmp/video_only_broll.mov"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="With Silent B-roll">
+                <sequence format="r1" duration="200s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="r2" offset="0s" name="talker" start="0s" duration="100s" audioRole="dialogue"/>
+                        <asset-clip ref="r3" offset="100s" name="broll" start="0s" duration="100s"/>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestAssetClipAbsentHasAudio:
+    """FCP omits hasAudio for video-only assets. Treating absence as
+    audio-bearing fed an audio-less input to the ffprobe gate and the
+    timeline render — one silent graphics/drone clip killed the whole
+    import."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "absent_hasaudio.fcpxml"
+        p.write_text(ABSENT_HASAUDIO_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_absent_hasaudio_reads_as_muted(self, parsed):
+        s0, s1 = parsed.spine_segments
+        assert s0.audio_source.is_muted is False
+        assert s1.audio_source.is_muted is True
+
+    def test_muted_broll_dropped_from_plan(self, parsed):
+        plan = plan_render(parsed)
+        assert [p["input_path"] for p in plan] == ["/tmp/has_audio.mp4"]
+
+    def test_audio_sources_attr_counts_as_audio_evidence(self, tmp_path):
+        # Producers that declare the layout without hasAudio still transcribe.
+        p = tmp_path / "layout_only.fcpxml"
+        p.write_text(ABSENT_HASAUDIO_FIXTURE.replace(
+            'name="broll" start="0s" duration="100s" hasVideo="1" videoSources="1"',
+            'name="broll" start="0s" duration="100s" hasVideo="1" videoSources="1" audioSources="1"',
+        ))
+        parsed = parse_fcpxml(p)
+        assert parsed.spine_segments[1].audio_source.is_muted is False
+
+
+DISABLED_CLIP_FIXTURE = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE fcpxml>
+    <fcpxml version="1.13">
+        <resources>
+            <format id="r1" name="FF30" frameDuration="1/30s" width="1920" height="1080"/>
+            <asset id="rA" name="camA" start="0s" duration="600s" hasVideo="1" hasAudio="1" audioSources="1">
+                <media-rep kind="original-media" src="file:///tmp/camA.mov"/>
+            </asset>
+            <asset id="rB" name="camB" start="0s" duration="600s" hasVideo="1" hasAudio="1" audioSources="1">
+                <media-rep kind="original-media" src="file:///tmp/camB.mov"/>
+            </asset>
+            <asset id="rC" name="camC" start="0s" duration="600s" hasVideo="1" hasAudio="1" audioSources="1">
+                <media-rep kind="original-media" src="file:///tmp/camC.mov"/>
+            </asset>
+        </resources>
+        <library location="file:///Users/x/Movies/X.fcpbundle/">
+            <event name="E"><project name="Disabled Middle">
+                <sequence format="r1" duration="90s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="rA" offset="0s" name="A" start="0s" duration="30s" audioRole="dialogue"/>
+                        <asset-clip ref="rB" offset="30s" name="B" start="0s" duration="30s" enabled="0" audioRole="dialogue"/>
+                        <asset-clip ref="rC" offset="60s" name="C" start="0s" duration="30s" audioRole="dialogue"/>
+                    </spine>
+                </sequence>
+            </project></event>
+        </library>
+    </fcpxml>
+""")
+
+
+class TestDisabledSpineClips:
+    """Clips disabled with V in FCP (enabled="0") play as black/silence —
+    they must be neither transcribed nor selectable. They STAY in the
+    segment list (dropping them would shift indices and flip
+    is_multi_source for projects ingested before this behavior existed —
+    stored FCPXML is re-parsed at export time), marked disabled with muted
+    audio, and the writer's select locator refuses to match them."""
+
+    @pytest.fixture
+    def parsed(self, tmp_path):
+        p = tmp_path / "disabled.fcpxml"
+        p.write_text(DISABLED_CLIP_FIXTURE)
+        return parse_fcpxml(p)
+
+    def test_disabled_clip_stays_a_segment_but_disabled(self, parsed):
+        assert [s.name for s in parsed.spine_segments] == ["A", "B", "C"]
+        a, b, c = parsed.spine_segments
+        assert a.enabled and c.enabled and not b.enabled
+        assert b.audio_source is not None and b.audio_source.is_muted
+
+    def test_disabled_clip_does_not_flip_multi_source_on_reparse(self, parsed):
+        # The 1.0.26 parser counted the disabled clip in the multi-source
+        # basis; re-parses must keep the same coordinate convention or
+        # stored selects export the wrong footage.
+        assert parsed.is_multi_source
+
+    def test_disabled_clip_is_not_rendered(self, parsed):
+        # Not in the plan → its dialogue never reaches transcription.
+        plan = plan_render(parsed)
+        assert "/tmp/camB.mov" not in [p["input_path"] for p in plan]
+        assert len(plan) == 2
+
+    def test_writer_spine_index_stays_lockstep(self, parsed):
+        from doza_assist.fcpxml.writer import _index_original_spine
+        elements = _index_original_spine(parsed)
+        assert [el.get("name") for el in elements] == ["A", "B", "C"]
+        assert len(elements) == len(parsed.spine_segments)
+
+    def test_select_on_enabled_clip_exports_right_footage(self, parsed):
+        # Multi-source: timeline 65s is 5s into C. With the disabled B
+        # filtered on BOTH sides, the select must still deep-copy rC (an
+        # index skew would grab the wrong original element).
+        out = write_selects_as_new_project(
+            parsed, [Select(start_seconds=65, end_seconds=70, label="In C")])
+        clips = etree.fromstring(out).findall(".//sequence/spine/asset-clip")
+        assert [c.get("ref") for c in clips] == ["rC"]
+
+    def test_select_on_disabled_clip_is_skipped(self, parsed):
+        # Timeline 35s falls where B sits — B is not timeline content, so the
+        # select is skipped and surfaced, not exported as disabled footage.
+        skipped = []
+        out = write_selects_as_new_project(
+            parsed,
+            [Select(start_seconds=5, end_seconds=8, label="In A"),
+             Select(start_seconds=35, end_seconds=40, label="On B")],
+            skipped_out=skipped,
+        )
+        assert [s.label for s in skipped] == ["On B"]
+        clips = etree.fromstring(out).findall(".//sequence/spine/asset-clip")
+        assert [c.get("ref") for c in clips] == ["rA"]
+
+    def test_disabled_lane_clip_in_gap_is_skipped(self, tmp_path):
+        p = tmp_path / "disabled_lane.fcpxml"
+        p.write_text(DISABLED_CLIP_FIXTURE.replace(
+            '<asset-clip ref="rB" offset="30s" name="B" start="0s" duration="30s" enabled="0" audioRole="dialogue"/>',
+            '<gap name="Gap" offset="30s" start="3600s" duration="30s">'
+            '<asset-clip ref="rB" lane="1" offset="3600s" name="B" start="0s" duration="30s" enabled="0"/>'
+            '</gap>',
+        ))
+        parsed = parse_fcpxml(p)
+        assert [s.name for s in parsed.spine_segments] == ["A", "B", "C"]
+        b = parsed.spine_segments[1]
+        assert not b.enabled
+        assert b.audio_source is None or b.audio_source.is_muted
+
+    def test_all_disabled_spine_parses_fully_muted(self, tmp_path):
+        # Parse succeeds (segments keep their indices); nothing is renderable,
+        # so the ingest-level no-audio gate rejects the project with its own
+        # friendlier message.
+        p = tmp_path / "all_disabled.fcpxml"
+        p.write_text(DISABLED_CLIP_FIXTURE
+                     .replace('name="A" start="0s" duration="30s"',
+                              'name="A" start="0s" duration="30s" enabled="0"')
+                     .replace('name="C" start="0s" duration="30s"',
+                              'name="C" start="0s" duration="30s" enabled="0"'))
+        parsed = parse_fcpxml(p)
+        assert all(not s.enabled for s in parsed.spine_segments)
+        assert all(s.audio_source is None or s.audio_source.is_muted
+                   for s in parsed.spine_segments)
+        assert plan_render(parsed) == []

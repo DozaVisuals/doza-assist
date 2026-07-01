@@ -911,7 +911,18 @@
         {% set transcript_count = (project.transcript.segments if project.transcript else [])|length %}
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
             <div class="card">
-            {% if project.fcpxml_source %}
+            {# Round-trip panel gate — Jinja twin of the JS _useRoundTripExport()
+               helper and the server rule (app.py _round_trip_fcp_only): FCP-only
+               container shapes (mc-clip/sync-clip, multi-source or rendered-audio
+               asset-clip imports) ALWAYS get the round-trip panel; single-source
+               asset-clip imports honor the editing platform — FCP shows the
+               round-trip panel, Resolve/Premiere get the standard direct-export
+               panel over the real source media (the 1.0.26 behavior). #}
+            {% set rt_src = project.fcpxml_source %}
+            {% if rt_src and ((editing_platform or 'fcp') == 'fcp'
+                              or rt_src.container_type != 'asset-clip'
+                              or rt_src.is_multi_source
+                              or rt_src.timeline_audio_rendered) %}
                 {# ── FCPXML Round-Trip (primary for imported projects) ───── #}
                 <div class="card-title" style="margin-bottom: 1rem;">FCPXML Round-Trip Export</div>
                 <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 1rem;">
@@ -1261,6 +1272,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (el) el.addEventListener('change', _refreshExportButtonState);
     });
     if (typeof _refreshExportButtonState === 'function') _refreshExportButtonState();
+    // Same for the round-trip panel's checkboxes (rendered instead of the
+    // above on fcpxml_source projects) — without this, #rtExportBtn's
+    // disabled state only refreshed on tab switch.
+    ['rtCatLabels', 'rtCatSocial', 'rtCatStory', 'rtCatSoundbites'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', _refreshRtExportButtonState);
+    });
+    if (typeof _refreshRtExportButtonState === 'function') _refreshRtExportButtonState();
 });
 
 // For multi-project, chat/labels use combined ID string
@@ -3919,6 +3938,7 @@ function toggleAllClipChecks(checked) {
 }
 
 async function exportSelectedClips() {
+    const triggerBtn = _exportTriggerButton();  // capture before any await
     const checkedIds = new Set();
     document.querySelectorAll('.clip-check:checked').forEach(cb => {
         checkedIds.add(parseInt(cb.dataset.clipId));
@@ -3929,95 +3949,114 @@ async function exportSelectedClips() {
         return;
     }
 
-    // Save only the selected clips as labeled_sections, then export
+    // "Export the checked subset" works by temporarily persisting ONLY the
+    // selected clips as labeled_sections (the export endpoints read them
+    // server-side; the direct endpoint has no inline clip-list param and the
+    // round-trip endpoint's only inline source is story_build, whose
+    // label/kind semantics differ from client selects). The full list is
+    // ALWAYS restored in a finally, and every persist is res.ok-checked.
     const selected = labelSections.filter(s => checkedIds.has(s.id));
     const sections = selected.map(s => ({
         start: s.start, end: s.end, color: s.color, text: s.text
     }));
-
-    await fetch(`/project/${PROJECT_ID}/labels`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
-    });
-
-    // FCPXML-imported projects: use the round-trip exporter so the
-    // original video media references are preserved (not just the WAV).
-    // Plain asset-clip imports honor the chosen editing platform; multicam/
-    // sync-clip containers are FCP-only by nature, so those always round-trip.
-    const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
-    const rtContainer = (hasFcpxmlSource ? (PROJECT.fcpxml_source || {}) : {}).container_type || '';
-    const rtIsFcpOnly = hasFcpxmlSource && rtContainer !== 'asset-clip';
-    const useRoundTrip = hasFcpxmlSource && (EDITING_PLATFORM === 'fcp' || rtIsFcpOnly);
-    if (useRoundTrip) {
-        try {
-            await _exportFCPXMLRoundTrip({
-                sources: ['client_selects'],
-                mode: 'selects_project',
-            });
-            showToast(`Exported ${checkedIds.size} clips!`);
-        } catch (err) {
-            showToast('Export error: ' + err.message, true);
-        }
-        // Restore full labels after export
-        const allSections = labelSections.map(s => ({
-            start: s.start, end: s.end, color: s.color, text: s.text
-        }));
-        await fetch(`/project/${PROJECT_ID}/labels`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: allSections }),
-        });
-        return;
-    }
-
-    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
-    const mode = document.getElementById('exportMode')?.value || 'cuts';
-    const delivery = typeof getDelivery === 'function' ? getDelivery() : null;
-    const nle = typeof EDITING_PLATFORM !== 'undefined' ? EDITING_PLATFORM : 'fcp';
-
-    const exportBody = {
-        type: 'labels', framerate, mode,
-        total_clips: labelSections.length,
-        deliver_to: delivery, nle,
-    };
-    const runLabelsExport = async () => {
-        const r = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(exportBody),
-        });
-        const d = await r.json().catch(() => ({}));
-        return { res: r, data: d };
-    };
-    maybeShowExportBusy(delivery, nle);
-    try {
-        const { res, data } = await runLabelsExport();
-        hideBusy();
-        if (res.ok) {
-            if (data.delivery === 'nle') {
-                showToast(formatExportToast(data, `Exported ${checkedIds.size} clips`));
-                maybeShowResolveSetup(data, runLabelsExport);
-            } else {
-                showToast(`Exported ${checkedIds.size} clips!`);
-            }
-            if (data.media_warning) showToast(data.media_warning);  // info, not error
-        } else {
-            showToast((data && data.error) || 'Export failed', true);
-        }
-    } catch (err) {
-        showToast('Export error: ' + err.message, true);
-    }
-
-    // Restore full labels after export
-    const allSections = labelSections.map(s => ({
+    const allSections = () => labelSections.map(s => ({
         start: s.start, end: s.end, color: s.color, text: s.text
     }));
-    await fetch(`/project/${PROJECT_ID}/labels`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ color_labels: colorLabels, labeled_sections: allSections }),
-    });
+    const restoreAllSections = async () => {
+        if (!(await _persistLabelSections(allSections()))) {
+            showToast('Could not restore your full clip list after export — reload the page to resync.', true);
+        }
+    };
+
+    if (!_beginExport(triggerBtn)) return;
+    try {
+        // Round-trip routing — see _useRoundTripExport(): FCP-only container
+        // shapes (mc-clip/sync-clip, multi-source/rendered asset-clip — the
+        // imports whose flat export would reference the app-internal
+        // timeline_audio.wav) always round-trip; single-source asset-clip
+        // imports honor the editing platform and take the direct path below
+        // (flat export against the real source media — works in
+        // Resolve/Premiere, the 1.0.26 behavior).
+        if (_useRoundTripExport()) {
+            if (!(await _persistLabelSections(sections))) {
+                showToast('Could not save your clip selection before export — export cancelled.', true);
+                return;
+            }
+            try {
+                // The helper toasts the accurate outcome itself (success /
+                // skipped warning / error) — no unconditional success toast
+                // here, which used to overwrite the helper's error message.
+                await _exportFCPXMLRoundTrip({
+                    sources: ['client_selects'],
+                    mode: 'selects_project',
+                }, `Exported ${checkedIds.size} clips`);
+            } catch (err) {
+                reportExportError(err);
+            } finally {
+                // Restore full labels even when the export throws.
+                await restoreAllSections();
+            }
+            return;
+        }
+
+        const framerateEl = document.getElementById('framerate');
+        const mode = document.getElementById('exportMode')?.value || 'cuts';
+        const delivery = typeof getDelivery === 'function' ? getDelivery() : null;
+        const nle = typeof EDITING_PLATFORM !== 'undefined' ? EDITING_PLATFORM : 'fcp';
+
+        const exportBody = {
+            type: 'labels', mode,
+            total_clips: labelSections.length,
+            deliver_to: delivery, nle,
+        };
+        // No #framerate select on this page (FCPXML imports render the
+        // round-trip panel instead): omit the key so the backend probes the
+        // media / parsed sequence rate rather than trusting a hardcoded UI
+        // default.
+        if (framerateEl) {
+            const fr = parseFloat(framerateEl.value);
+            if (!Number.isNaN(fr)) exportBody.framerate = fr;
+        }
+        const runLabelsExport = async () => {
+            // Re-persist the checked subset before EVERY run: the finally
+            // below restores the full list, so the Resolve setup modal's
+            // "Test again" retry must scope labeled_sections back down to
+            // the user's selection first (it used to re-export ALL clips).
+            if (!(await _persistLabelSections(sections))) {
+                const msg = 'Could not save your clip selection before export — export cancelled.';
+                showToast(msg, true);
+                return { res: { ok: false }, data: { error: msg } };
+            }
+            try {
+                const r = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(exportBody),
+                });
+                const d = await r.json().catch(() => ({}));
+                return { res: r, data: d };
+            } finally {
+                await restoreAllSections();
+            }
+        };
+        maybeShowExportBusy(delivery, nle);
+        try {
+            const { res, data } = await runLabelsExport();
+            hideBusy();
+            if (res.ok) {
+                const summary = `Exported ${checkedIds.size} clips`;
+                showExportOutcome(_directExportSuccessMsg(data, summary, summary), data);
+                if (data.delivery === 'nle') maybeShowResolveSetup(data, runLabelsExport);
+            } else {
+                showToast((data && data.error) || 'Export failed', true);
+            }
+        } catch (err) {
+            // runLabelsExport's own finally already restored the full list.
+            reportExportError(err);
+        }
+    } finally {
+        _endExport();
+    }
 }
 
 // Initial render
@@ -4410,92 +4449,128 @@ async function exportFCPXML(category) {
     // ``category`` is passed by the analysis-section buttons (story/social/
     // soundbites/labels) to export just one bucket; the Export tab calls
     // without an arg and we read the checkboxes instead.
+    const triggerBtn = _exportTriggerButton()
+        || (category ? null : document.getElementById('exportFCPXMLBtn'));
     const types = category ? [category] : _collectExportCategories();
     if (types.length === 0) {
         showToast('Check at least one category to export.');
         return;
     }
-
-    if (types.includes('labels')) {
-        if (labelSections.length === 0) {
-            showToast('No clips to export. Uncheck "My Clips" or highlight some in the transcript first.');
-            return;
-        }
-        // Persist labels before export so the server sees the latest state.
-        const sections = labelSections.map(s => ({
-            start: s.start, end: s.end, color: s.color, text: s.text
-        }));
-        await fetch(`/project/${PROJECT_ID}/labels`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
-        });
+    if (types.includes('labels') && labelSections.length === 0) {
+        showToast('No clips to export. Uncheck "My Clips" or highlight some in the transcript first.');
+        return;
     }
 
-    // Round-trip branch: when the project was imported from FCPXML, route
-    // analysis-section single-category exports through /export/fcpxml-multicam
-    // so the original media references are preserved. The Export tab's bare
-    // exportFCPXML() call doesn't take this branch because that UI is gated
-    // out for fcpxml_source projects in favor of exportFCPXMLMulticam().
-    //
-    // NOTE: PROJECT is declared `const` at the top of the page script. Top-
-    // level `const` lives in the *lexical* global scope, not on `window` —
-    // so `window.PROJECT` is undefined here. Check the lexical binding via
-    // `typeof` instead.
-    // Plain asset-clip imports honor the chosen editing platform; multicam/
-    // sync-clip containers are FCP-only by nature, so those always round-trip.
-    const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
-    const rtContainer = (hasFcpxmlSource ? (PROJECT.fcpxml_source || {}) : {}).container_type || '';
-    const rtIsFcpOnly = hasFcpxmlSource && rtContainer !== 'asset-clip';
-    const useRoundTrip = hasFcpxmlSource && (EDITING_PLATFORM === 'fcp' || rtIsFcpOnly);
-    if (useRoundTrip && category) {
-        const rtSource = _CATEGORY_TO_RT_SOURCE[category];
-        if (rtSource) {
-            return _exportFCPXMLRoundTrip({
-                sources: [rtSource],
-                mode: 'selects_project',
-            });
-        }
-    }
-
-    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
-    const mode = document.getElementById('exportMode')?.value || 'cuts';
-    const delivery = getDelivery();
-    const nle = EDITING_PLATFORM;
-    const platName = PLATFORM_NAMES[nle] || 'NLE';
-
-    const exportBody = {
-        types, framerate, mode,
-        total_clips: labelSections.length,
-        deliver_to: delivery, nle,
-    };
-    const runExport = async () => {
-        const r = await fetch(`/project/${PROJECT_ID}/export/fcpxml`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(exportBody),
-        });
-        const d = await r.json().catch(() => ({}));
-        return { res: r, data: d };
-    };
-    maybeShowExportBusy(delivery, nle);
+    if (!_beginExport(triggerBtn)) return;
     try {
-        const { res, data } = await runExport();
-        hideBusy();
-        if (!res.ok) {
-            showToast((data && data.error) || 'Export failed', true);
-            return;
+        if (types.includes('labels')) {
+            // Persist labels before export so the server sees the latest
+            // state — and ABORT on failure, or the export silently builds
+            // from the last successfully-saved in/out points.
+            const sections = labelSections.map(s => ({
+                start: s.start, end: s.end, color: s.color, text: s.text
+            }));
+            if (!(await _persistLabelSections(sections))) {
+                showToast('Could not save your clips before export — export cancelled.', true);
+                return;
+            }
         }
-        if (data.delivery === 'nle') {
-            showToast(formatExportToast(data, 'Sent'));
-            maybeShowResolveSetup(data, runExport);
-        } else {
-            showToast(`Exported to ${data.file || data.filename || 'disk'}`);
+
+        // Round-trip branch — see _useRoundTripExport(): FCP-only container
+        // shapes route through /export/fcpxml-multicam so the original
+        // camera-media references are preserved (their flat export would
+        // reference the app-internal timeline_audio.wav); single-source
+        // asset-clip imports honor the editing platform and fall through to
+        // the direct path below (1.0.26 behavior).
+        if (_useRoundTripExport() && category) {
+            const rtSource = _CATEGORY_TO_RT_SOURCE[category];
+            if (rtSource) {
+                return await _exportFCPXMLRoundTrip({
+                    sources: [rtSource],
+                    mode: 'selects_project',
+                });
+            }
         }
-        if (data.media_warning) showToast(data.media_warning);  // info, not error
-    } catch (err) {
-        showToast('Export error: ' + err.message, true);
+
+        const framerateEl = document.getElementById('framerate');
+        const mode = document.getElementById('exportMode')?.value || 'cuts';
+        const delivery = getDelivery();
+        const nle = EDITING_PLATFORM;
+
+        const exportBody = {
+            types, mode,
+            total_clips: labelSections.length,
+            deliver_to: delivery, nle,
+        };
+        // No #framerate select on this page (FCPXML imports render the
+        // round-trip panel instead): omit the key so the backend probes the
+        // media / parsed sequence rate rather than trusting a hardcoded UI
+        // default of 23.976.
+        if (framerateEl) {
+            const fr = parseFloat(framerateEl.value);
+            if (!Number.isNaN(fr)) exportBody.framerate = fr;
+        }
+        const runExport = async () => {
+            const r = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(exportBody),
+            });
+            const d = await r.json().catch(() => ({}));
+            return { res: r, data: d };
+        };
+        maybeShowExportBusy(delivery, nle);
+        try {
+            const { res, data } = await runExport();
+            hideBusy();
+            if (!res.ok) {
+                showToast((data && data.error) || 'Export failed', true);
+                return;
+            }
+            showExportOutcome(_directExportSuccessMsg(data, 'Sent'), data);
+            if (data.delivery === 'nle') maybeShowResolveSetup(data, runExport);
+        } catch (err) {
+            reportExportError(err);
+        }
+    } finally {
+        _endExport();
     }
+}
+
+// Client twin of the server gate app.py _round_trip_fcp_only — keep the
+// shape test in lockstep. True when this FCPXML-imported project may only
+// be SENT BACK to Final Cut Pro: mc-clip/sync-clip containers re-emit
+// FCP-only structures (Resolve imports the timeline EMPTY, Premiere can't
+// read FCPXML at all), and multi-source / rendered-audio asset-clip imports
+// have no direct media file for the flat exporters — their source_path is
+// the app-internal timeline_audio.wav.
+function _roundTripFcpOnly() {
+    const src = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.fcpxml_source) || null;
+    if (!src) return false;
+    if (src.container_type !== 'asset-clip') return true;
+    return !!(src.timeline_audio_rendered || src.is_multi_source);
+}
+
+// Single routing rule for every export surface (clips tab, Export tab,
+// AI-analysis buttons, Story Builder): round-trip when the container shape
+// is FCP-only (see _roundTripFcpOnly) OR the editing platform is FCP
+// (round-trips preserve the original container, so they're strictly better
+// when the destination is FCP anyway). Single-source asset-clip imports on
+// Resolve/Premiere return false and take the DIRECT export path — a flat
+// export against the real source media, the 1.0.26 behavior the server
+// gate (_round_trip_fcp_only call sites in app.py) deliberately permits.
+//
+// NOTE: PROJECT is declared `const` at the top of the page script. Top-
+// level `const` lives in the *lexical* global scope, not on `window` — so
+// `window.PROJECT` is undefined here. Check the lexical binding via
+// `typeof` instead.
+function _useRoundTripExport() {
+    const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
+    if (!hasFcpxmlSource) return false;
+    // Undefined platform == the FCP default, same convention as the
+    // platformIsFcp checks in the round-trip outcome toasts.
+    const platformIsFcp = typeof EDITING_PLATFORM === 'undefined' || EDITING_PLATFORM === 'fcp';
+    return platformIsFcp || _roundTripFcpOnly();
 }
 
 // Shared transport for AI Analysis + Story Builder round-trip exports.
@@ -4505,15 +4580,23 @@ async function exportFCPXML(category) {
 // Final Cut Pro can import: Resolve opens the FCPXML but the timeline comes in
 // empty, and Premiere can't read FCPXML at all. If the editor has another NLE
 // selected, say plainly that the file is going to FCP regardless.
-function _warnRoundTripFcpOnly() {
+function _warnRoundTripFcpOnly(delivery) {
+    // Send-to-NLE delivery shows a busy toast in the same tick, which would
+    // overwrite this warning before it renders a single frame (#toast is a
+    // single mutable element). For that path the explanation is folded into
+    // the outcome toast instead — only pre-toast for file delivery.
+    if (delivery === 'nle') return;
     if (typeof EDITING_PLATFORM !== 'undefined' && EDITING_PLATFORM !== 'fcp') {
         showToast('FCPXML round-trips can only be sent back to Final Cut Pro — exporting to Final Cut Pro.', true);
     }
 }
 
-async function _exportFCPXMLRoundTrip(opts) {
-    _warnRoundTripFcpOnly();
+// Returns { ok, data } so callers can gate their own follow-up toasts —
+// every failure path is handled (toasted) internally and returns ok:false
+// rather than throwing.
+async function _exportFCPXMLRoundTrip(opts, summary) {
     const delivery = getDelivery();
+    _warnRoundTripFcpOnly(delivery);
     const body = Object.assign(
         { mode: 'selects_project', deliver_to: delivery },
         opts || {},
@@ -4529,31 +4612,27 @@ async function _exportFCPXMLRoundTrip(opts) {
         hideBusy();
         if (!res.ok) {
             showToast((data && data.error) || 'Export failed', true);
-            return;
+            return { ok: false, data };
         }
+        // When the round-trip ran despite a non-FCP platform selection
+        // (round-trips re-emit the FCP container, which only FCP imports),
+        // say why the file went to FCP instead of pretending that was the
+        // user's choice.
+        const platformIsFcp = typeof EDITING_PLATFORM === 'undefined' || EDITING_PLATFORM === 'fcp';
+        const fcpOnlyNote = platformIsFcp ? '' : ' (round-trips preserve the FCP container, so this went to Final Cut Pro)';
+        let msg;
         if (data.delivery === 'nle') {
-            // When the round-trip ran despite a non-FCP platform selection
-            // (multicam/sync-clip containers are FCP-only), say why the file
-            // went to FCP instead of pretending that was the user's choice.
-            const platformIsFcp = typeof EDITING_PLATFORM === 'undefined' || EDITING_PLATFORM === 'fcp';
-            showToast(platformIsFcp
-                ? 'Sent to Final Cut Pro'
-                : 'Multicam round-trips preserve the FCP container — sent to Final Cut Pro');
+            msg = (summary ? `${summary} → Final Cut Pro` : 'Sent to Final Cut Pro') + fcpOnlyNote;
         } else {
-            showToast(`Exported to ${data.file || data.filename || 'disk'}`);
+            msg = `Exported to ${data.file || data.filename || 'disk'}` + fcpOnlyNote;
         }
-        if (data.media_warning) showToast(data.media_warning);  // info, not error
-        if (data.skipped_count) {
-            // Partial drops used to be invisible — an editor exporting 12
-            // selects silently received 10 clips (the lane-1-gap bug class).
-            const names = (data.skipped || []).slice(0, 3).join(', ');
-            showToast(
-                `${data.skipped_count} select${data.skipped_count === 1 ? '' : 's'} ` +
-                `could not be placed (outside the timeline's clips)` +
-                (names ? `: ${names}` : ''), true);
-        }
+        // One consolidated toast: success + media warning + skipped selects
+        // (partial drops used to be invisible — the lane-1-gap bug class).
+        showExportOutcome(msg, data);
+        return { ok: true, data };
     } catch (err) {
-        showToast('Export error: ' + err.message, true);
+        reportExportError(err);
+        return { ok: false, data: null };
     }
 }
 
@@ -4586,11 +4665,17 @@ function _refreshRtExportButtonState() {
 }
 
 function _refreshExportCounts() {
-    const analysis = (window.PROJECT && PROJECT.analysis) || {};
+    // NOTE: PROJECT is a top-level `const` — it lives in the lexical global
+    // scope, NOT on `window` (window.PROJECT is always undefined, which used
+    // to zero every AI count and force-uncheck the boxes on tab switch).
+    const proj = (typeof PROJECT !== 'undefined' && PROJECT) ? PROJECT : null;
+    const analysis = (proj && proj.analysis) || {};
     const clipCount = (typeof labelSections !== 'undefined') ? labelSections.length : 0;
     const socialCount = (analysis.social_clips || []).length;
     const storyCount = (analysis.story_beats || []).length;
     const soundbiteCount = (analysis.strongest_soundbites || []).length;
+    const transcriptCount = (proj && proj.transcript && Array.isArray(proj.transcript.segments))
+        ? proj.transcript.segments.length : 0;
 
     // Round-trip export checkboxes
     const rtMap = {
@@ -4610,7 +4695,7 @@ function _refreshExportCounts() {
     // Standard NLE export checkboxes
     const stdMap = {
         exportCatLabelsCount: clipCount, exportCatSocialCount: socialCount,
-        exportCatStoryCount: storyCount,
+        exportCatStoryCount: storyCount, exportCatTranscriptCount: transcriptCount,
     };
     for (const [id, count] of Object.entries(stdMap)) {
         const el = document.getElementById(id);
@@ -4628,19 +4713,7 @@ function _refreshExportCounts() {
 // "save and reveal" vs "open in Final Cut Pro" but never targets Resolve
 // or Premiere.
 async function exportFCPXMLMulticam() {
-    _warnRoundTripFcpOnly();
-    // Persist the latest clip labels before export so "Clip labels" source is fresh.
-    if (typeof labelSections !== 'undefined' && labelSections.length) {
-        const sections = labelSections.map(s => ({
-            start: s.start, end: s.end, color: s.color, text: s.text
-        }));
-        await fetch(`/project/${PROJECT_ID}/labels`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
-        });
-    }
-
+    const triggerBtn = _exportTriggerButton() || document.getElementById('rtExportBtn');
     const sources = _collectRtSources();
     if (sources.length === 0) {
         showToast('Check at least one category to export.');
@@ -4650,28 +4723,53 @@ async function exportFCPXMLMulticam() {
     const mode = modeBtn ? modeBtn.getAttribute('data-mode') : 'selects_project';
     const delivery = getDelivery();
     const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
+    _warnRoundTripFcpOnly(delivery);
 
-    maybeShowExportBusy(delivery, 'fcp');  // multicam round-trip targets FCP
+    if (!_beginExport(triggerBtn)) return;
     try {
-        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode, sources, deliver_to: delivery }),
-        });
-        const data = await res.json().catch(() => ({}));
-        hideBusy();
-        if (!res.ok) {
-            showToast((data && data.error) || 'Export failed', true);
-            return;
+        // Persist the latest clip labels before export so the "My Clips"
+        // source is fresh — and ABORT on failure, or the export silently
+        // builds from the last successfully-saved in/out points.
+        if (typeof labelSections !== 'undefined' && labelSections.length) {
+            const sections = labelSections.map(s => ({
+                start: s.start, end: s.end, color: s.color, text: s.text
+            }));
+            if (!(await _persistLabelSections(sections))) {
+                showToast('Could not save your clips before export — export cancelled.', true);
+                return;
+            }
         }
-        if (data.delivery === 'nle') {
-            showToast(`Sent to Final Cut Pro — ${modeLabel}`);
-        } else {
-            showToast(`Exported to ${data.file || data.filename || 'disk'} — ${modeLabel}`);
+
+        maybeShowExportBusy(delivery, 'fcp');  // multicam round-trip targets FCP
+        try {
+            const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode, sources, deliver_to: delivery }),
+            });
+            const data = await res.json().catch(() => ({}));
+            hideBusy();
+            if (!res.ok) {
+                showToast((data && data.error) || 'Export failed', true);
+                return;
+            }
+            // When a non-FCP platform is selected the pre-export warning is
+            // suppressed for NLE delivery (the busy toast would overwrite it
+            // in the same tick) — fold the explanation into the outcome.
+            const platformIsFcp = typeof EDITING_PLATFORM === 'undefined' || EDITING_PLATFORM === 'fcp';
+            const fcpOnlyNote = platformIsFcp ? '' : ' (round-trips preserve the FCP container, so this went to Final Cut Pro)';
+            const msg = data.delivery === 'nle'
+                ? `Sent to Final Cut Pro — ${modeLabel}${fcpOnlyNote}`
+                : `Exported to ${data.file || data.filename || 'disk'} — ${modeLabel}${fcpOnlyNote}`;
+            // One consolidated toast: success + media warning + skipped
+            // selects (dropped selects used to be invisible on this path —
+            // the primary round-trip export button).
+            showExportOutcome(msg, data);
+        } catch (err) {
+            reportExportError(err);
         }
-        if (data.media_warning) showToast(data.media_warning);  // info, not error
-    } catch (err) {
-        showToast('Export error: ' + err.message, true);
+    } finally {
+        _endExport();
     }
 }
 
@@ -4684,7 +4782,7 @@ function downloadOtherFormat() {
 }
 
 function downloadJSON() {
-    if (!PROJECT.transcript) return;
+    if (!PROJECT.transcript) { showToast('Transcript not ready yet — nothing to download.'); return; }
     const blob = new Blob([JSON.stringify(PROJECT.transcript, null, 2)], { type: 'application/json' });
     downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '_transcript.json');
 }
@@ -4697,7 +4795,7 @@ function displaySpeaker(raw) {
 }
 
 function downloadSRT() {
-    if (!PROJECT.transcript) return;
+    if (!PROJECT.transcript) { showToast('Transcript not ready yet — nothing to download.'); return; }
     let srt = '';
     PROJECT.transcript.segments.forEach((seg, i) => {
         srt += `${i + 1}\n`;
@@ -4709,7 +4807,7 @@ function downloadSRT() {
 }
 
 function downloadTXT() {
-    if (!PROJECT.transcript) return;
+    if (!PROJECT.transcript) { showToast('Transcript not ready yet — nothing to download.'); return; }
     let txt = PROJECT.name + '\n' + '='.repeat(40) + '\n\n';
     PROJECT.transcript.segments.forEach(seg => {
         // Follow the on-screen timecode mode: a TXT handed to an editor is
@@ -5245,12 +5343,26 @@ async function deleteProject() {
 }
 
 // ── Toast ──
-function showToast(msg, isError = false) {
+// Single hide-timer, always cleared before rearming: an earlier toast's
+// stale 5s timeout used to hide a LATER message early — including the
+// persistent showBusy "Sending to…" toast mid-send on long NLE handoffs.
+let _toastHideTimer = null;
+function _clearToastHideTimer() {
+    if (_toastHideTimer) {
+        clearTimeout(_toastHideTimer);
+        _toastHideTimer = null;
+    }
+}
+function showToast(msg, isError = false, durationMs = 5000) {
     const toast = document.getElementById('toast');
     toast.textContent = msg;
     toast.classList.toggle('error', isError);
     toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 5000);
+    _clearToastHideTimer();
+    _toastHideTimer = setTimeout(() => {
+        _toastHideTimer = null;
+        toast.classList.remove('show');
+    }, durationMs);
 }
 // Expose so inject-cloud-share.js can call it as a fallback after a pull.
 window.showToast = showToast;
@@ -5262,6 +5374,7 @@ window.showToast = showToast;
 function showBusy(msg) {
     const toast = document.getElementById('toast');
     if (!toast) return;
+    _clearToastHideTimer();  // a stale showToast timer must not hide us
     toast.textContent = msg;
     toast.classList.remove('error');
     toast.classList.add('show');
@@ -5281,6 +5394,38 @@ function maybeShowExportBusy(delivery, nle) {
         : '…';
     showBusy('Sending to ' + name + tail);
     return true;
+}
+
+// Client-side safety net for the NLE export handoff. The backend Resolve
+// import is bounded (resolve_import.TOTAL_IMPORT_BUDGET = 30s cold-launch
+// handle poll + 180s import = 210s), but if anything upstream wedges we
+// abort here so the "Sending to…" busy toast can never become a permanent
+// beachball. Must stay ABOVE the 210s server budget (a 200s cap once
+// aborted slow-but-SUCCEEDING cold-Resolve sends, telling the user to
+// import manually while the server import completed → duplicate timeline).
+const EXPORT_FETCH_TIMEOUT_MS = 240000;
+async function exportFetch(url, opts) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), EXPORT_FETCH_TIMEOUT_MS);
+    try {
+        return await fetch(url, Object.assign({}, opts, { signal: controller.signal }));
+    } finally {
+        clearTimeout(timer);
+    }
+}
+// Always clear the busy toast and surface an actionable message when an
+// export fetch fails or times out — so a stalled Resolve never leaves the UI
+// stuck on "Sending to…". Returns true when the failure was a timeout/abort.
+function reportExportError(err) {
+    hideBusy();
+    if (err && err.name === 'AbortError') {
+        showToast('Resolve isn\'t responding — the export file was saved. '
+            + 'Reveal it in Finder and import it manually '
+            + '(Resolve: File → Import → Timeline).', true);
+        return true;
+    }
+    showToast('Export error: ' + (err && err.message ? err.message : err), true);
+    return false;
 }
 
 // Compose an NLE-export toast that's honest about what actually happened.
@@ -5310,6 +5455,115 @@ function formatExportToast(data, summary) {
         return `${summary} → revealed in Finder for ${nleName}`;
     }
     return `${summary} → ${nleName}`;
+}
+
+// Compose the post-export outcome into ONE toast. #toast is a single mutable
+// element (no queue), so stacked showToast calls only ever display the last
+// message — success + media_warning + skipped-selects used to overwrite each
+// other. Fold them together instead; a warning-bearing outcome renders in the
+// warning style and persists longer than a plain success toast.
+function showExportOutcome(successMsg, data) {
+    data = data || {};
+    const warnings = [];
+    // Resolve was reachable but the scripted import failed operationally
+    // (no_project / import_failed / import_empty / import_timeout /
+    // unexpected_error — see app.py _hand_file_to_resolve). The server
+    // already revealed the file and focused Resolve; surface its per-reason
+    // hint as a persistent warning. NOT the setup modal — that stays keyed
+    // on setup_required (maybeShowResolveSetup).
+    if (data.import_fallback) {
+        warnings.push(String(data.hint
+            || 'Resolve could not auto-import the timeline — the file was revealed in Finder. In Resolve: File → Import → Timeline… and pick it.'));
+    }
+    if (data.media_warning) warnings.push(data.media_warning);
+    if (Array.isArray(data.warnings)) {
+        data.warnings.forEach(w => { if (w) warnings.push(String(w)); });
+    }
+    if (data.skipped_count) {
+        // Partial drops used to be invisible — an editor exporting 12
+        // selects silently received 10 clips (the lane-1-gap bug class).
+        const names = (data.skipped || []).slice(0, 3).join(', ');
+        warnings.push(
+            `${data.skipped_count} select${data.skipped_count === 1 ? '' : 's'} ` +
+            `could not be placed (outside the timeline's clips)` +
+            (names ? `: ${names}` : ''));
+    }
+    if (warnings.length === 0) {
+        showToast(successMsg);
+        return;
+    }
+    showToast(successMsg + ' — ' + warnings.join(' · '), true, 12000);
+}
+
+// Success message for the direct-media export paths (/export/fcpxml,
+// /story/export). Premiere delivery is file-only (no reliable CLI import),
+// so the backend returns delivery:'file' + premiere_manual_import — tell the
+// user where the XML went instead of pretending it opened in Premiere.
+function _directExportSuccessMsg(data, nleSummary, fileSummary) {
+    data = data || {};
+    if (data.delivery === 'nle') return formatExportToast(data, nleSummary || 'Sent');
+    if (data.premiere_manual_import) {
+        return data.note
+            || ('Premiere XML saved and revealed in Finder — in Premiere Pro: '
+                + 'File → Import → pick ' + (data.file || data.filename || 'the exported .xml') + '.');
+    }
+    const dest = data.file || data.filename || 'disk';
+    return (fileSummary ? `${fileSummary} — saved to ${dest}` : `Exported to ${dest}`);
+}
+
+// ── Export in-flight guard ─────────────────────────────────────────
+// One export at a time: disable the clicked button until the request
+// settles so a double-click can't write the same file twice or race two
+// concurrent Resolve scripting imports against one Resolve instance.
+let _exportInFlight = false;
+let _exportBusyBtn = null;
+function _exportTriggerButton() {
+    // Inline onclick handlers run synchronously during dispatch, so
+    // window.event still points at the originating click here (call this
+    // BEFORE the first await). closest() tolerates clicks landing on a
+    // nested span/svg inside the button.
+    try {
+        const t = window.event && (window.event.currentTarget || window.event.target);
+        if (t && typeof t.closest === 'function') return t.closest('button');
+    } catch (_) { /* no live event — programmatic call */ }
+    return null;
+}
+function _beginExport(btn) {
+    if (_exportInFlight) {
+        showToast('An export is already running — wait for it to finish.');
+        return false;
+    }
+    _exportInFlight = true;
+    _exportBusyBtn = btn || null;
+    if (_exportBusyBtn) {
+        _exportBusyBtn.disabled = true;
+        _exportBusyBtn.setAttribute('aria-busy', 'true');
+    }
+    return true;
+}
+function _endExport() {
+    _exportInFlight = false;
+    if (_exportBusyBtn) {
+        _exportBusyBtn.disabled = false;
+        _exportBusyBtn.removeAttribute('aria-busy');
+        _exportBusyBtn = null;
+    }
+}
+
+// Persist labeled_sections and REPORT the result — a silently-failed save
+// used to export stale in/out points (HTTP error) or kill the click handler
+// with an unhandled rejection (network error). Returns true on success.
+async function _persistLabelSections(sectionsList) {
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sectionsList }),
+        });
+        return res.ok;
+    } catch (_) {
+        return false;
+    }
 }
 
 // Resolve setup modal — opens when the backend reports setup_required after
@@ -5393,13 +5647,20 @@ window.addEventListener('DOMContentLoaded', () => {
                 _hideResolveSetup();
                 return;
             }
-            retryBtn.disabled = true;
+            // The retry IS an export (it re-runs the stored export fn), so
+            // it must hold the same in-flight guard as every export button —
+            // it used to run outside it, letting a concurrent export race the
+            // retry's subset-persist and export the wrong clip set (or run
+            // two scripted Resolve imports at once). _beginExport toasts
+            // "An export is already running" on refusal; keep the modal up so
+            // the user can retry once the other export settles.
+            if (!_beginExport(retryBtn)) return;
             const orig = retryBtn.textContent;
             retryBtn.textContent = 'Testing…';
             try {
                 await retry();
             } finally {
-                retryBtn.disabled = false;
+                _endExport();  // re-enables retryBtn (it was the guard's button)
                 retryBtn.textContent = orig;
                 _hideResolveSetup();
             }
@@ -5784,73 +6045,77 @@ function addAllStoryClips() {
 }
 
 async function exportStoryFCPXML() {
+    const triggerBtn = _exportTriggerButton();  // capture before any await
     const build = storyBuilds.find(b => b.id === currentBuildId);
     if (!build || !build.clips || build.clips.length === 0) {
         showToast('No clips to export');
         return;
     }
 
-    // Round-trip branch: for FCPXML-imported projects, route the Story
-    // Builder export through /export/fcpxml-multicam so the original media
-    // references are preserved. The 'story_build' source kind on
-    // _project_selects_for_fcpxml consumes the inline clips list (the
-    // build's clips don't live on the project, only in this request body)
-    // and preserve_order on the writer keeps the narrative ordering.
-    //
-    // NOTE: see exportFCPXML — top-level `const PROJECT` lives in the
-    // lexical global, not on `window`, so we check the binding directly.
-    // Plain asset-clip imports honor the chosen editing platform; multicam/
-    // sync-clip containers are FCP-only by nature, so those always round-trip.
-    const hasFcpxmlSource = typeof PROJECT !== 'undefined' && !!(PROJECT && PROJECT.fcpxml_source);
-    const rtContainer = (hasFcpxmlSource ? (PROJECT.fcpxml_source || {}) : {}).container_type || '';
-    const rtIsFcpOnly = hasFcpxmlSource && rtContainer !== 'asset-clip';
-    const useRoundTrip = hasFcpxmlSource && (EDITING_PLATFORM === 'fcp' || rtIsFcpOnly);
-    if (useRoundTrip) {
-        return _exportFCPXMLRoundTrip({
-            sources: ['story_build'],
-            mode: 'selects_project',
-            story_build_clips: build.clips,
-            story_title: build.story_title,
-            preserve_order: true,
-        });
-    }
-
-    const framerate = parseFloat(document.getElementById('framerate')?.value || '23.976');
-    const delivery = getDelivery();
-    const nle = EDITING_PLATFORM;
-    const platName = PLATFORM_NAMES[nle] || 'NLE';
-
-    const exportBody = {
-        clips: build.clips,
-        story_title: build.story_title,
-        framerate,
-        deliver_to: delivery, nle,
-    };
-    const runStoryExport = async () => {
-        const r = await fetch(`/project/${PROJECT_ID}/story/export`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(exportBody),
-        });
-        const d = await r.json().catch(() => ({}));
-        return { res: r, data: d };
-    };
-    maybeShowExportBusy(delivery, nle);
+    if (!_beginExport(triggerBtn)) return;
     try {
-        const { res, data } = await runStoryExport();
-        hideBusy();
-        if (!res.ok) {
-            showToast((data && data.error) || 'Export failed', true);
-            return;
+        // Round-trip branch — see _useRoundTripExport(): FCP-only container
+        // shapes route the Story Builder export through
+        // /export/fcpxml-multicam so the original camera-media references
+        // are preserved; single-source asset-clip imports honor the editing
+        // platform and take the direct /story/export path below (1.0.26
+        // behavior). The 'story_build' source kind on
+        // _project_selects_for_fcpxml consumes the inline clips list (the
+        // build's clips don't live on the project, only in this request
+        // body) and preserve_order on the writer keeps the narrative
+        // ordering.
+        if (_useRoundTripExport()) {
+            return await _exportFCPXMLRoundTrip({
+                sources: ['story_build'],
+                mode: 'selects_project',
+                story_build_clips: build.clips,
+                story_title: build.story_title,
+                preserve_order: true,
+            });
         }
-        if (data.delivery === 'nle') {
-            showToast(formatExportToast(data, 'Sent'));
-            maybeShowResolveSetup(data, runStoryExport);
-        } else {
-            showToast(`Exported to ${data.file || data.filename || 'disk'}`);
+
+        const framerateEl = document.getElementById('framerate');
+        const delivery = getDelivery();
+        const nle = EDITING_PLATFORM;
+
+        const exportBody = {
+            clips: build.clips,
+            story_title: build.story_title,
+            deliver_to: delivery, nle,
+        };
+        // No #framerate select on this page: omit the key so the backend
+        // probes the media rate rather than trusting a hardcoded UI default.
+        if (framerateEl) {
+            const fr = parseFloat(framerateEl.value);
+            if (!Number.isNaN(fr)) exportBody.framerate = fr;
         }
-        if (data.media_warning) showToast(data.media_warning);  // info, not error
-    } catch (err) { showToast('Export error: ' + err.message, true); }
+        const runStoryExport = async () => {
+            // exportFetch (not bare fetch): its abort timeout guarantees a
+            // wedged Send-to-Resolve can never leave the busy toast up forever.
+            const r = await exportFetch(`/project/${PROJECT_ID}/story/export`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(exportBody),
+            });
+            const d = await r.json().catch(() => ({}));
+            return { res: r, data: d };
+        };
+        maybeShowExportBusy(delivery, nle);
+        try {
+            const { res, data } = await runStoryExport();
+            hideBusy();
+            if (!res.ok) {
+                showToast((data && data.error) || 'Export failed', true);
+                return;
+            }
+            showExportOutcome(_directExportSuccessMsg(data, 'Sent'), data);
+            if (data.delivery === 'nle') maybeShowResolveSetup(data, runStoryExport);
+        } catch (err) {
+            reportExportError(err);
+        }
+    } finally {
+        _endExport();
+    }
 }
 
 // Story clip playback

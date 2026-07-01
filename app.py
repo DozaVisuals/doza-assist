@@ -50,6 +50,19 @@ def get_project_platform(project: dict) -> str:
     return prefs.get_default_platform()
 
 
+def _ascii_header_value(value):
+    """Fold a header value to ASCII (errors='replace').
+
+    Werkzeug/http.server encode response headers latin-1 STRICT: one
+    non-latin-1 char (an em-dash in a warning string) raises mid-header and
+    kills the whole legacy attachment response — the client sees a closed
+    connection, no file, no error JSON. Exporters are expected to emit
+    ASCII-safe warnings (see fcpxml_export._ascii_safe), but this choke
+    point guarantees no future warning string can 500 the response.
+    """
+    return str(value).encode('ascii', errors='replace').decode('ascii')
+
+
 def _exporter_response(result, project, exporter):
     """Send an export file with X-Export-* headers for the frontend toast."""
     response = send_file(
@@ -57,12 +70,13 @@ def _exporter_response(result, project, exporter):
         as_attachment=True,
         download_name=result.filename,
     )
-    response.headers['X-Export-Format'] = result.format_name
-    response.headers['X-Export-Platform'] = result.platform_name
-    response.headers['X-Export-Extension'] = exporter.file_extension
+    response.headers['X-Export-Format'] = _ascii_header_value(result.format_name)
+    response.headers['X-Export-Platform'] = _ascii_header_value(result.platform_name)
+    response.headers['X-Export-Extension'] = _ascii_header_value(exporter.file_extension)
     if result.warnings:
         # Headers must be ASCII-safe; join with " | ".
-        response.headers['X-Export-Warnings'] = ' | '.join(result.warnings)
+        response.headers['X-Export-Warnings'] = _ascii_header_value(
+            ' | '.join(result.warnings))
     return response
 
 
@@ -388,13 +402,17 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
         raise ValueError(f'Could not read FCPXML: {e}') from e
 
     # Check every referenced source, not just the representative one — a
-    # multi-source spine can reference several drives.
+    # multi-source spine can reference several drives. Muted segments are
+    # EXCLUDED: they are never extracted, rendered, or transcribed (the
+    # renderer plays silence there, matching FCP), so a muted/video-only
+    # B-roll clip on an unmounted drive must not block the import.
     unique_paths = []
     seen = set()
     for seg in parsed.spine_segments:
-        if seg.audio_source is None:
+        src = seg.audio_source
+        if src is None or src.is_muted:
             continue
-        p = seg.audio_source.path
+        p = src.path
         if p in seen:
             continue
         seen.add(p)
@@ -418,6 +436,11 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     # project that dies mid-transcription with a raw ffmpeg error.
     from exporters.media_probe import _find_ffprobe
     _ffprobe = _find_ffprobe()
+    # Sources the probe CONFIRMED are video-only (decodable video, no
+    # decodable audio despite what the asset declared). Individually they
+    # are importable — the timeline render substitutes silence for their
+    # spans — but a timeline made of NOTHING else has no audio to transcribe.
+    video_only_paths = set()
     if _ffprobe:
         for p in unique_paths:
             try:
@@ -429,12 +452,40 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
             except Exception:
                 continue  # probe trouble is not the user's problem
             if probe.returncode != 0 or not probe.stdout.strip():
+                # No decodable audio. A video-only file (its asset declared
+                # audio it doesn't have) is still importable — the timeline
+                # render substitutes silence for its spans — so only fail
+                # when the file has no decodable video either.
+                try:
+                    vprobe = subprocess.run(
+                        [_ffprobe, '-v', 'error', '-select_streams', 'v',
+                         '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', p],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                except Exception:
+                    continue
+                if vprobe.returncode == 0 and vprobe.stdout.strip():
+                    video_only_paths.add(p)
+                    continue
                 raise ValueError(
                     f'The media this FCPXML references ({os.path.basename(p)}) '
                     f'is not in a format Doza Assist can transcribe. '
                     f'Re-export from FCP with standard audio (WAV/AAC/MOV), '
                     f'or transcode the source first.'
                 )
+
+    # At least one non-muted, audio-bearing source must survive the gates
+    # above. Without this, an all-muted timeline (unique_paths empty — no
+    # per-file gate ever ran) or an all-video-only one imports fine and then
+    # dies mid-transcription in the audio extractor, leaving a dead
+    # error-state project instead of a clear answer at import time. Probe
+    # trouble fails open: only CONFIRMED video-only paths count against it.
+    if not unique_paths or (
+            _ffprobe and len(video_only_paths) == len(unique_paths)):
+        raise ValueError(
+            'This timeline has no audio to transcribe — every clip is '
+            'video-only or muted.'
+        )
 
     # Stash the original FCPXML inside the project directory so the writer
     # module can round-trip selects back out without needing the user to still
@@ -1219,7 +1270,16 @@ def create_project():
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
 
-    return jsonify({'project_id': project_id, 'status': 'created'})
+    payload = {'project_id': project_id, 'status': 'created'}
+    # FCPXML ingest can succeed with non-fatal parse notes (retimed /
+    # rate-conformed clips, dropped ref-clip dialogue). They are persisted in
+    # meta.json (fcpxml_source.parse_warnings) — surface them to the caller
+    # too, so the import UI can explain future transcript holes/misalignment.
+    created = get_project(project_id) or {}
+    parse_warnings = (created.get('fcpxml_source') or {}).get('parse_warnings') or []
+    if parse_warnings:
+        payload['warnings'] = list(parse_warnings)
+    return jsonify(payload)
 
 
 @app.route('/upload', methods=['POST'])
@@ -3063,6 +3123,29 @@ def save_labels(project_id):
     return jsonify({'status': 'saved', 'count': new_count})
 
 
+def _safe_filename(name: str, fallback: str = 'Export') -> str:
+    """Make a user/AI-supplied string safe to use as a single filename.
+
+    Story titles and project names are free text (user renames, AI output
+    like "24/7 — The Grind"); a '/' in one used to make ``open()`` treat
+    part of the name as a subdirectory and 500 the export. Replaces '/'
+    and ':' (the legacy HFS separator, which Finder displays as '/') with
+    '-', strips NULs and other control characters, collapses whitespace,
+    and returns ``fallback`` when nothing displayable survives. For
+    filenames only — never feed the result back into user-visible text.
+    """
+    cleaned = []
+    for ch in str(name or ''):
+        if ch in '/:':
+            cleaned.append('-')
+        elif ord(ch) < 32 or ch == '\x7f':
+            cleaned.append(' ')
+        else:
+            cleaned.append(ch)
+    out = ' '.join(''.join(cleaned).split())
+    return out or fallback
+
+
 def _resolve_export_framerate(body, detected_fps):
     """Pick the export framerate: explicit user override > probe > default.
 
@@ -3083,12 +3166,17 @@ def _resolve_export_framerate(body, detected_fps):
     return detected_fps or 23.976
 
 
-def _build_nle_export(project: dict, body: dict, force_platform: str | None = None):
+def _build_nle_export(project: dict, body: dict, force_platform: str | None = None,
+                      warnings_out: list | None = None):
     """Run the configured exporter for ``project`` against the selections in ``body``.
 
     Shared by ``/export/fcpxml`` (which streams the file back) and
     ``/export/send-to-nle`` (which writes the file then launches the NLE).
     Returns ``(result, exporter)``.
+
+    Items with malformed ':'-style timecodes (AI output like '00:02:4S')
+    are skipped with a note appended to ``warnings_out`` — one bad value
+    used to 500 the entire export.
     """
     raw_types = body.get('types')
     if isinstance(raw_types, list) and raw_types:
@@ -3106,7 +3194,14 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
     markers = []
 
     def _to_seconds(val):
-        """Convert timecode string or number to float seconds."""
+        """Convert timecode string or number to float seconds.
+
+        A ':'-style string with non-numeric parts (a hallucinated
+        '00:02:4S') raises ValueError — the marker loops below catch it
+        per item and skip that marker with a warning instead of letting
+        it 500 the whole export. Values without ':' keep the legacy
+        garbage→0.0 fallback.
+        """
         if isinstance(val, (int, float)):
             return float(val)
         val = str(val).strip()
@@ -3120,6 +3215,16 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
             return float(val)
         except (ValueError, TypeError):
             return 0.0
+
+    # Malformed timecodes skip their item with a user-visible warning
+    # rather than failing every category at once.
+    warnings = warnings_out if warnings_out is not None else []
+
+    def _skip_marker(what, label, start_val, end_val):
+        name = f' "{label}"' if label else ''
+        warnings.append(
+            f'Skipped {what}{name} — unreadable timecode '
+            f'(start={start_val!r}, end={end_val!r})')
 
     # Resolve a clip-style marker's speaker by looking up the first transcript
     # segment whose start time falls inside the marker's [start, end] range,
@@ -3150,8 +3255,12 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
     if 'social' in requested:
         analysis = project.get('analysis', {})
         for clip in analysis.get('social_clips', []):
-            cs = _to_seconds(clip.get('start', 0))
-            ce = _to_seconds(clip.get('end', 0))
+            try:
+                cs = _to_seconds(clip.get('start', 0))
+                ce = _to_seconds(clip.get('end', 0))
+            except ValueError:
+                _skip_marker('social clip', clip.get('title'), clip.get('start'), clip.get('end'))
+                continue
             markers.append({
                 'start': cs,
                 'end': ce,
@@ -3165,8 +3274,12 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
     if 'story' in requested:
         analysis = project.get('analysis', {})
         for beat in analysis.get('story_beats', []):
-            start = _to_seconds(beat.get('start', 0))
-            end = _to_seconds(beat.get('end', start))
+            try:
+                start = _to_seconds(beat.get('start', 0))
+                end = _to_seconds(beat.get('end', start))
+            except ValueError:
+                _skip_marker('story beat', beat.get('label'), beat.get('start'), beat.get('end'))
+                continue
             if end <= start:
                 end = start + 15
             markers.append({
@@ -3182,8 +3295,13 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
     if 'soundbites' in requested:
         analysis = project.get('analysis', {})
         for sb in analysis.get('strongest_soundbites', []):
-            start = _to_seconds(sb.get('start', 0))
-            end = _to_seconds(sb.get('end', start))
+            try:
+                start = _to_seconds(sb.get('start', 0))
+                end = _to_seconds(sb.get('end', start))
+            except ValueError:
+                _skip_marker('soundbite', (sb.get('text') or '')[:40],
+                             sb.get('start'), sb.get('end'))
+                continue
             if end <= start:
                 end = start + 15
             markers.append({
@@ -3200,13 +3318,21 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         color_labels = project.get('color_labels', {})
         for sec in project.get('labeled_sections', []):
             label_name = color_labels.get(sec.get('color', ''), sec.get('color', ''))
-            ls = _to_seconds(sec.get('start', 0))
-            le = _to_seconds(sec.get('end', 0))
+            try:
+                ls = _to_seconds(sec.get('start', 0))
+                le = _to_seconds(sec.get('end', 0))
+            except ValueError:
+                _skip_marker('labeled clip', label_name, sec.get('start'), sec.get('end'))
+                continue
             markers.append({
                 'start': ls,
                 'end': le,
                 'text': label_name,
-                'note': sec.get('text', '')[:80],
+                # ``or ''`` (not a .get default): a JSON null stored via the
+                # /labels API makes .get return None, and None[:80] used to
+                # TypeError every export for the project. Matches the
+                # round-trip twin in _project_selects_for_fcpxml.
+                'note': (sec.get('text') or '')[:80],
                 'color': sec.get('color', 'blue'),
                 'category': label_name,
                 'speaker': _speaker_at_range(ls, le),
@@ -3223,8 +3349,11 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         transcript = project.get('transcript') or {}
         speaker_names_map = project.get('speaker_names') or {}
         for seg in transcript.get('segments', []):
-            start = _to_seconds(seg.get('start', 0))
-            end = _to_seconds(seg.get('end', start))
+            try:
+                start = _to_seconds(seg.get('start', 0))
+                end = _to_seconds(seg.get('end', start))
+            except ValueError:
+                continue  # Whisper emits floats; skip silently, don't spam warnings
             if end <= start:
                 end = start + 1
             raw_speaker = (seg.get('speaker') or '').strip()
@@ -3315,11 +3444,34 @@ def export_fcpxml(project_id):
     # EDL even if the project was originally configured for FCP).
     force_platform = nle if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES) else None
 
+    # Server-side round-trip gate: the UI shows the same warning, but raw
+    # HTTP callers (and any future view without the PROJECT binding) used to
+    # bypass it and hand Resolve/Premiere a flat timeline over the
+    # app-internal timeline_audio.wav.
+    if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES and nle != 'fcp'
+            and _round_trip_fcp_only(project)):
+        return jsonify({'error': ROUND_TRIP_FCP_ONLY_ERROR}), 400
+
+    export_warnings: list[str] = []
     try:
-        result, exporter = _build_nle_export(project, body, force_platform=force_platform)
+        result, exporter = _build_nle_export(project, body, force_platform=force_platform,
+                                             warnings_out=export_warnings)
+    except ValueError as e:
+        # Exporter-level user errors (nothing to export, source media offline)
+        # are the caller's problem, not a server fault. Keep the per-item
+        # skip warnings collected before the failure — when EVERY item was
+        # skipped for a bad timecode they are the only explanation of why
+        # there was nothing left to export.
+        payload = {'error': f'Export failed: {e}'}
+        if export_warnings:
+            payload['warnings'] = export_warnings
+        return jsonify(payload), 400
     except Exception as e:
         app.logger.error('Export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
+    # Exporter-level warnings (silent drops, probe fallbacks) ride the same
+    # payload list as app-level ones so the UI shows one combined report.
+    export_warnings.extend(getattr(result, 'warnings', None) or [])
 
     if deliver_to == 'nle':
         if nle not in NLE_DISPLAY_NAMES:
@@ -3340,6 +3492,8 @@ def export_fcpxml(project_id):
             'format_name': result.format_name,
         }
         payload.update(info)
+        if export_warnings:
+            payload['warnings'] = export_warnings
         warning = _mpegts_media_warning(project, nle)
         if warning:
             payload['media_warning'] = warning
@@ -3352,6 +3506,8 @@ def export_fcpxml(project_id):
             'file': result.file_path, 'filename': result.filename,
             'format_name': result.format_name,
         }
+        if export_warnings:
+            payload['warnings'] = export_warnings
         warning = _mpegts_media_warning(project)
         if warning:
             payload['media_warning'] = warning
@@ -3368,6 +3524,39 @@ NLE_DISPLAY_NAMES = {
     'premiere': 'Premiere Pro',
     'resolve': 'DaVinci Resolve',
 }
+
+# Server-side twin of the UI's round-trip toast (project.html
+# _warnRoundTripFcpOnly) — keep the first sentence in lockstep with it.
+ROUND_TRIP_FCP_ONLY_ERROR = (
+    'FCPXML round-trips can only be sent back to Final Cut Pro. '
+    'Switch the target editor to Final Cut Pro and export again.'
+)
+
+
+def _round_trip_fcp_only(project: dict) -> bool:
+    """True when this FCPXML-imported project may only be SENT to Final Cut Pro.
+
+    Server-side twin of the UI's routing: project.html keys its export
+    branching off the project's ``fcpxml_source`` block using this same
+    shape predicate (container_type + timeline_audio_rendered /
+    is_multi_source), and this gate keeps raw HTTP callers from bypassing
+    it: multicam/sync-clip containers re-emit FCP-only structures (Resolve
+    imports the timeline EMPTY — field-verified in 1.0.24 — and Premiere
+    can't read FCPXML at all), and multi-source asset-clip imports have no
+    direct media file for the flat exporters to reference — their
+    source_path is the app-internal timeline_audio.wav, so a flat export
+    would hand the NLE a silent WAV timeline.
+
+    Single-source asset-clip imports are deliberately EXEMPT and keep the
+    direct (flat) export path: their source_path is the real camera media,
+    so a flat export against it is safe for any editing platform.
+    """
+    src = project.get('fcpxml_source')
+    if not src:
+        return False
+    if src.get('container_type') != 'asset-clip':
+        return True
+    return bool(src.get('timeline_audio_rendered') or src.get('is_multi_source'))
 
 
 def _mpegts_media_warning(project: dict, nle: str | None = None) -> str | None:
@@ -3514,6 +3703,25 @@ def _nle_bundle_id(nle: str) -> str | None:
     return ids[0] if ids else None
 
 
+def _run_open(args: list[str], timeout: float = 5.0) -> tuple[bool, str]:
+    """Run macOS ``open`` synchronously and report whether it succeeded.
+
+    A non-zero exit (app trashed/moved since the path was cached, Launch
+    Services refusal) used to be invisible — the fire-and-forget Popen made
+    every handoff report ok even when nothing launched, so the UI toasted
+    "(auto-imported)" over a failure. Returns ``(ok, error_detail)``.
+    """
+    try:
+        proc = subprocess.run(
+            ['open', *args], capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return False, str(e)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or '').strip()
+        return False, detail or f'open exited with status {proc.returncode}'
+    return True, ''
+
+
 def _hand_file_to_nle(file_path: str, nle: str, *,
                       source_media_path: str | None = None,
                       project_name: str = '',
@@ -3523,8 +3731,12 @@ def _hand_file_to_nle(file_path: str, nle: str, *,
 
     Returns ``(opened_in, info)`` where ``info`` is always a dict. Keys:
       - ``error``: string if delivery failed; absent on success.
-      - For Resolve fallback: ``setup_required: True`` plus ``reason``
+      - For Premiere: ``delivery: 'file'``, ``premiere_manual_import: True``
+        and a ``note`` string — Premiere delivery is XML-file-only.
+      - For Resolve setup fallback: ``setup_required: True`` plus ``reason``
         and ``hint`` strings the frontend uses to render the setup modal.
+      - For Resolve non-setup fallback: ``import_fallback: True`` plus
+        ``reason`` and ``hint`` — guidance, not the setup walkthrough.
       - For Resolve scripted success: ``timeline_name`` (which timeline
         the user lands on inside Resolve).
 
@@ -3540,13 +3752,37 @@ def _hand_file_to_nle(file_path: str, nle: str, *,
     + app-launch, and tag the response with ``setup_required`` so the
     frontend can prompt the user to enable External Scripting.
     """
+    if nle == 'premiere':
+        # Premiere delivery is XML-file-only BY DESIGN: never launch (or
+        # even require) Premiere Pro — write the XML, reveal it in Finder,
+        # and tell the user to import it themselves (File → Import).
+        # Premiere missing on THIS Mac is normal (transcribe here, edit on
+        # the Premiere workstation) and must not fail the export — the old
+        # install gate returned an error while the XML sat invisibly in the
+        # exports folder.
+        detected = _find_nle_app_path('premiere')
+        revealed, reveal_err = _run_open(['-R', file_path])
+        if not revealed:
+            app.logger.warning('Finder reveal failed for %s: %s',
+                               file_path, reveal_err)
+            note = ('Import the XML into Premiere Pro via File → Import — '
+                    f'it was saved to {file_path}.')
+        else:
+            note = ('The XML is selected in Finder — import it into '
+                    'Premiere Pro via File → Import.')
+        if not detected:
+            note = ('Premiere Pro was not detected on this Mac — the XML '
+                    'was still saved for manual import. ' + note)
+        return 'finder', {
+            'delivery': 'file',
+            'premiere_manual_import': True,
+            'note': note,
+        }
+
     app_path = _find_nle_app_path(nle)
     if not app_path:
         return None, {'error': f"{NLE_DISPLAY_NAMES[nle]} not found on this Mac. If it is installed, try moving it to /Applications and re-launching, or contact support."}
     try:
-        if nle == 'premiere':
-            subprocess.Popen(['open', '-R', file_path])
-            return 'finder', {}
         if nle == 'resolve':
             return _hand_file_to_resolve(
                 file_path,
@@ -3561,12 +3797,24 @@ def _hand_file_to_nle(file_path: str, nle: str, *,
         # if the bundle ID isn't mapped (shouldn't happen for fcp).
         bundle_id = _nle_bundle_id(nle)
         if bundle_id:
-            subprocess.Popen(['open', '-b', bundle_id, file_path])
+            ok, err = _run_open(['-b', bundle_id, file_path])
         else:
-            subprocess.Popen(['open', '-a', app_path, file_path])
+            ok, err = _run_open(['-a', app_path, file_path])
+        if not ok:
+            # The cached path can go stale (app trashed/moved since the
+            # first lookup) — drop it so the next attempt re-runs mdfind.
+            _nle_path_cache.pop(nle, None)
+            return None, {'error': f'Could not launch {NLE_DISPLAY_NAMES[nle]}: {err}'}
         return 'app', {}
     except Exception as e:
         return None, {'error': f'Could not launch {NLE_DISPLAY_NAMES[nle]}: {e}'}
+
+
+# Resolve failure reasons the External-Scripting walkthrough can fix.
+# Everything else resolve_import returns means the scripting session was
+# reachable and something operational went wrong (see the module docstring
+# in exporters/resolve_import.py for the full taxonomy).
+_RESOLVE_SETUP_REASONS = ('module_missing', 'scripting_disabled', 'requires_studio')
 
 
 def _hand_file_to_resolve(file_path: str, *,
@@ -3606,15 +3854,21 @@ def _hand_file_to_resolve(file_path: str, *,
         return 'scripted', {'timeline_name': result.timeline_name}
 
     # Scripting failed. Fall back to Phase-1 behavior so the file still
-    # ends up somewhere visible. Surface the setup hint so the frontend
-    # can show a remediation modal (especially for scripting_disabled).
+    # ends up somewhere visible. Only the reasons the one-time External
+    # Scripting setup can actually fix get setup_required (the frontend
+    # renders the setup modal for those); operational failures
+    # (import_failed / import_empty / import_timeout / no_project /
+    # unexpected_error) mean scripting itself was reachable — tagging them
+    # setup_required walked the user through enabling a preference that
+    # was already on. Those carry the per-reason hint as plain guidance.
     subprocess.Popen(['open', '-R', file_path])
     subprocess.Popen(['open', '-a', app_path])
-    return 'finder+app', {
-        'setup_required': True,
-        'reason': result.reason,
-        'hint': result.hint,
-    }
+    info = {'reason': result.reason, 'hint': result.hint}
+    if result.reason in _RESOLVE_SETUP_REASONS:
+        info['setup_required'] = True
+    else:
+        info['import_fallback'] = True
+    return 'finder+app', info
 
 
 def _reveal_in_finder(file_path: str):
@@ -3664,29 +3918,58 @@ def send_to_nle():
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
-    app_path = _find_nle_app_path(nle)
-    if not app_path:
-        return jsonify({
-            'error': f"{NLE_DISPLAY_NAMES[nle]} not found on this Mac. If it is installed, try moving it to /Applications and re-launching, or contact support."
-        }), 404
+    # Server-side round-trip gate — same rule /export/fcpxml enforces: a
+    # round-trip project may only be SENT to Final Cut Pro. The UI never
+    # posts that combination, but this route is raw-HTTP reachable.
+    if nle != 'fcp' and _round_trip_fcp_only(project):
+        return jsonify({'error': ROUND_TRIP_FCP_ONLY_ERROR}), 400
+
+    # Premiere delivery is XML-file-only (write + reveal in Finder) — it
+    # neither launches nor requires Premiere Pro on this Mac, so there is
+    # no install gate for it (see _hand_file_to_nle).
+    if nle != 'premiere':
+        app_path = _find_nle_app_path(nle)
+        if not app_path:
+            return jsonify({
+                'error': f"{NLE_DISPLAY_NAMES[nle]} not found on this Mac. If it is installed, try moving it to /Applications and re-launching, or contact support."
+            }), 404
 
     file_path = None
     filename = None
     format_name = None
+    skipped_labels = None  # multicam only — parity with /export/fcpxml-multicam
+    export_warnings: list[str] = []
     try:
         if export_type == 'story_builder':
             if not body.get('clips'):
                 return jsonify({'error': 'No clips in story builder'}), 400
-            result, _ = _build_nle_story_export(project, body, force_platform=nle)
+            result, _ = _build_nle_story_export(project, body, force_platform=nle,
+                                                warnings_out=export_warnings)
             file_path, filename, format_name = result.file_path, result.filename, result.format_name
+            export_warnings.extend(getattr(result, 'warnings', None) or [])
         elif export_type == 'multicam':
-            file_path, filename, _mode, _skipped = _build_nle_multicam_export(project, body)
+            (file_path, filename, _mode, skipped_labels,
+             rt_parse_warnings) = _build_nle_multicam_export(project, body)
             format_name = 'FCPXML'
+            # Stored-FCPXML parse notes ride the same payload list as
+            # exporter/app warnings — the UI already renders it.
+            export_warnings.extend(rt_parse_warnings)
         else:
-            result, _ = _build_nle_export(project, body, force_platform=nle)
+            result, _ = _build_nle_export(project, body, force_platform=nle,
+                                          warnings_out=export_warnings)
             file_path, filename, format_name = result.file_path, result.filename, result.format_name
+            export_warnings.extend(getattr(result, 'warnings', None) or [])
     except MulticamExportError as e:
         return jsonify({'error': str(e)}), e.status
+    except ValueError as e:
+        # Exporter-level user errors (nothing to export, source media
+        # offline). Keep the per-item skip warnings collected before the
+        # failure — in the all-items-skipped case they are the only clue
+        # to which timecodes were unreadable.
+        payload = {'error': f'Export failed: {e}'}
+        if export_warnings:
+            payload['warnings'] = export_warnings
+        return jsonify(payload), 400
     except Exception as e:
         app.logger.error('Send-to-NLE export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
@@ -3711,6 +3994,17 @@ def send_to_nle():
         'filename': filename,
         'format_name': format_name,
     }
+    # Forward the handoff details (Premiere manual-import note, Resolve
+    # setup/fallback reason+hint, scripted timeline_name) — this route
+    # used to drop them, so scripting failures surfaced with no guidance.
+    payload.update(info)
+    if skipped_labels is not None:
+        # Selects the round-trip writer dropped (timeline gaps) — parity
+        # with /export/fcpxml-multicam, which has always returned these.
+        payload['skipped'] = skipped_labels
+        payload['skipped_count'] = len(skipped_labels)
+    if export_warnings:
+        payload['warnings'] = export_warnings
     warning = _mpegts_media_warning(project, nle)
     if warning:
         payload['media_warning'] = warning
@@ -3889,9 +4183,13 @@ class MulticamExportError(Exception):
 def _build_nle_multicam_export(project, body):
     """Round-trip selects back into FCP-importable FCPXML.
 
-    Returns ``(out_path, filename, mode)``. Always FCPXML — multicam round-trip
-    is FCP-specific by design (it reuses the original multicam / sync-clip
-    container), so there's no platform branch.
+    Returns ``(out_path, filename, mode, skipped_labels, parse_warnings)``.
+    Always FCPXML — multicam round-trip is FCP-specific by design (it reuses
+    the original multicam / sync-clip container), so there's no platform
+    branch. ``parse_warnings`` are the stored FCPXML's non-fatal parse notes
+    (retimed / rate-conformed clips, dropped ref-clip dialogue) — the routes
+    merge them into the payload's ``warnings`` list so the editor learns why
+    selects inside such clips may land on the wrong footage.
     """
     body = body or {}
     fcpxml_source = project.get('fcpxml_source')
@@ -3925,6 +4223,11 @@ def _build_nle_multicam_export(project, body):
         parsed = parse_fcpxml(stored_path)
     except ParseError as e:
         raise MulticamExportError(f'Could not re-read stored FCPXML: {e}', status=500)
+    # Non-fatal parse notes (retimed/rate-conformed clips, dropped ref-clip
+    # dialogue) — generated at ingest but only ever logged/stored until now;
+    # surface them on the export the misalignment would actually show up in.
+    # getattr: route tests stub parse_fcpxml with a bare object().
+    parse_warnings = list(getattr(parsed, 'parse_warnings', None) or [])
 
     selects = _project_selects_for_fcpxml(
         project, sources, story_build_clips=story_build_clips,
@@ -3959,15 +4262,33 @@ def _build_nle_multicam_export(project, body):
         story_title = (body.get('story_title') or '').strip()
         if story_title:
             suffix = f"{story_title}"
-    base = (project.get('name') or 'Project').strip().replace('/', '-')
-    filename = f"{base} - {suffix}.fcpxml"
+    # Sanitize the COMPOSED filename: story titles are user/AI free text
+    # ("24/7 — The Grind"), and only ``base`` used to get the '/' scrub, so
+    # a slash in the title made open() treat it as a subdirectory and 500.
+    base = (project.get('name') or 'Project').strip()
+    filename = _safe_filename(f"{base} - {suffix}", fallback='Doza Export') + '.fcpxml'
     exports_dir = app.config['EXPORTS_DIR']
     os.makedirs(exports_dir, exist_ok=True)
     out_path = os.path.join(exports_dir, filename)
-    with open(out_path, 'wb') as fh:
-        fh.write(output)
+    # Write to a unique temp name, then atomically swap it in (os.replace is
+    # atomic on APFS). Filenames are deterministic per project, so a rapid
+    # second export used to truncate the file FCP was still reading from the
+    # first. The OSError wrap keeps the route's JSON contract — this route
+    # only catches MulticamExportError, so a raw OSError escaped as an HTML
+    # 500 the frontend's res.json() couldn't parse.
+    tmp_path = f"{out_path}.{uuid.uuid4().hex[:8]}.part"
+    try:
+        with open(tmp_path, 'wb') as fh:
+            fh.write(output)
+        os.replace(tmp_path, out_path)
+    except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise MulticamExportError(f'Could not write export file: {e}', status=500)
 
-    return out_path, filename, mode, skipped_labels
+    return out_path, filename, mode, skipped_labels, parse_warnings
 
 
 @app.route('/project/<project_id>/export/fcpxml-multicam', methods=['POST'])
@@ -3997,8 +4318,8 @@ def export_fcpxml_multicam(project_id):
     deliver_to = str(body.get('deliver_to') or '').strip().lower()
 
     try:
-        out_path, filename, mode, skipped_labels = _build_nle_multicam_export(
-            project, body)
+        (out_path, filename, mode, skipped_labels,
+         parse_warnings) = _build_nle_multicam_export(project, body)
     except MulticamExportError as e:
         return jsonify({'error': str(e)}), e.status
 
@@ -4016,6 +4337,8 @@ def export_fcpxml_multicam(project_id):
             'format_name': 'FCPXML', 'mode': mode,
             'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
         }
+        if parse_warnings:
+            payload.setdefault('warnings', []).extend(parse_warnings)
         warning = _mpegts_media_warning(project, 'fcp')
         if warning:
             payload['media_warning'] = warning
@@ -4029,6 +4352,8 @@ def export_fcpxml_multicam(project_id):
             'format_name': 'FCPXML', 'mode': mode,
             'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
         }
+        if parse_warnings:
+            payload.setdefault('warnings', []).extend(parse_warnings)
         warning = _mpegts_media_warning(project)
         if warning:
             payload['media_warning'] = warning
@@ -4603,18 +4928,26 @@ def story_delete(project_id, build_id):
     return jsonify({'status': 'deleted'})
 
 
-def _build_nle_story_export(project, body, force_platform=None):
+def _build_nle_story_export(project, body, force_platform=None, warnings_out=None):
     """Build a story-timeline export for ``project`` from a request body.
 
     Mirrors :func:`_build_nle_export` for assembled story sequences: the
     ``/story/export`` route streams the file back, ``/export/send-to-nle``
     hands it to the chosen NLE. Returns ``(result, exporter)``.
+
+    Clips with malformed ':'-style timecodes are skipped with a note in
+    ``warnings_out`` — Story Builder clips carry AI-generated string
+    timecodes by design, and one hallucinated token ('00:02:4S') used to
+    500 the whole export (and kept doing so on every retry, since the bad
+    build persists in story_builds.json).
     """
     body = body or {}
     clips = body.get('clips') or []
     story_title = body.get('story_title', 'Story')
 
     def _to_seconds(val):
+        # A ':'-style string with non-numeric parts raises ValueError —
+        # the clip loop below catches it per clip. See _build_nle_export.
         if isinstance(val, (int, float)):
             return float(val)
         val = str(val).strip()
@@ -4629,11 +4962,21 @@ def _build_nle_story_export(project, body, force_platform=None):
         except (ValueError, TypeError):
             return 0.0
 
+    warnings = warnings_out if warnings_out is not None else []
     markers = []
     for i, clip in enumerate(clips):
+        title = clip.get('title') or f'Clip {i + 1}'
+        try:
+            start = _to_seconds(clip.get('start_time', 0))
+            end = _to_seconds(clip.get('end_time', 0))
+        except ValueError:
+            warnings.append(
+                f'Skipped clip "{title}" — unreadable timecode '
+                f"(start={clip.get('start_time')!r}, end={clip.get('end_time')!r})")
+            continue
         markers.append({
-            'start': _to_seconds(clip.get('start_time', 0)),
-            'end': _to_seconds(clip.get('end_time', 0)),
+            'start': start,
+            'end': end,
             'text': clip.get('title', 'Clip'),
             'note': clip.get('editorial_note', ''),
             '_order': clip.get('order', i),
@@ -4695,11 +5038,30 @@ def story_export(project_id):
     nle = str(data.get('nle') or '').strip().lower()
     force_platform = nle if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES) else None
 
+    # Server-side round-trip gate — same rule as /export/fcpxml: round-trip
+    # projects may only be SENT to Final Cut Pro.
+    if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES and nle != 'fcp'
+            and _round_trip_fcp_only(project)):
+        return jsonify({'error': ROUND_TRIP_FCP_ONLY_ERROR}), 400
+
+    export_warnings: list[str] = []
     try:
-        result, exporter = _build_nle_story_export(project, data, force_platform=force_platform)
+        result, exporter = _build_nle_story_export(project, data, force_platform=force_platform,
+                                                   warnings_out=export_warnings)
+    except ValueError as e:
+        # Exporter-level user errors (nothing to export, source media
+        # offline). Keep the per-clip skip warnings collected before the
+        # failure — for a persisted bad build the user retries forever
+        # unless the payload names which clip's timecode is corrupt.
+        payload = {'error': f'Export failed: {e}'}
+        if export_warnings:
+            payload['warnings'] = export_warnings
+        return jsonify(payload), 400
     except Exception as e:
         app.logger.error('Story export failed: %s', e)
         return jsonify({'error': f'Export failed: {e}'}), 500
+    # Exporter-level warnings ride the same payload list as app-level ones.
+    export_warnings.extend(getattr(result, 'warnings', None) or [])
 
     if deliver_to == 'nle':
         if nle not in NLE_DISPLAY_NAMES:
@@ -4720,6 +5082,8 @@ def story_export(project_id):
             'format_name': result.format_name,
         }
         payload.update(info)
+        if export_warnings:
+            payload['warnings'] = export_warnings
         warning = _mpegts_media_warning(project, nle)
         if warning:
             payload['media_warning'] = warning
@@ -4732,6 +5096,8 @@ def story_export(project_id):
             'file': result.file_path, 'filename': result.filename,
             'format_name': result.format_name,
         }
+        if export_warnings:
+            payload['warnings'] = export_warnings
         warning = _mpegts_media_warning(project)
         if warning:
             payload['media_warning'] = warning

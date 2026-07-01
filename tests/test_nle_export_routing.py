@@ -228,7 +228,7 @@ class TestSendToNleMediaWarning:
                                filename='out.fcpxml', format_name='FCPXML')
         monkeypatch.setattr(
             app_module, '_build_nle_export',
-            lambda project, body, force_platform=None: (stub, None))
+            lambda project, body, force_platform=None, **kw: (stub, None))
 
     @pytest.mark.skipif(_FULL_FFMPEG is None,
                         reason="needs a full ffmpeg to synthesize the TS fixture")

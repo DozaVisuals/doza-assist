@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 from typing import List, Optional
@@ -72,9 +72,20 @@ def iter_spine_clip_elements(spine):
     connected clips (``lane != 0``) anchored inside a gap — B-roll bridging a
     hole in the primary storyline — are real timeline content whose dialogue
     is selectable; skipping them silently dropped any select landing in the
-    gap (the long-standing "lane-1 B-roll-gap" bug). The writer's
-    ``_index_original_spine`` and Mode B's element indexing MUST iterate via
-    this same function — index N corresponds to ``spine_segments[N]``.
+    gap (the long-standing "lane-1 B-roll-gap" bug).
+
+    Clips the editor disabled in FCP (``enabled="0"``, the V key) ARE still
+    yielded: dropping them from the walk would change the segment count and
+    the multi-source basis, flipping the select coordinate convention
+    (timeline vs source seconds) for previously-ingested projects whose
+    stored FCPXML is re-parsed at export time — stored selects would then
+    export the wrong footage. Instead the parser marks them
+    ``enabled=False`` and mutes their audio, so they are never rendered,
+    transcribed, or matched by the writer (selects landing on them are
+    skipped and surfaced). The walk lives here — not in the parser's segment
+    loop — because the writer's ``_index_original_spine`` and Mode B's
+    element indexing MUST iterate via this same function so index N
+    corresponds to ``spine_segments[N]``.
     """
     for child in spine:
         if child.tag in SPINE_SEGMENT_TAGS:
@@ -102,6 +113,22 @@ def _safe_parse_rational(value: Optional[str], *, what: str) -> Fraction:
     except (ValueError, ZeroDivisionError) as e:
         _log.warning("could not parse %s=%r (%s); defaulting to 0", what, value, e)
         return Fraction(0)
+
+
+def _strict_parse_rational(value: Optional[str], *, what: str) -> Fraction:
+    """Parse a required FCPXML rational, raising :class:`ParseError` on garbage.
+
+    ``Fraction`` raises bare ``ValueError`` (``"1.5s"``) or ``ZeroDivisionError``
+    (``"240240/0s"``) on malformed input; neither is a :class:`ParseError`, so
+    they bypass the routes' friendly-message handlers and surface as raw
+    tracebacks. Time values the parse cannot sanely default to 0 (clip
+    offset/start/duration — a wrong 0 silently mislocates footage) must fail
+    as a ParseError naming the offending attribute instead.
+    """
+    try:
+        return parse_rational(value)
+    except (ValueError, ZeroDivisionError) as e:
+        raise ParseError(f"malformed time value {what}={value!r}: {e}") from e
 
 
 def _detect_nle(root) -> str:
@@ -194,6 +221,12 @@ class SpineSegment:
     # Non-empty for connected clips lifted out of a primary-storyline <gap>
     # (e.g. "1" for lane-1 B-roll). Empty for primary spine segments.
     lane: str = ""
+    # False for clips the editor disabled in FCP (enabled="0", the V key).
+    # Disabled clips stay in the segment list — dropping them would shift
+    # segment indices and flip is_multi_source for previously-ingested
+    # projects — but they play as black/silence, so they are never rendered,
+    # transcribed, or matched by the writer's select locator.
+    enabled: bool = True
 
     @property
     def offset_seconds(self) -> float:
@@ -222,6 +255,7 @@ class SpineSegment:
             "duration_seconds": self.duration_seconds,
             "mc_sources": list(self.mc_sources),
             "lane": self.lane,
+            "enabled": self.enabled,
         }
         if self.audio_source is not None:
             d["audio_source"] = self.audio_source.to_dict()
@@ -270,6 +304,13 @@ class ParsedFCPXML:
     # jam-synced timecode (pro cameras, time-of-day TC). Mirror audio_angle_*.
     audio_container_tc_start_fraction: Fraction = Fraction(0)
     audio_asset_start_fraction: Fraction = Fraction(0)
+
+    # Human-readable, non-fatal conditions found at parse time (unsupported
+    # spine entries whose dialogue is dropped, retimed/rate-conformed clips
+    # whose 1:1 time math drifts). Stored in project metadata so ingest / the
+    # UI can explain transcript holes and misalignment instead of leaving the
+    # editor to diagnose unexplained silence.
+    parse_warnings: List[str] = field(default_factory=list)
 
     @property
     def timeline_duration_seconds(self) -> float:
@@ -324,17 +365,49 @@ class ParsedFCPXML:
             "library_location": self.library_location,
             "is_multi_source": self.is_multi_source,
             "spine_segments": [s.to_dict() for s in self.spine_segments],
+            "parse_warnings": list(self.parse_warnings),
         }
 
 
 def strip_file_url(src: str) -> str:
     """Convert a ``media-rep`` ``src`` attribute to an absolute filesystem path.
 
-    Handles FCP's ``file:///Volume/...`` URLs, Resolve's occasional bare paths,
-    and percent-encoded characters in either form.
+    Handles FCP's ``file:///Volume/...`` URLs, the authority form
+    ``file://localhost/Volume/...`` written by some older exporters/translators,
+    Resolve's occasional bare paths, and percent-encoded characters in any form.
+
+    Two-slash forms carry an "authority" component before the path, and not
+    every writer means a hostname by it:
+
+      - ``''`` or ``localhost`` is a real (RFC 8089) authority — strip it.
+        Keeping it yields a relative garbage path ("localhost/Volumes/...")
+        that silently fails every on-disk check — defeating the
+        original-media preference and confusing drive-mount errors.
+      - ``C:`` (a Windows drive letter, from FCPXML written on a Windows
+        Resolve/translator box) is part of the path — keep it, with no
+        leading slash, so the never-exists-on-macOS path surfaces verbatim
+        in the missing-media error instead of colliding with a real
+        ``/Users/...`` path.
+      - anything else (``file://Volumes/X/a.mov``, the missing-third-slash
+        form) is actually the first path component — re-prepend it with a
+        leading slash.
     """
     if src.startswith("file://"):
-        src = src[len("file://"):]
+        rest = src[len("file://"):]
+        if rest.startswith("/"):
+            src = rest  # file:///path — empty authority, plain POSIX path
+        else:
+            slash = rest.find("/")
+            if slash == -1:
+                authority, path = rest, ""
+            else:
+                authority, path = rest[:slash], rest[slash:]
+            if authority in ("", "localhost"):
+                src = path
+            elif re.match(r"^[A-Za-z]:$", authority):
+                src = authority + path
+            else:
+                src = "/" + authority + path
     return unquote(src)
 
 
@@ -523,8 +596,12 @@ def _resolve_multicam_audio(
     return {
         "path": _resolve_asset_path(asset_el),
         "asset_id": asset_ref,
-        "angle_offset": parse_rational(asset_clip.get("offset")),
-        "angle_start": parse_rational(asset_clip.get("start")),
+        "angle_offset": _strict_parse_rational(
+            asset_clip.get("offset"), what="multicam asset-clip offset",
+        ),
+        "angle_start": _strict_parse_rational(
+            asset_clip.get("start"), what="multicam asset-clip start",
+        ),
         "container_tc_start": mcam_tc_start,
         "asset_start": _safe_parse_rational(
             asset_el.get("start"), what=f"asset {asset_ref!r} start",
@@ -585,10 +662,14 @@ def _offset_within_sync_clip(clip_el, sync_clip_el) -> Fraction:
     if clip_el is None or clip_el is sync_clip_el:
         return Fraction(0)
     parent = clip_el.getparent()
-    off = parse_rational(clip_el.get("offset"))
+    off = _strict_parse_rational(
+        clip_el.get("offset"), what="sync-clip clip offset",
+    )
     if parent is None or parent is sync_clip_el or parent.tag == "spine":
         return off
-    parent_start = parse_rational(parent.get("start"))
+    parent_start = _strict_parse_rational(
+        parent.get("start"), what="sync-clip parent start",
+    )
     return _offset_within_sync_clip(parent, sync_clip_el) + (off - parent_start)
 
 
@@ -607,13 +688,15 @@ def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
     pick that lane-attached clip in that case, so the timeline-audio render
     includes the real dialogue instead of silence.
 
-    Sync-clip's own ``start`` attribute already measures the source time into
-    the chosen audio asset, so the returned ``angle_offset`` / ``angle_start``
-    are zero — the segment's ``start`` is used directly as the source time.
+    The returned ``angle_offset`` / ``angle_start`` position the chosen clip
+    within the sync-clip's internal timeline; ``asset_start`` is the asset's
+    own timecode origin when the clip declares an explicit in-point (see the
+    inline comment below), so the renderer's ``angle_start - asset_start``
+    lands on the zero-based media time.
 
-    Returns ``{path, asset_id, angle_offset, angle_start, is_muted}``. Sets
-    ``is_muted`` only when the primary is muted and no lane replacement is
-    available — i.e. when FCP itself plays silence there.
+    Returns ``{path, asset_id, angle_offset, angle_start, asset_start,
+    is_muted}``. Sets ``is_muted`` only when the primary is muted and no lane
+    replacement is available — i.e. when FCP itself plays silence there.
     """
     primary_candidates = list(sync_clip_el.findall("asset-clip"))
     lane_candidates: List = []
@@ -678,17 +761,33 @@ def _resolve_sync_clip_audio(sync_clip_el, resource_by_id: dict) -> dict:
     #   - external recorder nested inside the camera clip on a lane (the
     #     Interview case) or attached in a <gap> — composed via the parent
     #     chain by _offset_within_sync_clip.
-    # tcStart/asset-start stay zero: the inner spine is zero-based and the
-    # chosen clip's own start already expresses its media in-point.
+    # tcStart stays zero: the inner spine is zero-based.
     angle_offset = _offset_within_sync_clip(dialogue, sync_clip_el)
-    angle_start = parse_rational(dialogue.get("start"))
+    angle_start = _strict_parse_rational(
+        dialogue.get("start"), what="sync-clip asset-clip start",
+    )
+    # When the dialogue clip carries an explicit start attr, that in-point is
+    # measured on the asset's local timeline, whose origin is asset@start —
+    # non-zero for TC-carrying media (jam-synced BWF field recorders, sync
+    # boxes writing time-of-day TC). The renderer seeks by
+    # ``angle_start - asset_start``, so surfacing asset@start here yields the
+    # zero-based in-point, matching the plain asset-clip path. With no
+    # explicit start both parse to 0 and the original source-time convention
+    # holds. [Was hardcoded 0 — a recorder WAV with asset start="3600s"
+    # over-seeked by exactly one hour, silencing that interview in the
+    # timeline WAV with no error.]
+    asset_start = Fraction(0)
+    if dialogue.get("start") is not None:
+        asset_start = _safe_parse_rational(
+            asset_el.get("start"), what=f"asset {asset_ref!r} start",
+        )
     return {
         "path": _resolve_asset_path(asset_el),
         "asset_id": asset_ref,
         "angle_offset": angle_offset,
         "angle_start": angle_start,
         "container_tc_start": Fraction(0),
-        "asset_start": Fraction(0),
+        "asset_start": asset_start,
         "is_muted": is_muted,
     }
 
@@ -710,9 +809,15 @@ def _resolve_asset_clip_audio(asset_clip_el, resource_by_id: dict) -> dict:
     so ``angle_offset`` / ``angle_start`` / ``container_tc_start`` are all zero —
     the same convention sync-clips use.
 
-    ``is_muted`` is True when the asset declares ``hasAudio="0"`` (a video-only
-    clip — silent b-roll): it still occupies timeline space but contributes
-    silence, which is exactly what FCP plays there.
+    ``is_muted`` is True when the asset does not declare audio (a video-only
+    clip — silent b-roll, graphics render, drone/timelapse): it still occupies
+    timeline space but contributes silence, which is exactly what FCP plays
+    there. FCP OMITS ``hasAudio`` entirely for video-only assets (it never
+    writes ``hasAudio="0"`` itself), so absence must read as muted — treating
+    it as audio-bearing fed an audio-less input to the ffprobe gate and the
+    timeline render, killing the whole import over one silent B-roll clip.
+    ``audioSources``/``audioChannels`` are accepted as audio evidence for
+    producers that declare the layout without ``hasAudio``.
     """
     asset_ref = asset_clip_el.get("ref")
     asset_el = resource_by_id.get(asset_ref)
@@ -724,6 +829,14 @@ def _resolve_asset_clip_audio(asset_clip_el, resource_by_id: dict) -> dict:
     asset_start = _safe_parse_rational(
         asset_el.get("start"), what=f"asset {asset_ref!r} start",
     )
+    has_audio_attr = asset_el.get("hasAudio")
+    if has_audio_attr is not None:
+        declares_audio = has_audio_attr == "1"
+    else:
+        declares_audio = (
+            (asset_el.get("audioSources") or "0") not in ("", "0")
+            or (asset_el.get("audioChannels") or "0") not in ("", "0")
+        )
     return {
         "path": _resolve_asset_path(asset_el),
         "asset_id": asset_ref,
@@ -731,7 +844,7 @@ def _resolve_asset_clip_audio(asset_clip_el, resource_by_id: dict) -> dict:
         "angle_start": Fraction(0),
         "container_tc_start": Fraction(0),
         "asset_start": asset_start,
-        "is_muted": asset_el.get("hasAudio") == "0",
+        "is_muted": not declares_audio,
     }
 
 
@@ -747,7 +860,9 @@ def _resolve_segment_audio(
             if "audio" in enable or enable == "all":
                 angle_id = ms.get("angleID")
                 break
-        segment_start = parse_rational(child.get("start"))
+        segment_start = _strict_parse_rational(
+            child.get("start"), what="mc-clip start",
+        )
         info = _resolve_multicam_audio(
             resource_by_id, child.get("ref") or "", angle_id,
             segment_start=segment_start,
@@ -786,6 +901,108 @@ def _resolve_segment_audio(
             container_tc_start_fraction=info["container_tc_start"],
             asset_start_fraction=info["asset_start"],
         )
+
+
+def _segment_parse_warnings(child, frame_duration: Fraction) -> List[str]:
+    """Non-fatal per-clip conditions the pipeline's 1:1 time math cannot honor.
+
+    Detection only — the renderer and select locator still treat these clips
+    literally, so the warning is what stands between the editor and an
+    unexplained misalignment. (Full support means applying the timeMap /
+    conform-rate mapping in ``timeline_audio._segment_source_window`` AND the
+    writer's select locator in lockstep; until then, flag loudly.)
+    """
+    warnings: List[str] = []
+    name = child.get("name") or child.get("ref") or child.tag
+
+    # <timeMap> = retimed (speed-changed) clip: timeline time no longer maps
+    # 1:1 to source time, so the rendered source window and every word
+    # position inside the clip are wrong at any speed other than 1x.
+    if child.find(".//timeMap") is not None:
+        warnings.append(
+            f"clip '{name}' is retimed (timeMap); the transcript and selects "
+            "inside it may be misaligned"
+        )
+
+    # <conform-rate> with scaleEnabled left at its DTD default of "1" is a
+    # frame-for-frame rate conform: FCP plays the media at the sequence rate
+    # (25p in 23.976 runs ~4.3% slow) while our math treats clip times as
+    # literal seconds — progressive drift within the clip. FCP writes
+    # scaleEnabled="0" for far-rate conforms (which literal math handles), so
+    # only a genuine close-rate mismatch warns.
+    conform = child.find("conform-rate")
+    if conform is not None and conform.get("scaleEnabled", "1") != "0":
+        src_attr = conform.get("srcFrameRate")
+        try:
+            src_rate = float(src_attr) if src_attr else None
+        except ValueError:
+            src_rate = None
+        seq_rate = (
+            float(Fraction(frame_duration.denominator, frame_duration.numerator))
+            if frame_duration > 0 else None
+        )
+        # FCP writes rounded rate tokens ("23.98" for 24000/1001); 0.05 fps
+        # tolerance treats those as equal while catching real conforms.
+        if src_rate and seq_rate and abs(src_rate - seq_rate) > 0.05:
+            drift_pct = abs(src_rate / seq_rate - 1) * 100
+            warnings.append(
+                f"clip '{name}' is rate-conformed ({src_attr} fps media in a "
+                f"{seq_rate:.5g} fps sequence); the transcript and selects "
+                f"inside it may drift by ~{drift_pct:.1f}%"
+            )
+    return warnings
+
+
+def _unsupported_spine_warnings(spine) -> List[str]:
+    """Warnings for spine entries the segment walk drops.
+
+    A dropped ``<ref-clip>`` (FCP compound clip), ``<clip>`` (Resolve-style
+    wrapper), or ``<audio>`` leaves silence over its time range in the
+    composed timeline WAV and an unexplained hole in the transcript — with at
+    least one supported clip present the parse succeeds, so without this the
+    editor gets zero surfacing. Only dialogue-capable containers warn:
+    ``<title>``/``<video>``/``<transition>`` carry no speech, and warning on
+    every title would bury the real signal.
+
+    The scan mirrors :func:`iter_spine_clip_elements`'s descent: ``<gap>``
+    children are real timeline content (connected clips bridging a hole in
+    the primary storyline), so an unsupported dialogue-capable clip anchored
+    INSIDE a gap is dropped just as silently as a top-level one and must
+    warn the same way.
+    """
+    warnings: List[str] = []
+
+    def _warn(el):
+        tag = el.tag
+        name = el.get("name")
+        label = f" '{name}'" if name else ""
+        hint = ""
+        if tag == "ref-clip":
+            hint = (" (compound clip — in Final Cut choose Clip ▸ Break Apart "
+                    "Clip Items and re-export)")
+        warnings.append(
+            f"unsupported <{tag}> clip{label} on the spine was skipped; its "
+            f"dialogue will not be transcribed{hint}"
+        )
+
+    for child in spine:
+        tag = child.tag
+        if not isinstance(tag, str):
+            continue
+        if tag == "gap":
+            # Same one-level descent iter_spine_clip_elements performs for
+            # the supported tags — anything dialogue-capable it would never
+            # yield gets the warning instead of vanishing.
+            for sub in child:
+                if isinstance(sub.tag, str) and sub.tag in ("ref-clip", "clip", "audio"):
+                    _warn(sub)
+            continue
+        if tag in SPINE_SEGMENT_TAGS:
+            continue
+        if tag not in ("ref-clip", "clip", "audio"):
+            continue
+        _warn(child)
+    return warnings
 
 
 def parse_fcpxml(path) -> ParsedFCPXML:
@@ -831,7 +1048,9 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         raise ParseError("no <sequence> inside a <project> element")
 
     sequence_format_id = sequence.get("format") or ""
-    sequence_duration = parse_rational(sequence.get("duration"))
+    sequence_duration = _strict_parse_rational(
+        sequence.get("duration"), what="sequence duration",
+    )
     fmt_el = resource_by_id.get(sequence_format_id)
     if fmt_el is None:
         if nle == NLE_RESOLVE:
@@ -844,13 +1063,16 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         else:
             raise ParseError(f"sequence references missing format id {sequence_format_id!r}")
     else:
-        frame_duration = parse_rational(fmt_el.get("frameDuration"))
+        frame_duration = _strict_parse_rational(
+            fmt_el.get("frameDuration"), what="format frameDuration",
+        )
 
     spine = sequence.find("spine")
     if spine is None:
         raise ParseError("sequence has no <spine>")
 
     segments: List[SpineSegment] = []
+    parse_warnings: List[str] = []
 
     for child, parent_gap in iter_spine_clip_elements(spine):
         mc_sources: List[dict] = []
@@ -868,31 +1090,52 @@ def parse_fcpxml(path) -> ParsedFCPXML:
 
         audio_source = _resolve_segment_audio(child, resource_by_id, mc_sources)
 
-        offset_fraction = parse_rational(child.get("offset"))
+        what_prefix = f"<{child.tag} name={child.get('name')!r}>"
+        offset_fraction = _strict_parse_rational(
+            child.get("offset"), what=f"{what_prefix} offset",
+        )
         lane = ""
         if parent_gap is not None:
             # Connected clips are anchored in the gap's LOCAL timeline, whose
             # origin is the gap's own start — the same composition rule
             # _offset_within_sync_clip uses for nested sync-clip audio.
-            gap_offset = parse_rational(parent_gap.get("offset"))
-            gap_start = parse_rational(parent_gap.get("start"))
+            gap_offset = _strict_parse_rational(
+                parent_gap.get("offset"), what="gap offset",
+            )
+            gap_start = _strict_parse_rational(
+                parent_gap.get("start"), what="gap start",
+            )
             offset_fraction = gap_offset + (offset_fraction - gap_start)
             lane = child.get("lane") or ""
-            if child.get("enabled") == "0" and audio_source is not None:
-                audio_source.is_muted = True
+
+        enabled = child.get("enabled") != "0"
+        if not enabled and audio_source is not None:
+            # Disabled clips play as silence — never render/transcribe their
+            # audio. The segment itself stays (index + multi-source stability).
+            audio_source = replace(audio_source, is_muted=True)
 
         seg = SpineSegment(
             kind=child.tag,
             ref=child.get("ref") or "",
             name=child.get("name") or "",
             offset_fraction=offset_fraction,
-            start_fraction=parse_rational(child.get("start")),
-            duration_fraction=parse_rational(child.get("duration")),
+            start_fraction=_strict_parse_rational(
+                child.get("start"), what=f"{what_prefix} start",
+            ),
+            duration_fraction=_strict_parse_rational(
+                child.get("duration"), what=f"{what_prefix} duration",
+            ),
             mc_sources=mc_sources,
             audio_source=audio_source,
             lane=lane,
+            enabled=enabled,
         )
         segments.append(seg)
+        parse_warnings.extend(_segment_parse_warnings(child, frame_duration))
+
+    parse_warnings.extend(_unsupported_spine_warnings(spine))
+    for w in parse_warnings:
+        _log.warning("FCPXML parse: %s", w)
 
     if not segments:
         # Report what the spine *did* contain so the message is actionable —
@@ -971,4 +1214,5 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         is_multi_source=is_multi_source,
         original_resources_xml=original_resources_xml,
         original_fcpxml_bytes=raw_bytes,
+        parse_warnings=parse_warnings,
     )

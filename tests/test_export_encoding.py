@@ -41,9 +41,16 @@ NB_MARKERS = [
      'category': 'Klipp'},
 ]
 
-_COMMON = dict(project_name='Fotballnetter · naboklage',
-               source_path='/tmp/Håkon.mp4', media_duration=60.0,
-               framerate=25.0, width=1920, height=1080)
+# The FCPXML exporters now fail loudly when a named source file is missing
+# at export time (instead of silently degrading to markers-only), so the
+# non-ASCII source has to exist on disk. Content is never decoded.
+@pytest.fixture
+def common(tmp_path):
+    src = tmp_path / 'Håkon.mp4'
+    src.write_bytes(b'\x00')
+    return dict(project_name='Fotballnetter · naboklage',
+                source_path=str(src), media_duration=60.0,
+                framerate=25.0, width=1920, height=1080)
 
 
 @pytest.fixture
@@ -81,16 +88,16 @@ _EXPORTERS = [
 
 
 @pytest.mark.parametrize('name,cls', _EXPORTERS)
-def test_export_markers_utf8_under_ascii_locale(name, cls, ascii_locale, tmp_path):
+def test_export_markers_utf8_under_ascii_locale(name, cls, ascii_locale, common, tmp_path):
     result = cls().export_markers(
         NB_MARKERS, export_type='labels', exports_dir=str(tmp_path),
-        total_clips=len(NB_MARKERS), **_COMMON)
+        total_clips=len(NB_MARKERS), **common)
     _assert_utf8_roundtrip(result.file_path)
 
 
 @pytest.mark.parametrize('name,cls', _EXPORTERS)
-def test_export_story_utf8_under_ascii_locale(name, cls, ascii_locale, tmp_path):
+def test_export_story_utf8_under_ascii_locale(name, cls, ascii_locale, common, tmp_path):
     result = cls().export_story(
         NB_MARKERS, story_title='Naboen klager · runde 2',
-        exports_dir=str(tmp_path), **_COMMON)
+        exports_dir=str(tmp_path), **common)
     _assert_utf8_roundtrip(result.file_path)

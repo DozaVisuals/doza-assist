@@ -113,12 +113,16 @@ def stage_fcpxml(fcpxml_path: str, staging_dir: str) -> IngestResult:
         shutil.copy2(inner_path, stored_fcpxml_path)
 
     # Walk every referenced audio source and split into present/missing.
+    # Muted/video-only segments are excluded: they are never rendered, so an
+    # offline file behind one must neither block the import nor show up as a
+    # missing-media notice.
     referenced_paths: list[str] = []
     seen: set[str] = set()
     for seg in parsed.spine_segments:
-        if seg.audio_source is None:
+        src = seg.audio_source
+        if src is None or src.is_muted:
             continue
-        p = seg.audio_source.path
+        p = src.path
         if p in seen:
             continue
         seen.add(p)
@@ -135,7 +139,10 @@ def stage_fcpxml(fcpxml_path: str, staging_dir: str) -> IngestResult:
 
     timeline_wav = os.path.join(staging_dir, 'timeline_audio.wav')
     try:
-        render_timeline_audio(parsed, timeline_wav)
+        # skip_missing: the PRD's partial-import promise — offline clips
+        # render as silence and are surfaced via missing_media, instead of
+        # one unmounted recorder killing the whole style import.
+        render_timeline_audio(parsed, timeline_wav, skip_missing=True)
     except TimelineAudioError as e:
         raise ValueError(f'Could not render timeline audio: {e}') from e
 

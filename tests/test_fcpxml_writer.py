@@ -587,13 +587,64 @@ class TestMixedSpineWriter:
         assert enables.get("audio") == "aE"
         assert enables.get("video") == "vE"
 
-    def test_mode_a_cross_boundary_heterogeneous_raises(self, parsed):
+    def test_mode_a_cross_boundary_heterogeneous_splits(self, parsed):
         # Select 95-110 crosses mc-clip (mcE) → sync-clip (rDlg). Different
-        # sources → still rejected; the editor needs to trim or split.
-        with pytest.raises(WriterError, match="different sources"):
-            write_selects_as_new_project(parsed, [
-                Select(start_seconds=95.0, end_seconds=110.0, label="bad"),
-            ])
+        # sources → split at the boundary into two back-to-back clips instead
+        # of aborting the export (the 1.0.26 "crosses a segment boundary"
+        # failure an editor hit on a real mc-clip round-trip).
+        out = write_selects_as_new_project(parsed, [
+            Select(start_seconds=95.0, end_seconds=110.0, label="purple"),
+        ])
+        root = etree.fromstring(out)
+        top_spine = root.find(".//sequence/spine")
+        clips = [c for c in top_spine if c.tag in ("mc-clip", "sync-clip", "asset-clip")]
+        assert [c.tag for c in clips] == ["mc-clip", "sync-clip"]
+        # Piece 1: mc-clip container 95 → 100 (5s), named after the select.
+        mc = clips[0]
+        assert mc.get("name") == "purple"
+        assert abs(float(parse_rational(mc.get("start"))) - 95.0) < 0.05
+        assert abs(float(parse_rational(mc.get("duration"))) - 5.0) < 0.05
+        # Piece 2: sync-clip container 0 → 10 (10s), contiguous on the new
+        # timeline (offset = piece 1's snapped duration).
+        sc = clips[1]
+        assert sc.get("name") == "purple"
+        assert abs(float(parse_rational(sc.get("start"))) - 0.0) < 0.05
+        assert abs(float(parse_rational(sc.get("duration"))) - 10.0) < 0.05
+        assert parse_rational(sc.get("offset")) == parse_rational(mc.get("duration"))
+        # Total playback = the full select length.
+        total = sum(parse_rational(c.get("duration")) for c in clips)
+        assert abs(float(total) - 15.0) < 0.1
+
+    def test_mode_a_cross_boundary_split_does_not_skip(self, parsed):
+        # The split select must not be reported as skipped, and other selects
+        # in the same export are unaffected.
+        skipped = []
+        out = write_selects_as_new_project(parsed, [
+            Select(start_seconds=10.0, end_seconds=20.0, label="fine"),
+            Select(start_seconds=95.0, end_seconds=110.0, label="purple"),
+        ], skipped_out=skipped)
+        assert skipped == []
+        root = etree.fromstring(out)
+        top_spine = root.find(".//sequence/spine")
+        clips = [c for c in top_spine if c.tag in ("mc-clip", "sync-clip", "asset-clip")]
+        assert len(clips) == 3  # "fine" + 2 pieces of "purple"
+        # New spine stays frame-contiguous across the pieces.
+        cursor = Fraction(0)
+        for c in clips:
+            assert parse_rational(c.get("offset")) == cursor
+            cursor += parse_rational(c.get("duration"))
+
+    def test_mode_a_boundary_sliver_dropped(self, parsed):
+        # A select overhanging the boundary by less than half a frame keeps
+        # only the meaningful piece — no stray one-frame edit of the
+        # neighboring source.
+        out = write_selects_as_new_project(parsed, [
+            Select(start_seconds=95.0, end_seconds=100.01, label="edge"),
+        ])
+        root = etree.fromstring(out)
+        top_spine = root.find(".//sequence/spine")
+        clips = [c for c in top_spine if c.tag in ("mc-clip", "sync-clip", "asset-clip")]
+        assert [c.tag for c in clips] == ["mc-clip"]
 
     def test_mode_a_select_in_gap_raises(self, parsed):
         # Past the end of the sequence (> 150s) — no covering segment.

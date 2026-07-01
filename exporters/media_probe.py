@@ -47,6 +47,23 @@ def _find_ffprobe() -> str | None:
     return None
 
 
+def _find_ffmpeg() -> str | None:
+    """Resolve ffmpeg (bundled first), mirroring _find_ffprobe. Needed for the
+    per-stream loudness probe (volumedetect) that finds the dialogue channel."""
+    bundled_dir = os.environ.get("DOZA_FFMPEG_DIR")
+    if bundled_dir:
+        candidate = os.path.join(bundled_dir, "ffmpeg")
+        if os.path.isfile(candidate):
+            return candidate
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _first_csv_row(stdout: str) -> str:
     """First non-empty row of ffprobe csv output.
 
@@ -125,6 +142,42 @@ def get_video_framerate(path: str) -> float | None:
     return None
 
 
+def has_video_stream(path: str) -> bool | None:
+    """Whether the file carries a REAL video stream (attached-picture cover
+    art excluded), or None when the question can't be answered (missing
+    file / no ffprobe / probe failure).
+
+    The FCPXML exporters used to decide ``hasVideo`` from the file
+    EXTENSION, so an audio-only .mp4/.mov (AAC podcast export, multi-mono
+    field-recorder QuickTime) declared a video component the media doesn't
+    have — FCP/Resolve import such an asset offline/invalid instead of as a
+    clean audio clip. Callers keep the extension heuristic only for the
+    None case.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                # Capital V excludes attached pictures (see resolution probe).
+                "-select_streams", "V",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return bool(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 def get_audio_channels(path: str) -> int | None:
     """Channel count of the first audio stream (None if no audio/probe fail).
 
@@ -154,6 +207,191 @@ def get_audio_channels(path: str) -> int | None:
     except Exception:
         pass
     return None
+
+
+def get_audio_sample_rate(path: str) -> int | None:
+    """Sample rate (Hz) of the first audio stream, or None if no audio/probe fail.
+
+    Used to declare an FCPXML asset's ``audioRate`` so Resolve routes the
+    clip audio (Resolve maps FCPXML audio from the declared rate/channels,
+    not the file's track table). Pro media is overwhelmingly 48000.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            rate = int(_first_csv_row(result.stdout).split(",")[0])
+            if rate > 0:
+                return rate
+    except Exception:
+        pass
+    return None
+
+
+def get_audio_layout(path: str):
+    """``(num_audio_streams, total_channels)`` across ALL audio streams,
+    ``(0, 0)`` when the file probed clean but has NO audio streams (silent
+    B-roll / FX plate), or None when the probe itself failed (missing file,
+    no ffprobe, timeout) — callers use the distinction to declare
+    ``hasAudio="0"`` for genuinely silent media without failing open on a
+    probe error.
+
+    FCP declares a clip's asset as ``audioSources=<#streams> audioChannels=<total>``:
+    a stereo camera file is ``(1, 2)``, a mono file ``(1, 1)``, and a 4-mono-track
+    MXF ``(4, 4)``. Resolve needs the TOTAL channel count to bring every track's
+    audio onto the timeline — declaring only the FIRST stream's channels
+    (``get_audio_channels`` → 1 for multi-mono MXF) imports just track 1, which is
+    silent when the dialogue is on another mono track or the editor transcribed
+    "all tracks (mixed)" and the lav lives elsewhere.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        # Query the stream INDEX alongside channels so we can dedup: MPEG-TS
+        # lists each stream twice (top-level + program section), which would
+        # otherwise double the source/channel count for the .ts (and
+        # .ts-content-named-.mp4) media this app ingests — the same double-
+        # listing _first_csv_row guards against for the single-row probes.
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-select_streams", "a",
+                "-show_entries", "stream=index,channels",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        by_index = {}  # stream index -> channel count (dedups TS double-listing)
+        rows_seen = False
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            rows_seen = True
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            try:
+                idx, ch = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            if ch > 0:
+                by_index[idx] = ch
+        if not by_index:
+            # No rows at all = the probe ANSWERED "no audio streams" -> (0, 0).
+            # Rows that all failed to parse (N/A channels) = audio exists but
+            # we can't describe it -> None, same as a probe failure.
+            return (0, 0) if not rows_seen else None
+        return (len(by_index), sum(by_index.values()))
+    except Exception:
+        return None
+
+
+# Per-(path,size,mtime) memo so re-exporting a source doesn't re-probe loudness.
+_dialogue_channel_cache: dict = {}
+
+
+def _mean_volume_db(ffmpeg: str, path: str, stream_idx: int,
+                    start: float, seg: float):
+    """Mean volume (dB) of ONE audio stream over a sample window, via ffmpeg
+    `volumedetect`. None on failure. Digital silence reads ≈ -91 dB / -inf.
+
+    Input-seek (`-ss` before `-i`) so a multi-GB master isn't decoded from the
+    top — sample-window accuracy is irrelevant for a loudness average."""
+    try:
+        cmd = [ffmpeg, "-nostdin", "-hide_banner", "-nostats"]
+        if start and start > 0:
+            cmd += ["-ss", f"{start:.3f}"]
+        cmd += ["-t", f"{max(1.0, seg):.3f}", "-i", path,
+                "-map", f"0:a:{stream_idx}", "-af", "volumedetect",
+                "-f", "null", "-"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        m = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", result.stderr or "")
+        if m:
+            return float(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def detect_dialogue_channels(path: str, sample_seconds: float = 90.0,
+                             floor_db: float = -60.0, rel_db: float = 25.0):
+    """0-based indices of the audio streams carrying usable audio (the lav /
+    dialogue track[s]), loudest first — or None.
+
+    For a broadcast multi-mono MXF (e.g. 4 discrete mono tracks, lav on one,
+    the rest silent scratch/room), this returns the speech-bearing track(s) so
+    the FCPXML export can route ONLY them and the editor gets clean dialogue
+    instead of an empty channel. Returns None for single-stream sources (no
+    disambiguation needed) and when nothing can be measured.
+
+    Method: ffmpeg `volumedetect` on a ~90s window per stream (export-time
+    cost, not a full decode). "Active" = the loudest stream plus any within
+    `rel_db` of it and above `floor_db`; empty PCM tracks read ≈ -91 dB and
+    drop out. Loudness can't separate speech from music — but it cleanly
+    separates SILENT tracks, which is the multi-mono case here; the editor can
+    always override via the audio selector. Result is memoized per file.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    layout = get_audio_layout(path)
+    if not layout or layout[0] <= 1:
+        return None  # single audio stream — nothing to disambiguate
+    n_streams, n_channels = layout
+    # Only the all-mono case maps stream index -> source channel cleanly
+    # (stream i == srcCh i+1). Mixed/multi-channel streams: leave alone.
+    if n_streams != n_channels:
+        return None
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return None
+    try:
+        st = os.stat(path)
+        key = (path, st.st_size, int(st.st_mtime))
+    except OSError:
+        key = None
+    if key is not None and key in _dialogue_channel_cache:
+        return _dialogue_channel_cache[key]
+
+    dur = get_media_duration(path) or 0.0
+    start = max(0.0, dur * 0.15) if dur else 0.0
+    seg = min(sample_seconds, max(10.0, dur - start)) if dur else sample_seconds
+
+    measured = []  # (stream_idx, mean_db)
+    for i in range(n_streams):
+        db = _mean_volume_db(ffmpeg, path, i, start, seg)
+        if db is not None:
+            measured.append((i, db))
+
+    result = None
+    if measured:
+        loudest = max(db for _, db in measured)
+        active = [i for (i, db) in measured
+                  if db >= loudest - rel_db and db > floor_db]
+        active.sort(key=lambda i: dict(measured)[i], reverse=True)
+        result = active or None
+    if key is not None:
+        _dialogue_channel_cache[key] = result
+    return result
 
 
 def get_media_container_format(path: str) -> str | None:
@@ -313,10 +551,18 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
     The inverse bit us on Sony XAVC-S: MP4 containers cannot carry a
     ``tmcd`` track, but Sony stamps a ``timecode`` metadata TAG (alongside
     an ``rtmd`` data track). FCP ignores the tag and treats such files as
-    starting at 0 — so we honor embedded timecode ONLY when the container
-    carries a real ``tmcd`` stream, matching what FCP keys off. The same
-    gate governs the DISPLAY layer so on-screen TC always matches what an
-    export (and FCP) will say.
+    starting at 0 — so for QuickTime-family containers we honor embedded
+    timecode ONLY when a real ``tmcd`` stream exists, matching what FCP
+    keys off. The same gate governs the DISPLAY layer so on-screen TC
+    always matches what an export (and FCP) will say.
+
+    MXF is the exception: it carries SMPTE-12M timecode in its structural
+    metadata, which ffprobe surfaces as a format-level (or data-stream)
+    ``timecode`` tag rather than a ``tmcd`` track. FCP and Resolve both
+    anchor an MXF asset to that embedded TC, so we honor the tag for MXF
+    even without a tmcd stream — broadcast/camera MXF routinely starts at a
+    non-zero record TC (e.g. 00:54:44:12), and exporting 0-based edits
+    against it makes every clip land outside the asset's range.
 
     BWF field-recorder WAV/AIFF stamp time-of-day TC as bext
     time_reference (samples since midnight) — FCP anchors such assets
@@ -333,7 +579,7 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
                 ffprobe, "-v", "quiet",
                 "-print_format", "json",
                 "-show_entries",
-                "stream=codec_type,codec_tag_string,sample_rate:stream_tags=timecode:format_tags=timecode,time_reference",
+                "stream=codec_type,codec_tag_string,sample_rate:format=format_name:stream_tags=timecode:format_tags=timecode,time_reference",
                 path,
             ],
             capture_output=True, text=True, timeout=10,
@@ -342,15 +588,23 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
             return None
         data = json.loads(result.stdout or "{}")
         streams = data.get("streams") or []
-        fmt_tags = (data.get("format") or {}).get("tags") or {}
+        fmt = data.get("format") or {}
+        fmt_tags = fmt.get("tags") or {}
         tmcd_streams = [
             s for s in streams
             if (s.get("codec_tag_string") or "").lower() == "tmcd"
         ]
-        if tmcd_streams:
-            # Prefer the tmcd stream's own tag, then any other stream tag,
-            # then the container-level tag (muxers vary in where they stamp
-            # it). The separator before FF carries drop-frame-ness.
+        # MXF anchors to its embedded SMPTE-12M timecode (surfaced as a
+        # format-/stream-level `timecode` tag, no tmcd track), so honor the
+        # tag for MXF even without tmcd. The tmcd gate stays for QuickTime
+        # containers to keep rejecting the Sony XAVC-S MP4 tag FCP ignores.
+        container = (fmt.get("format_name") or "").lower()
+        is_mxf = ("mxf" in container
+                  or os.path.splitext(path)[1].lower() == ".mxf")
+        if tmcd_streams or is_mxf:
+            # Prefer a tmcd stream's own tag, then any other stream tag, then
+            # the container-level tag (muxers — MXF especially — vary in where
+            # they stamp it). The separator before FF carries drop-frame-ness.
             candidates = []
             for s in tmcd_streams + streams:
                 tc = ((s.get("tags") or {}).get("timecode") or "").strip()
@@ -359,6 +613,7 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
             fmt_tc = (fmt_tags.get("timecode") or "").strip()
             if fmt_tc:
                 candidates.append(fmt_tc)
+            source = "tmcd" if tmcd_streams else "mxf"
             zero_tc = None
             for tc in candidates:
                 frames = timecode_to_frames(tc, framerate)
@@ -371,10 +626,10 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
                     # tag plus the real camera TC on the tmcd stream, or
                     # vice versa) must keep resolving to the real one.
                     return {"frames": frames, "drop": is_drop,
-                            "raw": tc.strip(), "source": "tmcd"}
+                            "raw": tc.strip(), "source": source}
                 if zero_tc is None:
                     zero_tc = {"frames": 0, "drop": is_drop,
-                               "raw": tc.strip(), "source": "tmcd"}
+                               "raw": tc.strip(), "source": source}
             # Only zero tags found: the media genuinely starts at zero TC.
             return zero_tc
         # No tmcd track — BWF bext time_reference (samples since midnight).

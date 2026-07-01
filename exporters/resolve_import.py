@@ -32,6 +32,9 @@ frontend can show the right setup hint):
                            CreateProject() failed.
   - ``import_failed``    — ImportTimelineFromFile returned None;
                            usually a source-media reconnect issue.
+  - ``import_empty``     — the timeline imported but landed zero clips
+                           (silent offline/relink failure); the caller
+                           falls back to the manual reveal-in-Finder path.
   - ``requires_studio`` — Resolve Free is installed (verified via the
                           app's CFBundleName) and the scripting daemon
                           isn't listening. As of Resolve 20, Blackmagic
@@ -61,6 +64,31 @@ from dataclasses import dataclass
 # dies with the process, so it can never block the request OR app exit
 # (unlike a ThreadPoolExecutor, whose shutdown joins the hung worker).
 _RESOLVE_CALL_TIMEOUT = 120.0
+
+# Overall hard cap for the ENTIRE Resolve import handshake (project lookup +
+# media add + timeline import + switch), run on one daemon worker so a
+# wizard-blocked or wedged Resolve can never stall the request thread
+# indefinitely. Generous enough to cover a legitimate large-timeline import
+# plus a media reconnect, but bounded.
+_IMPORT_TIMEOUT = 180.0
+
+# scriptapp() handle-acquisition poll budgets. A COLD launch needs Resolve to
+# boot its scripting daemon (several seconds). When Resolve is ALREADY
+# running, a script-ready daemon answers in well under a second — so if it
+# doesn't answer fast it's blocked (first-run setup wizard) or scripting is
+# off; bail quickly with an actionable message instead of waiting the full
+# cold budget (the old 30s "beachball").
+_COLD_HANDLE_TIMEOUT = 30.0
+_RUNNING_HANDLE_TIMEOUT = 8.0
+
+# Worst-case wall clock for one scripted send: the cold handle poll plus the
+# bounded import handshake (210s). Anything driving this module over HTTP
+# must time out ABOVE this figure plus the export-build/probe time that runs
+# before it in the same request — the project.html export fetch uses 240s.
+# Keep the client cap > TOTAL_IMPORT_BUDGET + headroom whenever these budgets
+# change: a 200s client cap once aborted slow-but-SUCCEEDING sends as
+# "Resolve isn't responding", and the user manually imported a duplicate.
+TOTAL_IMPORT_BUDGET = _COLD_HANDLE_TIMEOUT + _IMPORT_TIMEOUT
 
 
 def _call_with_timeout(fn, *args, timeout=_RESOLVE_CALL_TIMEOUT, **kwargs):
@@ -102,20 +130,27 @@ _RESOLVE_APP = '/Applications/DaVinci Resolve/DaVinci Resolve.app'
 _RESOLVE_PLIST = f'{_RESOLVE_APP}/Contents/Info.plist'
 
 
-def edition() -> str:
-    """Return ``'studio'``, ``'free'``, or ``'unknown'``.
+def edition(app_path: str | None = None) -> str:
+    """Return ``'studio'``, ``'free'``, or ``'unknown'`` for a Resolve install.
 
     Studio installs ship as ``DaVinci Resolve Studio.app`` with
     ``CFBundleName = "DaVinci Resolve Studio"``; Free is just
     ``"DaVinci Resolve"``. Reading the plist is cheap and runs out of
     process, so we don't have to import anything from Resolve to find
     out — useful when scripting itself is unreachable.
+
+    ``app_path`` is the specific Resolve .app to inspect (the running
+    instance, or the version-ranked install for a cold launch). Falls back
+    to the canonical ``_RESOLVE_APP`` path only when not given, so the
+    edition we report always matches the Resolve we actually drive.
     """
-    if not os.path.isfile(_RESOLVE_PLIST):
+    base = app_path or _RESOLVE_APP
+    plist = os.path.join(base, 'Contents', 'Info.plist')
+    if not os.path.isfile(plist):
         return 'unknown'
     try:
         out = subprocess.check_output(
-            ['defaults', 'read', _RESOLVE_PLIST, 'CFBundleName'],
+            ['defaults', 'read', plist, 'CFBundleName'],
             text=True, timeout=2, stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:
@@ -138,6 +173,22 @@ class ImportResult:
     timeline_name: str | None = None
 
 
+def _ensure_resolve_env() -> None:
+    """Set the standard Resolve scripting env vars (macOS default install) if
+    the user hasn't already, so ``import DaVinciResolveScript`` can dlopen
+    fusionscript.so on a fresh backend process. Values mirror the exports in
+    Blackmagic's own Scripting README. ``setdefault`` means a user/admin who
+    already exported these (e.g. a non-default install) is never overridden.
+    """
+    api_dir = os.path.dirname(_MODULES_DIR)  # .../Developer/Scripting
+    os.environ.setdefault('RESOLVE_SCRIPT_API', api_dir)
+    os.environ.setdefault('RESOLVE_SCRIPT_LIB', _FUSION_SO)
+    existing = os.environ.get('PYTHONPATH', '')
+    if _MODULES_DIR not in existing.split(os.pathsep):
+        os.environ['PYTHONPATH'] = (
+            existing + os.pathsep + _MODULES_DIR if existing else _MODULES_DIR)
+
+
 def _ensure_modules_on_path() -> bool:
     """Add Resolve's scripting module dir to sys.path if not already there.
 
@@ -152,7 +203,14 @@ def _ensure_modules_on_path() -> bool:
 
 
 def _try_import_module():
-    """Lazy import of DaVinciResolveScript. Returns the module or None."""
+    """Lazy import of DaVinciResolveScript. Returns the module or None.
+
+    Sets the RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB / PYTHONPATH env vars
+    first (if unset) so the import can resolve fusionscript.so. A failed
+    import means no scripting API (Resolve Free, or not installed) — the
+    caller falls through to the manual export path.
+    """
+    _ensure_resolve_env()
     if not _ensure_modules_on_path():
         return None
     try:
@@ -175,10 +233,46 @@ def _is_resolve_running() -> bool:
         return False
 
 
-def _launch_resolve() -> None:
-    """Bring Resolve to the front (launches if not running). Non-blocking."""
+def running_app_path() -> str | None:
+    """Return the .app path of the Resolve instance currently running, or None.
+
+    Connect-before-launch relies on this: if a Resolve is already open we
+    drive THAT instance (the user has their project in it) and never pick
+    or launch a different version. Derives the bundle path from the running
+    process's executable path, so it reports the exact copy in use —
+    whatever version, wherever installed.
+    """
     try:
-        subprocess.Popen(['open', '-a', _RESOLVE_APP])
+        out = subprocess.check_output(
+            ['pgrep', '-i', '-f', 'DaVinci Resolve.app/Contents/MacOS'],
+            stderr=subprocess.DEVNULL, timeout=2, text=True,
+        ).strip()
+    except Exception:
+        return None
+    for pid in (p for p in out.splitlines() if p.strip()):
+        try:
+            comm = subprocess.check_output(
+                ['ps', '-p', pid.strip(), '-o', 'comm='],
+                stderr=subprocess.DEVNULL, timeout=2, text=True,
+            ).strip()
+        except Exception:
+            continue
+        idx = comm.find('.app/')
+        if idx != -1:
+            return comm[:idx + 4]  # up to and including '.app'
+    return None
+
+
+def _launch_resolve(app_path: str | None = None) -> None:
+    """Bring a specific Resolve to the front (launches if not running).
+
+    Non-blocking. ``app_path`` is the version-ranked install chosen for a
+    COLD launch; only used when no Resolve is running (connect-before-launch
+    handles the already-running case upstream). Falls back to the canonical
+    path when not given.
+    """
+    try:
+        subprocess.Popen(['open', '-a', app_path or _RESOLVE_APP])
     except Exception:
         pass
 
@@ -260,29 +354,124 @@ def _get_resolve_handle(dvr_script, timeout_seconds: float = 30.0):
     return None, None
 
 
+def _timeline_clip_count(timeline) -> int:
+    """Total timeline items across all video tracks — used to confirm the
+    import actually landed clips rather than producing an empty/offline
+    timeline. Defensive: any scripting hiccup counts as 0, so the caller
+    treats it as a failed import and falls back to the manual path rather
+    than reporting a false success.
+    """
+    try:
+        total = 0
+        track_count = int(timeline.GetTrackCount('video') or 0)
+        for i in range(1, track_count + 1):
+            items = timeline.GetItemListInTrack('video', i) or []
+            total += len(items)
+        return total
+    except Exception:
+        return 0
+
+
+def _do_import(handle, timeline_path, source_media_path,
+               project_name, timeline_name) -> ImportResult:
+    """The full Resolve import handshake — run on ONE bounded worker.
+
+    Every scripting call lives here: project lookup/create, the
+    ``GetMediaStorage()`` / ``GetMediaPool()`` receiver evaluations, the
+    media add, the timeline import, and the switch. Running the whole
+    sequence under a single wall-clock cap (see import_timeline) means a
+    wizard-blocked or wedged Resolve can stall this worker but never the
+    request thread. Returns an ImportResult; unexpected exceptions
+    propagate to import_timeline's handler.
+    """
+    pm = handle.GetProjectManager()
+    project = pm.GetCurrentProject()
+    if project is None:
+        project = pm.CreateProject(project_name)
+    if project is None:
+        return ImportResult(
+            ok=False, reason='no_project',
+            hint=('Resolve has no open project and a new one could not '
+                  'be created. Open or create a project in Resolve, '
+                  'then run the export again.'),
+        )
+
+    # Add source media into the Media Pool. Best-effort: if the source
+    # path isn't reachable (network drive offline, path moved since
+    # transcription) we still try the timeline import — Resolve marks
+    # clips offline but the cuts and structure land.
+    if source_media_path and os.path.isfile(source_media_path):
+        try:
+            handle.GetMediaStorage().AddItemListToMediaPool([source_media_path])
+        except Exception:
+            pass
+
+    media_pool = project.GetMediaPool()
+    # importOptions keys verified against the Resolve Scripting README:
+    # timelineName (name of the created timeline), importSourceClips (import
+    # source clips, True by default), sourceClipsPath (where to look for media
+    # if it isn't at its embedded path). Media was already added to the pool
+    # above, so the timeline relinks to it cleanly.
+    import_opts = {'timelineName': timeline_name, 'importSourceClips': True}
+    if source_media_path:
+        import_opts['sourceClipsPath'] = os.path.dirname(source_media_path)
+
+    timeline = media_pool.ImportTimelineFromFile(timeline_path, import_opts)
+    if timeline is None:
+        return ImportResult(
+            ok=False, reason='import_failed',
+            hint=('Resolve refused the timeline file. The file is in '
+                  'Finder — try File → Import → Timeline manually to '
+                  'see the underlying error.'),
+        )
+
+    # Confirm the import actually landed clips. A timeline that comes in with
+    # zero items is a silent failure (the classic "timeline imports but has no
+    # clips") — never report it as success; fall back to the manual path so
+    # the user isn't stranded with an empty timeline.
+    if _timeline_clip_count(timeline) <= 0:
+        return ImportResult(
+            ok=False, reason='import_empty',
+            hint=('Resolve created the timeline but it has no clips — the '
+                  'source media did not link. The file is in Finder; import '
+                  'it manually with File → Import → Timeline.'),
+        )
+
+    try:
+        project.SetCurrentTimeline(timeline)
+    except Exception:
+        # Non-fatal: the timeline is imported, we just couldn't switch to
+        # it. The user can pick it from the Media Pool.
+        pass
+
+    return ImportResult(ok=True, timeline_name=timeline_name)
+
+
 def import_timeline(
     timeline_path: str,
     *,
     source_media_path: str | None,
     project_name: str,
     timeline_name: str,
+    app_path: str | None = None,
 ) -> ImportResult:
     """Connect to Resolve, import source media + timeline, switch to it.
 
+    ``app_path`` is the specific Resolve .app to drive: the already-running
+    instance (connect-before-launch, resolved upstream) or the
+    version-ranked install chosen for a cold launch. It governs the cold
+    launch and the edition check, so we always talk to — and report on —
+    the same copy. Falls back to the canonical install only when omitted.
+
     Flow:
       1. Load DaVinciResolveScript (fail fast if absent).
-      2. Launch Resolve if not already running, wait for the scripting
-         daemon to accept connections (up to 30s).
-      3. Use the current project, or create one named after the Doza
-         Assist project if Resolve has none open.
-      4. Add the source media file(s) to the Media Pool (if path given
-         and exists). Skips silently if media isn't reachable — the
-         timeline still imports, clips just land offline like a manual
-         EDL import would.
-      5. ``MediaPool.ImportTimelineFromFile(timeline_path, {
-            timelineName: ..., sourceClipsPath: media_dir
-          })``
-      6. Set the imported timeline as current so the user lands on it.
+      2. Cold-launch ``app_path`` only if no Resolve is running; wait for
+         the scripting daemon — a long budget when cold (Resolve is
+         booting), a SHORT budget when one is already running so a
+         wizard-blocked daemon bails fast instead of beachballing.
+      3-6. Project lookup/create, media add, timeline import, switch — all
+         on one bounded daemon worker (``_do_import``) so a wedged Resolve
+         can never stall the request thread indefinitely.
 
     Returns ImportResult with ok=True on success. On failure the reason
     code feeds the frontend's setup-modal trigger.
@@ -296,16 +485,22 @@ def import_timeline(
                   'the Media Pool to import.'),
         )
 
-    if not _is_resolve_running():
-        _launch_resolve()
+    # Connect-before-launch: only cold-launch when nothing is running, and
+    # poll on the short budget when a Resolve is already up.
+    running = _is_resolve_running()
+    if not running:
+        _launch_resolve(app_path)
 
-    handle, err = _get_resolve_handle(dvr_script)
+    handle, err = _get_resolve_handle(
+        dvr_script,
+        timeout_seconds=(_RUNNING_HANDLE_TIMEOUT if running else _COLD_HANDLE_TIMEOUT),
+    )
     if handle is None:
-        # We launched Resolve (or it was running) but scriptapp never
-        # returned a handle. On Free, this is structural (no toggle
-        # to flip — Blackmagic restricts scripting to Studio). On
-        # Studio, it's the External Scripting preference being off.
-        if edition() == 'free':
+        # Launched Resolve (or it was running) but scriptapp never returned
+        # a handle. On Free this is structural (Blackmagic restricts
+        # scripting to Studio); on Studio it's External Scripting being off
+        # — or Resolve still booting / stuck on its first-run setup wizard.
+        if edition(app_path) == 'free':
             return ImportResult(
                 ok=False, reason='requires_studio',
                 hint=('Auto-import into DaVinci Resolve requires Resolve '
@@ -316,73 +511,29 @@ def import_timeline(
             )
         return ImportResult(
             ok=False, reason='scripting_disabled',
-            hint=('Resolve is open but rejected the import. Enable External '
-                  'Scripting: Resolve → Preferences (⌘,) → System → General → '
-                  '"External scripting using:" → Local → Save → restart '
-                  'Resolve, then run the export again.'),
+            hint=('Resolve is open but did not accept scripting in time. If '
+                  'a first-run setup screen is showing, finish it. Then '
+                  'enable External Scripting: Resolve → Preferences (⌘,) → '
+                  'System → General → "External scripting using:" → Local → '
+                  'Save → restart Resolve, then run the export again.'),
         )
 
+    # Run the ENTIRE handshake on one bounded worker (not just the import
+    # calls) so the receiver evals and a wizard-blocked project lookup can
+    # never stall past _IMPORT_TIMEOUT.
     try:
-        pm = handle.GetProjectManager()
-        project = pm.GetCurrentProject()
-        if project is None:
-            project = pm.CreateProject(project_name)
-        if project is None:
-            return ImportResult(
-                ok=False, reason='no_project',
-                hint=('Resolve has no open project and a new one could not '
-                      'be created. Open or create a project in Resolve, '
-                      'then run the export again.'),
-            )
-
-        # Add source media into the Media Pool. This is best-effort:
-        # if the source path isn't reachable (network drive offline,
-        # path moved since transcription) we still try the timeline
-        # import — Resolve will mark clips offline but at least the
-        # cuts and structure land.
-        if source_media_path and os.path.isfile(source_media_path):
-            try:
-                _call_with_timeout(
-                    handle.GetMediaStorage().AddItemListToMediaPool,
-                    [source_media_path], timeout=60.0,
-                )
-            except (Exception, TimeoutError):
-                pass
-
-        media_pool = project.GetMediaPool()
-        import_opts = {'timelineName': timeline_name}
-        if source_media_path:
-            import_opts['sourceClipsPath'] = os.path.dirname(source_media_path)
-
-        try:
-            timeline = _call_with_timeout(
-                media_pool.ImportTimelineFromFile, timeline_path, import_opts,
-            )
-        except TimeoutError:
-            return ImportResult(
-                ok=False, reason='import_timeout',
-                hint=('Resolve did not finish importing in time (it may be '
-                      'reconnecting media or busy). The timeline file is in '
-                      'Finder — import it manually with File → Import → '
-                      'Timeline once Resolve is responsive.'),
-            )
-        if timeline is None:
-            return ImportResult(
-                ok=False, reason='import_failed',
-                hint=('Resolve refused the timeline file. The file is in '
-                      'Finder — try File → Import → Timeline manually to '
-                      'see the underlying error.'),
-            )
-
-        try:
-            project.SetCurrentTimeline(timeline)
-        except Exception:
-            # Non-fatal: the timeline is imported, we just couldn't
-            # switch to it. The user can pick it from the Media Pool.
-            pass
-
-        return ImportResult(ok=True, timeline_name=timeline_name)
-
+        return _call_with_timeout(
+            _do_import, handle, timeline_path, source_media_path,
+            project_name, timeline_name, timeout=_IMPORT_TIMEOUT,
+        )
+    except TimeoutError:
+        return ImportResult(
+            ok=False, reason='import_timeout',
+            hint=('Resolve did not finish importing in time (it may be '
+                  'reconnecting media, busy, or showing a setup dialog). '
+                  'The timeline file is in Finder — import it manually with '
+                  'File → Import → Timeline once Resolve is responsive.'),
+        )
     except Exception as e:
         return ImportResult(
             ok=False, reason='unexpected_error',

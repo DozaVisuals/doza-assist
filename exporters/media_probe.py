@@ -142,6 +142,42 @@ def get_video_framerate(path: str) -> float | None:
     return None
 
 
+def has_video_stream(path: str) -> bool | None:
+    """Whether the file carries a REAL video stream (attached-picture cover
+    art excluded), or None when the question can't be answered (missing
+    file / no ffprobe / probe failure).
+
+    The FCPXML exporters used to decide ``hasVideo`` from the file
+    EXTENSION, so an audio-only .mp4/.mov (AAC podcast export, multi-mono
+    field-recorder QuickTime) declared a video component the media doesn't
+    have — FCP/Resolve import such an asset offline/invalid instead of as a
+    clean audio clip. Callers keep the extension heuristic only for the
+    None case.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                # Capital V excludes attached pictures (see resolution probe).
+                "-select_streams", "V",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return bool(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 def get_audio_channels(path: str) -> int | None:
     """Channel count of the first audio stream (None if no audio/probe fail).
 
@@ -206,7 +242,12 @@ def get_audio_sample_rate(path: str) -> int | None:
 
 
 def get_audio_layout(path: str):
-    """``(num_audio_streams, total_channels)`` across ALL audio streams, or None.
+    """``(num_audio_streams, total_channels)`` across ALL audio streams,
+    ``(0, 0)`` when the file probed clean but has NO audio streams (silent
+    B-roll / FX plate), or None when the probe itself failed (missing file,
+    no ffprobe, timeout) — callers use the distinction to declare
+    ``hasAudio="0"`` for genuinely silent media without failing open on a
+    probe error.
 
     FCP declares a clip's asset as ``audioSources=<#streams> audioChannels=<total>``:
     a stereo camera file is ``(1, 2)``, a mono file ``(1, 1)``, and a 4-mono-track
@@ -240,10 +281,12 @@ def get_audio_layout(path: str):
         if result.returncode != 0:
             return None
         by_index = {}  # stream index -> channel count (dedups TS double-listing)
+        rows_seen = False
         for line in result.stdout.splitlines():
             line = line.strip()
             if not line:
                 continue
+            rows_seen = True
             parts = line.split(",")
             if len(parts) < 2:
                 continue
@@ -254,7 +297,10 @@ def get_audio_layout(path: str):
             if ch > 0:
                 by_index[idx] = ch
         if not by_index:
-            return None
+            # No rows at all = the probe ANSWERED "no audio streams" -> (0, 0).
+            # Rows that all failed to parse (N/A channels) = audio exists but
+            # we can't describe it -> None, same as a probe failure.
+            return (0, 0) if not rows_seen else None
         return (len(by_index), sum(by_index.values()))
     except Exception:
         return None

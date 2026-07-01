@@ -13,6 +13,7 @@ silent — this matches what FCP plays on the timeline.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -20,6 +21,9 @@ from fractions import Fraction
 from typing import List, Optional, Tuple
 
 from .parser import ParsedFCPXML, SpineSegment
+
+
+_log = logging.getLogger(__name__)
 
 
 class TimelineAudioError(RuntimeError):
@@ -34,6 +38,50 @@ def _find_ffmpeg() -> str:
         if os.path.isfile(candidate):
             return candidate
     return "ffmpeg"
+
+
+def _find_ffprobe() -> Optional[str]:
+    # Bundled binary first: packaged installs may have NO ffprobe on PATH
+    # (same resolution order as exporters.media_probe). Returns None when
+    # unavailable so callers degrade to not probing.
+    bundled_dir = os.environ.get("DOZA_FFMPEG_DIR")
+    if bundled_dir:
+        candidate = os.path.join(bundled_dir, "ffprobe")
+        if os.path.isfile(candidate):
+            return candidate
+    path = shutil.which("ffprobe")
+    if path:
+        return path
+    for candidate in ("/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe"):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _input_has_audio_stream(path: str) -> bool:
+    """True unless ffprobe positively reports zero audio streams.
+
+    Feeding an audio-less file (video-only B-roll whose asset over-declared
+    audio) into the amix filtergraph aborts the WHOLE render on a missing
+    ``[n:a]`` stream, so those inputs must be dropped to silence instead.
+    Errs on the side of keeping the input: no ffprobe, a probe error, or an
+    unreadable file all return True, degrading to the status quo where ffmpeg
+    itself surfaces the real problem.
+    """
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return True
+    try:
+        probe = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return True
+    if probe.returncode != 0:
+        return True  # unreadable is not the same as audio-less
+    return bool(probe.stdout.strip())
 
 
 def _segment_source_window(seg: SpineSegment) -> Tuple[Fraction, Fraction]:
@@ -110,6 +158,7 @@ def build_ffmpeg_command(
     *,
     sample_rate: int = 16000,
     ffmpeg_bin: Optional[str] = None,
+    plan: Optional[List[dict]] = None,
 ) -> List[str]:
     """Build the ffmpeg argv for the given parsed FCPXML.
 
@@ -121,8 +170,13 @@ def build_ffmpeg_command(
       - A ``filter_complex`` trims each segment's source range, resamples to
         the target sample rate and mono, delays it to the timeline offset,
         and amixes everything against the null base.
+
+    ``plan`` lets :func:`render_timeline_audio` pass a filtered render plan
+    (missing/audio-less inputs dropped to silence); defaults to the full
+    :func:`plan_render` output.
     """
-    plan = plan_render(parsed)
+    if plan is None:
+        plan = plan_render(parsed)
     if not plan:
         raise TimelineAudioError("no unmuted spine segments with resolvable audio")
 
@@ -179,12 +233,18 @@ def render_timeline_audio(
     *,
     sample_rate: int = 16000,
     ffmpeg_bin: Optional[str] = None,
+    skip_missing: bool = False,
 ) -> str:
     """Compose the sequence's dialogue to a single WAV at ``output_path``.
 
     Verifies every referenced source exists before shelling out; raises
     :class:`TimelineAudioError` if any segment source is missing (typical when
-    an edit drive is unmounted) or if ffmpeg fails.
+    an edit drive is unmounted) or if ffmpeg fails. With ``skip_missing`` the
+    offline segments render as silence instead — the My Style path's
+    partial-import promise (skip the clip, log it, continue); the project
+    ingest path keeps the strict default because it pre-validates with
+    drive-mount hints. Inputs that exist but carry no audio stream are always
+    dropped to silence (see :func:`_input_has_audio_stream`).
     """
     plan = plan_render(parsed)
     if not plan:
@@ -196,13 +256,35 @@ def render_timeline_audio(
         # Deduplicate while preserving order for a stable error message.
         seen = set()
         unique = [m for m in missing if not (m in seen or seen.add(m))]
+        if not skip_missing:
+            raise TimelineAudioError(
+                "missing audio source(s): " + ", ".join(unique)
+            )
+        _log.warning(
+            "timeline render: skipping offline source(s), their segments "
+            "become silence: %s", ", ".join(unique),
+        )
+        missing_set = set(unique)
+        plan = [item for item in plan if item["input_path"] not in missing_set]
+
+    audioless = {p for p in {item["input_path"] for item in plan}
+                 if not _input_has_audio_stream(p)}
+    if audioless:
+        _log.warning(
+            "timeline render: skipping audio-less source(s), their segments "
+            "become silence: %s", ", ".join(sorted(audioless)),
+        )
+        plan = [item for item in plan if item["input_path"] not in audioless]
+
+    if not plan:
         raise TimelineAudioError(
-            "missing audio source(s): " + ", ".join(unique)
+            "no renderable audio: every unmuted segment's source is missing "
+            "or has no audio stream"
         )
 
     argv = build_ffmpeg_command(
         parsed, output_path,
-        sample_rate=sample_rate, ffmpeg_bin=ffmpeg_bin,
+        sample_rate=sample_rate, ffmpeg_bin=ffmpeg_bin, plan=plan,
     )
     result = subprocess.run(argv, capture_output=True, text=True)
     if result.returncode != 0:

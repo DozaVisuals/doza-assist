@@ -152,7 +152,7 @@ class TestSendToNleForwardsArgs:
         stub = SimpleNamespace(file_path='/tmp/out.fcpxml',
                                filename='out.fcpxml', format_name='FCPXML')
         monkeypatch.setattr(app_module, '_build_nle_export',
-                            lambda project, body, force_platform=None: (stub, None))
+                            lambda project, body, force_platform=None, **kw: (stub, None))
 
         res = client.post('/export/send-to-nle',
                           json={'project_id': 'pX', 'nle': 'resolve'})

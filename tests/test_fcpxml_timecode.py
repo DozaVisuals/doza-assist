@@ -341,6 +341,9 @@ class TestFcpxmlAudioDecl:
         monkeypatch.setattr(_mp, "get_audio_sample_rate", lambda p: rate)
         monkeypatch.setattr(_mp, "detect_dialogue_channels",
                             lambda p, *a, **k: dialogue)
+        # Probe "can't answer" -> extension fallback, i.e. the pre-probe
+        # behavior these declaration tests were written against.
+        monkeypatch.setattr(_mp, "has_video_stream", lambda p: None)
         markers = [{"start": 1.0, "end": 5.0, "text": "a", "category": "Soundbite"}]
         if fn is generate_fcpxml:
             return fn(markers, "T", framerate=23.976, source_path=source,
@@ -371,7 +374,13 @@ class TestFcpxmlAudioDecl:
 
     def test_two_live_mics_route_both(self, monkeypatch, source):
         xml = self._gen(monkeypatch, source, (4, 4), 48000, dialogue=[1, 2])
-        assert 'srcCh="2"' in xml and 'srcCh="3"' in xml
+        audios = re.findall(r'<audio [^>]*/>', xml)
+        assert len(audios) == 2
+        # Each mic descends its OWN lane (-1, -2): two connected items
+        # sharing lane="-1" with identical offset/duration are a lane
+        # collision FCP may reject (or silently drop a mic on).
+        assert 'lane="-1"' in audios[0] and 'srcCh="2"' in audios[0]
+        assert 'lane="-2"' in audios[1] and 'srcCh="3"' in audios[1]
 
     def test_multimono_no_detection_uses_asset_clip(self, monkeypatch, source):
         # Detection found nothing -> compact asset-clip + audioRole (no guess).
@@ -438,11 +447,26 @@ class TestGetAudioLayout:
         # 4-mono TS doubled stays 4/4, not 8/8.
         assert self._layout(monkeypatch, "1,1\n1,1\n2,1\n2,1\n3,1\n3,1\n4,1\n4,1\n") == (4, 4)
 
-    def test_no_audio_returns_none(self, monkeypatch):
-        assert self._layout(monkeypatch, "") is None
+    def test_no_audio_probed_clean_returns_zero_zero(self, monkeypatch):
+        # rc==0 with no stream rows = the probe ANSWERED "no audio streams"
+        # (silent B-roll). Distinct from None (probe trouble) so the FCPXML
+        # asset can declare hasAudio="0" without failing open on errors.
+        assert self._layout(monkeypatch, "") == (0, 0)
+
+    def test_probe_failure_returns_none(self, monkeypatch):
+        monkeypatch.setattr(_mp, "_find_ffprobe", lambda: "/fake/ffprobe")
+        monkeypatch.setattr(_mp.os.path, "exists", lambda p: True)
+        monkeypatch.setattr(_mp.subprocess, "run",
+            lambda *a, **k: _subprocess.CompletedProcess([], 1, "", "boom"))
+        assert _mp.get_audio_layout("/fake/x") is None
 
     def test_na_channels_skipped(self, monkeypatch):
         assert self._layout(monkeypatch, "0,N/A\n1,1\n") == (1, 1)
+
+    def test_all_rows_unparseable_returns_none(self, monkeypatch):
+        # Rows existed but none parsed (N/A channels): audio exists but we
+        # can't describe it — that's a probe failure, NOT "no audio".
+        assert self._layout(monkeypatch, "0,N/A\n") is None
 
 
 # ── detect_dialogue_channels (loudness-based speech-track picker) ────────────
@@ -483,3 +507,51 @@ class TestDetectDialogueChannels:
         # 2 streams / 4 channels (stereo pairs) — stream->srcCh mapping is not
         # 1:1, so we don't guess; returns None.
         assert self._detect(monkeypatch, (2, 4), {0: -24.0, 1: -91.0}) is None
+
+
+# ── DTD-structural check (Apple's real FCPXML DTD, when FCP is installed) ────
+#
+# The two-mic connected-clip form (multiple <audio> elements descending lanes
+# -1, -2, ... under a <clip><video>) must satisfy the same DTD FCP's import
+# dialog validates against. Skipped on machines without Final Cut Pro.
+
+_FCP_DTD = ("/Applications/Final Cut Pro.app/Contents/Frameworks/"
+            "Interchange.framework/Versions/A/Resources/FCPXMLv1_11.dtd")
+
+
+@pytest.mark.skipif(not os.path.exists(_FCP_DTD),
+                    reason="Final Cut Pro (and its FCPXML DTD) not installed")
+class TestConnectedClipDTDValid:
+    def _validate(self, xml):
+        from lxml import etree
+        with open(_FCP_DTD, "rb") as fh:
+            dtd = etree.DTD(fh)
+        root = etree.fromstring(xml.encode("utf-8"))
+        assert dtd.validate(root), str(dtd.error_log)
+
+    def test_two_mic_connected_clips_are_dtd_valid(self, monkeypatch, source):
+        monkeypatch.setattr(_mp, "get_audio_layout", lambda p: (4, 4))
+        monkeypatch.setattr(_mp, "get_audio_sample_rate", lambda p: 48000)
+        monkeypatch.setattr(_mp, "detect_dialogue_channels",
+                            lambda p, *a, **k: [1, 2])
+        monkeypatch.setattr(_mp, "has_video_stream", lambda p: True)
+        xml = generate_fcpxml(
+            [{"start": 1.0, "end": 5.0, "text": "a", "category": "Soundbite"},
+             {"start": 8.0, "end": 12.0, "text": "b", "category": "Soundbite"}],
+            "T", framerate=29.97, source_path=source, media_duration=60.0,
+            mode="both")
+        assert 'lane="-1"' in xml and 'lane="-2"' in xml
+        self._validate(xml)
+
+    def test_story_connected_clips_are_dtd_valid(self, monkeypatch, source):
+        monkeypatch.setattr(_mp, "get_audio_layout", lambda p: (4, 4))
+        monkeypatch.setattr(_mp, "get_audio_sample_rate", lambda p: 48000)
+        monkeypatch.setattr(_mp, "detect_dialogue_channels",
+                            lambda p, *a, **k: [0, 3])
+        monkeypatch.setattr(_mp, "has_video_stream", lambda p: True)
+        xml = generate_story_fcpxml(
+            [{"start": 5.0, "end": 10.0, "text": "beat", "_order": 0}],
+            "T", story_title="S", framerate=29.97, source_path=source,
+            media_duration=120.0)
+        assert 'lane="-1"' in xml and 'lane="-2"' in xml
+        self._validate(xml)

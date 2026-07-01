@@ -92,10 +92,83 @@ _XML_PROLOGUE = b'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n\n'
 
 
 class WriterError(ValueError):
-    """Raised when selects cannot be written (e.g. cross-boundary select)."""
+    """Raised when selects cannot be written (e.g. all selects off-timeline).
+
+    Per-select recoverable problems (a select in a gap, a boundary-crossing
+    select) do NOT raise from the public writers — they are split or skipped
+    and surfaced via ``skipped_out``.
+    """
 
 
 # ---------- select → (segment, container time) locator ---------------------
+
+def _source_to_container(parsed: ParsedFCPXML, select_seconds: float) -> Fraction:
+    """Single-source: invert the renderer's source-seek formula.
+
+    Adding the representative's container-tc / asset start is what keeps
+    selects landing correctly when the media carries embedded timecode (pro
+    cameras, time-of-day TC) — both terms are zero for sync-clips and ordinary
+    tcStart-zero footage, so this is a no-op there.
+    """
+    t = Fraction(select_seconds).limit_denominator(10_000_000)
+    return (
+        t
+        + parsed.audio_angle_offset_fraction
+        - parsed.audio_angle_start_fraction
+        + parsed.audio_container_tc_start_fraction
+        + parsed.audio_asset_start_fraction
+    )
+
+
+def _shares_representative_coordinates(parsed: ParsedFCPXML, seg: SpineSegment) -> bool:
+    """True when this segment's start/duration live in the same container /
+    source coordinate space as the representative (transcribed) audio.
+
+    Single-source select times are seconds into the transcribed recording, so
+    they may only be matched against segments that play that same recording:
+    mc-clips of the SAME multicam container (all angles share the container
+    timeline), or sync-/asset-clips resolving to the SAME audio asset.
+    Connected lane clips (gap B-roll) and cutaways of other media have
+    start/duration in their own asset's coordinates — numerically comparable
+    but semantically foreign; matching them exports the wrong footage (a
+    select on the interview coming back as ten seconds of B-roll).
+    """
+    if seg.kind == "mc-clip":
+        if bool(seg.ref) and seg.ref == parsed.container_ref:
+            return True
+        # FCP's "Duplicate" of a multicam mints a new <media> id over the
+        # SAME angle assets — the copy's container timeline is identical, so
+        # same-audio-asset mc-clips share coordinates despite the ref.
+        return (seg.audio_source is not None
+                and seg.audio_source.asset_id == parsed.audio_asset_id)
+    if seg.audio_source is not None:
+        return seg.audio_source.asset_id == parsed.audio_asset_id
+    return False
+
+
+def _matchable_segments(parsed: ParsedFCPXML):
+    """Return ``(segments, seg_lo, seg_hi)`` for select matching.
+
+    Multi-source: every ENABLED spine segment, keyed by its genuine timeline
+    offset. Single-source: only enabled segments sharing the representative
+    coordinate space (see :func:`_shares_representative_coordinates`), keyed
+    by container time. Disabled clips (V in FCP) play as black/silence — a
+    select landing on one is skipped and surfaced, never exported.
+    """
+    if parsed.is_multi_source:
+        return (
+            [s for s in parsed.spine_segments if getattr(s, "enabled", True)],
+            lambda s: s.offset_fraction,
+            lambda s: s.offset_fraction + s.duration_fraction,
+        )
+    return (
+        [s for s in parsed.spine_segments
+         if getattr(s, "enabled", True)
+         and _shares_representative_coordinates(parsed, s)],
+        lambda s: s.start_fraction,
+        lambda s: s.start_fraction + s.duration_fraction,
+    )
+
 
 def _locate_select_start(
     parsed: ParsedFCPXML, select_seconds: float
@@ -105,29 +178,20 @@ def _locate_select_start(
     For multi-source projects, ``select_seconds`` is a timeline time; find the
     segment whose timeline range covers it and translate to container time.
     For single-source projects, ``select_seconds`` is audio-source time (0-based
-    into the file the transcription ran against); convert to container time by
-    inverting the renderer's source-seek formula, then find the covering
-    segment. Adding the representative's container-tc / asset start is what keeps
-    selects landing correctly when the media carries embedded timecode (pro
-    cameras, time-of-day TC) — both terms are zero for sync-clips and ordinary
-    tcStart-zero footage, so this is a no-op there.
+    into the file the transcription ran against); convert to container time via
+    :func:`_source_to_container`, then find the covering segment among those
+    sharing the representative coordinate space.
 
     Returns ``(None, None)`` if the time falls outside any spine segment.
     """
+    segments, seg_lo, seg_hi = _matchable_segments(parsed)
     if parsed.is_multi_source:
-        seg, container_time = timeline_to_segment(parsed.spine_segments, select_seconds)
+        seg, container_time = timeline_to_segment(segments, select_seconds)
         return seg, container_time
 
-    t = Fraction(select_seconds).limit_denominator(10_000_000)
-    container_time = (
-        t
-        + parsed.audio_angle_offset_fraction
-        - parsed.audio_angle_start_fraction
-        + parsed.audio_container_tc_start_fraction
-        + parsed.audio_asset_start_fraction
-    )
-    for seg in parsed.spine_segments:
-        if seg.start_fraction <= container_time < seg.start_fraction + seg.duration_fraction:
+    container_time = _source_to_container(parsed, select_seconds)
+    for seg in segments:
+        if seg_lo(seg) <= container_time < seg_hi(seg):
             return seg, container_time
     return None, None
 
@@ -155,64 +219,170 @@ def _all_share_source(segments: List[SpineSegment]) -> bool:
     return True
 
 
-def _locate_select_range(
-    parsed: ParsedFCPXML, select: Select
-) -> Tuple[SpineSegment, Fraction, Fraction]:
-    """Resolve a select to (segment, container_start, container_end).
+def _slice_by_segment_coverage(
+    segments: List[SpineSegment],
+    lo: Fraction,
+    hi: Fraction,
+    frame_duration: Fraction,
+    seg_lo,
+    seg_hi,
+) -> List[Tuple[SpineSegment, Fraction, Fraction]]:
+    """Greedily cover ``[lo, hi)`` with segment sub-ranges, left to right.
 
-    Returns container-time fractions on the **starting** segment suitable for
-    building a new clip. The container_end may extend past the starting
-    segment's duration when the select spans multiple segments that all share
-    the same underlying source (common when FCP split one continuous recording
-    into several sync-clips; a story beat naturally spans those splits).
-
-    Raises :class:`WriterError` when the select falls outside any segment or
-    crosses a boundary between heterogeneous sources (e.g. mc-clip → sync-clip,
-    or two mc-clips from different multicams) — those need to be split into
-    separate selects.
+    ``seg_lo`` / ``seg_hi`` extract each segment's covering range in the same
+    coordinate system as ``lo`` / ``hi`` (timeline offsets for multi-source
+    projects, container time for single-source). At each cursor position the
+    FIRST covering segment wins — the same first-match rule as
+    :func:`_locate_select_start`, so overlapping lane clips can't double-emit
+    the same span. Ranges inside ``[lo, hi)`` that no segment covers (timeline
+    gaps) are skipped. Slivers shorter than half a frame are dropped — they
+    would snap to a stray one-frame edit of the neighboring source.
     """
-    seg, container_start = _locate_select_start(parsed, select.start_seconds)
-    if seg is None or container_start is None:
+    pieces: List[Tuple[SpineSegment, Fraction, Fraction]] = []
+    cursor = lo
+    half_frame = frame_duration / 2
+    while hi - cursor >= half_frame:
+        cover = None
+        for s in segments:
+            if seg_lo(s) <= cursor < seg_hi(s):
+                cover = s
+                break
+        if cover is None:
+            nxt = min((seg_lo(s) for s in segments if seg_lo(s) > cursor), default=None)
+            if nxt is None or nxt >= hi:
+                break
+            cursor = nxt
+            continue
+        piece_end = min(hi, seg_hi(cover))
+        if piece_end - cursor >= half_frame:
+            pieces.append((cover, cursor, piece_end))
+        cursor = piece_end
+    return pieces
+
+
+def _locate_select_pieces(
+    parsed: ParsedFCPXML, select: Select
+) -> List[Tuple[SpineSegment, Fraction, Fraction, Fraction, Optional[Fraction]]]:
+    """Resolve a select to one or more
+    ``(segment, container_start, container_end, min_start, max_end)`` pieces,
+    each fully inside its segment's source; the last two entries are the
+    piece's media bounds for the snap clamp (``max_end`` is None when the
+    span intentionally runs past the covered segments into the continuous
+    recording).
+
+    The common case returns ONE piece: the select fits inside its starting
+    segment, or spans segments that all play the same CONTINUOUS stretch of one
+    source (FCP splitting one continuous recording into several sync-clips; a
+    story beat naturally spans those splits) — container time is continuous
+    across such segments, so one clip plays the whole span.
+
+    A select that crosses a boundary between DIFFERENT sources (mc-clip →
+    sync-clip, two different multicams, camera A → camera B) — or between
+    same-source segments with material CUT OUT at the join (a jump cut; the
+    collapsed clip would play the removed footage) — is split at the segment
+    boundaries into one piece per covered segment. The builder emits the
+    pieces back-to-back, so the new timeline plays the select exactly as the
+    original timeline did. (This used to raise WriterError and abort the
+    whole export — one boundary-crossing select killed every other select.)
+
+    A select whose START drifts into a timeline gap (Whisper word-start fuzz
+    before a cut) keeps its covered tail instead of being dropped whole.
+
+    Raises :class:`WriterError` only when no part of the select lands on any
+    spine segment (that audio was never on the timeline).
+    """
+    duration = Fraction(select.duration_seconds).limit_denominator(10_000_000)
+    fd = parsed.sequence_frame_duration
+    segments, seg_lo, seg_hi = _matchable_segments(parsed)
+
+    # ``lo``/``hi`` are the select's range in the matching coordinate system:
+    # timeline time for multi-source, container time for single-source.
+    if parsed.is_multi_source:
+        lo = Fraction(select.start_seconds).limit_denominator(10_000_000)
+    else:
+        lo = _source_to_container(parsed, select.start_seconds)
+    hi = lo + duration
+
+    start_seg = None
+    for s in segments:
+        if seg_lo(s) <= lo < seg_hi(s):
+            start_seg = s
+            break
+
+    def _to_container(s: SpineSegment, p_lo: Fraction, p_hi: Fraction):
+        # Pieces carry their media bounds (the owning segment's container
+        # range) so the snap step can clamp sample-aligned boundaries.
+        seg_min = s.start_fraction
+        seg_max = s.start_fraction + s.duration_fraction
+        if parsed.is_multi_source:
+            c_lo = s.start_fraction + (p_lo - s.offset_fraction)
+            return s, c_lo, c_lo + (p_hi - p_lo), seg_min, seg_max
+        return s, p_lo, p_hi, seg_min, seg_max
+
+    # Fast path: the whole select fits inside its starting segment.
+    if start_seg is not None and hi <= seg_hi(start_seg):
+        return [_to_container(start_seg, lo, hi)]
+
+    slices = _slice_by_segment_coverage(segments, lo, hi, fd, seg_lo, seg_hi)
+    if not slices:
         raise WriterError(
             f"select {select.label!r} at {select.start_seconds}s falls outside "
             "any spine segment"
         )
-    duration = Fraction(select.duration_seconds).limit_denominator(10_000_000)
-    container_end = container_start + duration
-    if container_end <= seg.start_fraction + seg.duration_fraction:
-        return seg, container_start, container_end
+    pieces = [_to_container(s, p_lo, p_hi) for s, p_lo, p_hi in slices]
 
-    # Multi-segment span. Collapse into one clip when all spanned segments
-    # share the same source; otherwise reject with a trim-or-split hint.
-    start_idx = parsed.spine_segments.index(seg)
-    end_time = Fraction(select.end_seconds).limit_denominator(10_000_000)
-    end_idx = start_idx
-    for i in range(start_idx, len(parsed.spine_segments)):
-        s = parsed.spine_segments[i]
-        if s.offset_fraction < end_time:
-            end_idx = i
-        else:
-            break
-    spanned = parsed.spine_segments[start_idx:end_idx + 1]
+    # Same-source collapse: emit ONE clip spanning the whole select when the
+    # spanned segments play one continuous stretch of one source.
+    #
+    # - Single-source projects: select times are source seconds — the
+    #   transcript the editor clicked on IS the continuous recording, so the
+    #   collapsed clip is faithful even across FCP's split points, and only
+    #   applies when the select's start actually lands on a segment.
+    # - Multi-source projects: select times are timeline seconds, so collapse
+    #   additionally requires the pieces to be container-CONTIGUOUS and to
+    #   cover the full select. A jump cut (same asset, source material removed
+    #   at the join) or a timeline gap inside the span must keep the per-piece
+    #   split — a collapsed clip would silently play the removed footage
+    #   instead of what the timeline plays.
+    #
+    # A collapsed span's media bound is the LAST covered segment's container
+    # end — but only when the select's end actually lies within coverage; a
+    # single-source span whose tail extends past the last segment plays on
+    # into the continuous recording (story beats over FCP splits), where the
+    # writer has no media extent to clamp against.
+    if start_seg is not None and _all_share_source([s for s, _l, _h in slices]):
+        s_last, _lo_l, p_hi_l = slices[-1]
+        last_seg_end = s_last.start_fraction + s_last.duration_fraction
+        if not parsed.is_multi_source:
+            max_end = last_seg_end if p_hi_l >= hi else None
+            return [(start_seg, lo, hi, start_seg.start_fraction, max_end)]
+        covered = sum((p_hi - p_lo for _s, p_lo, p_hi in slices), Fraction(0))
+        contiguous = all(
+            abs(pieces[i + 1][1] - pieces[i][2]) <= fd / 2
+            for i in range(len(pieces) - 1)
+        )
+        if contiguous and duration - covered <= fd / 2:
+            c_lo = pieces[0][1]
+            return [(start_seg, c_lo, c_lo + duration,
+                     start_seg.start_fraction, last_seg_end)]
 
-    if _all_share_source(spanned):
-        # Container-internal time is continuous across same-source segments
-        # (mc-clips of the same multicam share a container timeline; sync-clip
-        # math zeroes the angle offsets so container_time maps directly to
-        # source time on the shared asset). Returning the starting segment +
-        # the full container range lets the builder emit one clip that plays
-        # the whole select duration from a single source.
-        return seg, container_start, container_end
-
-    raise WriterError(
-        f"select {select.label!r} ({select.start_seconds}–{select.end_seconds}s) "
-        "crosses a segment boundary between different sources; "
-        "trim it to land within one source clip"
-    )
+    return pieces
 
 
-def _iter_selects(selects: Iterable[Select], *, preserve_order: bool = False) -> List[Select]:
-    out = [s for s in selects if s.duration_seconds > 0]
+def _iter_selects(
+    selects: Iterable[Select],
+    *,
+    preserve_order: bool = False,
+    skipped_out: Optional[List[Select]] = None,
+) -> List[Select]:
+    out = []
+    for s in selects:
+        if s.duration_seconds > 0:
+            out.append(s)
+        elif skipped_out is not None:
+            # Zero-length selects (stray click-highlights) are dropped like any
+            # other unroutable select — counted, not silently vanished.
+            skipped_out.append(s)
     if not preserve_order:
         # Default: sort by in-point so the new timeline reads chronologically.
         # Story Builder exports pass preserve_order=True so the build's
@@ -227,7 +397,11 @@ def _format_suffix(original: Optional[str], suffix: str) -> str:
 
 
 def _snap_clip_times(
-    container_start: Fraction, container_end: Fraction, fd: Fraction
+    container_start: Fraction,
+    container_end: Fraction,
+    fd: Fraction,
+    max_end: Optional[Fraction] = None,
+    min_start: Optional[Fraction] = None,
 ) -> Tuple[str, str, Fraction]:
     """Snap a select's in/out to the frame grid and derive duration from the
     *snapped* endpoints.
@@ -239,14 +413,38 @@ def _snap_clip_times(
     ``duration = snapped_end - snapped_start`` keeps the edit's out point exactly
     on the snapped end, so it can never overshoot.
 
+    ``max_end`` / ``min_start`` bound the snapped edit to the available media:
+    segment / asset boundaries are often sample-aligned rather than
+    frame-aligned (Resolve exports, audio assets), so nearest-frame rounding
+    of a piece that hugs such a boundary can overshoot either end by up to
+    half a frame — same FCP rejection. The end floors to the frame grid at or
+    below ``max_end``, the start ceils to the grid at or above ``min_start``;
+    if the 1-frame minimum would exceed the clamp, the start is shifted back
+    a frame instead (never below ``min_start``).
+
     Returns ``(start_str, duration_str, duration_fraction)``. The fraction is an
     exact multiple of ``fd``, so the caller advances the timeline cursor with it
     and the new spine stays frame-contiguous (no sub-frame gaps/overlaps).
     """
     start_frac = parse_rational(seconds_to_rational(container_start, fd))
     end_frac = parse_rational(seconds_to_rational(container_end, fd))
+    if min_start is not None and start_frac < min_start:
+        # Nearest-frame rounding of a piece at a non-frame-aligned segment
+        # head can land before the media in-point — bump UP to the grid.
+        start_frac = fd * -((-min_start) // fd)   # ceil to the frame grid
+    if max_end is not None:
+        limit = fd * (max_end // fd)              # floor to the frame grid
+        if end_frac > limit:
+            end_frac = limit
     if end_frac - start_frac < fd:
-        end_frac = start_frac + fd        # never emit a zero / sub-frame edit
+        # 1-frame minimum: prefer shifting the start back (stays inside the
+        # media when the piece hugs its out-point); only extend past the
+        # clamp when there is genuinely less than one frame of media.
+        floor_start = min_start if min_start is not None else Fraction(0)
+        if end_frac - fd >= floor_start:
+            start_frac = end_frac - fd
+        else:
+            end_frac = start_frac + fd
     dur_frac = end_frac - start_frac
     return (
         seconds_to_rational(start_frac, fd),
@@ -549,34 +747,48 @@ def _build_selects_spine(
     copy_seq = 0  # unique per deep-copied clip — drives text-style-def suffixing
     for s in selects:
         try:
-            segment, container_start, container_end = _locate_select_range(parsed, s)
-        except WriterError as e:
-            if "falls outside" in str(e) and skipped is not None:
+            pieces = _locate_select_pieces(parsed, s)
+        except WriterError:
+            # Per-select problems never abort the export — the select is
+            # skipped and surfaced to the caller (an editor exporting 12
+            # selects must still get the other 11, with a visible warning).
+            if skipped is not None:
                 skipped.append(s)
                 continue
             raise
-        seg_idx = parsed.spine_segments.index(segment)
-        # Snap once: start/duration share the same snapped endpoints (so the edit
-        # can't overshoot the source) and the cursor advances by the same snapped
-        # duration (so the new spine stays frame-contiguous).
-        start_str, dur_str, dur_frac = _snap_clip_times(container_start, container_end, fd)
-        offset_str = seconds_to_rational(timeline_cursor, fd)
-        if segment.kind == "mc-clip":
-            node = _build_mc_clip_node(parsed, s, segment, start_str, dur_str, offset_str)
-        else:
-            # sync-clip and asset-clip both round-trip by deep-copying their
-            # source spine element, so both need that original element on hand.
-            if seg_idx >= len(original_spine_clips):
-                if skipped is not None:
-                    skipped.append(s)
-                continue
-            node = _build_copied_clip_node(
-                parsed, s, segment, original_spine_clips[seg_idx],
-                start_str, dur_str, offset_str, copy_seq,
+        for segment, container_start, container_end, min_start, max_end in pieces:
+            # Identity lookup, not value equality: two visually identical
+            # segments (same B-roll used twice) must map to their own
+            # original spine elements.
+            seg_idx = next(
+                (i for i, x in enumerate(parsed.spine_segments) if x is segment),
+                len(parsed.spine_segments),
             )
-            copy_seq += 1
-        spine.append(node)
-        timeline_cursor += dur_frac
+            # Snap once: start/duration share the same snapped endpoints (so the
+            # edit can't overshoot the source) and the cursor advances by the same
+            # snapped duration (so the new spine stays frame-contiguous). The
+            # piece's media bounds clamp the snap — segment/media ends are often
+            # sample-aligned, and nearest-frame rounding at them is exactly the
+            # "Invalid edit with no respective media" FCP rejection.
+            start_str, dur_str, dur_frac = _snap_clip_times(
+                container_start, container_end, fd, max_end, min_start)
+            offset_str = seconds_to_rational(timeline_cursor, fd)
+            if segment.kind == "mc-clip":
+                node = _build_mc_clip_node(parsed, s, segment, start_str, dur_str, offset_str)
+            else:
+                # sync-clip and asset-clip both round-trip by deep-copying their
+                # source spine element, so both need that original element on hand.
+                if seg_idx >= len(original_spine_clips):
+                    if skipped is not None and s not in skipped:
+                        skipped.append(s)
+                    continue
+                node = _build_copied_clip_node(
+                    parsed, s, segment, original_spine_clips[seg_idx],
+                    start_str, dur_str, offset_str, copy_seq,
+                )
+                copy_seq += 1
+            spine.append(node)
+            timeline_cursor += dur_frac
     return spine, timeline_cursor
 
 
@@ -598,14 +810,19 @@ def write_selects_as_new_project(
     custom clip order intact instead of chronologically sorting by source
     in-point.
     """
-    selects = _iter_selects(selects, preserve_order=preserve_order)
+    skipped: List[Select] = []
+    provided = list(selects)
+    selects = _iter_selects(provided, preserve_order=preserve_order, skipped_out=skipped)
     if not selects:
+        if provided:
+            raise WriterError(
+                "all selects have zero length — nothing to export"
+            )
         raise WriterError("no selects provided")
 
     project_title = project_name or _format_suffix(parsed.project_name, "Doza Selects")
     event_title = event_name or (parsed.event_name or "Doza Selects")
-
-    skipped: List[Select] = []
+    zero_len_count = len(skipped)   # zero-length drops from _iter_selects above
     spine_el, total_duration = _build_selects_spine(parsed, selects, skipped=skipped)
     if skipped_out is not None:
         # Surface partial drops to the caller — an editor exporting 12
@@ -613,7 +830,7 @@ def write_selects_as_new_project(
         # bug shipped unnoticed.
         skipped_out.extend(skipped)
 
-    if len(skipped) == len(selects):
+    if len(skipped) - zero_len_count == len(selects):
         raise WriterError(
             "all selects fall outside the timeline segments — nothing to export"
         )
@@ -689,7 +906,10 @@ def _marker_element(
     marker = etree.Element("marker")
     marker.set("start", seconds_to_rational(container_time, fd))
     marker.set("duration", seconds_to_rational(fd, fd))
-    marker.set("value", select.label or "Marker")
+    # Scrubbed like every other user-supplied string: a label pasted with an
+    # XML-illegal control char would otherwise raise ValueError from lxml —
+    # not a WriterError, so it would 500 the whole markers export.
+    marker.set("value", scrub_xml_text(select.label) or "Marker")
     for k, v in _MARKER_KIND_ATTRS.get(select.kind, {}).items():
         marker.set(k, v)
     note_text = scrub_xml_text(select.note)
@@ -715,8 +935,16 @@ def write_markers_on_timeline(
     appropriate spine clips. Selects that fall outside any spine segment are
     silently dropped (that source audio is unused on the timeline).
     """
-    selects = _iter_selects(selects)
+    provided = list(selects)
+    zero_len: List[Select] = []
+    selects = _iter_selects(provided, skipped_out=zero_len)
+    if skipped_out is not None:
+        skipped_out.extend(zero_len)
     if not selects:
+        if provided:
+            raise WriterError(
+                "all selects have zero length — nothing to export"
+            )
         raise WriterError("no selects provided")
 
     root = etree.fromstring(parsed.original_fcpxml_bytes)
@@ -758,12 +986,14 @@ def write_markers_on_timeline(
             continue
         marker = _marker_element(parsed, s, container_time)
         target = element_for_segment[id(segment)]
-        # FCPXML's content model puts marker items BEFORE audio-channel-source,
-        # filters, and metadata; appending after them is DTD-invalid and real
-        # FCP exports carry those children on most spine clips.
+        # FCPXML's content model puts marker items BEFORE sync-source,
+        # audio-channel-source, filters, and metadata; appending after them is
+        # DTD-invalid and real FCP exports carry those children on most spine
+        # clips (every synchronized clip carries <sync-source> — landing the
+        # marker after it fails the whole 'Doza Notes' import).
         _TRAILING_TAGS = (
-            "audio-channel-source", "filter-video", "filter-video-mask",
-            "filter-audio", "metadata",
+            "sync-source", "audio-channel-source", "filter-video",
+            "filter-video-mask", "filter-audio", "metadata",
         )
         insert_at = None
         for idx, child in enumerate(target):

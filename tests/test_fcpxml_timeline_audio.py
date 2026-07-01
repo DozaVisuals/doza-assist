@@ -166,6 +166,35 @@ class TestRenderErrors:
             render_timeline_audio(parsed, str(tmp_path / "out.wav"))
 
 
+class TestSkipMissing:
+    """``skip_missing`` is the My Style partial-import mode: offline segments
+    render as silence instead of one unmounted recorder killing the render."""
+
+    def test_all_sources_missing_raises_even_with_skip(self, tmp_path):
+        audio_a = tmp_path / "missing_a.wav"
+        audio_b = tmp_path / "missing_b.wav"
+        fcpxml = tmp_path / "x.fcpxml"
+        fcpxml.write_text(MIXED_FIXTURE.format(audio_a=str(audio_a), audio_b=str(audio_b)))
+        parsed = parse_fcpxml(fcpxml)
+
+        # Nothing left to mix → still an error, not a silent-only WAV.
+        with pytest.raises(TimelineAudioError, match="no renderable audio"):
+            render_timeline_audio(
+                parsed, str(tmp_path / "out.wav"), skip_missing=True)
+
+    def test_build_command_accepts_filtered_plan(self, parsed_mixed):
+        # render_timeline_audio passes its filtered plan through; the argv
+        # must contain only the surviving inputs.
+        parsed, audio_a, _ = parsed_mixed
+        plan = [item for item in plan_render(parsed)
+                if item["input_path"] == str(audio_a)]
+        argv = build_ffmpeg_command(
+            parsed, "/tmp/out.wav", ffmpeg_bin="ffmpeg", plan=plan)
+        inputs = [argv[i + 1] for i, v in enumerate(argv) if v == "-i"]
+        assert len(inputs) == 2  # anullsrc base + the one surviving input
+        assert str(audio_a) in inputs
+
+
 # ---------- integration: real ffmpeg -----------------------------------------
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
@@ -211,3 +240,41 @@ class TestRealRender:
                 dur = float(result.stdout.strip())
                 # Sequence is 200s; allow a small margin.
                 assert 199.0 <= dur <= 201.0
+
+    def test_skip_missing_renders_offline_segment_as_silence(self, tmp_path):
+        # One recorder on disk, one offline: skip_missing must produce a
+        # full-length WAV (the offline span stays silent) instead of raising.
+        audio_a = tmp_path / "a.wav"
+        self._make_silent_wav(audio_a, 60)
+        audio_b = tmp_path / "offline_recorder.wav"  # never created
+
+        fcpxml = tmp_path / "partial.fcpxml"
+        fcpxml.write_text(MIXED_FIXTURE.format(audio_a=str(audio_a), audio_b=str(audio_b)))
+        parsed = parse_fcpxml(fcpxml)
+
+        out = tmp_path / "timeline.wav"
+        render_timeline_audio(parsed, str(out), skip_missing=True)
+        assert out.exists() and out.stat().st_size > 0
+
+    @pytest.mark.skipif(shutil.which("ffprobe") is None, reason="ffprobe not installed")
+    def test_audioless_input_dropped_instead_of_aborting(self, tmp_path):
+        # b is a genuinely video-only file even though the FCPXML declares
+        # hasAudio="1" for its asset. Feeding it to amix used to abort the
+        # whole render on the missing [n:a] stream; it must render as silence.
+        import subprocess
+        audio_a = tmp_path / "a.wav"
+        self._make_silent_wav(audio_a, 60)
+        video_b = tmp_path / "video_only.mp4"
+        subprocess.run([
+            "ffmpeg", "-y", "-nostdin",
+            "-f", "lavfi", "-i", "color=black:size=64x64:rate=10:duration=1",
+            "-an", str(video_b),
+        ], capture_output=True, check=True)
+
+        fcpxml = tmp_path / "with_video_only.fcpxml"
+        fcpxml.write_text(MIXED_FIXTURE.format(audio_a=str(audio_a), audio_b=str(video_b)))
+        parsed = parse_fcpxml(fcpxml)
+
+        out = tmp_path / "timeline.wav"
+        render_timeline_audio(parsed, str(out))
+        assert out.exists() and out.stat().st_size > 0

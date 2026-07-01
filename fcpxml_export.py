@@ -17,6 +17,7 @@ When imported into FCPX, the editor gets:
 import os
 import re
 import math
+import unicodedata
 import uuid
 from fractions import Fraction
 from urllib.parse import quote
@@ -95,6 +96,31 @@ def get_frame_duration(framerate=23.976):
     return frames_to_fcpxml_time(1, framerate)
 
 
+def _ascii_safe(text):
+    """Fold user text (clip titles, filenames) to ASCII for warning strings.
+
+    Warnings ride the ASCII-only ``X-Export-Warnings`` HTTP header on the
+    legacy attachment path (see app.py), so they must never carry raw
+    non-ASCII. Accented latin folds cleanly (Håkon -> Hakon); anything that
+    folds to nothing keeps a placeholder.
+    """
+    folded = unicodedata.normalize("NFKD", str(text))
+    out = folded.encode("ascii", "ignore").decode("ascii").strip()
+    return out or "untitled"
+
+
+def _note_warning(warnings_out, message):
+    """Append to the caller's warnings channel (no-op when not collecting).
+
+    The generators used to drop clips and degrade modes SILENTLY — the user
+    got a success toast for an incomplete export. Every silent-loss path now
+    records a human-readable reason here; the exporter wrapper surfaces the
+    list via ``ExportResult.warnings``.
+    """
+    if warnings_out is not None:
+        warnings_out.append(message)
+
+
 # FCPXML marker colors
 MARKER_COLORS = {
     'blue': 'Blue',
@@ -111,14 +137,22 @@ MARKER_COLORS = {
 def _probe_audio_decl(source_path):
     """Probe the source's audio for FCPXML declaration.
 
-    Returns ``(asset_audio_attrs, clip_audio_attr, dialogue_srcch)``:
+    Returns ``(asset_audio_attrs, clip_audio_attr, dialogue_srcch, has_audio)``:
       - asset_audio_attrs: e.g. ``' audioSources="1" audioChannels="4" audioRate="48000"'``
       - clip_audio_attr:   ``' audioRole="dialogue"'``
       - dialogue_srcch:    list of 1-based source channels to route as the
                            dialogue (the detected speech track[s] of a
                            multi-mono source), or ``None`` — meaning emit the
                            compact ``<asset-clip>`` and let the asset carry it.
-    or ``('', '', None)`` when the source has no detectable audio.
+      - has_audio:         True when the probe found audio streams, False when
+                           it answered "none" (silent B-roll -> hasAudio="0"),
+                           None when the probe itself failed (no source path /
+                           ffprobe missing / timeout) — the caller keeps the
+                           legacy fail-open hasAudio="1" but must WARN, since
+                           a bare declaration with no layout attrs is the
+                           exact shape that imported silent in Resolve
+                           pre-1.0.20.
+    ``('', '', None, ...)`` when the source has no declarable audio.
 
     Resolve maps FCPXML clip audio from these DECLARATIONS, not from the
     media file's track table — an asset with a bare ``hasAudio="1"`` and an
@@ -137,13 +171,14 @@ def _probe_audio_decl(source_path):
     module for VIDEO_EXTS, so a module-level import would be a cycle.
     """
     if not source_path:
-        return '', '', None
+        return '', '', None, None
     try:
         from exporters.media_probe import (
             get_audio_layout, get_audio_sample_rate, detect_dialogue_channels)
         layout = get_audio_layout(source_path)
         if not layout or layout[1] < 1:
-            return '', '', None
+            # (0, 0) = probed clean, genuinely no audio; None = probe failed.
+            return '', '', None, (False if layout is not None else None)
         n_sources, n_channels = layout
         rate = get_audio_sample_rate(source_path) or 48000
         # A single media file is ONE audio source with N channels — matches
@@ -162,9 +197,63 @@ def _probe_audio_decl(source_path):
             active = detect_dialogue_channels(source_path)
             if active:
                 dialogue_srcch = [idx + 1 for idx in active]
-        return asset_attrs, clip_attr, dialogue_srcch
+        return asset_attrs, clip_attr, dialogue_srcch, True
     except Exception:
-        return '', '', None
+        return '', '', None, None
+
+
+def _resolve_audio_decl(source_path, warnings_out=None):
+    """Probe the audio declaration and derive the asset's ``hasAudio`` value.
+
+    Returns ``(asset_audio_attrs, clip_audio_attr, dialogue_srcch, has_audio_attr)``
+    where ``has_audio_attr`` is the 0/1 the asset declares. A clean "no audio
+    streams" probe declares 0 (the declaration must not contradict the media);
+    a FAILED probe keeps the legacy fail-open 1 — but both paths now say so on
+    the warnings channel instead of silently shipping the pre-1.0.20
+    silent-import shape.
+    """
+    asset_audio_attrs, clip_audio_attr, dialogue_srcch, has_audio = \
+        _probe_audio_decl(source_path)
+    if has_audio is None:
+        _note_warning(warnings_out,
+                      'Could not probe the source audio layout; clips may '
+                      'import silent in DaVinci Resolve. Re-export, or check '
+                      'that the source volume is responsive.')
+    elif has_audio is False:
+        _note_warning(warnings_out,
+                      'Source media has no audio streams; the timeline is '
+                      'exported without audio.')
+    return (asset_audio_attrs, clip_audio_attr, dialogue_srcch,
+            0 if has_audio is False else 1)
+
+
+def _resolve_is_video(source_path, warnings_out=None):
+    """Whether the asset should declare ``hasVideo="1"``.
+
+    Decided by probing for a REAL video stream — the extension alone
+    mislabels an audio-only .mp4/.mov (AAC podcast export, multi-mono
+    field-recorder QuickTime) as video, declaring a component the media
+    doesn't have (FCP/Resolve import the asset offline/invalid, and the
+    connected-clip audio routing would emit a <video> on a video-less
+    asset). The extension heuristic remains only as the fallback when the
+    probe can't answer, with a warning since hasVideo is then a guess.
+
+    Imported lazily — see _probe_audio_decl.
+    """
+    try:
+        from exporters.media_probe import has_video_stream
+        probed = has_video_stream(source_path)
+    except Exception:
+        probed = None
+    if probed is not None:
+        return probed
+    is_video = os.path.splitext(source_path)[1].lower() in VIDEO_EXTS
+    _note_warning(warnings_out,
+                  f'Could not probe "{_ascii_safe(os.path.basename(source_path))}" '
+                  'for a video stream; assuming '
+                  f'{"video" if is_video else "audio-only"} from the file '
+                  'extension.')
+    return is_video
 
 
 def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
@@ -190,11 +279,16 @@ def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
     # e.g. a multi-stream .m4a) would emit a <video> on a video-less asset —
     # invalid FCPXML — so it falls back to the compact <asset-clip>.
     if dialogue_srcch and is_video:
+        # One lane per connected <audio> (-1, -2, ...): two detected mics on
+        # the SAME lane with identical offset/duration are a lane collision
+        # FCP may reject — or silently drop a mic on (two-mic 4-track MXF
+        # interviews). Resolve's own connected-clip export, the model this
+        # form was reverse-engineered from, also descends one lane per item.
         audio = ''.join(
-            f'\n                                <audio lane="-1" ref="r2" '
+            f'\n                                <audio lane="{-(n + 1)}" ref="r2" '
             f'srcCh="{ch}" offset="{asset_start_str}" '
             f'duration="{media_dur_str}" start="{asset_start_str}"/>'
-            for ch in dialogue_srcch)
+            for n, ch in enumerate(dialogue_srcch))
         return (
             f'                        <clip name="{clip_name}" '
             f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
@@ -216,9 +310,21 @@ def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
     )
 
 
+def _dropped_clip_warning(m, i, framerate, media_frames):
+    """Human-readable reason a marker couldn't be placed (dur_f <= 0)."""
+    name = _ascii_safe((m.get('text') or f'Clip {i + 1}')[:80])
+    if seconds_to_frames(m['start'], framerate) >= media_frames:
+        reason = 'starts past the end of the media'
+    else:
+        reason = 'is shorter than one frame'
+    return (f'Skipped "{name}" ({m["start"]:.2f}-{m["end"]:.2f}s): '
+            f'{reason}.')
+
+
 def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
                     source_path=None, media_duration=None, mode="cuts",
-                    width=1920, height=1080, start_tc_frames=0, tc_format="NDF"):
+                    width=1920, height=1080, start_tc_frames=0, tc_format="NDF",
+                    warnings_out=None):
     """
     Generate an FCPXML file.
 
@@ -229,12 +335,24 @@ def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
         source_path: str — path to the source media file (enables cut mode)
         media_duration: float — total duration of the source media in seconds
         mode: "cuts" | "markers" | "both"
+        warnings_out: optional list — human-readable notes for every clip the
+            generator drops and every mode it degrades (previously silent)
 
     Returns:
         str: Complete FCPXML content
+
+    Raises:
+        ValueError: cuts/both mode when NONE of the markers survive frame
+            snapping — an empty-spine timeline reads as a successful export
+            with nothing on it.
     """
     # If no source path, fall back to markers-only mode
     if not source_path or not os.path.exists(source_path):
+        if mode != "markers":
+            _note_warning(warnings_out,
+                          'Source media not found'
+                          + (f' at "{_ascii_safe(source_path)}"' if source_path else '')
+                          + '; exported chapter markers only (no cut clips).')
         mode = "markers"
 
     if mode == "markers":
@@ -242,13 +360,14 @@ def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
 
     return _generate_cuts_timeline(markers, project_name, framerate,
                                    source_path, media_duration, mode, width, height,
-                                   start_tc_frames, tc_format=tc_format)
+                                   start_tc_frames, tc_format=tc_format,
+                                   warnings_out=warnings_out)
 
 
 def _generate_cuts_timeline(markers, project_name, framerate, source_path,
                             media_duration, mode, width=1920, height=1080,
                             start_tc_frames=0,
-                            tc_format="NDF"):
+                            tc_format="NDF", warnings_out=None):
     """Generate FCPXML with actual cuts on the timeline referencing source media.
 
     ``start_tc_frames`` is the media's embedded start timecode in whole frames.
@@ -285,15 +404,15 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
     # File reference — use file:// URL for the source media
     file_url = 'file://' + quote(source_path, safe='/')
-    ext = os.path.splitext(source_path)[1].lower()
 
-    # Determine if video or audio-only
-    is_video = ext in VIDEO_EXTS
+    # Determine if video or audio-only (probed; extension only as fallback)
+    is_video = _resolve_is_video(source_path, warnings_out)
 
     # Declare the source audio so Resolve routes it onto the timeline. Without
     # these the clips import SILENT (Resolve maps FCPXML audio from the
     # declarations, not the file's track table).
-    asset_audio_attrs, clip_audio_attr, dialogue_srcch = _probe_audio_decl(source_path)
+    asset_audio_attrs, clip_audio_attr, dialogue_srcch, has_audio_attr = \
+        _resolve_audio_decl(source_path, warnings_out)
     seq_audio_attrs = ' audioLayout="stereo" audioRate="48k"' if asset_audio_attrs else ''
     # Asset source-TC origin (= embedded start TC). Computed before the spine
     # loop because the connected-clip audio routing references it per edit.
@@ -313,6 +432,11 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         end_f = max(start_f, min(seconds_to_frames(m['end'], framerate), media_frames))
         dur_f = end_f - start_f
         if dur_f <= 0:
+            # Not placeable: sub-frame after snapping, or entirely past the
+            # media. Say so — a silently vanished select looks like a clean
+            # export with a clip missing.
+            _note_warning(warnings_out, _dropped_clip_warning(
+                m, i, framerate, media_frames))
             continue
 
         offset_str = frames_to_fcpxml_time(offset_frames, framerate)
@@ -366,6 +490,15 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         # leaves sub-frame gaps/overlaps on the spine.
         offset_frames += dur_f
 
+    if markers and not spine_clips:
+        # EVERY select rounded to zero length or fell outside the media.
+        # Shipping the empty-spine timeline reads as a working export with
+        # nothing on it (and mis-triggers Resolve's setup modal via
+        # import_empty) — fail loudly instead.
+        raise ValueError(
+            f'No exportable clips - all {len(markers)} selected clip(s) are '
+            'zero-length or lie outside the media.')
+
     spine_block = '\n'.join(spine_clips)
 
     timeline_dur_str = frames_to_fcpxml_time(offset_frames or media_frames, framerate)
@@ -380,7 +513,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 <fcpxml version="1.11">
     <resources>
         <format id="r1"{_format_name_attr(width, height, framerate)} frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
-        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1"{asset_audio_attrs} format="r1">
+        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="{has_audio_attr}"{asset_audio_attrs} format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
     </resources>
@@ -402,12 +535,20 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 
 def generate_story_fcpxml(markers, project_name="Interview", story_title="Story",
                           framerate=23.976, source_path=None, media_duration=None,
-                          width=1920, height=1080, start_tc_frames=0, tc_format="NDF"):
+                          width=1920, height=1080, start_tc_frames=0, tc_format="NDF",
+                          warnings_out=None):
     """
     Generate FCPXML for a Story Builder sequence.
     Creates a single timeline with clips in narrative order as actual edits.
+
+    ``warnings_out`` and the no-placeable-clips ValueError behave as in
+    :func:`generate_fcpxml`.
     """
     if not source_path or not os.path.exists(source_path):
+        _note_warning(warnings_out,
+                      'Source media not found'
+                      + (f' at "{_ascii_safe(source_path)}"' if source_path else '')
+                      + '; exported chapter markers only (no cut clips).')
         return _generate_markers_only(markers, f"{project_name} - {story_title}", framerate, width, height)
 
     frame_dur = get_frame_duration(framerate)
@@ -431,12 +572,13 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
     media_dur_str = frames_to_fcpxml_time(media_frames, framerate)
 
     file_url = 'file://' + quote(source_path, safe='/')
-    ext = os.path.splitext(source_path)[1].lower()
-    is_video = ext in VIDEO_EXTS
+    # Probed video/audio declarations — see _generate_cuts_timeline.
+    is_video = _resolve_is_video(source_path, warnings_out)
 
     # Declare source audio so Resolve routes it (else clips import silent) —
     # see generate_fcpxml.
-    asset_audio_attrs, clip_audio_attr, dialogue_srcch = _probe_audio_decl(source_path)
+    asset_audio_attrs, clip_audio_attr, dialogue_srcch, has_audio_attr = \
+        _resolve_audio_decl(source_path, warnings_out)
     seq_audio_attrs = ' audioLayout="stereo" audioRate="48k"' if asset_audio_attrs else ''
     # Asset source-TC origin (= embedded start TC). Computed before the spine
     # loop because the connected-clip audio routing references it per edit.
@@ -455,6 +597,9 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
         end_f = max(start_f, min(seconds_to_frames(m['end'], framerate), media_frames))
         dur_f = end_f - start_f
         if dur_f <= 0:
+            # Not placeable — surface it (see _generate_cuts_timeline).
+            _note_warning(warnings_out, _dropped_clip_warning(
+                m, i, framerate, media_frames))
             continue
 
         offset_str = frames_to_fcpxml_time(offset_frames, framerate)
@@ -494,6 +639,12 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
         # leaves sub-frame gaps/overlaps on the spine.
         offset_frames += dur_f
 
+    if markers and not spine_clips:
+        # Same guard as _generate_cuts_timeline: never ship an empty spine.
+        raise ValueError(
+            f'No exportable clips - all {len(markers)} selected clip(s) are '
+            'zero-length or lie outside the media.')
+
     spine_block = '\n'.join(spine_clips)
 
     timeline_dur_str = frames_to_fcpxml_time(offset_frames or media_frames, framerate)
@@ -508,7 +659,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
 <fcpxml version="1.11">
     <resources>
         <format id="r1"{_format_name_attr(width, height, framerate)} frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
-        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="1"{asset_audio_attrs} format="r1">
+        <asset id="r2" name="{_escape_xml(os.path.basename(source_path))}" start="{asset_start_str}" duration="{media_dur_str}" hasVideo="{1 if is_video else 0}" hasAudio="{has_audio_attr}"{asset_audio_attrs} format="r1">
             <media-rep kind="original-media" src="{file_url}"/>
         </asset>
     </resources>

@@ -81,6 +81,15 @@ _IMPORT_TIMEOUT = 180.0
 _COLD_HANDLE_TIMEOUT = 30.0
 _RUNNING_HANDLE_TIMEOUT = 8.0
 
+# Worst-case wall clock for one scripted send: the cold handle poll plus the
+# bounded import handshake (210s). Anything driving this module over HTTP
+# must time out ABOVE this figure plus the export-build/probe time that runs
+# before it in the same request — the project.html export fetch uses 240s.
+# Keep the client cap > TOTAL_IMPORT_BUDGET + headroom whenever these budgets
+# change: a 200s client cap once aborted slow-but-SUCCEEDING sends as
+# "Resolve isn't responding", and the user manually imported a duplicate.
+TOTAL_IMPORT_BUDGET = _COLD_HANDLE_TIMEOUT + _IMPORT_TIMEOUT
+
 
 def _call_with_timeout(fn, *args, timeout=_RESOLVE_CALL_TIMEOUT, **kwargs):
     """Run a blocking Resolve scripting call with a hard wall-clock cap.

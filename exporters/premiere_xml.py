@@ -22,7 +22,9 @@ import urllib.parse
 
 from exporters.xml_text import scrub_xml_text
 from fcpxml_export import VIDEO_EXTS
-from exporters.media_probe import get_audio_channels
+from exporters.media_probe import (
+    get_audio_channels, get_audio_layout, detect_dialogue_channels,
+    has_video_stream)
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
@@ -109,8 +111,9 @@ def _add_clipitem(track: ET.Element, *, clip_id: str, name: str, file_ref_id: st
     which channel of the source file each audio clipitem should pull from
     — without it, Resolve (and Premiere) place the clip on the track but
     play silence because they don't know which source stream is wired
-    through. A1 → channel 1, A2 → channel 2; if the source is mono,
-    Resolve handles channel-2 references gracefully.
+    through. The index is the file's FLAT audio track number across all
+    streams (see _resolve_audio_wiring), so a sequence A1 may pull source
+    track 2 when that's where the dialogue lives.
     """
     clipitem = ET.SubElement(track, "clipitem", id=clip_id)
     ET.SubElement(clipitem, "name").text = name
@@ -157,6 +160,69 @@ def _is_video_source(source_path: str) -> bool:
     return ext in VIDEO_EXTS
 
 
+def _resolve_has_video(source_path: str) -> bool:
+    """Whether the sequence should carry video clipitems for this source.
+
+    Decided by probing for a REAL video stream (attached-picture cover art
+    excluded) — the extension alone mislabels an audio-only .mov/.mp4 (AAC
+    podcast export, multi-mono field-recorder QuickTime) as video, emitting
+    <video> clipitems against a file with no picture, which Premiere shows
+    as a black/offline video component on V1 for every select. The extension
+    heuristic remains only as the fallback when the probe can't answer
+    (missing file / no ffprobe), mirroring fcpxml_export._resolve_is_video.
+    The probe reads stream headers only (no decode), so it adds no
+    meaningful latency to the export path.
+    """
+    probed = has_video_stream(source_path) if source_path else None
+    if probed is not None:
+        return probed
+    return _is_video_source(source_path)
+
+
+def _resolve_audio_wiring(source_path: str) -> tuple[list, int]:
+    """``(source track indices to wire, total source channels)`` for a file.
+
+    FCP7 XML numbers a file's audio FLAT across all streams — a stereo file
+    is tracks 1-2, a 4-mono-track broadcast MXF tracks 1-4 — so each returned
+    index lands directly in ``<sourcetrack><trackindex>``. The old two-track
+    cap probed only the first stream, so the lav mic on track 2+ of a
+    multi-mono MXF was never referenced and Premiere played camera scratch
+    or silence (the 1.0.21/1.0.22 layout fixes had landed on FCPXML only).
+
+    Multi-mono (multi-STREAM) sources route ONLY the detected speech-bearing
+    track(s), loudest first — same "Speech tracks only" policy as the FCPXML
+    exporter, so the primary dialogue lands on A1. When loudness can't be
+    measured, every track is wired: extra scratch tracks are mutable, a
+    missing dialogue track is not.
+
+    Single-STREAM multichannel sources (a camcorder 5.1 mix, a 16/32-channel
+    Dante WAV-in-MOV master) keep the historical 2-track cap: dialogue on
+    such mixes lives on the front pair, and wiring all N channels would
+    stack LFE/surrounds as timeline tracks routed straight into the stereo
+    master bus. Falls back to the historical first-stream probe (mono → one
+    track, otherwise stereo) when the layout probe fails.
+    """
+    layout = get_audio_layout(source_path)
+    if layout is None:
+        # Probe FAILED (missing file / no ffprobe) — historical fallback.
+        channels = min(get_audio_channels(source_path) or 2, 2)
+        return list(range(1, channels + 1)), channels
+    n_streams, total_channels = layout
+    if total_channels < 1:
+        # Probed clean with NO audio streams (silent B-roll): wire nothing —
+        # audio clipitems against a silent file import as offline audio.
+        return [], 0
+    if n_streams > 1:
+        active = detect_dialogue_channels(source_path)  # 0-based, loudest first
+        if active:
+            return [idx + 1 for idx in active], total_channels
+        # Unmeasurable multi-mono: wire every track rather than risk
+        # dropping the one carrying the dialogue.
+        return list(range(1, total_channels + 1)), total_channels
+    # Single stream: cap at the front pair (channels 1-2).
+    return list(range(1, min(total_channels, 2) + 1)), total_channels
+
+
 def _build_sequence(
     *,
     sequence_name: str,
@@ -167,11 +233,14 @@ def _build_sequence(
     width: int,
     height: int,
     export_mode: str = "cuts",
-    audio_channels: int = 2,
+    audio_channels: tuple = (1, 2),  # 1-based source track indices (A1..An)
+    file_channelcount: int = 0,      # total channels declared on <file> (0 = len(audio_channels))
 ) -> ET.Element:
     sequence_name = scrub_xml_text(sequence_name)
-    has_video = _is_video_source(source_path)
-    has_audio = True  # transcribed sources always have audio (gated at import)
+    has_video = _resolve_has_video(source_path)
+    # Transcribed sources always have audio (gated at import); an empty
+    # wiring only happens when the probe POSITIVELY found no audio streams.
+    has_audio = bool(audio_channels)
 
     timebase, _, _ = _rate_for(framerate)
 
@@ -198,16 +267,17 @@ def _build_sequence(
     video_track = ET.SubElement(video, "track")
 
     audio = ET.SubElement(media, "audio")
-    ET.SubElement(audio, "numOutputChannels").text = "2"
-    audio_track_1 = ET.SubElement(audio, "track")
-    audio_track_2 = ET.SubElement(audio, "track")
+    ET.SubElement(audio, "numOutputChannels").text = "2"  # stereo master bus
+    # One sequence track per routed source channel (A1..An); each track's
+    # clipitems carry <sourcetrack><trackindex> = the real source track.
+    audio_tracks = [ET.SubElement(audio, "track") for _ in audio_channels]
 
     file_id = "file-1"
     masterclip_id = "masterclip-1"
     file_element = _build_file_element(
         file_id, source_path, framerate, width, height,
         media_duration_frames, has_video, has_audio,
-        audio_channels=audio_channels,
+        audio_channels=file_channelcount or len(audio_channels),
     )
 
     timeline_offset_frames = 0
@@ -267,14 +337,11 @@ def _build_sequence(
             )
             file_emitted = True
 
-        active_audio_tracks = (
-            (audio_track_1,) if audio_channels == 1
-            else (audio_track_1, audio_track_2)
-        )
-        for ch_index, audio_track in enumerate(active_audio_tracks, start=1):
+        for a_index, (audio_track, src_ch) in enumerate(
+                zip(audio_tracks, audio_channels), start=1):
             _add_clipitem(
                 audio_track,
-                clip_id=f"clipitem-a{ch_index}-{clip_index}",
+                clip_id=f"clipitem-a{a_index}-{clip_index}",
                 name=clip_name,
                 file_ref_id=file_id,
                 source_in=src_in_f, source_out=src_out_f,
@@ -285,9 +352,19 @@ def _build_sequence(
                 reuse_file=file_emitted,
                 file_element=None if file_emitted else file_element,
                 comment=comment,
-                audio_channel=ch_index,
+                audio_channel=src_ch,
             )
             file_emitted = True
+
+        if export_mode == "both":
+            # Cuts + Markers: a sequence-level marker spanning the cut's
+            # RECORD range, so Premiere shows a named marker over every clip
+            # (the FCPXML side does the same via per-clip chapter-markers).
+            marker_el = ET.SubElement(sequence, "marker")
+            ET.SubElement(marker_el, "comment").text = comment
+            ET.SubElement(marker_el, "name").text = clip_name
+            ET.SubElement(marker_el, "in").text = str(rec_in_f)
+            ET.SubElement(marker_el, "out").text = str(rec_out_f)
 
         timeline_offset_frames = rec_out_f
 
@@ -310,14 +387,11 @@ def _build_sequence(
                 file_element=None if file_emitted else file_element,
             )
             file_emitted = True
-        active_audio_tracks = (
-            (audio_track_1,) if audio_channels == 1
-            else (audio_track_1, audio_track_2)
-        )
-        for ch_index, audio_track in enumerate(active_audio_tracks, start=1):
+        for a_index, (audio_track, src_ch) in enumerate(
+                zip(audio_tracks, audio_channels), start=1):
             _add_clipitem(
                 audio_track,
-                clip_id=f"clipitem-a{ch_index}-full",
+                clip_id=f"clipitem-a{a_index}-full",
                 name=full_name,
                 file_ref_id=file_id,
                 source_in=0, source_out=media_duration_frames,
@@ -327,7 +401,7 @@ def _build_sequence(
                 masterclip_id=masterclip_id,
                 reuse_file=file_emitted,
                 file_element=None if file_emitted else file_element,
-                audio_channel=ch_index,
+                audio_channel=src_ch,
             )
             file_emitted = True
         timeline_offset_frames = media_duration_frames
@@ -371,8 +445,9 @@ class PremiereXMLExporter(BaseExporter):
         start_tc_frames=0,
         tc_format="NDF",  # interface parity; this target renders its own TC convention  # accepted for interface parity; Premiere uses 0-based file in/out
     ) -> ExportResult:
-        # mono sources get a single audio track (see _build_sequence)
-        audio_channels = min(get_audio_channels(source_path) or 2, 2)
+        # One sequence track per routed source channel (multi-mono sources
+        # bring the real dialogue track(s), mono sources a single track).
+        audio_channels, file_channelcount = _resolve_audio_wiring(source_path)
         if export_type == "labels" and len(markers) == 1:
             suffix = (markers[0].get("text") or "Clip")[:40].strip()
         elif export_type == "labels":
@@ -403,8 +478,9 @@ class PremiereXMLExporter(BaseExporter):
             framerate=framerate,
             width=width,
             height=height,
-            export_mode=("markers" if export_mode == "markers" else "cuts"),
+            export_mode=(export_mode if export_mode in ("markers", "both") else "cuts"),
             audio_channels=audio_channels,
+            file_channelcount=file_channelcount,
         )
         content = _prettify(root)
 
@@ -440,6 +516,9 @@ class PremiereXMLExporter(BaseExporter):
         start_tc_frames=0,
         tc_format="NDF",  # interface parity; this target renders its own TC convention  # accepted for interface parity; Premiere uses 0-based file in/out
     ) -> ExportResult:
+        # Same audio probe as export_markers — the story path used to skip it
+        # and always built A1+A2, giving mono sources a phantom A2 clipitem.
+        audio_channels, file_channelcount = _resolve_audio_wiring(source_path)
         ordered = sorted(
             (m for m in markers if (m.get("end") or 0) > (m.get("start") or 0)),
             key=lambda m: m.get("_order", 0),
@@ -454,6 +533,8 @@ class PremiereXMLExporter(BaseExporter):
             framerate=framerate,
             width=width,
             height=height,
+            audio_channels=audio_channels,
+            file_channelcount=file_channelcount,
         )
         content = _prettify(root)
 

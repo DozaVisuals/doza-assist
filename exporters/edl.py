@@ -338,11 +338,18 @@ class EDLExporter(BaseExporter):
         else:
             suffix = export_type
 
-        # Sort by start time so the EDL is monotonic.
-        ordered = sorted(
-            (m for m in markers if (m.get("end") or 0) > (m.get("start") or 0)),
-            key=lambda m: float(m.get("start") or 0),
-        )
+        # Chronological by default — unless the caller tagged an explicit
+        # manual order ('_order', the Clips-tab drag-reorder; see the labels
+        # loop in app.py _build_nle_export), which wins. Same idiom as
+        # fcpxml_export._generate_cuts_timeline. Record TC stays monotonic
+        # either way: _build_edl runs with sequential_record=True, so record
+        # in/out accumulate clip DURATIONS in event order — only the source
+        # TC column reflects the (possibly non-chronological) manual order.
+        valid = [m for m in markers if (m.get("end") or 0) > (m.get("start") or 0)]
+        if any("_order" in m for m in valid):
+            ordered = sorted(valid, key=lambda m: m.get("_order", float("inf")))
+        else:
+            ordered = sorted(valid, key=lambda m: float(m.get("start") or 0))
 
         title = f"{project_name.strip()} - {suffix.strip()}"
         content, extra_warnings = _build_edl(

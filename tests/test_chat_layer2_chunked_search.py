@@ -670,3 +670,115 @@ class TestKeywordAnchoringInLayer2:
             ai_analysis.chat_about_transcript(t, 'find the best moment')
 
         assert chunk_count[0] >= 2
+
+class TestLayer2DurationTarget:
+    """Duration asks on long transcripts: final_top_k derives from the
+    parsed time budget (not the hardcoded 5), and the ranked pool tops the
+    reranked pick up to >= 0.85x the target before cards are formatted."""
+
+    def test_final_top_k_derived_from_duration(self):
+        t = _make_long_transcript(minutes=90)
+        rerank_top_k = []
+        orig = ai_analysis._rerank_candidates_globally
+
+        def spy_rerank(candidates, message, top_k=5):
+            rerank_top_k.append(top_k)
+            return orig(candidates, message, top_k=top_k)
+
+        def fake_json(sys_p, user_p, **kwargs):
+            return '{"candidates": []}'
+
+        with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json), \
+                patch.object(ai_analysis, '_rerank_candidates_globally', side_effect=spy_rerank):
+            ai_analysis.chat_about_transcript(t, 'give me 6 minutes of the best moments')
+
+        # 360s / 35s-per-clip ≈ 10 — not the default 5, not a count parse.
+        assert rerank_top_k == [ai_analysis._duration_clip_count_hint(360.0)]
+        assert rerank_top_k != [5]
+
+    def test_no_duration_keeps_default_top_k(self):
+        t = _make_long_transcript(minutes=90)
+        rerank_top_k = []
+        orig = ai_analysis._rerank_candidates_globally
+
+        def spy_rerank(candidates, message, top_k=5):
+            rerank_top_k.append(top_k)
+            return orig(candidates, message, top_k=top_k)
+
+        def fake_json(sys_p, user_p, **kwargs):
+            return '{"candidates": []}'
+
+        with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json), \
+                patch.object(ai_analysis, '_rerank_candidates_globally', side_effect=spy_rerank):
+            ai_analysis.chat_about_transcript(t, 'find the best moments')
+
+        assert rerank_top_k == [ai_analysis._CHAT_TOP_K_CLIPS]
+
+    def test_extend_candidates_until_085_of_target(self):
+        picked = [
+            {'start_sec': 0.0, 'end_sec': 30.0, 'title': 'a', 'score': 9},
+            {'start_sec': 100.0, 'end_sec': 130.0, 'title': 'b', 'score': 8},
+        ]
+        pool = picked + [
+            {'start_sec': 200.0 + i * 60, 'end_sec': 230.0 + i * 60,
+             'title': f'p{i}', 'score': 7 - i}
+            for i in range(10)
+        ]
+        out = ai_analysis._extend_candidates_to_duration(picked, pool, 300.0)
+        total = sum(c['end_sec'] - c['start_sec'] for c in out)
+        assert total >= 0.85 * 300.0
+        assert total <= 1.25 * 300.0
+        # Chronological presentation, like _aggregate_chunk_candidates.
+        starts = [c['start_sec'] for c in out]
+        assert starts == sorted(starts)
+
+    def test_extension_skips_overlapping_pool_entries(self):
+        picked = [{'start_sec': 0.0, 'end_sec': 60.0, 'title': 'a', 'score': 9}]
+        pool = [
+            {'start_sec': 10.0, 'end_sec': 55.0, 'title': 'dup', 'score': 8},
+            {'start_sec': 200.0, 'end_sec': 260.0, 'title': 'fresh', 'score': 7},
+        ]
+        out = ai_analysis._extend_candidates_to_duration(picked, pool, 120.0)
+        titles = [c['title'] for c in out]
+        assert 'dup' not in titles
+        assert 'fresh' in titles
+
+    def test_within_target_returns_pick_unchanged(self):
+        picked = [{'start_sec': 0.0, 'end_sec': 120.0, 'title': 'a', 'score': 9}]
+        pool = picked + [{'start_sec': 300.0, 'end_sec': 360.0, 'title': 'extra', 'score': 8}]
+        out = ai_analysis._extend_candidates_to_duration(picked, pool, 120.0)
+        assert out == picked
+
+    def test_integration_duration_ask_emits_enough_material(self):
+        # Full Layer 2 run against a 6-minute ask (K=10): the chunk search
+        # yields twelve 30s candidates, the (failed) rerank falls back to
+        # its top-K — 300s, UNDER the 306s floor — and the extension pass
+        # must close the gap from the pool before cards are formatted.
+        t = _make_long_transcript(minutes=90)
+
+        def fake_json(sys_p, user_p, **kwargs):
+            if 'Candidates (numbered)' in user_p:
+                return ''  # rerank falls back to the aggregated ranking
+            cands = [
+                {'title': f'M{i}',
+                 'start': f'00:{i:02d}:00', 'end': f'00:{i:02d}:30',
+                 'score': 8, 'why': 'w'}
+                for i in range(12)
+            ]
+            import json as _json
+            return _json.dumps({'candidates': cands})
+
+        with patch.object(ai_analysis, '_call_ai_json', side_effect=fake_json):
+            reply = ai_analysis.chat_about_transcript(
+                t, 'give me 6 minutes of the best moments',
+            )
+
+        import re as _re
+        spans = [
+            (ai_analysis._tc_to_seconds(s), ai_analysis._tc_to_seconds(e))
+            for s, e in _re.findall(
+                r'\[CLIP:[^\]]*?start=([\d:]+)[^\]]*?end=([\d:]+)', reply)
+        ]
+        total = sum(e - s for s, e in spans)
+        assert total >= 0.85 * 360.0, f'got {total}s of markers: {reply!r}'
+        assert total <= 1.25 * 360.0

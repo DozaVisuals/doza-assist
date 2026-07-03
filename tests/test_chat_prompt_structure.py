@@ -309,3 +309,58 @@ class TestEndOfPromptReminder:
         )
         assert messages[-1]['content'] == "what do you make of her arc?"
         assert all('FINAL REMINDER' not in m['content'] for m in messages)
+
+
+class TestDurationTargetPromptLine:
+    """A parsed duration ask injects ONE pre-computed guidance line into the
+    final user turn (the same recency slot as _FINAL_REMINDER). The count is
+    computed in Python — small local models follow explicit counts but
+    cannot sum timecodes."""
+
+    def _final_turn(self, message, **kw):
+        segments = _make_transcript()['segments']
+        _, messages = ai_analysis._build_chat_messages(
+            message, [], "Interview", segments,
+            formatted=ai_analysis._format_segments_for_ai(segments),
+            analysis_block='', relevant_excerpts_block='', profile_id=None,
+            **kw,
+        )
+        return messages[-1]['content']
+
+    def test_duration_ask_injects_precomputed_line(self):
+        final = self._final_turn("give me 2 minutes of the best moments")
+        assert 'DURATION TARGET' in final
+        assert '120 seconds' in final
+        k = ai_analysis._duration_clip_count_hint(120.0)
+        assert f'roughly {k} clips' in final
+        # Rides AFTER the contract restatement, still in the final turn.
+        assert final.index('FINAL REMINDER') < final.index('DURATION TARGET')
+
+    def test_no_duration_ask_keeps_final_turn_byte_identical(self):
+        msg = "what did they say?"
+        final = self._final_turn(msg)
+        assert final == f'{msg}\n\n{ai_analysis._FINAL_REMINDER}'
+        assert 'DURATION TARGET' not in final
+
+    def test_conversational_final_turn_never_carries_duration_line(self):
+        # include_final_reminder=False is the conversational-synthesis path.
+        msg = "no clips, what happens in the last 2 minutes?"
+        final = self._final_turn(msg, include_final_reminder=False)
+        assert final == msg
+
+    def test_positional_duration_mention_is_not_a_target(self):
+        final = self._final_turn("find the moment at 14 minutes in")
+        assert 'DURATION TARGET' not in final
+
+    def test_filler_and_content_durations_inject_nothing(self):
+        # 'give me a sec(ond)' is chat filler; a content duration the
+        # speaker mentions is a narrative fact. Neither may inject the
+        # DURATION TARGET line (a 1-second "target" trimmed multi-clip
+        # replies to a single clip).
+        for msg in (
+            "give me a second, checking something",
+            "give me a sec",
+            "find the part where he says it took 3 hours to set up",
+        ):
+            final = self._final_turn(msg)
+            assert 'DURATION TARGET' not in final, msg

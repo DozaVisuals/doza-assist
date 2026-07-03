@@ -2316,6 +2316,38 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 .clip-row-tc { font-family: var(--mono); font-size: 12px; color: var(--text-muted); white-space: nowrap; }
 .clip-row-dur { font-family: var(--mono); font-size: 12px; color: var(--text-muted); min-width: 32px; }
 
+/* Clips-tab drag-to-reorder (mirrors the .story-card drag states) */
+.clip-card.clip-dragging,
+.clip-row.clip-dragging { opacity: 0.4; }
+
+.clip-card.clip-drag-over {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.clip-row.clip-drag-over {
+    background: var(--accent-dim);
+    box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.clip-drag-grip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    cursor: grab;
+    color: var(--text-muted);
+    transition: color 0.15s;
+    /* The grip is the only drag handle (cards themselves are not
+       draggable, so excerpt/title text stays selectable) — a press on it
+       should always read as "drag", never start a text selection. */
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.clip-drag-grip:hover { color: var(--text-secondary); }
+.clip-drag-grip:active { cursor: grabbing; }
+
 .clip-row-play {
     display: flex; align-items: center; justify-content: center;
     width: 22px; height: 22px; border-radius: 50%; border: none;

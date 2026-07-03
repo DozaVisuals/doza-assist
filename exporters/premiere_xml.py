@@ -464,10 +464,17 @@ class PremiereXMLExporter(BaseExporter):
         else:
             suffix = export_type
 
-        ordered = sorted(
-            (m for m in markers if (m.get("end") or 0) > (m.get("start") or 0)),
-            key=lambda m: float(m.get("start") or 0),
-        )
+        # Chronological by default — unless the caller tagged an explicit
+        # manual order ('_order', the Clips-tab drag-reorder; see the labels
+        # loop in app.py _build_nle_export), which wins. Same idiom as
+        # fcpxml_export._generate_cuts_timeline; callers that set no
+        # '_order' (every pre-existing path) keep the chronological sort.
+        # Stable — untagged markers sort last in their input order.
+        valid = [m for m in markers if (m.get("end") or 0) > (m.get("start") or 0)]
+        if any("_order" in m for m in valid):
+            ordered = sorted(valid, key=lambda m: m.get("_order", float("inf")))
+        else:
+            ordered = sorted(valid, key=lambda m: float(m.get("start") or 0))
 
         sequence_name = f"{project_name.strip()} - {suffix.strip()}"
         root = _build_sequence(

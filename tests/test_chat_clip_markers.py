@@ -12,16 +12,23 @@ regress back to the "just text, no clip cards" behavior.
 """
 
 import os
+import re
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import ai_analysis  # noqa: E402
 from ai_analysis import (  # noqa: E402
+    _CLIP_MARKER_RE,
     _auto_wrap_timecode_ranges,
     _clean_chat_response,
+    _enforce_clip_count,
+    _enforce_duration_target,
     _format_clip_title,
     _normalize_clip_markers,
     _strip_raw_json_blobs,
+    _tc_to_seconds,
 )
 
 
@@ -290,3 +297,237 @@ class TestStripRawJsonBlobs:
         src = '[CLIP: start=00:01:00 end=00:01:30 title="Opening shot"]'
         out = _strip_raw_json_blobs(src)
         assert out == src
+
+
+def _marker_spans(text):
+    """[(start_sec, end_sec)] for every fully-formed marker in ``text``."""
+    return [
+        (_tc_to_seconds(s), _tc_to_seconds(e))
+        for s, e in re.findall(r'\[CLIP:[^\]]*?start=([\d:]+)[^\]]*?end=([\d:]+)', text)
+    ]
+
+
+def _marker_total(text):
+    return sum(e - s for s, e in _marker_spans(text))
+
+
+class TestEnforceDurationTarget:
+    """Code-side duration guarantee for chat replies. The pool shapes match
+    what the pipeline actually passes: Layer 1 matched paragraphs
+    ({'start','end','text'}) and Layer 2 aggregated candidates
+    ({'start_sec','end_sec','title','why','score'})."""
+
+    def _paragraph_pool(self, n=6, dur=40, gap=10, offset=100.0):
+        return [
+            {'start': offset + i * (dur + gap), 'end': offset + i * (dur + gap) + dur,
+             'text': f'paragraph {i} about the topic at hand'}
+            for i in range(n)
+        ]
+
+    def test_within_band_is_unchanged(self):
+        text = 'Take this.\n[CLIP: start=00:00:10 end=00:01:00 title="A"]'
+        assert _enforce_duration_target(text, 60.0, self._paragraph_pool()) == text
+
+    def test_top_up_from_paragraph_pool_reaches_floor(self):
+        # 30s emitted against a 120s ask (floor 96s) → deterministic top-up.
+        text = 'Here.\n[CLIP: start=00:00:10 end=00:00:40 title="Opening"]'
+        out = _enforce_duration_target(text, 120.0, self._paragraph_pool())
+        assert _marker_total(out) >= 0.8 * 120.0
+        assert _marker_total(out) <= 1.25 * 120.0
+        # Original prose and marker survive.
+        assert out.startswith('Here.')
+        assert 'start=00:00:10 end=00:00:40' in out
+
+    def test_top_up_accepts_layer2_candidate_shape(self):
+        pool = [
+            {'start_sec': 500.0 + i * 60, 'end_sec': 530.0 + i * 60,
+             'title': f'Moment {i}', 'why': 'strong beat', 'score': 9 - i}
+            for i in range(8)
+        ]
+        out = _enforce_duration_target('no markers here', 180.0, pool)
+        assert _marker_total(out) >= 0.8 * 180.0
+        assert 'note="strong beat"' in out
+
+    def test_top_up_skips_overlaps_with_emitted_clips(self):
+        text = '[CLIP: start=00:01:40 end=00:02:20 title="Already here"]'  # 100-140
+        pool = [
+            {'start': 100.0, 'end': 140.0, 'text': 'duplicate of the emitted clip'},
+            {'start': 300.0, 'end': 340.0, 'text': 'fresh material elsewhere'},
+        ]
+        out = _enforce_duration_target(text, 100.0, pool)
+        spans = _marker_spans(out)
+        assert (300.0, 340.0) in spans
+        assert spans.count((100.0, 140.0)) == 1
+
+    def test_top_up_has_no_60s_cap(self):
+        # _deterministic_clip_markers truncates >60s paragraphs to 45s; the
+        # duration pass must keep the full span or long asks can't be met.
+        pool = [{'start': 200.0, 'end': 290.0, 'text': 'one long continuous story beat'}]
+        out = _enforce_duration_target('x', 90.0, pool)
+        assert (200.0, 290.0) in _marker_spans(out)
+
+    def test_trim_drops_trailing_markers_past_ceiling(self):
+        # 4 × 60s = 240s against a 60s ask (ceiling 75s) → trailing markers
+        # (the weakest-ranked in every emitting path) are dropped.
+        text = '\n'.join(
+            f'[CLIP: start=00:0{i}:00 end=00:0{i + 1}:00 title="c{i}"]' for i in range(4)
+        )
+        out = _enforce_duration_target(text, 60.0, [])
+        assert _marker_total(out) <= 1.25 * 60.0
+        assert _marker_total(out) >= 0.8 * 60.0
+        assert 'start=00:00:00' in out  # first (strongest) survives
+
+    def test_trim_never_dips_below_floor(self):
+        # Two 50s markers against a 60s ask: total 100 > 75 ceiling, but
+        # dropping one leaves 50 >= 48 floor → exactly one is dropped.
+        text = ('[CLIP: start=00:00:00 end=00:00:50 title="a"]\n'
+                '[CLIP: start=00:02:00 end=00:02:50 title="b"]')
+        out = _enforce_duration_target(text, 60.0, [])
+        assert len(_marker_spans(out)) == 1
+
+    def test_empty_pool_returns_text_unchanged_when_under(self):
+        text = '[CLIP: start=00:00:00 end=00:00:10 title="short"]'
+        assert _enforce_duration_target(text, 300.0, []) == text
+        assert _enforce_duration_target(text, 300.0, None) == text
+
+    def test_no_target_guard(self):
+        text = '[CLIP: start=00:00:00 end=00:00:10 title="short"]'
+        assert _enforce_duration_target(text, 0, self._paragraph_pool()) == text
+        assert _enforce_duration_target('', 60.0, self._paragraph_pool()) == ''
+
+    def test_top_up_sanitizes_brackets_in_note(self):
+        # A model-emitted 'why' containing ']' or '"' must not produce a
+        # marker that truncates downstream marker parsing.
+        pool = [{'start_sec': 100.0, 'end_sec': 160.0, 'title': 'T',
+                 'why': 'she said ["exactly] this', 'score': 9}]
+        out = _enforce_duration_target('no markers', 60.0, pool)
+        markers = _CLIP_MARKER_RE.findall(out)
+        assert len(markers) == 1
+        assert '[' not in markers[0][len('[CLIP:'):-1]
+        assert ']' not in markers[0][len('[CLIP:'):-1]
+
+
+class TestTrimRemovesAttachedProse:
+    """A trimmed marker's explanation paragraph must go with it — the
+    rendered reply must never describe clips that no longer exist. And
+    markers whose note contains ']' must trim cleanly (the naive
+    [^\\]]* marker regex left literal junk like 'bracket\"]' behind)."""
+
+    THREE_CLIPS = (
+        'Here are three.\n\n'
+        '[CLIP: start=00:00:00 end=00:01:00 title="A" note="n1"]\n'
+        'Why A matters.\n\n'
+        '[CLIP: start=00:02:00 end=00:03:00 title="B" note="has ] bracket"]\n'
+        'Why B matters.\n\n'
+        '[CLIP: start=00:04:00 end=00:05:00 title="C"]\n'
+        'Why C matters.\n\n'
+        'Overall, a strong arc.'
+    )
+
+    def test_duration_trim_drops_orphaned_prose_and_bracket_residue(self):
+        out = _enforce_duration_target(self.THREE_CLIPS, 60.0, [])
+        assert out.count('[CLIP:') == 1
+        assert 'Why A matters.' in out          # surviving clip keeps its note
+        assert 'Why B matters.' not in out      # trimmed clips lose theirs
+        assert 'Why C matters.' not in out
+        assert 'bracket"]' not in out           # no malformed residue
+        assert 'Overall, a strong arc.' in out  # unrelated closer survives
+
+    def test_clip_count_trim_drops_orphaned_prose_too(self):
+        out = _enforce_clip_count(self.THREE_CLIPS, 1)
+        assert out.count('[CLIP:') == 1
+        assert 'Why A matters.' in out
+        assert 'Why B matters.' not in out
+        assert 'Why C matters.' not in out
+        assert 'bracket"]' not in out
+
+    def test_marker_regex_tolerates_bracket_inside_quoted_note(self):
+        marker = '[CLIP: start=00:00:00 end=00:00:30 title="A" note="he said [wow] there"]'
+        found = _CLIP_MARKER_RE.findall(f'intro\n{marker}\nafter')
+        assert found == [marker]
+
+    def test_consecutive_lines_without_blank_separators(self):
+        text = (
+            'Opening.\n'
+            '[CLIP: start=00:00:00 end=00:01:00 title="A"]\n'
+            'Why A matters.\n'
+            '[CLIP: start=00:02:00 end=00:03:00 title="B"]\n'
+            'Why B matters.'
+        )
+        out = _enforce_duration_target(text, 60.0, [])
+        assert out.count('[CLIP:') == 1
+        assert 'Why A matters.' in out
+        assert 'Why B matters.' not in out
+
+
+class TestDurationAskPipelineRegression:
+    """End-to-end guard for the live bug: 'give me 1 minute of selects' was
+    misparsed as clip-count 1 and the reply hard-trimmed to ONE clip."""
+
+    def _transcript(self):
+        segments = []
+        for i in range(20):
+            start = i * 30.0
+            segments.append({
+                'start': start, 'end': start + 30.0,
+                'start_formatted': f'{int(start) // 3600:02d}:{(int(start) % 3600) // 60:02d}:{int(start) % 60:02d}',
+                'text': f'great selects material segment {i}',
+                'speaker': 'A',
+            })
+        return {'segments': segments}
+
+    def test_one_minute_ask_is_not_trimmed_to_one_clip(self):
+        # Model emits three 20s markers (60s total — exactly the ask).
+        reply = (
+            'Three picks.\n'
+            '[CLIP: start=00:00:00 end=00:00:20 title="Moment one"]\n'
+            '[CLIP: start=00:01:00 end=00:01:20 title="Moment two"]\n'
+            '[CLIP: start=00:02:00 end=00:02:20 title="Moment three"]'
+        )
+        with patch.object(ai_analysis, '_call_ai_chat', return_value=reply):
+            out = ai_analysis.chat_about_transcript(
+                self._transcript(), 'give me 1 minute of selects',
+            )
+        assert len(_marker_spans(out)) == 3, (
+            f'duration ask was trimmed to {len(_marker_spans(out))} clip(s): {out!r}'
+        )
+
+    def test_one_minute_ask_tops_up_a_short_reply(self):
+        # Model emits a single 20s marker against the 60s ask — the
+        # deterministic pass extends from the retrieval pool.
+        reply = 'One pick.\n[CLIP: start=00:00:00 end=00:00:20 title="Moment one"]'
+        with patch.object(ai_analysis, '_call_ai_chat', return_value=reply):
+            out = ai_analysis.chat_about_transcript(
+                self._transcript(), 'give me 1 minute of selects',
+            )
+        assert _marker_total(out) >= 0.8 * 60.0
+
+    def test_explicit_count_ask_still_trims(self):
+        # The count path is untouched when no duration parses.
+        reply = (
+            '[CLIP: start=00:00:00 end=00:00:20 title="Moment one"]\n'
+            '[CLIP: start=00:01:00 end=00:01:20 title="Moment two"]\n'
+            '[CLIP: start=00:02:00 end=00:02:20 title="Moment three"]'
+        )
+        with patch.object(ai_analysis, '_call_ai_chat', return_value=reply):
+            out = ai_analysis.chat_about_transcript(
+                self._transcript(), 'find 2 clips about selects',
+            )
+        assert len(_marker_spans(out)) == 2
+
+    def test_count_wins_over_narrative_fact_duration(self):
+        # 'give me 3 clips from her 5 minute speech': the un-anchored
+        # 5-minute mention used to co-parse as a duration target and
+        # silently disable count enforcement (~9 clips came back). The
+        # explicit count=3 must be enforced; no duration machinery runs.
+        reply = '\n'.join(
+            f'[CLIP: start=00:0{i}:00 end=00:0{i}:20 title="M{i}"]'
+            for i in range(5)
+        )
+        with patch.object(ai_analysis, '_call_ai_chat', return_value=reply):
+            out = ai_analysis.chat_about_transcript(
+                self._transcript(), 'give me 3 clips from her 5 minute speech',
+            )
+        assert len(_marker_spans(out)) == 3, (
+            f'expected count=3 enforcement, got {len(_marker_spans(out))}: {out!r}'
+        )

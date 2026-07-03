@@ -527,6 +527,7 @@
                         <label class="clip-select-all" title="Select all / none">
                             <input type="checkbox" id="clipSelectAll" onchange="toggleAllClipChecks(this.checked)"> All
                         </label>
+                        <button class="btn btn-sm" id="clipSortTimeBtn" onclick="resetClipOrderToTime()" title="Discard the manual order and sort clips chronologically" style="display: none;">Sort by time</button>
                         <button class="btn btn-sm" onclick="exportClips()">Export</button>
                     </div>
                 </div>
@@ -2450,6 +2451,11 @@ transcriptInit({
     labeledSections: {{ (project.labeled_sections or [])|tojson }},
     segmentVectors: {{ (segment_vectors or [])|tojson }},
 });
+// Clips-tab ordering: 'time' (chronological display, default) or 'manual'
+// (the editor drag-reordered the Clips tab — the labelSections ARRAY order
+// is then canonical; see renderClipsTab/clipDrop). Persisted with every
+// saveLabels() POST (transcript.js reads this binding via typeof).
+let clipOrderMode = {{ (project.clip_order_mode or 'time')|tojson }};
 transcriptSearchInit(transcriptContainer);
 
 // ── Chat ──
@@ -3576,10 +3582,18 @@ function renderClipsTab() {
     if (!grid) return;
     const total = document.getElementById('clipsTotal');
 
-    // Sort by start time
-    const sorted = [...labelSections].sort((a, b) => a.start - b.start);
+    // Display order: manual mode = the labelSections ARRAY order (canonical,
+    // set by drag-reorder); time mode = chronological sort of a COPY (the
+    // array itself stays untouched until the first drag normalizes it).
+    const sorted = (clipOrderMode === 'manual')
+        ? [...labelSections]
+        : [...labelSections].sort((a, b) => a.start - b.start);
 
     if (total) total.textContent = sorted.length + ' clip' + (sorted.length !== 1 ? 's' : '');
+
+    // The reset control only makes sense once a manual order exists.
+    const sortBtn = document.getElementById('clipSortTimeBtn');
+    if (sortBtn) sortBtn.style.display = (clipOrderMode === 'manual' && sorted.length > 1) ? '' : 'none';
 
     if (sorted.length === 0) {
         // Re-render the empty state inline. The original #clipsEmpty node
@@ -3613,7 +3627,11 @@ function renderClipsTab() {
         if (clipText.length > 200) clipText = clipText.substring(0, 200) + '...';
 
         if (viewMode === 'list') {
-            return `<div class="clip-row" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}">
+            return `<div class="clip-row" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}"
+                ondragstart="clipDragStart(event)" ondragover="clipDragOver(event)" ondragenter="clipDragEnter(event)" ondragleave="clipDragLeave(event)" ondrop="clipDrop(event)" ondragend="clipDragEnd(event)">
+                <span class="clip-drag-grip" title="Drag to reorder" onmousedown="clipGripMouseDown(event)">
+                    <svg viewBox="0 0 10 16" fill="currentColor" width="8" height="13"><circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="3" cy="6" r="1.2"/><circle cx="7" cy="6" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="14" r="1.2"/><circle cx="7" cy="14" r="1.2"/></svg>
+                </span>
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
                 <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
@@ -3628,8 +3646,13 @@ function renderClipsTab() {
             </div>`;
         }
 
-        return `<div class="clip-card" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}" style="border-left: 3px solid var(--${colorVar});">
+        return `<div class="clip-card" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}"
+            ondragstart="clipDragStart(event)" ondragover="clipDragOver(event)" ondragenter="clipDragEnter(event)" ondragleave="clipDragLeave(event)" ondrop="clipDrop(event)" ondragend="clipDragEnd(event)"
+            style="border-left: 3px solid var(--${colorVar});">
             <div class="clip-card-head">
+                <span class="clip-drag-grip" title="Drag to reorder" onmousedown="clipGripMouseDown(event)">
+                    <svg viewBox="0 0 10 16" fill="currentColor" width="8" height="13"><circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="3" cy="6" r="1.2"/><circle cx="7" cy="6" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="14" r="1.2"/><circle cx="7" cy="14" r="1.2"/></svg>
+                </span>
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-card-title" title="${safeTitle}">${safeTitle}</span>
                 <span class="clip-card-duration">${formatDuration(duration)}</span>
@@ -3773,6 +3796,139 @@ function removeClipFromLibrary(id) {
     renderClipsTab();
 }
 
+// ── Clips drag-to-reorder (mirrors the Story Builder pattern; keyed by
+// data-clip-id, not index, so it is immune to render order) ──
+let clipDragItem = null;
+
+// renderClipsTab innerHTML-wipes the export-selection checkboxes; capture
+// the checked ids around any reorder re-render and restore them after.
+function _captureClipChecks() {
+    const ids = new Set();
+    document.querySelectorAll('.clip-check:checked').forEach(cb => {
+        ids.add(parseInt(cb.dataset.clipId));
+    });
+    return ids;
+}
+
+function _restoreClipChecks(ids) {
+    document.querySelectorAll('.clip-check').forEach(cb => {
+        cb.checked = ids.has(parseInt(cb.dataset.clipId));
+    });
+    updateClipSelection();
+}
+
+// Grip-gated dragging: cards/rows are NOT draggable by default — a
+// draggable ancestor hijacks mouse-down-and-move over the clip title /
+// excerpt text into an HTML5 drag, killing click-drag text selection
+// (verified in Electron). Pressing the grip arms `draggable` on its
+// card/row so the ensuing gesture drags the whole card; it disarms on the
+// next mouseup (press without drag) or in clipDragEnd (after a drag).
+function clipGripMouseDown(e) {
+    const card = e.currentTarget.closest('.clip-card, .clip-row');
+    if (!card) return;
+    card.draggable = true;
+    document.addEventListener('mouseup', () => { card.draggable = false; }, { once: true });
+}
+
+function clipDragStart(e) {
+    // No reordering while an export is in flight: the checked-subset export
+    // temporarily persists ONLY the selected clips server-side, and a drop
+    // mid-export would fire a full-array save that races the subset write
+    // (export ships ALL clips) and then gets clobbered by the export's
+    // finally-restore (the drag is silently lost). preventDefault cancels
+    // the native drag before it starts.
+    if (typeof _exportInFlight !== 'undefined' && _exportInFlight) {
+        e.preventDefault();
+        showToast('An export is running — reordering is paused until it finishes.');
+        return;
+    }
+    clipDragItem = e.currentTarget;
+    e.currentTarget.classList.add('clip-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', e.currentTarget.dataset.clipId);
+}
+
+function clipDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+}
+
+function clipDragEnter(e) {
+    e.preventDefault();
+    const card = e.target.closest('.clip-card, .clip-row');
+    if (card && card !== clipDragItem) card.classList.add('clip-drag-over');
+}
+
+function clipDragLeave(e) {
+    const card = e.target.closest('.clip-card, .clip-row');
+    if (card) card.classList.remove('clip-drag-over');
+}
+
+function clipDrop(e) {
+    e.preventDefault();
+    const card = e.target.closest('.clip-card, .clip-row');
+    if (!card || !clipDragItem || card === clipDragItem) return;
+    card.classList.remove('clip-drag-over');
+
+    const fromId = parseInt(clipDragItem.dataset.clipId);
+    const toId = parseInt(card.dataset.clipId);
+    if (Number.isNaN(fromId) || Number.isNaN(toId) || fromId === toId) return;
+
+    const checkedIds = _captureClipChecks();
+
+    // First drag while in chronological mode: normalize the array to the
+    // DISPLAYED order first, so what the user sees is what they reorder
+    // (array order becomes canonical once we flip to manual below).
+    if (clipOrderMode !== 'manual') {
+        labelSections.sort((a, b) => a.start - b.start);
+    }
+
+    // Snapshot AFTER normalization but BEFORE the move (and BEFORE the mode
+    // flip) so the transcript Undo button reverts a mis-drag to exactly the
+    // state the user was looking at: snapshotting pre-normalization would
+    // "restore" the raw insertion order — an arrangement that was never
+    // displayed — and snapshotting post-flip would leave Undo of a FIRST
+    // drag stuck in manual mode (stray "Sort by time" button, persisted
+    // clip_order_mode='manual') even though the order is back to time.
+    _snapshotForUndo();
+    clipOrderMode = 'manual';
+
+    const fromIdx = labelSections.findIndex(s => s.id === fromId);
+    const toIdx = labelSections.findIndex(s => s.id === toId);
+    if (fromIdx === -1 || toIdx === -1) return;
+
+    const [moved] = labelSections.splice(fromIdx, 1);
+    labelSections.splice(toIdx, 0, moved);
+
+    // Order (and clip_order_mode) ride the debounced /labels save. No
+    // _notifyCollectionClip here — the collection hook is add/remove only,
+    // and a reorder adds/removes nothing.
+    saveLabels();
+    renderClipsTab();
+    _restoreClipChecks(checkedIds);
+}
+
+function clipDragEnd(e) {
+    e.currentTarget.classList.remove('clip-dragging');
+    e.currentTarget.draggable = false;  // disarm the grip-armed drag
+    document.querySelectorAll('.clip-drag-over').forEach(el => el.classList.remove('clip-drag-over'));
+    clipDragItem = null;
+}
+
+// "Sort by time" reset — discard the manual order: re-sort the persisted
+// array chronologically and drop back to the default display mode.
+function resetClipOrderToTime() {
+    if (clipOrderMode !== 'manual') return;
+    const checkedIds = _captureClipChecks();
+    _snapshotForUndo();
+    clipOrderMode = 'time';
+    labelSections.sort((a, b) => a.start - b.start);
+    saveLabels();
+    renderClipsTab();
+    _restoreClipChecks(checkedIds);
+    showToast('Clips sorted by time');
+}
+
 function exportClips() {
     const checked = document.querySelectorAll('.clip-check:checked');
     if (checked.length > 0) {
@@ -3858,6 +4014,10 @@ async function exportSelectedClips() {
                 await _exportFCPXMLRoundTrip({
                     sources: ['client_selects'],
                     mode: 'selects_project',
+                    // Manual clip order rides the persisted array; the
+                    // writer's _iter_selects skips its chronological sort
+                    // when this is set (app.py already reads the body flag).
+                    preserve_order: clipOrderMode === 'manual',
                 }, `Exported ${checkedIds.size} clips`);
             } catch (err) {
                 reportExportError(err);
@@ -4357,6 +4517,10 @@ async function exportFCPXML(category) {
                 return await _exportFCPXMLRoundTrip({
                     sources: [rtSource],
                     mode: 'selects_project',
+                    // Manual Clips-tab order applies only to the clips
+                    // source — AI buckets have no manual ordering.
+                    preserve_order: rtSource === 'client_selects'
+                        && clipOrderMode === 'manual',
                 });
             }
         }
@@ -4609,12 +4773,19 @@ async function exportFCPXMLMulticam() {
             }
         }
 
+        // Manual Clips-tab order applies only when "My Clips" is the SOLE
+        // source — mixing AI buckets into a manual interleave is undefined,
+        // so combined exports keep the writer's chronological default.
+        const preserveOrder = clipOrderMode === 'manual'
+            && sources.length === 1 && sources[0] === 'client_selects';
+
         maybeShowExportBusy(delivery, 'fcp');  // multicam round-trip targets FCP
         try {
             const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mode, sources, deliver_to: delivery }),
+                body: JSON.stringify({ mode, sources, deliver_to: delivery,
+                                       preserve_order: preserveOrder }),
             });
             const data = await res.json().catch(() => ({}));
             hideBusy();
@@ -5362,6 +5533,15 @@ function _endExport() {
 // used to export stale in/out points (HTTP error) or kill the click handler
 // with an unhandled rejection (network error). Returns true on success.
 async function _persistLabelSections(sectionsList) {
+    // Flush (not just cancel) any pending debounced full-array save FIRST:
+    // a 500ms saveLabels timer still pending from a drag/label edit would
+    // otherwise land AFTER the subset write below and resurrect the full
+    // clip list right as the export route reads it server-side. Flushing
+    // (rather than cancelling) also keeps the drag's clip_order_mode flip,
+    // which this subset write deliberately omits.
+    if (typeof flushSaveLabels === 'function') {
+        try { await flushSaveLabels(); } catch (_) { /* fetch errors already logged */ }
+    }
     try {
         const res = await fetch(`/project/${PROJECT_ID}/labels`, {
             method: 'POST',
@@ -5558,7 +5738,13 @@ async function buildStory() {
             updateStoryBuildSelect();
             renderStoryList();
             renderStorySequence(data.build);
-            showToast('Story built!');
+            if (data.duration_shortfall_note) {
+                // Honest-numbers warning: the build came in short of the
+                // requested runtime because usable material ran out.
+                showToast(data.duration_shortfall_note, true, 8000);
+            } else {
+                showToast('Story built!');
+            }
         } else {
             showToast('Error: ' + (data.error || 'Failed to build story'), true);
             if (storyBuilds.length === 0) document.getElementById('storyEmpty').style.display = '';

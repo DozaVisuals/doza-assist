@@ -381,8 +381,16 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     safe_name = _escape_xml(project_name)
     uid = f"doza-{uuid.uuid4().hex[:8]}"
 
-    # Sort markers by start time
-    markers = sorted(markers, key=lambda m: m['start'])
+    # Sort markers by start time — unless the caller tagged an explicit manual
+    # order ('_order', the Clips-tab drag-reorder; see the labels loop in
+    # app.py _build_nle_export), which wins. Same idiom as
+    # generate_story_fcpxml; callers that set no '_order' (every pre-existing
+    # path) keep the chronological sort. Stable — untagged markers sort last
+    # in their input order.
+    if any('_order' in m for m in markers):
+        markers = sorted(markers, key=lambda m: m.get('_order', float('inf')))
+    else:
+        markers = sorted(markers, key=lambda m: m['start'])
 
     # Media duration fallback
     if not media_duration and markers:

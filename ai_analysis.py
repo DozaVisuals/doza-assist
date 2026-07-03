@@ -6,6 +6,7 @@ Uses Ollama (local) or Claude API for story structure and social clip suggestion
 import hashlib
 import os
 import json
+import re
 import threading
 from collections import OrderedDict
 
@@ -40,6 +41,21 @@ _EXTRACTIVE_VERB_STARTS = (
     'surfaces', 'search', 'searches', 'identify', 'identifies', 'gather',
     'gathers', 'compile', 'compiles', 'fetch', 'extract', 'extracts',
     'point me', 'point out', 'pick',
+    # Assembly verbs, "me"-suffixed forms — "build me a 2-minute cut" is
+    # unambiguously a clip ask, not discussion. Without these,
+    # duration-targeted builds were classified conversational and never
+    # reached the clip pipeline (or, on >60-min projects, diverted to
+    # prose-only synthesis).
+    'build me', 'make me', 'cut me',
+)
+# Bare assembly verbs are ambiguous English ("make sense of...", "cut to
+# the chase...", "create a description of..." are all discussion). They
+# flip the classification to extractive ONLY when the message also carries
+# an anchored duration target or a deliverable noun (_DURATION_INTENT_NOUNS)
+# — "make a 90 second teaser" yes, "make it shorter" no.
+_CONDITIONAL_ASSEMBLY_VERB_STARTS = (
+    'build', 'builds', 'make', 'makes', 'cut', 'cuts', 'create', 'creates',
+    'assemble', 'assembles',
 )
 _NO_CLIP_SIGNALS = (
     'no clip', 'without clip', 'no markers', 'without markers',
@@ -90,7 +106,6 @@ def _is_conversational_query(message: str, segments=None) -> bool:
                     speaker_tokens.add(part)
         if speaker_tokens:
             # Word-boundary check so "mae" doesn't match "make" or "name"
-            import re
             for tok in speaker_tokens:
                 if re.search(rf'\b{re.escape(tok)}\b', msg):
                     return False
@@ -101,6 +116,19 @@ def _is_conversational_query(message: str, segments=None) -> bool:
     for verb in _EXTRACTIVE_VERB_STARTS:
         # Match either "verb" or "verb me" / "show me" patterns
         if first_token == verb or first_two == verb:
+            return False
+    # Bare assembly verbs flip only with corroborating deliverable intent:
+    # an anchored duration target ("make a 90 second teaser") or a
+    # deliverable noun later in the message ("cut a highlight reel").
+    # Without that anchor, "make sense of...", "cut to the chase...",
+    # "create a description..." stay conversational.
+    if first_token in _CONDITIONAL_ASSEMBLY_VERB_STARTS:
+        if parse_target_duration_seconds(message) is not None:
+            return False
+        # Scan tokens AFTER the verb — "cut" itself is a deliverable noun
+        # and must not self-anchor ("cut to the chase").
+        rest_tokens = re.findall(r"[a-z0-9']+", stripped)[1:]
+        if any(t in _DURATION_INTENT_NOUNS for t in rest_tokens):
             return False
     return True
 
@@ -508,7 +536,21 @@ def _build_chat_messages(message, history, project_name, segments,
         # history, immediately before generation. Only the FINAL turn carries
         # it — replayed history turns come from chat_history, which stores the
         # raw message, so the KV prefix stays stable across turns.
-        messages.append({'role': 'user', 'content': f'{message}\n\n{_FINAL_REMINDER}'})
+        final_tail = _FINAL_REMINDER
+        # Duration ask ("give me 2 minutes of selects"): one pre-computed
+        # guidance line in the same recency slot. The clip count is derived
+        # in code — small local models follow explicit counts but cannot
+        # sum timecodes, so the arithmetic never rides on the model.
+        target_seconds = parse_target_duration_seconds(message)
+        if target_seconds and not _is_conversational_query(message, segments=segments):
+            hint_clips = _duration_clip_count_hint(target_seconds)
+            final_tail = (
+                f'{final_tail}\n\nDURATION TARGET: I asked for about '
+                f'{int(round(target_seconds))} seconds of material in total. '
+                f'Suggest roughly {hint_clips} clips so their combined runtime '
+                f'reaches that total — do not stop early.'
+            )
+        messages.append({'role': 'user', 'content': f'{message}\n\n{final_tail}'})
     else:
         messages.append({'role': 'user', 'content': message})
     return system_message, messages
@@ -655,10 +697,21 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
             language_directive_text=directive_plain,
             skip_title_anchor=skip_title_anchor,
         )
-    # Enforce explicit clip count from the user message. Gemma 4B
-    # routinely ignores "1 clip" / "one more" / "another" and emits 2-3.
-    # Trim server-side so the user sees what they asked for.
-    cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
+    # A duration ask and a clip-count ask contradict each other — "1 minute
+    # of selects" says nothing about clip count (and used to be misparsed
+    # as clip-count 1 and hard-trimmed to ONE clip). When a duration target
+    # parses, the deterministic duration pass owns the reply; otherwise the
+    # explicit-count trim applies as before.
+    target_seconds = parse_target_duration_seconds(message)
+    if target_seconds is None:
+        # Enforce explicit clip count from the user message. Gemma 4B
+        # routinely ignores "1 clip" / "one more" / "another" and emits 2-3.
+        # Trim server-side so the user sees what they asked for.
+        cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
+    elif not _is_conversational_query(message, segments=segments):
+        cleaned = _enforce_duration_target(
+            cleaned, target_seconds, matched, transcript=transcript,
+        )
     return cleaned
 
 
@@ -918,9 +971,19 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             language_directive_text=directive_plain,
             skip_title_anchor=skip_title_anchor,
         )
-    # Enforce explicit clip count from the user message — same defense
-    # the non-streaming path applies. See _enforce_clip_count.
-    cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
+    # Same count-vs-duration fork the non-streaming path applies: a parsed
+    # duration target supersedes clip-count trimming (they contradict), and
+    # the deterministic duration pass runs in the same post-stream slot the
+    # salvage pass already occupies.
+    target_seconds = parse_target_duration_seconds(message)
+    if target_seconds is None:
+        # Enforce explicit clip count from the user message — same defense
+        # the non-streaming path applies. See _enforce_clip_count.
+        cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
+    elif not _is_conversational_query(message, segments=segments):
+        cleaned = _enforce_duration_target(
+            cleaned, target_seconds, matched, transcript=transcript,
+        )
     yield ('done', cleaned)
 
 
@@ -948,6 +1011,13 @@ def _count_clip_markers(text):
     return len(re.findall(r'\[CLIP:[^\]]*?start=', text))
 
 
+# Negative lookahead shared by every count pattern that captures a number:
+# a number attached to a time unit is a DURATION, not a clip count ("give
+# me 1 minute of selects" must never become clip-count 1 and get trimmed
+# to a single clip). parse_target_duration_seconds owns those asks.
+_NOT_TIME_UNIT = r'(?![\s-]*(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)\b)'
+
+
 def _detect_explicit_clip_count(message):
     """Parse an explicit clip count from a user message, or return ``None``.
 
@@ -958,6 +1028,9 @@ def _detect_explicit_clip_count(message):
     - "one more", "another (clip|one)" → 1
     - "a few more", "some more" → 3 (upper bound of "a few")
 
+    Numbers attached to time units never count ("give me 1 minute",
+    "two more minutes") — see ``_NOT_TIME_UNIT``.
+
     Returns ``None`` if no explicit count is detectable — the model uses
     its judgment in that case (1-4 typical per the prompt).
     """
@@ -967,20 +1040,20 @@ def _detect_explicit_clip_count(message):
     msg = message.lower().strip()
 
     # "1 clip" / "2 clips" / etc.
-    m = re.search(r'\b(\d+)\s+clips?\b', msg)
+    m = re.search(r'\b(\d+)' + _NOT_TIME_UNIT + r'\s+clips?\b', msg)
     if m:
         return max(1, int(m.group(1)))
 
     # "1 more" / "2 more" / "3 more" — digit + "more" (with optional "clip"
     # after). The user means N additional clips. Same parse as "1 clip"
     # but with "more" as the noun.
-    m = re.search(r'\b(\d+)\s+more(?:\s+clips?)?\b', msg)
+    m = re.search(r'\b(\d+)\s+more(?:\s+clips?)?\b' + _NOT_TIME_UNIT, msg)
     if m:
         return max(1, int(m.group(1)))
 
     # "find me 3" / "give me 2" / "pull 4" — bare digit after a request verb.
     m = re.search(
-        r'\b(?:find|give|pull|show|get|make)\s+(?:me\s+)?(\d+)\b',
+        r'\b(?:find|give|pull|show|get|make)\s+(?:me\s+)?(\d+)\b' + _NOT_TIME_UNIT,
         msg,
     )
     if m:
@@ -992,7 +1065,10 @@ def _detect_explicit_clip_count(message):
         return word_to_num[m.group(1)]
 
     # Word-form + "more": "two more", "three more clips", etc.
-    m = re.search(r'\b(one|two|three|four|five)\s+more(?:\s+clips?)?\b', msg)
+    m = re.search(
+        r'\b(one|two|three|four|five)\s+more(?:\s+clips?)?\b' + _NOT_TIME_UNIT,
+        msg,
+    )
     if m:
         return word_to_num[m.group(1)]
 
@@ -1007,48 +1083,476 @@ def _detect_explicit_clip_count(message):
         r'|give\s+me\s+one(?:\s+clip)?'
         r'|find\s+me\s+one(?:\s+clip)?'
         r'|the\s+single\s+(?:best|strongest)'
-        r'|the\s+(?:best|strongest)\s+(?:one|clip|moment|single))\b',
+        r'|the\s+(?:best|strongest)\s+(?:one|clip|moment|single))\b'
+        + _NOT_TIME_UNIT,
         msg,
     ):
         return 1
 
     # "A few more" / "some more" — cap at 3.
-    if re.search(r'\b(?:a\s+few(?:\s+more)?|some\s+more|several)\b', msg):
+    if re.search(r'\b(?:a\s+few(?:\s+more)?|some\s+more|several)\b' + _NOT_TIME_UNIT, msg):
         return 3
 
     return None
 
 
+# Marker pattern shared by the server-side enforcement passes. Tolerates
+# ']' inside quoted attribute values (note="he said [wow] ..." ) — the
+# naive [^\]]* form stops at the first ']' and leaves malformed residue
+# behind when such a marker is trimmed. Quoted runs are matched as whole
+# units; both alternatives exclude newlines so a marker with a broken
+# quote can never swallow the rest of the reply.
+_CLIP_MARKER_RE = re.compile(r'\[CLIP:(?:"[^"\n]*"|[^\]"\n])*\]')
+
+
+def _strip_trimmed_clip_tail(tail):
+    """Remove every [CLIP:] marker in ``tail`` along with the per-clip
+    prose attached to it: the marker's own line and the explanation
+    lines that immediately follow it (up to the next blank line). Prose
+    that precedes the first trimmed marker belongs to the last SURVIVING
+    clip and is kept, as is unrelated prose after a note paragraph
+    ("Overall these show her arc."). Used by both trim passes —
+    _enforce_clip_count and _enforce_duration_target — so a trimmed
+    reply never describes clips that no longer exist.
+    """
+    if not tail:
+        return tail
+    kept = []
+    dropping = False  # consuming a trimmed marker's attached note lines
+    for line in tail.splitlines():
+        if _CLIP_MARKER_RE.search(line):
+            dropping = True
+            continue
+        if not line.strip():
+            dropping = False  # a blank line ends the trimmed clip's note
+            kept.append(line)
+            continue
+        if dropping:
+            continue
+        kept.append(line)
+    out = '\n'.join(kept)
+    # Drop any leftover "Here's another:" / "Plus:" connector lines that
+    # introduced the trimmed clips. A connector is a short line ending in
+    # a colon with nothing meaningful on either side.
+    out = re.sub(r'\n\s*[A-Z][^.\n]{0,40}:\s*\n', '\n', out)
+    # Collapse the blank-line runs the dropped paragraphs leave behind.
+    out = re.sub(r'\n[ \t]*\n(?:[ \t]*\n)+', '\n\n', out)
+    return out
+
+
 def _enforce_clip_count(text, target):
     """Trim ``text`` so it contains at most ``target`` [CLIP:] markers.
 
-    Strips excess markers and any prose that immediately precedes them
-    (single-line "preamble" prose introducing each excess clip), but
-    preserves the through-line opener and the first ``target`` clips.
-    Used to defend against Gemma 4 ignoring the explicit count rule in
-    the prompt — the prompt asks for "EXACTLY 1" but the model emits
-    2-3 anyway, so we enforce server-side.
+    Strips excess markers and the prose attached to them (preamble lines
+    introducing each excess clip and the per-clip explanation paragraph
+    after it), but preserves the through-line opener and the first
+    ``target`` clips. Used to defend against Gemma 4 ignoring the
+    explicit count rule in the prompt — the prompt asks for "EXACTLY 1"
+    but the model emits 2-3 anyway, so we enforce server-side.
     """
     if target is None or target < 1 or not text:
         return text
-    import re
-    clips = list(re.finditer(r'\[CLIP:[^\]]*\]', text))
+    clips = list(_CLIP_MARKER_RE.finditer(text))
     if len(clips) <= target:
         return text
     # Cut at the end of the target-th marker. Anything after gets the
-    # CLIP markers stripped (so any salvageable prose stays, but no
-    # excess clip cards render). In practice the tail is almost always
-    # just more markers + their preamble lines, so the trim is clean.
+    # CLIP markers stripped along with their attached prose (so any
+    # salvageable standalone prose stays, but no excess clip cards — and
+    # no orphaned per-clip notes — render).
     cut = clips[target - 1].end()
     head = text[:cut]
-    tail = text[cut:]
-    tail = re.sub(r'\[CLIP:[^\]]*\]', '', tail)
-    # Drop any leftover "Here's another:" / "Plus:" connector lines that
-    # introduced the excess clips. A connector is a short line ending in
-    # a colon with nothing meaningful on either side.
-    tail = re.sub(r'\n\s*[A-Z][^.\n]{0,40}:\s*\n', '\n', tail)
+    tail = _strip_trimmed_clip_tail(text[cut:])
     result = (head + tail).rstrip()
     return result
+
+
+# ── Duration-target parsing + enforcement ────────────────────────────────
+#
+# The bundled Gemma models cannot do arithmetic: any "give me N minutes"
+# ask must be parsed and enforced in CODE, never delegated to the model.
+# parse_target_duration_seconds is the single shared parser — project chat,
+# collection chat (pro/collection/chat.py imports it the same way it
+# imports _enforce_clip_count), and Story Builder all call it.
+
+_DURATION_WORD_NUMBERS = {
+    'one': 1.0, 'two': 2.0, 'three': 3.0, 'four': 4.0, 'five': 5.0,
+    'six': 6.0, 'seven': 7.0, 'eight': 8.0, 'nine': 9.0, 'ten': 10.0,
+    'a': 1.0, 'an': 1.0,
+}
+
+# Tokens immediately BEFORE a duration phrase that mark it as a timeline
+# position ("at 14 minutes", "the first 2 minutes") or as the SOURCE
+# footage ("from the 40 minute interview") rather than a requested length.
+_DURATION_POSITION_BEFORE = frozenset({
+    'at', 'after', 'before', 'past', 'from', 'until', 'till', 'by',
+    'first', 'last', 'opening', 'final', 'initial', 'closing', 'within',
+})
+# Filler skipped when walking back to the governing word ("build me a 14
+# minute video" → back past 'a'/'me' to 'build').
+_DURATION_SKIP_BEFORE = frozenset({
+    'a', 'an', 'the', 'this', 'that', 'me', 'my', 'us', 'our', 'another',
+    'about', 'approximately', 'roughly', 'around', 'like', 'exactly',
+    'only', 'just', 'some',
+})
+# Tokens immediately AFTER that mark a position, a per-clip length, or a
+# relative/comparative adjustment ("14 minutes in", "the 2 minute mark",
+# "30 seconds each", "cut 30 seconds off", "make it 2 minutes shorter",
+# "make each clip 30 seconds long") — none of these are total-output asks.
+_DURATION_POSITION_AFTER = frozenset({
+    'in', 'into', 'mark', 'point', 'ago', 'each', 'apiece',
+    'shorter', 'longer', 'less', 'off', 'long', 'early', 'late',
+})
+# Request verbs that anchor a duration as the requested OUTPUT length.
+_DURATION_REQUEST_VERBS = frozenset({
+    'give', 'make', 'build', 'cut', 'create', 'assemble', 'pull', 'find',
+    'get', 'want', 'need', 'do', 'produce', 'edit', 'put', 'string',
+    'deliver', 'export', 'compile', 'grab', 'show',
+})
+# Deliverable nouns that anchor "14 minute X" as the requested OUTPUT length.
+_DURATION_INTENT_NOUNS = frozenset({
+    'cut', 'video', 'edit', 'version', 'story', 'sequence', 'reel',
+    'montage', 'piece', 'film', 'teaser', 'trailer', 'supercut', 'promo',
+    'highlight', 'highlights', 'selects', 'stringout', 'assembly', 'rough',
+    'draft', 'episode', 'short', 'documentary', 'doc', 'build', 'clip',
+    'clips', 'moments',
+})
+
+# Plausibility floor for a parsed target: nobody asks the app to build a
+# sub-15-second deliverable, but "give me a sec" / "give me 10 seconds"
+# (as in: wait a moment) are common chat filler. Below this → None.
+_DURATION_MIN_TARGET_SECONDS = 15.0
+
+
+def parse_target_duration_seconds(message):
+    """Parse a requested TOTAL output duration from a user message.
+
+    Pure regex — no LLM. Recognized shapes: "14 minute" / "14-minute" /
+    "90 sec" / "1.5 hours", word numbers ("one minute", "a minute", plus
+    "and a half"), and "m:ss"/"h:mm:ss" literals when clearly anchored to
+    a request ("make a 2:30 reel"). Only ANCHORED durations count — a
+    request verb governs the number ("build me a 14 minute...") or a
+    deliverable noun / "of" follows it ("14 minute cut", "2 minutes of
+    selects"). Content durations the speaker merely mentions ("the 3 hour
+    rescue", "she spends 2 minutes describing..."), positional references
+    ("the moment at 14 minutes in", "the first 2 minutes", "what did she
+    say at 1:35"), relative adjustments ("cut 30 seconds off", "make it
+    2 minutes shorter"), and messages with competing durations all return
+    ``None`` — callers fall back to today's behavior when the ask is
+    ambiguous. False positives here are worse than a missed ask: every
+    hit activates deterministic duration enforcement downstream.
+
+    Returns float seconds or ``None``.
+    """
+    if not message:
+        return None
+    import re
+    msg = message.lower()
+
+    def _governing_before(idx):
+        tokens = re.findall(r"[a-z0-9']+", msg[:idx])
+        for tok in reversed(tokens):
+            if tok in _DURATION_SKIP_BEFORE:
+                continue
+            return tok
+        return ''
+
+    def _token_after(idx):
+        m = re.match(r"[^a-z0-9]*([a-z0-9']+)", msg[idx:])
+        return m.group(1) if m else ''
+
+    def _classify(start, end):
+        """'positional' (skip), 'anchored' (a clear ask), or 'plain'."""
+        after = _token_after(end)
+        if after in _DURATION_POSITION_AFTER:
+            return 'positional'
+        # Per-clip phrasing can put "each" BEFORE the number too:
+        # "make each clip 30 seconds long".
+        preceding = re.findall(r"[a-z0-9']+", msg[:start])[-4:]
+        if any(t in ('each', 'every', 'apiece') for t in preceding):
+            return 'positional'
+        governing = _governing_before(start)
+        if governing in _DURATION_POSITION_BEFORE:
+            return 'positional'
+        if governing in _DURATION_REQUEST_VERBS:
+            return 'anchored'
+        if after == 'of' or after in _DURATION_INTENT_NOUNS:
+            return 'anchored'
+        # "14 minute paranormal investigation video": a deliverable noun
+        # within the next few tokens still anchors the ask.
+        tail = re.findall(r"[a-z0-9']+", msg[end:])[:5]
+        if any(t in _DURATION_INTENT_NOUNS for t in tail):
+            return 'anchored'
+        return 'plain'
+
+    candidates = []  # (seconds, classification)
+
+    # Number + unit: "14 minute(s)", "14-minute", "90 sec", "1.5 hours",
+    # "one minute", "a minute", "half an hour".
+    unit_re = re.compile(
+        r'(?<![\d:.])\b'
+        r'(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten'
+        r'|an?|half\s+an?)'
+        r'[\s-]+'
+        r'(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b'
+    )
+    for m in unit_re.finditer(msg):
+        raw = m.group(1)
+        if raw.startswith('half'):
+            qty = 0.5
+        else:
+            try:
+                qty = float(raw)
+            except ValueError:
+                qty = _DURATION_WORD_NUMBERS.get(raw)
+        if not qty:
+            continue
+        # Bare article + unit ("give me a second", "give me a sec",
+        # "hang on, a minute") is chat filler, not an ask. It only counts
+        # when it clearly quantifies deliverable material: "a minute OF
+        # selects" or a deliverable noun close behind ("a minute and a
+        # half of selects").
+        if raw in ('a', 'an'):
+            article_after = _token_after(m.end())
+            article_tail = re.findall(r"[a-z0-9']+", msg[m.end():])[:5]
+            if article_after != 'of' and not any(
+                    t in _DURATION_INTENT_NOUNS for t in article_tail):
+                continue
+        unit = m.group(2)
+        mult = 3600.0 if unit[0] == 'h' else (60.0 if unit[0] == 'm' else 1.0)
+        secs = qty * mult
+        # "a minute and a half" / "two minutes and a half"
+        if re.match(r'\s+and\s+a\s+half\b', msg[m.end():]):
+            secs *= 1.5
+        if secs < _DURATION_MIN_TARGET_SECONDS or secs > 6 * 3600:
+            continue
+        cls = _classify(m.start(), m.end())
+        if cls == 'positional':
+            continue
+        candidates.append((float(secs), cls))
+
+    # "m:ss" / "h:mm:ss" literals — a bare timecode in prose is a position
+    # reference, so these only count when anchored to a request.
+    tc_re = re.compile(r'(?<![\d:.])(\d{1,2}):(\d{2})(?::(\d{2}))?(?![\d:.])')
+    for m in tc_re.finditer(msg):
+        if _classify(m.start(), m.end()) != 'anchored':
+            continue
+        a, b, c = m.group(1), m.group(2), m.group(3)
+        if c is not None:
+            secs = int(a) * 3600 + int(b) * 60 + int(c)
+        else:
+            secs = int(a) * 60 + int(b)
+        if _DURATION_MIN_TARGET_SECONDS <= secs <= 6 * 3600:
+            candidates.append((float(secs), 'anchored'))
+
+    if not candidates:
+        return None
+    # Anchored-only: a 'plain' duration is a narrative fact the message
+    # mentions ("it took 3 hours to set up", "her 5 minute speech"), not
+    # a deliverable ask. Honoring a lone plain candidate turned ordinary
+    # locate/discuss messages into duration-enforced clip floods, and
+    # silently discarded explicit clip counts ("give me 3 clips from her
+    # 5 minute speech" must enforce count=3, no duration).
+    anchored = {s for s, cls in candidates if cls == 'anchored'}
+    if len(anchored) == 1:
+        return anchored.pop()
+    return None  # no anchored duration, or competing anchored ones
+
+
+def _duration_clip_count_hint(target_seconds, avg_clip_seconds=35.0):
+    """Clip-count guidance for a duration ask, computed in code.
+
+    Small local models follow explicit counts far better than time budgets,
+    so prompts state "roughly K clips" with K derived here. 35s is the
+    observed average of retrieval paragraphs and chat clip suggestions.
+    """
+    try:
+        k = int(round(float(target_seconds) / max(1.0, float(avg_clip_seconds))))
+    except (TypeError, ValueError):
+        return 2
+    return max(2, min(24, k))
+
+
+# Band shared by the chat-side duration pass: top up under 0.8× the target,
+# trim past 1.25×. Wider than the story band because chat pools are
+# retrieval-ranked paragraphs, not curated segments.
+_DURATION_TARGET_FLOOR = 0.8
+_DURATION_TARGET_CEILING = 1.25
+
+
+def _duration_candidate_span(cand, transcript=None):
+    """Normalize a ranked-pool candidate to ``(start, end, title, why)``.
+
+    Tolerates both pool shapes: Layer 1 matched paragraphs ({'start',
+    'end', 'text'}) and Layer 2 aggregated candidates ({'start_sec',
+    'end_sec', 'title', 'why'}). ``transcript`` supplies title text when
+    the candidate carries neither. Returns ``None`` when no usable
+    timespan exists.
+    """
+    if not isinstance(cand, dict):
+        return None
+    try:
+        if 'start_sec' in cand or 'end_sec' in cand:
+            s = float(cand.get('start_sec', 0) or 0)
+            e = float(cand.get('end_sec', s) or s)
+        else:
+            s = float(cand.get('start', 0) or 0)
+            e = float(cand.get('end', s) or s)
+    except (TypeError, ValueError):
+        return None
+    if e <= s:
+        return None
+    title = (cand.get('title') or '').strip()
+    if not title:
+        text = (cand.get('text') or '').strip()
+        if not text and transcript:
+            for seg in (transcript.get('segments') or []):
+                seg_start = float(seg.get('start', 0) or 0)
+                seg_end = float(seg.get('end', seg_start) or seg_start)
+                if seg_end >= s and seg_start <= e and (seg.get('text') or '').strip():
+                    text = seg['text'].strip()
+                    break
+        title = ' '.join(text.split()[:5]).rstrip('.,!?;:')[:40] or 'Transcript moment'
+    title = title.replace('"', "'").replace('[', '(').replace(']', ')')
+    # Brackets in the note would corrupt marker parsing downstream —
+    # neutralize them the same way titles are.
+    why = (cand.get('why') or '').strip().replace('"', "'")
+    why = why.replace('[', '(').replace(']', ')')
+    return s, e, title, why
+
+
+def _spans_overlap(start, end, spans):
+    """True when [start, end] overlaps any span by >50% of the shorter."""
+    dur = max(1.0, end - start)
+    for os_, oe in spans:
+        overlap = max(0.0, min(end, oe) - max(start, os_))
+        shorter = min(dur, max(1.0, oe - os_))
+        if overlap / shorter > 0.5:
+            return True
+    return False
+
+
+def _grouped_spans_overlap(start, end, group, spans):
+    """Group-aware variant of ``_spans_overlap`` for multi-source pools.
+
+    ``spans`` are ``(start, end, group)`` triples where ``group`` names the
+    timeline the span's timestamps are local to (e.g. a collection merges
+    several projects, each with its OWN zero-based clock — identical
+    numbers on different timelines are DIFFERENT footage). Two spans only
+    collide when they share a group. A ``None`` group means the timeline
+    is unknown; it conservatively collides with every group (better to
+    skip a candidate than emit the same moment twice). With every group
+    ``None`` this reduces exactly to ``_spans_overlap``.
+    """
+    dur = max(1.0, end - start)
+    for os_, oe, og in spans:
+        if group is not None and og is not None and og != group:
+            continue  # different timelines — equal numbers, unrelated footage
+        overlap = max(0.0, min(end, oe) - max(start, os_))
+        shorter = min(dur, max(1.0, oe - os_))
+        if overlap / shorter > 0.5:
+            return True
+    return False
+
+
+def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
+                             group_key=None):
+    """Deterministically hold a chat reply's [CLIP:] total to a duration ask.
+
+    Measures the emitted markers with ``_tc_to_seconds``, tops up from the
+    ranked candidate pool when the total lands under 0.8× the target (the
+    ``_deterministic_clip_markers`` machinery, minus its 60s cap, skipping
+    time-overlaps with clips already emitted), and trims trailing markers
+    — the weakest-ranked in every emitting path — when the total passes
+    1.25×. The model is never asked to do this arithmetic.
+
+    ``group_key`` (optional, additive): name of the candidate-dict field
+    carrying a per-source timeline id — e.g. ``'project_name'`` for
+    collection pools that merge several projects, each keeping its OWN
+    zero-based clock (identical timestamps on different timelines are
+    different footage, not overlaps). When set, the overlap bookkeeping
+    runs per group: a marker only blocks candidates on the SAME timeline,
+    with an emitted marker's group read from its ``project="..."`` field
+    (double-quoted, the shape this pipeline itself writes). Markers or
+    candidates without a group conservatively collide with every group.
+    Default ``None`` keeps the historical single-timeline behavior
+    byte-for-byte for existing callers.
+    """
+    if not text or not target_seconds or target_seconds <= 0:
+        return text
+    import re
+    markers = []
+    for m in _CLIP_MARKER_RE.finditer(text):
+        sm = re.search(r'start=([\d:.]+)', m.group(0))
+        em = re.search(r'end=([\d:.]+)', m.group(0))
+        if not (sm and em):
+            continue
+        s = _tc_to_seconds(sm.group(1))
+        e = _tc_to_seconds(em.group(1))
+        markers.append((m, s, max(s, e)))
+    marker_groups = []
+    if group_key:
+        # The group of an already-emitted marker is its project="..."
+        # field — written double-quoted by every emitting path (model
+        # markers via the pro stash/restore, repair markers, and this
+        # function's own top-up after pro re-attachment). No field →
+        # unknown timeline → collides with every group (conservative).
+        for m, _s, _e in markers:
+            gm = re.search(r'project="([^"]*)"', m.group(0))
+            grp = gm.group(1).strip() if gm else ''
+            marker_groups.append(grp or None)
+    total = sum(e - s for _m, s, e in markers)
+    floor = _DURATION_TARGET_FLOOR * float(target_seconds)
+    ceiling = _DURATION_TARGET_CEILING * float(target_seconds)
+
+    if markers and total > ceiling:
+        keep = len(markers)
+        while keep > 1 and total > ceiling:
+            last_dur = markers[keep - 1][2] - markers[keep - 1][1]
+            if total - last_dur < floor:
+                break
+            total -= last_dur
+            keep -= 1
+        if keep == len(markers):
+            return text
+        cut = markers[keep - 1][0].end()
+        head = text[:cut]
+        tail = _strip_trimmed_clip_tail(text[cut:])
+        return (head + tail).rstrip()
+
+    if total >= floor:
+        return text
+
+    # TOP-UP: extend with ranked candidates the reply didn't already cover.
+    taken = [
+        (s, e, marker_groups[i] if marker_groups else None)
+        for i, (_m, s, e) in enumerate(markers)
+    ]
+    lines = []
+    for cand in (candidates or []):
+        if total >= floor:
+            break
+        span = _duration_candidate_span(cand, transcript)
+        if span is None:
+            continue
+        s, e, title, why = span
+        dur = e - s
+        cand_group = None
+        if group_key:
+            cand_group = str(cand.get(group_key) or '').strip() or None
+        if _grouped_spans_overlap(s, e, cand_group, taken):
+            continue
+        if total + dur > ceiling:
+            continue
+        taken.append((s, e, cand_group))
+        total += dur
+        start_tc, end_tc = _seconds_to_tc(s), _seconds_to_tc(e)
+        if why:
+            lines.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}" note="{why}"]')
+        else:
+            lines.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}"]')
+    if not lines:
+        return text
+    return (text.rstrip() + '\n\n' + '\n'.join(lines)).strip()
 
 
 def _format_clip_title(title: str) -> str:
@@ -1503,11 +2007,16 @@ def _truncate_repetitions(text, min_block_chars=120):
     return text
 
 
+# Every number-capturing pattern carries _NOT_TIME_UNIT so duration asks
+# ("give me one minute of selects") fall through to the default instead of
+# being read as a count.
 _CLIP_COUNT_PATTERNS = [
-    (r'\b(?:find|give|pull|get|show|grab)\s+(?:me\s+)?(\d+)\s+clips?\b', None),
-    (r'\b(\d+)\s+clips?\b', None),
+    (r'\b(?:find|give|pull|get|show|grab)\s+(?:me\s+)?(\d+)' + _NOT_TIME_UNIT + r'\s+clips?\b', None),
+    (r'\b(\d+)' + _NOT_TIME_UNIT + r'\s+clips?\b', None),
     (r'\bthe\s+(?:single\s+)?best\s+(?:one|clip)\b', 1),
-    (r'\bjust\s+one\b|\bgive\s+me\s+one\b|\bonly\s+one\b', 1),
+    (r'\bjust\s+one\b' + _NOT_TIME_UNIT
+     + r'|\bgive\s+me\s+one\b' + _NOT_TIME_UNIT
+     + r'|\bonly\s+one\b' + _NOT_TIME_UNIT, 1),
 ]
 
 
@@ -2419,8 +2928,10 @@ def _parse_user_clip_count(message):
             return 1
 
     import re as _re
-    # Digits followed by clip(s)/moment(s)/soundbite(s)/quote(s)
-    m = _re.search(r'\b(\d{1,2})\s+(?:great\s+|strong\s+|best\s+)?(?:clip|moment|soundbite|quote|excerpt)s?\b', msg)
+    # Digits followed by clip(s)/moment(s)/soundbite(s)/quote(s). The
+    # _NOT_TIME_UNIT guard keeps duration phrasings ("2 minute clips") out —
+    # those belong to parse_target_duration_seconds.
+    m = _re.search(r'\b(\d{1,2})' + _NOT_TIME_UNIT + r'\s+(?:great\s+|strong\s+|best\s+)?(?:clip|moment|soundbite|quote|excerpt)s?\b', msg)
     if m:
         try:
             n = int(m.group(1))
@@ -3186,6 +3697,42 @@ def _aggregate_chunk_candidates(candidates, top_k=_CHAT_TOP_K_CLIPS):
     return kept
 
 
+def _extend_candidates_to_duration(picked, pool, target_seconds):
+    """Append ranked pool candidates until ``picked`` covers a duration ask.
+
+    Layer 2's duration guarantee: the rerank pass picks quality, this pass
+    guarantees quantity — keep appending the highest-scored unused pool
+    candidates (skipping >50% time-overlaps with what's already picked)
+    until the total reaches 0.85× the target or the pool runs out.
+    Presentation stays chronological, matching _aggregate_chunk_candidates.
+    """
+    if not target_seconds or target_seconds <= 0:
+        return picked
+    floor = 0.85 * float(target_seconds)
+    ceiling = _DURATION_TARGET_CEILING * float(target_seconds)
+    out = list(picked or [])
+    taken = [(c.get('start_sec', 0), c.get('end_sec', 0)) for c in out]
+    total = sum(max(0.0, e - s) for s, e in taken)
+    if total >= floor:
+        return out
+    ranked = sorted((pool or []), key=lambda c: -c.get('score', 0))
+    for cand in ranked:
+        if total >= floor:
+            break
+        s = cand.get('start_sec', 0)
+        e = cand.get('end_sec', 0)
+        dur = e - s
+        if dur <= 0 or _spans_overlap(s, e, taken):
+            continue
+        if total + dur > ceiling:
+            continue
+        out.append(cand)
+        taken.append((s, e))
+        total += dur
+    out.sort(key=lambda c: c.get('start_sec', 0))
+    return out
+
+
 def _format_clip_cards_from_candidates(candidates):
     """Emit the final chat reply text with `[CLIP:]` markers server-side.
 
@@ -3743,21 +4290,29 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
                 print(f"Layer 2 chunk error: {e}")
 
     # Honor an explicit user-stated clip count ("find me 1", "the best one",
-    # "give me 3"). Falls back to _CHAT_TOP_K_CLIPS when the user didn't
-    # specify a number. The pre-rerank candidate pool is kept generous so
-    # the global rerank still has range to pick from, even when the final
-    # output is just one clip.
-    user_count = _parse_user_clip_count(message)
-    final_top_k = user_count if user_count is not None else _CHAT_TOP_K_CLIPS
+    # "give me 3"). A duration ask overrides both the count parse and the
+    # hardcoded top-K: the clip count derives from the parsed time budget,
+    # and the ranked pool below tops the final pick up to that budget. The
+    # pre-rerank candidate pool is kept generous so the global rerank still
+    # has range to pick from, even when the final output is just one clip.
+    target_seconds = parse_target_duration_seconds(message)
+    if target_seconds is not None:
+        final_top_k = _duration_clip_count_hint(target_seconds)
+    else:
+        user_count = _parse_user_clip_count(message)
+        final_top_k = user_count if user_count is not None else _CHAT_TOP_K_CLIPS
     pool_top_k = max(final_top_k * 3, _CHAT_TOP_K_CLIPS * 3)
 
     top = _aggregate_chunk_candidates(all_candidates, top_k=pool_top_k)
+    duration_pool = list(top)
     # Cross-chunk synthesis pass: per-chunk scores aren't comparable across
     # chunks (each model call sees only its own window), so a final low-temp
     # rerank decides the global best. Falls back to the local-score top-K
     # if the synthesis call fails — better to ship the original aggregator's
     # answer than to drop everything.
     top = _rerank_candidates_globally(top, message, top_k=final_top_k)
+    if target_seconds is not None:
+        top = _extend_candidates_to_duration(top, duration_pool, target_seconds)
     return _format_clip_cards_from_candidates(top)
 
 
@@ -3835,13 +4390,23 @@ def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_nam
                 print(f"Layer 2 chunk error: {e}")
             yield ('progress', f'{completed}/{total} chunks searched')
 
-    user_count = _parse_user_clip_count(message)
-    final_top_k = user_count if user_count is not None else _CHAT_TOP_K_CLIPS
+    # Mirror of the non-streaming variant: a duration ask derives the clip
+    # count from the parsed time budget and tops the pick up from the
+    # ranked pool afterward.
+    target_seconds = parse_target_duration_seconds(message)
+    if target_seconds is not None:
+        final_top_k = _duration_clip_count_hint(target_seconds)
+    else:
+        user_count = _parse_user_clip_count(message)
+        final_top_k = user_count if user_count is not None else _CHAT_TOP_K_CLIPS
     pool_top_k = max(final_top_k * 3, _CHAT_TOP_K_CLIPS * 3)
 
     yield ('progress', 'Picking the best moments…')
     top = _aggregate_chunk_candidates(all_candidates, top_k=pool_top_k)
+    duration_pool = list(top)
     top = _rerank_candidates_globally(top, message, top_k=final_top_k)
+    if target_seconds is not None:
+        top = _extend_candidates_to_duration(top, duration_pool, target_seconds)
     yield ('done', _format_clip_cards_from_candidates(top))
 
 
@@ -5253,11 +5818,17 @@ def build_story(transcript, message, project_name="Interview", segment_vectors=N
     If segment_vectors is provided, the model is given the pre-classified segments
     instead of having to re-analyze the raw transcript. This makes builds faster and
     much more consistent across runs.
+
+    Duration asks ("build me a 14 minute cut") are parsed in code —
+    parse_target_duration_seconds — and enforced deterministically after the
+    model's pick (_enforce_duration_budget); the model's arithmetic is never
+    trusted. When no duration parses, behavior is unchanged.
     """
+    target_seconds = parse_target_duration_seconds(message)
     if segment_vectors:
         return _build_story_from_vectors(
             segment_vectors, message, project_name, profile_id=profile_id,
-            output_language=output_language,
+            output_language=output_language, target_seconds=target_seconds,
         )
 
     formatted = _format_transcript_for_ai(transcript)
@@ -5270,7 +5841,7 @@ Rules:
 - NON-CHRONOLOGICAL BY DEFAULT: the transcript below is presented in recording order; your output MUST NOT preserve that order unless the user explicitly requested chronological OR a clip's meaning depends on temporal sequence (cause→effect chain).
 - ANTI-PATTERN CHECK: if your selected clips' start_time values are monotonically increasing in your chosen order, you have likely defaulted to chronological — re-examine and re-sequence.
 - Each clip should be 5-30 seconds long unless the moment requires more breathing room
-- DURATION IS CRITICAL: If the user requests a specific duration (e.g. "4 minute story"), you MUST hit that target. Calculate the total duration of all clips you select by adding up (end_time - start_time) for each clip. Aim for roughly 3-4 clips per minute. For a 4-minute story, that means 12-16 clips totaling approximately 3:30-4:30 of content. If your first selection is too short, add more clips.
+- DURATION IS CRITICAL: If the user requests a specific duration, the request includes a TARGET TOTAL RUNTIME line with the exact numeric band and the minimum clip count already computed. Meet that clip count — undershooting by stopping early is the most common failure. Your selected clips' (end_time - start_time) values must sum inside the stated band.
 - For each clip, provide: a short title, start timecode, end timecode, the transcript excerpt, and a one-sentence editorial note explaining why this clip is in this position
 - Be selective and opinionated. Don't include filler. Every clip should earn its place
 - CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end times. Use string format like "00:02:45"
@@ -5292,13 +5863,19 @@ Rules:
   ]
 }"""
 
+    # Numeric budget line, mirroring the vectors path. No menu exists here,
+    # so the clip-count hint assumes the 5-30s per-clip rule above (~20s).
+    duration_block = ''
+    if target_seconds:
+        duration_block = _story_duration_prompt_block(target_seconds, 20.0) + '\n\n'
+
     prompt = f"""Build a narrative sequence from this interview transcript.
 
 PROJECT: {project_name}
 
 USER REQUEST: {message}
 
-TRANSCRIPT (presented in recording order — re-sequence freely for narrative arc):
+{duration_block}TRANSCRIPT (presented in recording order — re-sequence freely for narrative arc):
 {formatted}
 
 Return ONLY valid JSON. No markdown, no extra text."""
@@ -5309,7 +5886,16 @@ Return ONLY valid JSON. No markdown, no extra text."""
     if directive:
         system_prompt = system_prompt + directive
     response = _call_ai(prompt, system_prompt)
-    return _parse_json_response(response)
+    result = _parse_json_response(response)
+    if target_seconds and isinstance(result, dict) and result.get('clips'):
+        # No vector pool on the raw path — the budget pass still measures,
+        # trims overshoot, reports honest numbers, and flags shortfalls.
+        result['clips'], meta = _enforce_duration_budget(
+            result['clips'], target_seconds, segment_vectors=None,
+        )
+        result['target_duration'] = _format_duration_target(target_seconds)
+        result.update(meta)
+    return result
 
 
 _SEGMENT_VECTOR_SYSTEM_PROMPT = """You are a documentary story analyst. You break interview transcripts into discrete narrative segments and classify them with strict, structured metadata. You always respond in valid JSON only — no prose, no markdown, no code fences."""
@@ -5585,8 +6171,217 @@ def _extract_excerpt_for_range(transcript, tc_in, tc_out, max_words=50):
     return ' '.join(words)
 
 
+# ── Story duration budget ─────────────────────────────────────────────────
+#
+# The model's clip selection is advisory on duration: small Gemma reliably
+# returns ~8-15 clips regardless of the requested runtime (the five-slot
+# arc anchors it near one-clip-per-role), and hydration clamps every clip
+# to its segment's boundaries — so a 14-minute ask came back ~5.5 minutes,
+# every time. The budget is therefore measured and reconciled in code.
+_STORY_BUDGET_FLOOR = 0.9      # top-up trigger / trim floor
+_STORY_BUDGET_CEILING = 1.15   # trim trigger / top-up ceiling
+_STORY_BUDGET_HARD_FLOOR = 0.8  # below this after top-up → shortfall note
+_STORY_SCORE_RANK = {'high': 0, 'medium': 1, 'low': 2}
+# Shortening floor for the overshoot pass: never tighten a clip below
+# this — a sub-15s story beat stops being a usable moment.
+_STORY_MIN_CLIP_SECONDS = 15.0
+
+
+def _format_duration_target(seconds):
+    """Format parsed seconds for display: 840 → '14:00', 5400 → '1:30:00'."""
+    s = max(0, int(round(float(seconds))))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
+
+
+def _story_duration_prompt_block(target_seconds, avg_clip_seconds):
+    """Numeric runtime block injected into the story user prompt.
+
+    Every number is computed here — the 0.9-1.1× band, and the segment
+    count derived from the ACTUAL average duration on offer. The old
+    "3-4 clips per minute" prose heuristic assumed 15-20s clips; vector
+    segments average 25-50s, and the model can't do the correction math.
+    """
+    import math
+    target = int(round(float(target_seconds)))
+    lo = int(round(target * 0.9))
+    hi = int(round(target * 1.1))
+    avg = max(1.0, float(avg_clip_seconds))
+    min_clips = max(1, math.ceil(target / avg))
+    return (
+        f"TARGET TOTAL RUNTIME: {target}s ({_format_duration_target(target)}). "
+        f"Your selected clips' durations must sum to between {lo}s and {hi}s. "
+        f"The average segment available runs ~{int(round(avg))}s, so select at "
+        f"least {min_clips} segments — more if you choose shorter ones. Do not "
+        f"stop early."
+    )
+
+
+def _clip_span_seconds(clip):
+    """Duration of a story clip from its (string) timecodes."""
+    start = _tc_to_seconds(clip.get('start_time'))
+    end = _tc_to_seconds(clip.get('end_time'))
+    return max(0.0, end - start)
+
+
+def _enforce_duration_budget(clips, target_seconds, segment_vectors=None):
+    """Deterministic post-hydration duration budget for story builds.
+
+    Measures the hydrated total against the PARSED target (never the
+    model's echo). Under 0.9× → top up from unused segment vectors,
+    strongest narrative weight first, inserted before the closer so the
+    model's arc survives; 'low'-scored segments (pruned from the menu as
+    filler) are only drafted when even the 0.8× hard floor is otherwise
+    unreachable. Over 1.15× → trim the weakest non-essential clips,
+    never the hook or the closer. Returns ``(clips, meta)`` where meta
+    carries actual_duration_seconds, duration_enforced, and — when the
+    material can't reach 0.8× the target — duration_shortfall_note.
+    """
+    clips = [c for c in (clips or []) if isinstance(c, dict)]
+    target = float(target_seconds)
+    total = sum(_clip_span_seconds(c) for c in clips)
+    floor = _STORY_BUDGET_FLOOR * target
+    hard_floor = _STORY_BUDGET_HARD_FLOOR * target
+    ceiling = _STORY_BUDGET_CEILING * target
+    changed = False
+    shortfall = None
+
+    if total < floor:
+        used_ids = {c.get('seg_id') for c in clips if c.get('seg_id')}
+        taken = [
+            (_tc_to_seconds(c.get('start_time')), _tc_to_seconds(c.get('end_time')))
+            for c in clips
+        ]
+        pool = []
+        for seg in (segment_vectors or []):
+            if not isinstance(seg, dict) or seg.get('seg_id') in used_ids:
+                continue
+            s = _tc_to_seconds(seg.get('timecode_in'))
+            e = _tc_to_seconds(seg.get('timecode_out'))
+            if e <= s:
+                continue
+            pool.append((seg, s, e))
+
+        def _pref(entry):
+            seg, s, _e = entry
+            rank = _STORY_SCORE_RANK.get(
+                (seg.get('narrative_score') or 'medium').lower(), 1)
+            # Nearest picked clip = topical coherence tiebreak.
+            dist = min((abs(s - ts) for ts, _te in taken), default=0.0)
+            return (rank, dist, seg.get('seg_id') or '')
+
+        for seg, s, e in sorted(pool, key=_pref):
+            if total >= floor:
+                break
+            score = (seg.get('narrative_score') or 'medium').lower()
+            if score == 'low' and total >= hard_floor:
+                continue  # low-tier filler only closes a hard shortfall
+            dur = e - s
+            if total + dur > ceiling:
+                continue
+            if _spans_overlap(s, e, taken):
+                continue
+            taken.append((s, e))
+            total += dur
+            changed = True
+            insert_at = len(clips) - 1 if len(clips) >= 2 else len(clips)
+            clips.insert(insert_at, {
+                'order': 0,  # renumbered below
+                'seg_id': seg.get('seg_id'),
+                'title': seg.get('thread_title') or 'Untitled',
+                'start_time': seg.get('timecode_in'),
+                'end_time': seg.get('timecode_out'),
+                'transcript': seg.get('transcript_excerpt', ''),
+                'editorial_note': 'Added to reach the requested runtime.',
+                'narrative_score': seg.get('narrative_score'),
+                'memory_type': seg.get('memory_type'),
+                'beat_type': seg.get('beat_type'),
+            })
+        if total < hard_floor:
+            shortfall = (
+                f"The build reaches {_format_duration_target(total)} of the "
+                f"{_format_duration_target(target)} requested — there wasn't "
+                f"enough usable material to close the gap."
+            )
+    elif total > ceiling:
+        if len(clips) > 2:
+            while total > ceiling:
+                removable = [
+                    (i, c) for i, c in enumerate(clips)
+                    if 0 < i < len(clips) - 1
+                    and (c.get('beat_type') or '').lower() not in ('hook', 'resolution')
+                ]
+                if not removable:
+                    break
+                # Weakest first: lowest narrative weight, later position on ties.
+                removable.sort(key=lambda ic: (
+                    -_STORY_SCORE_RANK.get(
+                        (ic[1].get('narrative_score') or 'medium').lower(), 1),
+                    -ic[0],
+                ))
+                picked = None
+                for i, c in removable:
+                    if total - _clip_span_seconds(c) >= floor:
+                        picked = (i, c)
+                        break
+                if picked is None:
+                    # No removal keeps the floor — drop whichever lands closest
+                    # to the target (if that's an improvement), then stop.
+                    i, c = min(
+                        removable,
+                        key=lambda ic: abs((total - _clip_span_seconds(ic[1])) - target),
+                    )
+                    if abs((total - _clip_span_seconds(c)) - target) < abs(total - target):
+                        total -= _clip_span_seconds(c)
+                        del clips[i]
+                        changed = True
+                    break
+                i, c = picked
+                total -= _clip_span_seconds(c)
+                del clips[i]
+                changed = True
+        # Whole-clip removal can strand a build far over the ceiling: 1-2
+        # clip builds never enter the loop at all, and the loop only ever
+        # removes interior clips (the hook and the closer always survive)
+        # — a "30 second teaser" built from two 40s segments shipped at
+        # 80s. Land the residual inside the band by tightening the longest
+        # clips' end_time toward the target instead. Only end_time ever
+        # moves, and only downward, so each clip stays inside its own
+        # segment's boundaries; nothing is shortened below
+        # _STORY_MIN_CLIP_SECONDS.
+        while total > ceiling:
+            shrinkable = [
+                c for c in clips
+                if _clip_span_seconds(c) > _STORY_MIN_CLIP_SECONDS
+            ]
+            if not shrinkable:
+                break
+            c = max(shrinkable, key=_clip_span_seconds)
+            span = _clip_span_seconds(c)
+            new_span = max(_STORY_MIN_CLIP_SECONDS, span - (total - target))
+            if new_span >= span:
+                break
+            start = _tc_to_seconds(c.get('start_time'))
+            c['end_time'] = _seconds_to_tc(start + new_span)
+            total = sum(_clip_span_seconds(cl) for cl in clips)
+            changed = True
+
+    if changed:
+        for i, c in enumerate(clips, start=1):
+            c['order'] = i
+
+    meta = {
+        'actual_duration_seconds': round(total, 2),
+        'duration_enforced': changed,
+    }
+    if shortfall:
+        meta['duration_shortfall_note'] = shortfall
+    return clips, meta
+
+
 def _build_story_from_vectors(segment_vectors, message, project_name, profile_id=None,
-                              output_language=None):
+                              output_language=None, target_seconds=None):
     """Build a narrative using pre-classified segment vectors as the menu of clips.
 
     Prioritizes "high" narrative scores; uses "episodic" segments for key moments
@@ -5640,8 +6435,11 @@ def _build_story_from_vectors(segment_vectors, message, project_name, profile_id
         "NOT by recording time. Choose and order purely on story logic.",
         "",
     ]
+    menu_durs = []
     for s in ordered:
         dur = _tc_to_sec(s.get('timecode_out', '0:0:0')) - _tc_to_sec(s.get('timecode_in', '0:0:0'))
+        if dur > 0:
+            menu_durs.append(dur)
         menu_lines.append(
             f"- {s.get('seg_id', '?')} [{s.get('timecode_in', '')}-{s.get('timecode_out', '')}] "
             f"dur={int(dur)}s "
@@ -5662,15 +6460,23 @@ Rules:
 - MANDATORY ARC: every selected clip fills exactly one role in this five-slot arc — hook, context, pressure, turn, resolution. Tag each clip's role in its editorial_note (e.g. "ROLE: turn — ..."). The "order" field reflects the arc, NOT the timecode.
 - NON-CHRONOLOGICAL BY DEFAULT: the menu is listed by narrative weight, not by recording time. Your output ordering is independent of timecode_in. Re-sequence ruthlessly. Use chronological order only when the user's brief explicitly asks for it OR when a clip's meaning depends on a prior clip's information (cause→effect chain).
 - ANTI-PATTERN CHECK: before you finalize, scan your selected clips' timecode_in values in your chosen order. If they are monotonically increasing (each clip's timecode_in is later than the previous), you have likely failed to reorder for narrative arc — re-examine and re-sequence unless the story genuinely requires the temporal sequence.
-- DURATION IS CRITICAL: If the user requests a specific duration (e.g. "4 minute story"), you MUST hit that target. Calculate the total duration of all clips you select by adding up (end_time - start_time) for each clip. Each segment in the menu shows its timecode range — use that to calculate duration. Aim for roughly 3-4 clips per minute of requested duration. For a 4-minute story, select enough clips to total approximately 3:30-4:30 of content. If your first selection is too short, add more clips. If too long, trim or remove clips.
+- DURATION IS CRITICAL: If the user requests a specific duration, the request includes a TARGET TOTAL RUNTIME line with the exact numeric band and the minimum segment count already computed from the menu. Meet that segment count — undershooting by stopping early is the most common failure. Every menu line shows dur=<seconds>; your selected segments' dur values must sum inside the stated band. If your selection runs long, remove the weakest segments.
 - ALWAYS include a "reasoning" field: 2-3 conversational sentences in plain language explaining what this story is really about underneath the surface, why this arc works, and what the emotional spine is. Talk like a doc editor, not a corporate brief. No bullet points.
 - Always respond in valid JSON only. No markdown, no prose outside the JSON."""
+
+    # Numeric budget line — computed in code from the parsed target and the
+    # ACTUAL menu durations. '' when no duration was asked for, keeping the
+    # prompt byte-identical to pre-feature behavior.
+    duration_block = ''
+    if target_seconds:
+        avg_menu = (sum(menu_durs) / len(menu_durs)) if menu_durs else 30.0
+        duration_block = _story_duration_prompt_block(target_seconds, avg_menu) + '\n\n'
 
     prompt = f"""PROJECT: {project_name}
 
 USER REQUEST: {message}
 
-AVAILABLE SEGMENTS (pre-classified):
+{duration_block}AVAILABLE SEGMENTS (pre-classified):
 {menu}
 
 Return ONLY valid JSON in this shape:
@@ -5734,12 +6540,22 @@ Return ONLY valid JSON in this shape:
             'beat_type': seg.get('beat_type'),
         })
 
-    return {
+    result = {
         'story_title': parsed.get('story_title', 'Untitled'),
         'target_duration': parsed.get('target_duration', ''),
         'reasoning': parsed.get('reasoning', ''),
         'clips': hydrated,
     }
+    if target_seconds and hydrated:
+        # Code-side budget: measure the hydrated total, top up from unused
+        # vectors, trim overshoot. target_duration becomes the PARSED ask —
+        # the model's echoed string was never validated against anything.
+        result['clips'], meta = _enforce_duration_budget(
+            hydrated, target_seconds, segment_vectors,
+        )
+        result['target_duration'] = _format_duration_target(target_seconds)
+        result.update(meta)
+    return result
 
 
 def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_target=7,

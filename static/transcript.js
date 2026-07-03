@@ -288,14 +288,27 @@ function updateSelectCount() {
 let _undoStack = [];
 
 function _snapshotForUndo() {
-    _undoStack.push(labelSections.map(s => ({ ...s })));
+    _undoStack.push({
+        sections: labelSections.map(s => ({ ...s })),
+        // Clips-tab ordering mode ('time' | 'manual') rides along so Undo of
+        // a drag or "Sort by time" restores HOW the array is displayed, not
+        // just its contents (restoring a manual array while the mode stays
+        // 'time' would leave the restored order invisible — and the next
+        // drag's normalization would destroy it). typeof-guarded: the mode
+        // is a top-level `let` owned by project.html; hosts without it
+        // (Pro Collections) snapshot undefined and restore nothing.
+        orderMode: (typeof clipOrderMode !== 'undefined') ? clipOrderMode : undefined,
+    });
     _setUndoButtonEnabled(true);
 }
 
 function undoLastAction() {
     if (_undoStack.length === 0) return;
     const snap = _undoStack.pop();
-    labelSections = snap.map(s => ({ ...s }));
+    labelSections = snap.sections.map(s => ({ ...s }));
+    if (snap.orderMode !== undefined && typeof clipOrderMode !== 'undefined') {
+        clipOrderMode = snap.orderMode;
+    }
     renderAllHighlights();
     updateSelectCount();
     saveLabels();
@@ -325,22 +338,51 @@ function _setUndoButtonEnabled(enabled) {
     btn.classList.toggle('btn-undo', enabled);
 }
 
+async function _doSaveLabels() {
+    const sections = labelSections.map(s => ({
+        start: s.start, end: s.end, color: s.color, text: s.text
+    }));
+    const body = { color_labels: colorLabels, labeled_sections: sections };
+    // Clips-tab ordering mode ('time' | 'manual') is owned by the host
+    // page (top-level `let clipOrderMode` in project.html — shared via
+    // the global lexical environment, same as labelSections). Hosts
+    // without it (Pro Collections) omit the key; the server then
+    // preserves the stored value.
+    if (typeof clipOrderMode !== 'undefined') {
+        body.clip_order_mode = clipOrderMode;
+    }
+    try {
+        await fetch(`/project/${PROJECT_ID}/labels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+    } catch (err) {
+        console.error('Failed to save labels:', err);
+    }
+}
+
 function saveLabels() {
     clearTimeout(saveLabelTimeout);
-    saveLabelTimeout = setTimeout(async () => {
-        const sections = labelSections.map(s => ({
-            start: s.start, end: s.end, color: s.color, text: s.text
-        }));
-        try {
-            await fetch(`/project/${PROJECT_ID}/labels`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ color_labels: colorLabels, labeled_sections: sections }),
-            });
-        } catch (err) {
-            console.error('Failed to save labels:', err);
-        }
+    saveLabelTimeout = setTimeout(() => {
+        saveLabelTimeout = null;
+        _doSaveLabels();
     }, 500);
+}
+
+// Run any pending debounced save NOW and await it. The subset-export flow
+// (project.html _persistLabelSections) calls this before temporarily
+// persisting a checked subset: a still-pending full-array save landing
+// after the subset write — but before the export route's server-side read —
+// would make a "3 selected clips" export silently ship ALL clips (and
+// cancelling instead of flushing would drop the drag's clip_order_mode
+// flip, since the subset writes omit that key). No-op when nothing is
+// pending.
+async function flushSaveLabels() {
+    if (saveLabelTimeout === null) return;
+    clearTimeout(saveLabelTimeout);
+    saveLabelTimeout = null;
+    await _doSaveLabels();
 }
 
 

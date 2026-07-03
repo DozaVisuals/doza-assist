@@ -3402,10 +3402,22 @@ def save_labels(project_id):
     data = request.json or {}
     prev_count = len(project.get('labeled_sections', []) or [])
     new_sections = data.get('labeled_sections', [])
-    update_project(project_id, {
+    updates = {
         'color_labels': data.get('color_labels', {}),
         'labeled_sections': new_sections,
-    })
+    }
+    # Clips-tab ordering mode: 'time' (chronological display, the default) or
+    # 'manual' (the editor drag-reordered the Clips tab — the stored
+    # labeled_sections array order is then canonical). Persisted ONLY when the
+    # body carries a valid value: older clients and the subset-export
+    # _persistLabelSections calls omit the key, and that must not reset a
+    # manual ordering. Cross-origin (share-portal) callers can never flip it —
+    # ordering is a same-origin editor concern, exactly like the append-only
+    # no-reorder rule in _portal_append_only_ok.
+    order_mode = data.get('clip_order_mode')
+    if order_mode in ('time', 'manual') and not _request_is_cross_origin():
+        updates['clip_order_mode'] = order_mode
+    update_project(project_id, updates)
     new_count = len(new_sections)
     delta = new_count - prev_count
     if delta > 0:
@@ -3610,6 +3622,17 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
 
     if 'labels' in requested:
         color_labels = project.get('color_labels', {})
+        # Manual clip ordering (Clips-tab drag-reorder) applies only to a
+        # clips-only export AND only when the project explicitly opted in
+        # (clip_order_mode='manual', set by the first drag). Mixed-category
+        # exports have no meaningful manual interleave, so they — and every
+        # existing project, which has no clip_order_mode — keep the exporter's
+        # chronological sort. Markers are tagged with their stored-array
+        # position; _generate_cuts_timeline sorts by '_order' when present.
+        manual_clip_order = (
+            requested == {'labels'}
+            and project.get('clip_order_mode') == 'manual'
+        )
         for sec in project.get('labeled_sections', []):
             label_name = color_labels.get(sec.get('color', ''), sec.get('color', ''))
             try:
@@ -3618,7 +3641,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
             except ValueError:
                 _skip_marker('labeled clip', label_name, sec.get('start'), sec.get('end'))
                 continue
-            markers.append({
+            marker = {
                 'start': ls,
                 'end': le,
                 'text': label_name,
@@ -3630,7 +3653,10 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'color': sec.get('color', 'blue'),
                 'category': label_name,
                 'speaker': _speaker_at_range(ls, le),
-            })
+            }
+            if manual_clip_order:
+                marker['_order'] = len(markers)
+            markers.append(marker)
 
     if 'transcript' in requested:
         # Emit one marker per transcript segment so editors can navigate the
@@ -5153,6 +5179,13 @@ def story_build(project_id):
             'reasoning': result.get('reasoning', ''),
             'clips': clips,
         }
+        # Duration-budget fields — present only when the prompt carried a
+        # parseable duration target. Persisted so the UI can show the
+        # measured total against the parsed target, not the model's echo.
+        for key in ('actual_duration_seconds', 'duration_enforced',
+                    'duration_shortfall_note'):
+            if key in result:
+                build_entry[key] = result[key]
         # Locked read-modify-write so two concurrent builds can't drop each
         # other's entry; atomic write so a crash can't truncate the list.
         with project_lock(project_id):
@@ -5167,7 +5200,11 @@ def story_build(project_id):
             project_id, 'story_built',
             f"Story \"{build_entry['story_title']}\" built · {clip_count} clip{'s' if clip_count != 1 else ''}",
         )
-        return jsonify({'status': 'built', 'build': build_entry})
+        response_payload = {'status': 'built', 'build': build_entry}
+        if build_entry.get('duration_shortfall_note'):
+            # Top-level copy so the UI can toast it without digging.
+            response_payload['duration_shortfall_note'] = build_entry['duration_shortfall_note']
+        return jsonify(response_payload)
     except Exception as e:
         from ai_providers import ProviderError
         if isinstance(e, ProviderError):

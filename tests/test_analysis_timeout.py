@@ -64,6 +64,43 @@ def test_bad_config_falls_back_to_medium(monkeypatch):
     assert 180 <= t <= 1200
 
 
+# ── num_predict-aware ceiling (story-build 8192-token budget) ──────────────────
+
+_LOW_APPLE = {"arch": "arm64", "ram_gb": 8.0}
+
+
+def test_story_budget_outsizes_the_default_ceiling_on_8gb(monkeypatch):
+    # The default 8GB profile at medium (12 tok/s): 8192 tokens decode for
+    # 600-850s of honest generation, but the no-budget call returns 504s —
+    # the budget must buy a ceiling that covers the honest decode.
+    monkeypatch.setattr(model_config, "load_model_config", lambda: {"tier": "medium"})
+    base = model_config.recommended_analysis_timeout(hw_info=dict(_LOW_APPLE))
+    raised = model_config.recommended_analysis_timeout(
+        hw_info=dict(_LOW_APPLE), num_predict=8192)
+    assert base < 850 < raised
+
+
+def test_story_budget_scales_the_clamp_on_slow_profiles(monkeypatch):
+    # 8GB + large (2.5 tok/s): decode alone for 8192 tokens is ~3277s —
+    # the fixed 1200s clamp would kill the healthy generation it was
+    # raised to allow, so the ceiling scales with the authorized budget.
+    monkeypatch.setattr(model_config, "load_model_config", lambda: {"tier": "large"})
+    t = model_config.recommended_analysis_timeout(
+        hw_info=dict(_LOW_APPLE), num_predict=8192)
+    assert t >= 8192 / 2.5, f"ceiling {t}s cannot cover the honest decode"
+
+
+def test_no_budget_callers_keep_the_1200s_band(monkeypatch):
+    # Without num_predict every profile stays inside the historical
+    # 180-1200s band — byte-identical to the pre-budget behavior.
+    for tier in ("small", "medium", "large", "xlarge"):
+        monkeypatch.setattr(model_config, "load_model_config",
+                            lambda tier=tier: {"tier": tier})
+        for hw in (dict(_LOW_APPLE), dict(_XHIGH_APPLE)):
+            t = model_config.recommended_analysis_timeout(hw_info=hw)
+            assert 180 <= t <= 1200
+
+
 # ── _call_ai_json passes a model-aware timeout (chat layer-2 chunked search) ──
 
 class _FakeProvider:

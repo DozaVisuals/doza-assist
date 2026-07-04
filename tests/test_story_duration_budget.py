@@ -83,7 +83,7 @@ class TestStoryDurationPromptInjection:
     def _capture(self, monkeypatch, message, vectors=None):
         captured = {}
 
-        def _stub(prompt, system_prompt=""):
+        def _stub(prompt, system_prompt="", **kwargs):
             captured['prompt'] = prompt
             captured['system'] = system_prompt
             return '{"clips": []}'
@@ -96,14 +96,27 @@ class TestStoryDurationPromptInjection:
         )
         return captured
 
-    def test_target_line_carries_band_and_menu_derived_count(self, monkeypatch):
+    def test_target_line_carries_menu_derived_count(self, monkeypatch):
         cap = self._capture(monkeypatch, 'build me a 14 minute cut')
         prompt = cap['prompt']
         assert 'TARGET TOTAL RUNTIME: 840s (14:00)' in prompt
-        # 0.9-1.1x band, computed in code.
-        assert 'between 756s and 924s' in prompt
-        # Menu is 60 x 40s -> at least ceil(840/40) = 21 segments.
-        assert f'at least {math.ceil(840 / 40)} segments' in prompt
+        # Menu is 60 x 40s -> ceil(840/40) = 21 segments, capped to the
+        # 18-segment prompt ask (an uncapped 40-segment demand made the
+        # model truncate its JSON mid-array; the code-side top-up owns the
+        # remainder). The capped ask states the total the count CAN
+        # deliver (18 x 40s), not the unreachable 756-924s band.
+        assert math.ceil(840 / 40) == 21  # above the cap by construction
+        assert 'at least 18 segments' in prompt
+        assert 'must sum to between' not in prompt
+        assert 'should total at least 720s' in prompt
+
+    def test_uncapped_target_line_carries_band(self, monkeypatch):
+        # ceil(240/40) = 6 <= 18: the band wording survives verbatim.
+        cap = self._capture(monkeypatch, 'build me a 4 minute cut')
+        prompt = cap['prompt']
+        assert 'TARGET TOTAL RUNTIME: 240s (4:00)' in prompt
+        assert 'must sum to between 216s and 264s' in prompt
+        assert 'at least 6 segments' in prompt
 
     def test_no_target_keeps_prompt_free_of_budget_line(self, monkeypatch):
         cap = self._capture(monkeypatch, 'build me a story about the harbor')
@@ -132,7 +145,7 @@ class TestStoryDurationPromptInjection:
     def test_raw_transcript_path_also_gets_budget_line(self, monkeypatch):
         captured = {}
 
-        def _stub(prompt, system_prompt=""):
+        def _stub(prompt, system_prompt="", **kwargs):
             captured['prompt'] = prompt
             captured['system'] = system_prompt
             return '{"clips": []}'
@@ -305,7 +318,7 @@ class TestBuildStoryDurationIntegration:
         vectors = _mk_vectors()
         monkeypatch.setattr(
             ai_analysis, '_call_ai',
-            lambda p, s="": _model_response([f'SEG{i:03d}' for i in range(12)]),
+            lambda p, s="", **kw: _model_response([f'SEG{i:03d}' for i in range(12)]),
         )
         monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
 
@@ -327,7 +340,7 @@ class TestBuildStoryDurationIntegration:
         vectors = _mk_vectors(n=10, dur=40)  # 400s of material, 840s ask
         monkeypatch.setattr(
             ai_analysis, '_call_ai',
-            lambda p, s="": _model_response(['SEG000', 'SEG001', 'SEG002']),
+            lambda p, s="", **kw: _model_response(['SEG000', 'SEG001', 'SEG002']),
         )
         monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
         result = ai_analysis.build_story(
@@ -340,7 +353,7 @@ class TestBuildStoryDurationIntegration:
         vectors = _mk_vectors(n=6)
         monkeypatch.setattr(
             ai_analysis, '_call_ai',
-            lambda p, s="": _model_response(['SEG000', 'SEG001']),
+            lambda p, s="", **kw: _model_response(['SEG000', 'SEG001']),
         )
         monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
         result = ai_analysis.build_story(
@@ -465,3 +478,463 @@ class TestShortfallNoteReachesTheUI:
         idx = html.index("data.duration_shortfall_note")
         window = html[idx:idx + 400]
         assert "showToast(data.duration_shortfall_note" in window
+
+
+# ---------- prompt-ask cap ----------------------------------------------------
+
+TESTER_RANGE_PROMPT = (
+    'build a 15 to 20 minute paranormal investigation video that has a '
+    'defined intro, investigation, and ending'
+)
+
+
+class TestStoryPromptClipAskCap:
+    """The live 0-clips bug, part 1: a 1200s target over a ~30s menu
+    demanded "at least 40 segments — do not stop early", pushing the model
+    to write past its output budget and truncate the JSON mid-array. The
+    demanded count is now capped; the code-side top-up owns the rest."""
+
+    def test_count_above_cap_is_capped_and_pressure_dropped(self):
+        block = ai_analysis._story_duration_prompt_block(1200, 30)
+        assert 'at least 18 segments' in block
+        assert 'Do not stop early' not in block
+        assert 'completed automatically' in block
+
+    def test_count_below_cap_keeps_full_demand(self):
+        block = ai_analysis._story_duration_prompt_block(300, 30)
+        assert 'at least 10 segments' in block
+        assert 'Do not stop early' in block
+
+    def test_capped_block_replaces_band_with_count_consistent_total(self):
+        # 18 x 30s can only promise ~540s — demanding the 1080-1320s band
+        # in the same block was contradictory (the model either chased the
+        # band into the output blowout the cap exists to stop, or obeyed
+        # the cap and "failed" the band).
+        block = ai_analysis._story_duration_prompt_block(1200, 30)
+        assert 'TARGET TOTAL RUNTIME: 1200s (20:00)' in block
+        assert 'must sum to between' not in block
+        assert 'should total at least 540s' in block
+        assert 'completed automatically' in block
+
+    def test_uncapped_block_keeps_band_wording(self):
+        block = ai_analysis._story_duration_prompt_block(300, 30)
+        assert 'must sum to between 270s and 330s' in block
+        assert 'completed automatically' not in block
+
+    def test_capped_build_swaps_the_system_band_bullet(self, monkeypatch):
+        # The user-prompt block and the system bullet must agree: for a
+        # capped ask the system prompt's "must sum inside the stated band /
+        # undershooting is the most common failure" line is replaced with
+        # the count-consistent instruction.
+        captured = {}
+
+        def _stub(prompt, system_prompt="", **kwargs):
+            captured['system'] = system_prompt
+            return '{"clips": []}'
+
+        monkeypatch.setattr(ai_analysis, '_call_ai', _stub)
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        ai_analysis.build_story(
+            {'segments': []}, message='build me a 14 minute cut',
+            project_name='T', segment_vectors=_mk_vectors(),
+        )  # ceil(840/40) = 21 > 18 -> capped
+        assert 'must sum inside the stated band' not in captured['system']
+        assert 'undershooting by stopping early' not in captured['system']
+        assert 'completed automatically' in captured['system']
+        assert 'TARGET TOTAL RUNTIME' in captured['system']
+
+        ai_analysis.build_story(
+            {'segments': []}, message='build me a 4 minute cut',
+            project_name='T', segment_vectors=_mk_vectors(),
+        )  # ceil(240/40) = 6 <= 18 -> band bullet kept verbatim
+        assert 'must sum inside the stated band' in captured['system']
+        assert ('undershooting by stopping early is the most common failure'
+                in captured['system'])
+
+    def test_raw_path_capped_build_swaps_the_system_band_bullet(self, monkeypatch):
+        captured = {}
+
+        def _stub(prompt, system_prompt="", **kwargs):
+            captured['system'] = system_prompt
+            return '{"clips": []}'
+
+        monkeypatch.setattr(ai_analysis, '_call_ai', _stub)
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        transcript = {'segments': [{'start': 0.0, 'end': 30.0, 'text': 'hi',
+                                    'start_formatted': '00:00:00',
+                                    'speaker': 'A'}]}
+        ai_analysis.build_story(
+            transcript, message='build me a 15 minute cut',
+            project_name='T', segment_vectors=None,
+        )  # ceil(900/20) = 45 > 18 -> capped
+        assert 'must sum inside the stated band' not in captured['system']
+        assert 'completed automatically' in captured['system']
+
+        ai_analysis.build_story(
+            transcript, message='build me a 4 minute cut',
+            project_name='T', segment_vectors=None,
+        )  # ceil(240/20) = 12 <= 18 -> band bullet kept verbatim
+        assert ("(end_time - start_time) values must sum inside the stated "
+                "band") in captured['system']
+
+
+# ---------- num_predict threading ---------------------------------------------
+
+class _SpyProvider:
+    """Records every generate() kwargs dict; returns an unusable body so the
+    fallback path gets exercised too."""
+
+    def __init__(self, response='{"clips": []}'):
+        self.calls = []
+        self._response = response
+
+    def generate(self, system_prompt, user_or_messages, task_type="general",
+                 **kwargs):
+        self.calls.append(kwargs)
+        return self._response
+
+
+class TestStoryNumPredictThreading:
+    """The live 0-clips bug, part 2: story builds inherited the provider's
+    4096-token output default — a verbose 40-clip JSON does not fit. Both
+    story calls must raise the budget; nothing else may change."""
+
+    def _spy(self, monkeypatch):
+        spy = _SpyProvider()
+        import ai_providers
+        monkeypatch.setattr(
+            ai_providers, 'get_active_provider', lambda model_resolver=None: spy,
+        )
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        return spy
+
+    def test_vector_story_call_raises_output_budget(self, monkeypatch):
+        spy = self._spy(monkeypatch)
+        ai_analysis.build_story(
+            {'segments': []}, message='build a story', project_name='T',
+            segment_vectors=_mk_vectors(n=6),
+        )
+        assert spy.calls[-1].get('num_predict') == 8192
+
+    def test_raw_story_call_raises_output_budget(self, monkeypatch):
+        spy = self._spy(monkeypatch)
+        ai_analysis.build_story(
+            {'segments': [{'start': 0.0, 'end': 30.0, 'text': 'hello',
+                           'start_formatted': '00:00:00', 'speaker': 'A'}]},
+            message='build a story', project_name='T', segment_vectors=None,
+        )
+        assert spy.calls[-1].get('num_predict') == 8192
+
+    def test_other_callers_keep_the_provider_default(self, monkeypatch):
+        spy = self._spy(monkeypatch)
+        ai_analysis._call_ai('plain analysis prompt')
+        # No num_predict key at all — the provider's own default applies.
+        assert 'num_predict' not in spy.calls[-1]
+
+
+# ---------- timeout sized to the output budget ---------------------------------
+
+class TestStoryTimeoutSizing:
+    """The raised 8192-token budget decodes for 600-850s on the default 8GB
+    profile, but _call_ai sized the HTTP timeout with a no-arg
+    recommended_analysis_timeout() call (504s, off the 2000-token
+    representative) — ReadTimeout killed healthy story generations
+    mid-decode and bypassed both the JSON repair and the fallback. The
+    budget must reach the timeout function."""
+
+    def _spy_timeout(self, monkeypatch, seen):
+        import model_config
+
+        def _spy(hw_info=None, num_predict=None):
+            seen.append(num_predict)
+            return 600
+
+        monkeypatch.setattr(model_config, 'recommended_analysis_timeout', _spy)
+        spy = _SpyProvider()
+        import ai_providers
+        monkeypatch.setattr(ai_providers, 'get_active_provider',
+                            lambda model_resolver=None: spy)
+        return spy
+
+    def test_call_ai_threads_num_predict_into_timeout(self, monkeypatch):
+        seen = []
+        self._spy_timeout(monkeypatch, seen)
+        ai_analysis._call_ai('p', num_predict=8192)
+        assert seen == [8192]
+
+    def test_call_ai_without_budget_passes_none(self, monkeypatch):
+        # Default-path callers stay byte-identical: None falls back to the
+        # representative output size inside recommended_analysis_timeout.
+        seen = []
+        self._spy_timeout(monkeypatch, seen)
+        ai_analysis._call_ai('p')
+        assert seen == [None]
+
+    def test_story_build_timeout_covers_the_honest_decode(self, monkeypatch):
+        # End-to-end on the default profile (8GB Apple Silicon, medium):
+        # the story call's timeout must cover the 600-850s an 8192-token
+        # generation honestly needs (the old no-arg call returned 504s).
+        import model_config
+        monkeypatch.setattr(model_config, 'detect_hardware_tier',
+                            lambda: {'arch': 'arm64', 'ram_gb': 8.0})
+        monkeypatch.setattr(model_config, 'load_model_config',
+                            lambda: {'tier': 'medium'})
+        spy = _SpyProvider()
+        import ai_providers
+        monkeypatch.setattr(ai_providers, 'get_active_provider',
+                            lambda model_resolver=None: spy)
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        ai_analysis.build_story(
+            {'segments': []}, message='build me a 14 minute cut',
+            project_name='T', segment_vectors=_mk_vectors(),
+        )
+        assert spy.calls[-1].get('num_predict') == 8192
+        assert spy.calls[-1].get('timeout') >= 850
+
+
+class TestProviderTimeoutFallsBackToDeterministicBuild:
+    """A mid-generation provider death (typically the read timeout on slow
+    hardware) used to escape _build_story_from_vectors before the parse —
+    bypassing the JSON repair AND the fallback, so the endpoint 500'd even
+    though a fully classified menu existed."""
+
+    def test_provider_error_routes_into_fallback(self, monkeypatch):
+        from ai_providers import ProviderError
+
+        def _boom(prompt, system_prompt="", **kwargs):
+            raise ProviderError('Ollama timed out mid-request')
+
+        monkeypatch.setattr(ai_analysis, '_call_ai', _boom)
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        result = ai_analysis.build_story(
+            {'segments': []}, message=TESTER_RANGE_PROMPT, project_name='T',
+            segment_vectors=_mk_vectors(),
+        )
+        assert result['fallback_build'] is True
+        total = _clip_total(result['clips'])
+        assert 0.9 * 1050 <= total <= 1.15 * 1050
+
+    def test_provider_error_reraised_when_no_fallback_possible(self, monkeypatch):
+        # Degenerate vectors (no usable timecodes) leave nothing to build
+        # from — the typed provider message must survive to the endpoint
+        # instead of a bare 0-clip result.
+        from ai_providers import ProviderError
+
+        def _boom(prompt, system_prompt="", **kwargs):
+            raise ProviderError('Ollama timed out mid-request')
+
+        monkeypatch.setattr(ai_analysis, '_call_ai', _boom)
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        degenerate = [{'seg_id': 'S1', 'timecode_in': '00:00:10',
+                       'timecode_out': '00:00:10', 'narrative_score': 'high',
+                       'transcript_excerpt': ''}]
+        with pytest.raises(ProviderError):
+            ai_analysis.build_story(
+                {'segments': []}, message='build me a 14 minute cut',
+                project_name='T', segment_vectors=degenerate,
+            )
+
+
+# ---------- deterministic fallback build --------------------------------------
+
+class TestDeterministicFallbackBuild:
+    """The live 0-clips bug, part 3: when the model's response is unusable
+    end-to-end (garbage, unsalvageable truncation, or nothing surviving
+    hydration), the build must fall back to a deterministic assembly from
+    the segment menu instead of surfacing "The AI returned 0 clips"."""
+
+    def _build(self, monkeypatch, response, message=TESTER_RANGE_PROMPT,
+               vectors=None):
+        monkeypatch.setattr(ai_analysis, '_call_ai',
+                            lambda p, s="", **kw: response)
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        return ai_analysis.build_story(
+            {'segments': []}, message=message, project_name='T',
+            segment_vectors=vectors if vectors is not None else _mk_vectors(),
+        )
+
+    def test_garbage_response_builds_fallback_in_band(self, monkeypatch):
+        # The tester's exact prompt (parses to 1050s) + a model that answers
+        # in prose. The fallback must land inside the enforcement band.
+        result = self._build(monkeypatch, 'sorry, I could not pick clips')
+        assert result['fallback_build'] is True
+        assert result['clips']
+        total = _clip_total(result['clips'])
+        assert 0.9 * 1050 <= total <= 1.15 * 1050, f'total {total}s off band'
+        assert result['target_duration'] == '17:30'
+        assert 'deterministically' in result['reasoning']
+
+    def test_truncated_beyond_salvage_builds_fallback(self, monkeypatch):
+        # Cut before the first clip object completes — repair yields an
+        # empty clips array, so the fallback takes over.
+        result = self._build(monkeypatch, '{"story_title": "X", "clips": [{"or')
+        assert result['fallback_build'] is True
+        assert result['clips']
+
+    def test_hydration_wipeout_builds_fallback(self, monkeypatch):
+        # Valid JSON, but every seg_id is unknown and no timecodes came
+        # back — hydration drops everything.
+        response = json.dumps({'story_title': 'X', 'clips': [
+            {'order': 1, 'seg_id': 'NOPE1'}, {'order': 2, 'seg_id': 'NOPE2'},
+        ]})
+        result = self._build(monkeypatch, response)
+        assert result['fallback_build'] is True
+        assert result['clips']
+
+    def test_fallback_prefers_strong_tiers_chronologically(self, monkeypatch):
+        result = self._build(monkeypatch, 'garbage')
+        clips = result['clips']
+        # Enough high/medium material exists on the 40-minute menu — no
+        # 'low' filler drafted for a 1050s ask.
+        assert all(c.get('narrative_score') != 'low' for c in clips)
+        starts = [ai_analysis._tc_to_seconds(c['start_time']) for c in clips]
+        assert starts == sorted(starts), 'fallback must stay chronological'
+        assert clips[0]['beat_type'] == 'hook'
+        assert clips[-1]['beat_type'] == 'resolution'
+
+    def test_fallback_without_target_sizes_modestly(self, monkeypatch):
+        result = self._build(monkeypatch, 'garbage',
+                             message='build me a story about the harbor')
+        assert result['fallback_build'] is True
+        assert 8 <= len(result['clips']) <= 12
+        # No duration parsed -> no budget fields.
+        assert 'duration_enforced' not in result
+
+    def test_successful_model_build_carries_no_fallback_flag(self, monkeypatch):
+        result = self._build(monkeypatch,
+                             _model_response([f'SEG{i:03d}' for i in range(12)]))
+        assert 'fallback_build' not in result
+
+    def test_no_vectors_and_no_parse_still_returns_empty(self, monkeypatch):
+        # Raw-transcript path with an unusable response: no menu to fall
+        # back on, so the endpoint's 0-clips error remains reachable.
+        monkeypatch.setattr(ai_analysis, '_call_ai',
+                            lambda p, s="", **kw: 'garbage')
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        result = ai_analysis.build_story(
+            {'segments': [{'start': 0.0, 'end': 30.0, 'text': 'hello',
+                           'start_formatted': '00:00:00', 'speaker': 'A'}]},
+            message=TESTER_RANGE_PROMPT, segment_vectors=None,
+        )
+        assert not result.get('clips')
+
+
+class TestFallbackTimelineCoverage:
+    """98 high-scored 40s segments across ~100 minutes with a 1050s ask:
+    the greedy version consumed the strong pool from the front and returned
+    only the first 27 minutes — everything after minute 27 (including any
+    actual ending) was absent, and the arbitrary early cut point was tagged
+    'resolution' (a slot the budget pass protects). Oversupplied pools are
+    now stride-sampled across the whole timeline, with the closer reserved
+    for the final third."""
+
+    def _interview_vectors(self, n=98, spacing=60, dur=40, scores=('high',)):
+        out = []
+        for i in range(n):
+            start = 60 + i * spacing
+            out.append({
+                'seg_id': f's{i:03d}',
+                'timecode_in': _tc(start),
+                'timecode_out': _tc(start + dur),
+                'thread_title': f'thread {i}',
+                'memory_type': 'episodic',
+                'narrative_score': scores[i % len(scores)],
+                'beat_type': 'context',
+                'theme_tags': ['t'],
+                'transcript_excerpt': f'excerpt {i}',
+            })
+        return out
+
+    def test_picks_span_the_whole_timeline(self):
+        vectors = self._interview_vectors()
+        clips = ai_analysis._fallback_story_clips(vectors, target_seconds=1050)
+        starts = [ai_analysis._tc_to_seconds(c['start_time']) for c in clips]
+        assert starts == sorted(starts), 'draft must stay chronological'
+        # Coverage reaches past the 60-minute mark, not just the opening.
+        assert max(starts) > 3600
+        # The closer comes from the final third of the interview.
+        span_lo, span_hi = 60, 60 + 97 * 60
+        assert clips[-1]['beat_type'] == 'resolution'
+        assert starts[-1] >= span_lo + (span_hi - span_lo) * 2 / 3
+        # Sized near the ask so the budget pass lands it in band.
+        total = _clip_total(clips)
+        assert 0.9 * 1050 <= total <= 1.15 * 1050
+
+    def test_stride_prefers_high_over_medium_within_windows(self):
+        # Alternating high/medium: every stride window contains a 'high',
+        # so the sampled draft should be all-high while still spanning the
+        # timeline.
+        vectors = self._interview_vectors(scores=('high', 'medium'))
+        clips = ai_analysis._fallback_story_clips(vectors, target_seconds=1050)
+        assert all(c['narrative_score'] == 'high' for c in clips)
+        starts = [ai_analysis._tc_to_seconds(c['start_time']) for c in clips]
+        assert starts == sorted(starts)
+        assert max(starts) > 3600
+
+    def test_undersupplied_pool_keeps_greedy_take_everything(self):
+        # Strong pool smaller than the ask: all of it is used (top-up and
+        # shortfall handling belong to the budget pass), same as before.
+        vectors = self._interview_vectors(n=10)
+        clips = ai_analysis._fallback_story_clips(vectors, target_seconds=1050)
+        assert len(clips) == 10
+
+    def test_no_target_draft_also_samples_the_timeline(self):
+        vectors = self._interview_vectors()
+        clips = ai_analysis._fallback_story_clips(vectors)
+        assert 8 <= len(clips) <= 12
+        starts = [ai_analysis._tc_to_seconds(c['start_time']) for c in clips]
+        assert starts == sorted(starts)
+        assert max(starts) > 3600
+
+    def test_reasoning_copy_matches_the_sampling(self, monkeypatch):
+        # The user-facing copy claimed 'strongest moments' while the old
+        # algorithm took the EARLIEST — the copy must describe the draft.
+        monkeypatch.setattr(ai_analysis, '_call_ai',
+                            lambda p, s="", **kw: 'garbage')
+        monkeypatch.setattr(ai_analysis, 'inject_my_style',
+                            lambda p, profile_id=None: p)
+        result = ai_analysis.build_story(
+            {'segments': []}, message=TESTER_RANGE_PROMPT, project_name='T',
+            segment_vectors=self._interview_vectors(),
+        )
+        assert result['fallback_build'] is True
+        assert 'strongest moments' not in result['reasoning']
+        assert 'sampled across the full timeline' in result['reasoning']
+
+
+class TestStoryBuildEndpointFallbackFlag:
+    """/story/build must pass fallback_build through to the persisted build
+    and the response so the UI can surface it later."""
+
+    def test_fallback_flag_is_persisted_and_returned(self, client,
+                                                     transcribed_project,
+                                                     monkeypatch):
+        monkeypatch.setattr("ai_analysis.generate_segment_vectors",
+                            lambda *a, **kw: [])
+        monkeypatch.setattr("ai_analysis.build_story", lambda *a, **kw: {
+            'story_title': 'Draft', 'target_duration': '17:30',
+            'reasoning': 'deterministic', 'fallback_build': True,
+            'clips': [{'order': 1, 'seg_id': 'SEG001', 'title': 'x',
+                       'start_time': '00:00:00', 'end_time': '00:00:40',
+                       'transcript': 'hi', 'editorial_note': ''}],
+        })
+        resp = client.post(
+            f"/project/{transcribed_project}/story/build",
+            json={"message": TESTER_RANGE_PROMPT},
+        )
+        assert resp.status_code == 200, resp.data
+        build = resp.get_json()["build"]
+        assert build["fallback_build"] is True
+
+        builds_path = (Path(app_module.app.config["PROJECTS_DIR"])
+                       / transcribed_project / "story_builds.json")
+        persisted = json.loads(builds_path.read_text())[0]
+        assert persisted["fallback_build"] is True

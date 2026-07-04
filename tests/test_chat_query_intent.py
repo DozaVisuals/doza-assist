@@ -193,6 +193,72 @@ class TestParseTargetDurationSeconds:
         assert parse_target_duration_seconds("a minute and a half of selects") == 90.0
 
 
+class TestParseTargetDurationRanges:
+    """Range asks target the MIDPOINT. The live bug: the tester's
+    "15 to 20 minute" ask matched only "20 minute" (the range TOP) and
+    became a hard 1200s target — the demanded segment count then overran
+    the model's output budget and the build died with 0 clips."""
+
+    @pytest.mark.parametrize("message,expected", [
+        # The tester's exact prompt: 15-20 min -> 17.5 min midpoint.
+        ("build a 15 to 20 minute paranormal investigation video that has "
+         "a defined intro, investigation, and ending", 1050.0),
+        # Hyphen and en-dash forms.
+        ("make a 15-20 minute cut", 1050.0),
+        ("build a 15–20 minute video", 1050.0),
+        # Hour-unit range.
+        ("make a 1 to 2 hour documentary", 5400.0),
+        # No unit -> not a duration ask at all.
+        ("build me a 15 to 20 video", None),
+        ("15 to 20", None),
+        # Positional guards still apply to ranges.
+        ("the 15 to 20 minute mark", None),
+        ("what happens in the first 15 to 20 minutes", None),
+        # Narrative fact, phrased per-night -> 'each' guard.
+        ("he investigated 15 to 20 minutes each night", None),
+    ])
+    def test_range_cases(self, message, expected):
+        assert parse_target_duration_seconds(message) == expected
+
+    def test_range_top_number_is_not_double_counted(self):
+        # "20 minute" sits inside the consumed range span; if the
+        # single-number pass also counted it, the two anchored candidates
+        # (1050 vs 1200) would 'compete' and the whole parse fell to None.
+        msg = "build a 15 to 20 minute cut"
+        assert parse_target_duration_seconds(msg) == 1050.0
+
+    @pytest.mark.parametrize("message,expected", [
+        # Low end under the 15s floor: the MIDPOINT — the value actually
+        # enforced — is what the floor judges. These used to leak the
+        # range TOP as a hard target (30.0 / 20.0).
+        ("give me a 10 to 30 second teaser", 20.0),
+        ("make a 10 to 20 second teaser", 15.0),
+        # Midpoint under the floor: consumed, not an ask (the top must
+        # not leak either).
+        ("cut a 5 to 10 second teaser", None),
+        # Reversed range is noise — and used to leak 900.0 (the trailing
+        # "15 minute").
+        ("build a 20 to 15 minute video", None),
+        # Word-number range: "ten minute" used to leak as a hard 600s.
+        ("build a five to ten minute video", 450.0),
+        # Mixed units across the connector -> midpoint.
+        ("build a 90 second to 2 minute teaser", 105.0),
+        # Range shapes the regex can't model are consumed via the
+        # connector guard, never leaked as their top ("45 minute" used
+        # to parse as 2700s).
+        ("make me a half hour to 45 minute cut", None),
+    ])
+    def test_rejected_or_odd_ranges_never_leak_the_top_number(self, message, expected):
+        # Any recognized range shape is consumed BEFORE plausibility is
+        # judged, so its inner number can never re-surface as a standalone
+        # single-number candidate.
+        assert parse_target_duration_seconds(message) == expected
+
+    def test_single_durations_still_parse_around_ranges(self):
+        # A plain single-number ask is untouched by the range pass.
+        assert parse_target_duration_seconds("build me a 14 minute cut") == 840.0
+
+
 class TestExplicitCountWinsOverUnanchoredDuration:
     """'give me 3 clips from her 5 minute speech': the 5-minute narrative
     fact used to co-parse as a duration target, silently discarding the

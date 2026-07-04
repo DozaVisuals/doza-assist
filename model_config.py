@@ -488,7 +488,16 @@ def recommended_analysis_timeout(hw_info: dict = None, num_predict: int = None) 
     prefill = _ANALYSIS_INPUT_TOKENS_PER_CALL / (tps * _PREFILL_VS_DECODE_RATIO)
     decode = out_tokens / float(tps)
     est = (prefill + decode + _OVERHEAD_SECONDS_PER_CALL) * 1.5
-    return int(max(180, min(1200, est)))
+    # The 1200s ceiling was sized for the ~2k-token representative call.
+    # A raised output budget (the story builds authorize num_predict=8192)
+    # legitimately decodes for longer on the slow profiles — 8192 tokens
+    # at the large variant's 2.5 tok/s is ~55 min of honest generation —
+    # so the ceiling scales with the budget. Callers without num_predict
+    # keep the exact 180-1200s band as before.
+    ceiling = 1200
+    if out_tokens > _REPRESENTATIVE_OUTPUT_TOKENS:
+        ceiling = int(round(1200 * out_tokens / _REPRESENTATIVE_OUTPUT_TOKENS))
+    return int(max(180, min(ceiling, est)))
 
 
 def get_variant_estimates(hw_info: dict = None, total_seconds: float = None) -> list:

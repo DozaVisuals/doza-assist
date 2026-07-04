@@ -5182,8 +5182,10 @@ def story_build(project_id):
         # Duration-budget fields — present only when the prompt carried a
         # parseable duration target. Persisted so the UI can show the
         # measured total against the parsed target, not the model's echo.
+        # fallback_build flags a deterministic menu-built draft (the model's
+        # response was unusable) so the UI can surface it later.
         for key in ('actual_duration_seconds', 'duration_enforced',
-                    'duration_shortfall_note'):
+                    'duration_shortfall_note', 'fallback_build'):
             if key in result:
                 build_entry[key] = result[key]
         # Locked read-modify-write so two concurrent builds can't drop each

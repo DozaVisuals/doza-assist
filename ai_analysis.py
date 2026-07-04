@@ -1228,7 +1228,8 @@ def parse_target_duration_seconds(message):
 
     Pure regex — no LLM. Recognized shapes: "14 minute" / "14-minute" /
     "90 sec" / "1.5 hours", word numbers ("one minute", "a minute", plus
-    "and a half"), and "m:ss"/"h:mm:ss" literals when clearly anchored to
+    "and a half"), ranges ("15 to 20 minute" / "15-20 minute" → the
+    midpoint), and "m:ss"/"h:mm:ss" literals when clearly anchored to
     a request ("make a 2:30 reel"). Only ANCHORED durations count — a
     request verb governs the number ("build me a 14 minute...") or a
     deliverable noun / "of" follows it ("14 minute cut", "2 minutes of
@@ -1286,6 +1287,76 @@ def parse_target_duration_seconds(message):
 
     candidates = []  # (seconds, classification)
 
+    # Range asks: "15 to 20 minute", "15-20 minute", "15–20 minute", plus
+    # word-number lows ("five to ten minute") and mixed units across the
+    # connector ("90 second to 2 minute"). The single-number pass below
+    # only sees the unit-adjacent number — a "15 to 20 minute video" ask
+    # parsed as a hard 1200s target (the range TOP), never the ask's real
+    # center. A range targets its MIDPOINT. Matched spans are remembered
+    # so the single-number pass skips the "20 minute" inside a consumed
+    # range instead of double-counting it.
+    _num_word = r'\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten'
+    _unit = r'hours?|hrs?|minutes?|mins?|seconds?|secs?'
+    range_re = re.compile(
+        rf'(?<![\d:.])\b({_num_word})'
+        rf'(?:\s*({_unit}))?'
+        r'\s*(?:[-–—]|to)\s*'
+        rf'({_num_word})[\s-]+'
+        rf'({_unit})\b'
+    )
+
+    def _range_qty(raw):
+        try:
+            return float(raw)
+        except ValueError:
+            return _DURATION_WORD_NUMBERS.get(raw)
+
+    def _unit_mult(unit):
+        return 3600.0 if unit[0] == 'h' else (60.0 if unit[0] == 'm' else 1.0)
+
+    range_spans = []
+    for m in range_re.finditer(msg):
+        lo_qty = _range_qty(m.group(1))
+        hi_qty = _range_qty(m.group(3))
+        if not lo_qty or not hi_qty:
+            continue
+        hi_unit = m.group(4)
+        lo_secs = lo_qty * _unit_mult(m.group(2) or hi_unit)
+        hi_secs = hi_qty * _unit_mult(hi_unit)
+        # Consumed BEFORE any plausibility judgment: a recognized range
+        # shape must never leak its inner number to the single-number
+        # pass — a rejected "10 to 30 second teaser" otherwise parsed as
+        # a hard 30s target (the range TOP), the exact misparse this
+        # pass exists to fix. Also covers positional ranges ("the 15-20
+        # minute mark").
+        range_spans.append((m.start(), m.end()))
+        # A real range runs low-to-high ("20 to 15 minute" is noise, not
+        # an ask), and the MIDPOINT — the value actually enforced — must
+        # be a plausible target: a "10 to 30 second teaser" legitimately
+        # centers on 20s even though its low end sits under the floor.
+        if hi_secs <= lo_secs:
+            continue
+        mid = (lo_secs + hi_secs) / 2.0
+        if mid < _DURATION_MIN_TARGET_SECONDS or hi_secs > 6 * 3600:
+            continue
+        cls = _classify(m.start(), m.end())
+        if cls == 'positional':
+            continue
+        candidates.append((mid, cls))
+
+    # Range shapes the regex above cannot model (word numbers past ten,
+    # "half an hour to 45 minutes", ...) are recognized by their range
+    # connector sitting immediately before a number+unit match, and
+    # consumed the same way — leaking one would turn the range TOP into
+    # a hard target.
+    range_orphan_re = re.compile(
+        rf'(?:{_num_word}'
+        r'|eleven|twelve|thirteen|fifteen|twenty|thirty|forty|fifty'
+        r'|sixty|ninety|half(?:\s+an?)?)'
+        rf'(?:\s*(?:{_unit}))?'
+        r'\s*(?:[-–—]|to)\s*$'
+    )
+
     # Number + unit: "14 minute(s)", "14-minute", "90 sec", "1.5 hours",
     # "one minute", "a minute", "half an hour".
     unit_re = re.compile(
@@ -1296,6 +1367,11 @@ def parse_target_duration_seconds(message):
         r'(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b'
     )
     for m in unit_re.finditer(msg):
+        if any(m.start() < r_end and m.end() > r_start
+               for r_start, r_end in range_spans):
+            continue  # the trailing half of an already-consumed range
+        if range_orphan_re.search(msg[:m.start()]):
+            continue  # the TOP half of a range the range pass can't model
         raw = m.group(1)
         if raw.startswith('half'):
             qty = 0.5
@@ -4615,7 +4691,9 @@ def _attempt_chunk_response_repair(value):
                 parsed = json.loads(repaired)
                 if isinstance(parsed, dict):
                     return parsed
-        except (json.JSONDecodeError, ValueError):
+        except Exception:
+            # Same never-crash contract as _parse_json_response: a repair
+            # bug degrades to the None return, not an exception.
             pass
 
     return None
@@ -5520,13 +5598,21 @@ def _format_transcript_paragraphs_for_ai(transcript, max_paragraph_seconds=60):
     return _format_paragraphs_as_lines(paragraphs)
 
 
-def _call_ai(prompt, system_prompt="", task_type="analysis", force_json=True):
+def _call_ai(prompt, system_prompt="", task_type="analysis", force_json=True,
+             num_predict=None):
     """Single-prompt generation through the active provider.
 
     ``task_type`` selects the model when the provider tiers (Anthropic uses
     Opus for ``profile_creation``, Sonnet otherwise; Ollama ignores it).
     Editorial DNA's classifier passes ``"analysis"``; My Style synthesis
     passes ``"profile_creation"``.
+
+    ``num_predict`` (Ollama-only) overrides the provider's output-token
+    budget. The story-build calls pass _STORY_NUM_PREDICT: a duration-target
+    build legitimately returns dozens of clip objects, and the 4096 default
+    truncated the JSON mid-array — the whole build then parsed to 0 clips.
+    ``None`` (the default) leaves every other caller on the provider's own
+    default. Cloud providers ignore it (they size output per task_type).
 
     ``force_json`` (Ollama-only) toggles the ``format='json'`` decoding
     grammar on the local ``/api/generate`` path. It defaults to True (the
@@ -5561,12 +5647,23 @@ def _call_ai(prompt, system_prompt="", task_type="analysis", force_json=True):
     # this; cloud providers ignore it.
     try:
         from model_config import recommended_analysis_timeout
-        timeout = recommended_analysis_timeout()
+        # Sized to the authorized output budget too: the story builds'
+        # num_predict=8192 legitimately decodes for 600-850s on the
+        # default 8GB profile, but the no-arg call sized the ceiling off
+        # the 2000-token representative (504s) — ReadTimeout killed
+        # healthy generations mid-decode, bypassing both the JSON repair
+        # and the deterministic fallback. None → identical to before.
+        timeout = recommended_analysis_timeout(num_predict=num_predict)
     except Exception:
         timeout = 600
+    extra = {}
+    if num_predict is not None:
+        # Only forwarded when set, keeping every default-path provider call
+        # byte-identical to before the story-build budget raise.
+        extra['num_predict'] = num_predict
     return provider.generate(
         system_prompt, prompt, task_type=task_type, force_json=force_json,
-        timeout=timeout,
+        timeout=timeout, **extra,
     )
 
 
@@ -5833,6 +5930,20 @@ def build_story(transcript, message, project_name="Interview", segment_vectors=N
 
     formatted = _format_transcript_for_ai(transcript)
 
+    # Numeric budget line, mirroring the vectors path. No menu exists here,
+    # so the clip-count hint assumes the 5-30s per-clip rule below (~20s).
+    # A capped ask also swaps the DURATION bullet so the system prompt and
+    # the block agree (band vs capped count).
+    duration_block = ''
+    duration_capped = False
+    if target_seconds:
+        duration_block = _story_duration_prompt_block(target_seconds, 20.0) + '\n\n'
+        duration_capped = (
+            _story_min_clip_ask(target_seconds, 20.0) > _STORY_PROMPT_MAX_CLIP_ASK
+        )
+    duration_bullet = (_STORY_DURATION_BULLET_RAW_CAPPED if duration_capped
+                       else _STORY_DURATION_BULLET_RAW)
+
     system_prompt = """You are a story editor building a narrative sequence from interview transcript footage. The user will describe what kind of story or edit they want. Your job is to select and order clips from the transcript that form a coherent narrative.
 
 Rules:
@@ -5841,7 +5952,7 @@ Rules:
 - NON-CHRONOLOGICAL BY DEFAULT: the transcript below is presented in recording order; your output MUST NOT preserve that order unless the user explicitly requested chronological OR a clip's meaning depends on temporal sequence (cause→effect chain).
 - ANTI-PATTERN CHECK: if your selected clips' start_time values are monotonically increasing in your chosen order, you have likely defaulted to chronological — re-examine and re-sequence.
 - Each clip should be 5-30 seconds long unless the moment requires more breathing room
-- DURATION IS CRITICAL: If the user requests a specific duration, the request includes a TARGET TOTAL RUNTIME line with the exact numeric band and the minimum clip count already computed. Meet that clip count — undershooting by stopping early is the most common failure. Your selected clips' (end_time - start_time) values must sum inside the stated band.
+""" + duration_bullet + """
 - For each clip, provide: a short title, start timecode, end timecode, the transcript excerpt, and a one-sentence editorial note explaining why this clip is in this position
 - Be selective and opinionated. Don't include filler. Every clip should earn its place
 - CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end times. Use string format like "00:02:45"
@@ -5863,12 +5974,6 @@ Rules:
   ]
 }"""
 
-    # Numeric budget line, mirroring the vectors path. No menu exists here,
-    # so the clip-count hint assumes the 5-30s per-clip rule above (~20s).
-    duration_block = ''
-    if target_seconds:
-        duration_block = _story_duration_prompt_block(target_seconds, 20.0) + '\n\n'
-
     prompt = f"""Build a narrative sequence from this interview transcript.
 
 PROJECT: {project_name}
@@ -5885,7 +5990,9 @@ Return ONLY valid JSON. No markdown, no extra text."""
     directive = language_directive(output_language)
     if directive:
         system_prompt = system_prompt + directive
-    response = _call_ai(prompt, system_prompt)
+    # Raised output budget: a duration-target build returns dozens of clip
+    # objects and the provider default truncated the JSON mid-array.
+    response = _call_ai(prompt, system_prompt, num_predict=_STORY_NUM_PREDICT)
     result = _parse_json_response(response)
     if target_seconds and isinstance(result, dict) and result.get('clips'):
         # No vector pool on the raw path — the budget pass still measures,
@@ -6185,6 +6292,52 @@ _STORY_SCORE_RANK = {'high': 0, 'medium': 1, 'low': 2}
 # Shortening floor for the overshoot pass: never tighten a clip below
 # this — a sub-15s story beat stops being a usable moment.
 _STORY_MIN_CLIP_SECONDS = 15.0
+# Cap on the segment count the duration prompt block DEMANDS. A 15-20
+# minute ask over a ~30s-average menu computes to 35-40 segments; pushing
+# a small local model to emit 40 verbose clip objects blew straight
+# through the output-token budget and the JSON truncated mid-array — the
+# "AI returned 0 clips" tester failure. 18 objects fit comfortably inside
+# the raised story num_predict; the deterministic _enforce_duration_budget
+# top-up closes whatever runtime gap the capped ask leaves.
+_STORY_PROMPT_MAX_CLIP_ASK = 18
+# Output-token budget for the two story-build calls. The provider default
+# (4096) fits every other analysis schema, but a duration-target story
+# legitimately returns dozens of clip objects with editorial notes — the
+# 32B variant writes long ones — and truncation there costs the entire
+# build. Ollama-only; cloud providers size output per task_type.
+_STORY_NUM_PREDICT = 8192
+
+# System-prompt DURATION bullets, selected per build (one pair for each
+# story path — the vectors prompt speaks in menu segments, the raw prompt
+# in transcript clips). The band version demands the numeric sum band and
+# is correct whenever the prompt block's segment ask can actually reach
+# it. When the ask is capped at _STORY_PROMPT_MAX_CLIP_ASK the band is
+# unreachable by construction (18 x avg < 0.9 x target), and keeping the
+# band bullet alongside the capped block handed the model two
+# contradictory instructions — chase the band (the output blowout the cap
+# exists to stop) or obey the cap and "fail" the bullet. Capped builds
+# get the count-consistent bullet; uncapped builds keep the band wording
+# verbatim.
+_STORY_DURATION_BULLET_VECTORS = (
+    "- DURATION IS CRITICAL: If the user requests a specific duration, the request includes a TARGET TOTAL RUNTIME line with the exact numeric band and the minimum segment count already computed from the menu. Meet that segment count — undershooting by stopping early is the most common failure. Every menu line shows dur=<seconds>; your selected segments' dur values must sum inside the stated band. If your selection runs long, remove the weakest segments."
+)
+_STORY_DURATION_BULLET_VECTORS_CAPPED = (
+    "- DURATION IS CRITICAL: The request includes a TARGET TOTAL RUNTIME line with the segment count to select, already computed from the menu. Meet that count with the strongest segments — the remaining runtime toward the target is completed automatically, so do not pad your selection to chase the total yourself."
+)
+_STORY_DURATION_BULLET_RAW = (
+    "- DURATION IS CRITICAL: If the user requests a specific duration, the request includes a TARGET TOTAL RUNTIME line with the exact numeric band and the minimum clip count already computed. Meet that clip count — undershooting by stopping early is the most common failure. Your selected clips' (end_time - start_time) values must sum inside the stated band."
+)
+_STORY_DURATION_BULLET_RAW_CAPPED = (
+    "- DURATION IS CRITICAL: The request includes a TARGET TOTAL RUNTIME line with the clip count to select, already computed. Meet that count with the strongest clips — the remaining runtime toward the target is completed automatically, so do not pad your selection to chase the total yourself."
+)
+
+
+def _story_min_clip_ask(target_seconds, avg_clip_seconds):
+    """ceil(target/avg) — the segment count a duration ask implies. Shared
+    by the prompt block and the capped-ask check so the two can't drift."""
+    import math
+    avg = max(1.0, float(avg_clip_seconds))
+    return max(1, math.ceil(int(round(float(target_seconds))) / avg))
 
 
 def _format_duration_target(seconds):
@@ -6202,19 +6355,36 @@ def _story_duration_prompt_block(target_seconds, avg_clip_seconds):
     count derived from the ACTUAL average duration on offer. The old
     "3-4 clips per minute" prose heuristic assumed 15-20s clips; vector
     segments average 25-50s, and the model can't do the correction math.
+
+    The demanded count is capped at _STORY_PROMPT_MAX_CLIP_ASK: "select at
+    least 40 segments — do not stop early" made the model write past its
+    output budget and truncate the JSON mid-array. Past the cap the band
+    sentence goes too — 18 x avg cannot reach the 0.9x floor, so demanding
+    "must sum to between..." alongside the capped count handed the model
+    two contradictory instructions. The capped wording states the total
+    the count CAN deliver and leans on the code-side top-up for the rest.
     """
-    import math
     target = int(round(float(target_seconds)))
     lo = int(round(target * 0.9))
     hi = int(round(target * 1.1))
     avg = max(1.0, float(avg_clip_seconds))
-    min_clips = max(1, math.ceil(target / avg))
+    min_clips = _story_min_clip_ask(target_seconds, avg_clip_seconds)
+    shown = min(min_clips, _STORY_PROMPT_MAX_CLIP_ASK)
+    if min_clips > shown:
+        return (
+            f"TARGET TOTAL RUNTIME: {target}s ({_format_duration_target(target)}). "
+            f"Your selected clips should total at least {int(round(shown * avg))}s; "
+            f"the remaining runtime is completed automatically from the rest "
+            f"of the menu. The average segment available runs "
+            f"~{int(round(avg))}s, so select at least {shown} segments — the "
+            f"strongest ones."
+        )
     return (
         f"TARGET TOTAL RUNTIME: {target}s ({_format_duration_target(target)}). "
         f"Your selected clips' durations must sum to between {lo}s and {hi}s. "
-        f"The average segment available runs ~{int(round(avg))}s, so select at "
-        f"least {min_clips} segments — more if you choose shorter ones. Do not "
-        f"stop early."
+        f"The average segment available runs ~{int(round(avg))}s, so "
+        f"select at least {shown} segments — more if you choose shorter "
+        f"ones. Do not stop early."
     )
 
 
@@ -6380,6 +6550,132 @@ def _enforce_duration_budget(clips, target_seconds, segment_vectors=None):
     return clips, meta
 
 
+def _fallback_entry_rank(entry):
+    """Sort weight for a fallback pool entry: narrative tier first."""
+    score = (entry[2].get('narrative_score') or 'medium').lower()
+    return _STORY_SCORE_RANK.get(score, 1)
+
+
+def _stride_pick(entries, want):
+    """Pick ``want`` entries spread evenly across a chronological list.
+
+    One pick per contiguous window, preferring the higher narrative tier
+    inside each window (earliest within a tier). Windows are disjoint and
+    ordered, so the picks stay chronological. Used by the fallback build
+    so an oversupplied timeline is SAMPLED end-to-end instead of consumed
+    greedily from the front.
+    """
+    if want >= len(entries):
+        return list(entries)
+    if want <= 0:
+        return []
+    picked = []
+    for k in range(want):
+        i0 = (k * len(entries)) // want
+        i1 = max(i0 + 1, ((k + 1) * len(entries)) // want)
+        window = entries[i0:i1]
+        picked.append(min(window, key=lambda e: (_fallback_entry_rank(e), e[0])))
+    return picked
+
+
+def _fallback_story_clips(segment_vectors, target_seconds=None):
+    """Deterministic last-resort clip selection from the vector menu.
+
+    Runs when the model's story response was unusable end-to-end — nothing
+    parsed (even after truncation repair) or nothing survived hydration.
+    Returning clips=[] there surfaced "The AI returned 0 clips" to a user
+    whose project already has a fully classified segment menu; a
+    deterministic straight-line assembly is strictly better than an error.
+
+    Selection: chronological order, high/medium narrative weight only —
+    'low' filler is drafted only when the stronger tiers can't fill the
+    ask. Sized to the duration target when one parsed (the caller's
+    _enforce_duration_budget pass then lands the total inside the band and
+    handles top-up/trim/shortfall), else ~10 segments (8 minimum). When
+    the strong pool oversupplies the ask, picks are stride-sampled across
+    the WHOLE timeline — greedy-from-the-front turned a 100-minute
+    interview into a draft of its first 27 minutes, with the arbitrary
+    cut point tagged 'resolution' (a slot the budget pass protects) — and
+    the closer is reserved for the final third so the draft ends on
+    actual ending material. The first clip is tagged hook and the last
+    resolution, with the middle carrying context. No narrative
+    re-sequencing is claimed: this is a watchable draft, not the model's
+    arc.
+    """
+    pool = []
+    for seg in (segment_vectors or []):
+        if not isinstance(seg, dict) or not seg.get('seg_id'):
+            continue
+        s = _tc_to_seconds(seg.get('timecode_in'))
+        e = _tc_to_seconds(seg.get('timecode_out'))
+        if e <= s:
+            continue
+        pool.append((s, e - s, seg))
+    pool.sort(key=lambda entry: entry[0])
+    strong = [p for p in pool
+              if (p[2].get('narrative_score') or 'medium').lower() != 'low']
+    weak = [p for p in pool
+            if (p[2].get('narrative_score') or 'medium').lower() == 'low']
+
+    if target_seconds:
+        budget = float(target_seconds)
+        strong_total = sum(entry[1] for entry in strong)
+        if strong and strong_total > budget:
+            # More strong material than the ask: sample the timeline.
+            import math
+            avg = strong_total / len(strong)
+            want = max(1, min(len(strong), math.ceil(budget / avg)))
+            # Reserve the closer: the strongest segment in the final
+            # third of the timeline (latest within its tier).
+            span_lo, span_hi = strong[0][0], strong[-1][0]
+            cutoff = span_lo + (span_hi - span_lo) * (2.0 / 3.0)
+            tail_pool = [e for e in strong if e[0] >= cutoff] or [strong[-1]]
+            closer = min(tail_pool,
+                         key=lambda e: (_fallback_entry_rank(e), -e[0]))
+            head = [e for e in strong if e[0] < closer[0]]
+            picked = _stride_pick(head, want - 1) + [closer]
+        else:
+            picked, total = [], 0.0
+            for entry in strong:
+                if total >= budget:
+                    break
+                picked.append(entry)
+                total += entry[1]
+            if total < budget:
+                # Strong tiers exhausted short of the ask — draft filler.
+                for entry in weak:
+                    if total >= budget:
+                        break
+                    picked.append(entry)
+                    total += entry[1]
+                picked.sort(key=lambda entry: entry[0])  # back into chronology
+    else:
+        # No parsed target: a ~10-segment draft (8 minimum when 'low'
+        # filler has to make up the numbers), sampled across the timeline.
+        picked = _stride_pick(strong, 10)
+        if len(picked) < 8 and weak:
+            picked.extend(weak[:8 - len(picked)])
+            picked.sort(key=lambda entry: entry[0])
+
+    clips = []
+    last = len(picked) - 1
+    for i, (_start, _dur, seg) in enumerate(picked):
+        role = 'hook' if i == 0 else ('resolution' if i == last else 'context')
+        clips.append({
+            'order': i + 1,
+            'seg_id': seg.get('seg_id'),
+            'title': seg.get('thread_title') or 'Untitled',
+            'start_time': seg.get('timecode_in'),
+            'end_time': seg.get('timecode_out'),
+            'transcript': seg.get('transcript_excerpt', ''),
+            'editorial_note': f'ROLE: {role} — deterministic fallback pick.',
+            'narrative_score': seg.get('narrative_score'),
+            'memory_type': seg.get('memory_type'),
+            'beat_type': role,
+        })
+    return clips
+
+
 def _build_story_from_vectors(segment_vectors, message, project_name, profile_id=None,
                               output_language=None, target_seconds=None):
     """Build a narrative using pre-classified segment vectors as the menu of clips.
@@ -6450,6 +6746,22 @@ def _build_story_from_vectors(segment_vectors, message, project_name, profile_id
         )
     menu = '\n'.join(menu_lines)
 
+    # Numeric budget line — computed in code from the parsed target and the
+    # ACTUAL menu durations. '' when no duration was asked for, keeping the
+    # prompt byte-identical to pre-feature behavior. A capped ask also
+    # swaps the system prompt's DURATION bullet below, so the model gets
+    # ONE consistent instruction (band vs capped count).
+    duration_block = ''
+    duration_capped = False
+    if target_seconds:
+        avg_menu = (sum(menu_durs) / len(menu_durs)) if menu_durs else 30.0
+        duration_block = _story_duration_prompt_block(target_seconds, avg_menu) + '\n\n'
+        duration_capped = (
+            _story_min_clip_ask(target_seconds, avg_menu) > _STORY_PROMPT_MAX_CLIP_ASK
+        )
+    duration_bullet = (_STORY_DURATION_BULLET_VECTORS_CAPPED if duration_capped
+                       else _STORY_DURATION_BULLET_VECTORS)
+
     system_prompt = """You are a documentary story editor. You are given a menu of pre-classified interview segments and a user's brief. You select and order segments from the menu to form a coherent narrative arc.
 
 Rules:
@@ -6460,17 +6772,9 @@ Rules:
 - MANDATORY ARC: every selected clip fills exactly one role in this five-slot arc — hook, context, pressure, turn, resolution. Tag each clip's role in its editorial_note (e.g. "ROLE: turn — ..."). The "order" field reflects the arc, NOT the timecode.
 - NON-CHRONOLOGICAL BY DEFAULT: the menu is listed by narrative weight, not by recording time. Your output ordering is independent of timecode_in. Re-sequence ruthlessly. Use chronological order only when the user's brief explicitly asks for it OR when a clip's meaning depends on a prior clip's information (cause→effect chain).
 - ANTI-PATTERN CHECK: before you finalize, scan your selected clips' timecode_in values in your chosen order. If they are monotonically increasing (each clip's timecode_in is later than the previous), you have likely failed to reorder for narrative arc — re-examine and re-sequence unless the story genuinely requires the temporal sequence.
-- DURATION IS CRITICAL: If the user requests a specific duration, the request includes a TARGET TOTAL RUNTIME line with the exact numeric band and the minimum segment count already computed from the menu. Meet that segment count — undershooting by stopping early is the most common failure. Every menu line shows dur=<seconds>; your selected segments' dur values must sum inside the stated band. If your selection runs long, remove the weakest segments.
+""" + duration_bullet + """
 - ALWAYS include a "reasoning" field: 2-3 conversational sentences in plain language explaining what this story is really about underneath the surface, why this arc works, and what the emotional spine is. Talk like a doc editor, not a corporate brief. No bullet points.
 - Always respond in valid JSON only. No markdown, no prose outside the JSON."""
-
-    # Numeric budget line — computed in code from the parsed target and the
-    # ACTUAL menu durations. '' when no duration was asked for, keeping the
-    # prompt byte-identical to pre-feature behavior.
-    duration_block = ''
-    if target_seconds:
-        avg_menu = (sum(menu_durs) / len(menu_durs)) if menu_durs else 30.0
-        duration_block = _story_duration_prompt_block(target_seconds, avg_menu) + '\n\n'
 
     prompt = f"""PROJECT: {project_name}
 
@@ -6501,8 +6805,23 @@ Return ONLY valid JSON in this shape:
     directive = language_directive(output_language)
     if directive:
         system_prompt = system_prompt + directive
-    response = _call_ai(prompt, system_prompt)
-    parsed = _parse_json_response(response)
+    # Raised output budget: a duration-target build returns dozens of clip
+    # objects and the provider default truncated the JSON mid-array.
+    from ai_providers import ProviderError
+    provider_error = None
+    try:
+        response = _call_ai(prompt, system_prompt, num_predict=_STORY_NUM_PREDICT)
+    except ProviderError as e:
+        # A mid-generation death (typically the HTTP read timeout on slow
+        # hardware — the raised budget decodes for minutes) must still
+        # produce a build when a classified menu exists: treat it like an
+        # unusable response and let the deterministic fallback below own
+        # the draft. Re-raised further down only if the fallback comes up
+        # empty, so the endpoint keeps its typed provider message then.
+        provider_error = e
+        parsed = {'clips': []}
+    else:
+        parsed = _parse_json_response(response)
     if not isinstance(parsed, dict):
         parsed = {'clips': []}
 
@@ -6546,12 +6865,32 @@ Return ONLY valid JSON in this shape:
         'reasoning': parsed.get('reasoning', ''),
         'clips': hydrated,
     }
-    if target_seconds and hydrated:
+    if not hydrated and segment_vectors:
+        # The model's response was unusable end-to-end (unparseable even
+        # after repair, or every clip failed hydration). Build a
+        # deterministic draft from the classified menu instead of handing
+        # the endpoint a 0-clip result — that path shows the user an error
+        # even though a perfectly good segment menu exists.
+        result['clips'] = _fallback_story_clips(segment_vectors, target_seconds)
+        if result['clips']:
+            result['fallback_build'] = True
+            result['reasoning'] = (
+                'The AI response was unusable; built deterministically from '
+                'the segment menu — strong moments sampled across the full '
+                'timeline, in running order.'
+            )
+            if not parsed.get('story_title'):
+                result['story_title'] = f'{project_name} — draft assembly'
+    if provider_error is not None and not result['clips']:
+        # Nothing to fall back on (degenerate menu) — surface the typed
+        # provider message rather than a bare 0-clip result.
+        raise provider_error
+    if target_seconds and result['clips']:
         # Code-side budget: measure the hydrated total, top up from unused
         # vectors, trim overshoot. target_duration becomes the PARSED ask —
         # the model's echoed string was never validated against anything.
         result['clips'], meta = _enforce_duration_budget(
-            hydrated, target_seconds, segment_vectors,
+            result['clips'], target_seconds, segment_vectors,
         )
         result['target_duration'] = _format_duration_target(target_seconds)
         result.update(meta)
@@ -6913,8 +7252,14 @@ def _parse_json_response(response_text):
         except json.JSONDecodeError:
             pass
 
-        # Handle truncated JSON — try closing open braces/brackets
-        repaired = _repair_truncated_json(text)
+        # Handle truncated JSON — try closing open braces/brackets. The
+        # repair is best-effort text surgery: a bug in it must degrade to
+        # the tolerant error dict below, never crash the parse contract
+        # (a repair IndexError once escaped to all 12 call sites).
+        try:
+            repaired = _repair_truncated_json(text)
+        except Exception:
+            repaired = None
         if repaired:
             try:
                 return json.loads(repaired)
@@ -6930,67 +7275,112 @@ def _parse_json_response(response_text):
 
 
 def _repair_truncated_json(text):
-    """Attempt to repair truncated JSON by closing open structures."""
-    # Strip trailing whitespace
-    text = text.rstrip()
+    """Repair truncated JSON by salvaging the complete leading elements.
 
-    # If we're mid-string, close it: find if we have unmatched quote
+    The old version only closed open braces/brackets around whatever the
+    cut left behind. On the common failure — a story/clips array truncated
+    mid-object when the model runs out of output tokens — that produced
+    things like ``{"clips": [{...}, {"order": 3, "title"]}``: still invalid,
+    so the whole response (39 perfectly good clips included) parsed to
+    nothing and the story endpoint reported "0 clips".
+
+    Now: one scan tracks the container stack and in-string state, and each
+    open container remembers where its last COMPLETE child ended (a child
+    container closing, a string closing — as an array element or an object
+    pair's value — or a comma terminating a primitive). On a truncated
+    tail the text is cut back to the deepest open ARRAY's last element
+    boundary, dropping the partial trailing element entirely, and the
+    still-open structures above it are closed. The result is the valid
+    leading prefix of what the model managed to emit.
+    """
+    text = text.rstrip()
+    if not text:
+        return text
+
+    # Frames: [opening char, open index, last complete child end, after-':']
+    stack = []
     in_str = False
     esc = False
-    last_quote = -1
+    top_close = 0  # end of the last balanced TOP-LEVEL structure
     for i, ch in enumerate(text):
         if esc:
             esc = False
             continue
-        if ch == '\\' and in_str:
-            esc = True
+        if in_str:
+            if ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+                if stack:
+                    top = stack[-1]
+                    # In an array a closed string IS a complete element; in
+                    # an object it only completes a pair as the VALUE half
+                    # (cutting after a bare key would dangle `"key"`).
+                    if top[0] == '[' or top[3]:
+                        top[2] = i + 1
             continue
         if ch == '"':
-            in_str = not in_str
-            last_quote = i
+            in_str = True
+        elif ch in '{[':
+            stack.append([ch, i, -1, False])
+        elif ch in '}]':
+            if stack:
+                stack.pop()
+                if stack:
+                    stack[-1][2] = i + 1
+                    stack[-1][3] = False
+                else:
+                    top_close = i + 1
+        elif ch == ':':
+            if stack and stack[-1][0] == '{':
+                stack[-1][3] = True
+        elif ch == ',':
+            if stack:
+                # A comma also seals primitive elements/values (numbers,
+                # true/false/null) that no quote or bracket event recorded.
+                stack[-1][2] = i
+                stack[-1][3] = False
 
-    # If we're inside an open string, truncate to last clean point before it
-    if in_str and last_quote > 0:
-        # Close the string and trim any trailing partial value
-        text = text[:last_quote + 1]
-        # We may now have something like  "key": "value  — close quote
-        if not text.endswith('"'):
-            text += '"'
+    if not stack and not in_str:
+        # Structurally complete — only trailing junk can be wrong.
+        while text and text[-1] in (',', ':', ' ', '\n', '\t'):
+            text = text[:-1]
+        return text
 
-    # Remove trailing commas, colons, or partial tokens
-    text = text.rstrip()
+    if not stack:
+        # Stack empty but in_str still True: the JSON itself is balanced
+        # and the odd quote lives in trailing PROSE after it (the model
+        # finished the object, then its commentary got cut mid-quoted-
+        # sentence). Nothing is open to close — cut back to the last
+        # balanced top-level point so the leading JSON parses. Indexing
+        # the empty stack below raised IndexError and crashed every
+        # _parse_json_response caller.
+        return text[:top_close] if top_close else text
+
+    # Truncated mid-structure. Prefer cutting inside the deepest open ARRAY
+    # (dropping the partial tail element whole — a clip missing half its
+    # fields helps nobody); with only objects open, keep the innermost
+    # complete key/value pairs instead.
+    cut_frame = None
+    for idx in range(len(stack) - 1, -1, -1):
+        if stack[idx][0] == '[':
+            cut_frame = idx
+            break
+    if cut_frame is None:
+        for idx in range(len(stack) - 1, -1, -1):
+            if stack[idx][2] > 0:
+                cut_frame = idx
+                break
+        if cut_frame is None:
+            cut_frame = 0  # nothing completed anywhere → empty shell
+    frame = stack[cut_frame]
+    cut_at = frame[2] if frame[2] > frame[1] else frame[1] + 1
+    text = text[:cut_at].rstrip()
     while text and text[-1] in (',', ':', ' ', '\n', '\t'):
         text = text[:-1]
-
-    # Count open braces/brackets and close them
-    open_braces = 0
-    open_brackets = 0
-    in_string = False
-    escape_next = False
-
-    for ch in text:
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == '\\' and in_string:
-            escape_next = True
-            continue
-        if ch == '"' and not escape_next:
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == '{':
-            open_braces += 1
-        elif ch == '}':
-            open_braces -= 1
-        elif ch == '[':
-            open_brackets += 1
-        elif ch == ']':
-            open_brackets -= 1
-
-    # Close any remaining open structures
-    text += ']' * max(0, open_brackets)
-    text += '}' * max(0, open_braces)
-
-    return text
+    # Close the cut container and everything still open above it.
+    closers = ''.join(
+        ']' if stack[idx][0] == '[' else '}'
+        for idx in range(cut_frame, -1, -1)
+    )
+    return text + closers

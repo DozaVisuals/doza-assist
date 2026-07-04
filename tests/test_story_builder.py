@@ -165,7 +165,7 @@ class TestStoryBuildMenuPruning:
     def test_menu_drops_low_score_segments(self, monkeypatch):
         captured = {}
 
-        def _stub_call_ai(prompt, system_prompt=""):
+        def _stub_call_ai(prompt, system_prompt="", **kwargs):
             captured['prompt'] = prompt
             return '{"clips": []}'
 
@@ -191,7 +191,7 @@ class TestStoryBuildMenuPruning:
             dict(s, narrative_score='low') for s in self._vectors()
         ]
         captured = {}
-        monkeypatch.setattr(ai_analysis, '_call_ai', lambda p, s="": (captured.update(prompt=p), '{"clips": []}')[1])
+        monkeypatch.setattr(ai_analysis, '_call_ai', lambda p, s="", **kw: (captured.update(prompt=p), '{"clips": []}')[1])
         monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
 
         ai_analysis._build_story_from_vectors(all_low, message="build", project_name="T")
@@ -232,7 +232,7 @@ class TestStoryBuildOrdering:
         captured = {}
         monkeypatch.setattr(
             ai_analysis, '_call_ai',
-            lambda p, s="": (captured.update(prompt=p, system=s), '{"clips": []}')[1],
+            lambda p, s="", **kw: (captured.update(prompt=p, system=s), '{"clips": []}')[1],
         )
         monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
 
@@ -251,7 +251,7 @@ class TestStoryBuildOrdering:
     def test_prompt_contains_mandatory_reorder_directive(self, monkeypatch):
         captured = {}
 
-        def _stub(prompt, system_prompt=""):
+        def _stub(prompt, system_prompt="", **kwargs):
             captured['prompt'] = prompt
             captured['system'] = system_prompt
             return '{"clips": []}'
@@ -297,7 +297,7 @@ class TestStoryBuildOrdering:
                 {'order': 3, 'seg_id': 'SEG_C', 'editorial_note': 'ROLE: turn'},
             ],
         })
-        monkeypatch.setattr(ai_analysis, '_call_ai', lambda p, s="": fake_response)
+        monkeypatch.setattr(ai_analysis, '_call_ai', lambda p, s="", **kw: fake_response)
         monkeypatch.setattr(ai_analysis, 'inject_my_style', lambda p, profile_id=None: p)
 
         out = ai_analysis._build_story_from_vectors(

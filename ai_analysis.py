@@ -8,6 +8,7 @@ import os
 import json
 import re
 import threading
+import time
 from collections import OrderedDict
 
 import requests
@@ -656,11 +657,22 @@ def _extract_speaker_names(segments):
 
 
 def _build_transcript_message(project_name, segments, formatted,
-                              analysis_block, relevant_excerpts_block):
+                              analysis_block, relevant_excerpts_block=''):
     """The user-role transcript message: opening declarative line so the
     LLM treats this as loaded data (not a request to provide a transcript),
-    then the project header, then the word-level transcript and any
-    analysis / relevant-excerpts blocks.
+    then the project header, then the word-level transcript and the
+    analysis block.
+
+    PREFIX-CACHE CONTRACT: everything in this message must be stable for
+    the life of the project. Ollama reuses a cached KV prefix only up to
+    the first changed byte — this message sits at index 1-2 of the array,
+    so ANY per-query content here forces a full re-prefill of the system
+    prompt + transcript (10-20K tokens, tens of seconds on 16GB machines)
+    on every turn. That is exactly what the per-query RELEVANT EXCERPTS
+    block used to do; it now rides the FINAL user turn (recency-correct
+    anyway — see _build_chat_messages). ``relevant_excerpts_block`` is
+    accepted for backward compatibility but no longer belongs here; a
+    non-empty value is still honored for any straggler caller.
 
     The declarative opener matters for Gemma 4B's instruction-following:
     without it, the model sometimes reads the message as "user is about
@@ -807,18 +819,27 @@ def _estimate_chat_num_ctx(system_message, messages, num_predict=4096):
 # flip. Never shrink mid-conversation: grow-only per project.
 _NUM_CTX_HWM: "OrderedDict[str, int]" = OrderedDict()
 _NUM_CTX_HWM_MAX = 64
+_NUM_CTX_HWM_LOCK = threading.Lock()
 
 
 def _sticky_chat_num_ctx(project_name, system_message, messages):
-    """Payload-aware num_ctx with a grow-only floor per project."""
+    """Payload-aware num_ctx with a grow-only floor per project.
+
+    Locked read-modify-write: the prewarm daemon thread and Flask request
+    threads legitimately hit the same key concurrently, and an interleaved
+    max() would let the high-water mark regress — putting two in-flight
+    calls on different rungs, the exact runner-reload flip this floor
+    exists to prevent.
+    """
     est = _estimate_chat_num_ctx(system_message, messages)
     key = str(project_name or '')
-    prior = _NUM_CTX_HWM.get(key, 0)
-    ctx = max(est, prior)
-    _NUM_CTX_HWM[key] = ctx
-    _NUM_CTX_HWM.move_to_end(key)
-    while len(_NUM_CTX_HWM) > _NUM_CTX_HWM_MAX:
-        _NUM_CTX_HWM.popitem(last=False)
+    with _NUM_CTX_HWM_LOCK:
+        prior = _NUM_CTX_HWM.get(key, 0)
+        ctx = max(est, prior)
+        _NUM_CTX_HWM[key] = ctx
+        _NUM_CTX_HWM.move_to_end(key)
+        while len(_NUM_CTX_HWM) > _NUM_CTX_HWM_MAX:
+            _NUM_CTX_HWM.popitem(last=False)
     return ctx
 
 
@@ -832,9 +853,12 @@ def _build_chat_messages(message, history, project_name, segments,
     Layout:
       system        : CHAT_SYSTEM_PROMPT + storytelling foundation
       user (opt.)   : STYLE CONTEXT — only when a My Style profile is active
-      user          : PROJECT/DURATION/SPEAKERS/TRANSCRIPT block
+      user          : PROJECT/DURATION/SPEAKERS/TRANSCRIPT block (stable
+                      per project — the KV prefix-cache contract; see
+                      _build_transcript_message)
       ...history... : prior user/assistant turns (capped at last 6)
-      user          : the current user message + _FINAL_REMINDER
+      user          : RELEVANT EXCERPTS (per-query, when retrieval
+                      matched) + the current user message + _FINAL_REMINDER
 
     ``include_final_reminder=False`` drops the contract restatement from the
     final turn. The Layer-2 conversational-synthesis divert passes False: its
@@ -907,8 +931,14 @@ def _build_chat_messages(message, history, project_name, segments,
             'content': f'STYLE CONTEXT (active My Style profile):\n\n{style_block}',
         })
 
+    # The transcript message carries ONLY per-project-stable content
+    # (header + transcript + analysis block). The per-query excerpts used
+    # to be packed in here — which changed this message's bytes on every
+    # question and broke Ollama's KV prefix reuse at the most expensive
+    # possible point (a full transcript re-prefill per turn). They now
+    # ride the final user turn below: recency-correct AND cache-stable.
     transcript_msg = _build_transcript_message(
-        project_name, segments, formatted, analysis_block, relevant_excerpts_block,
+        project_name, segments, formatted, analysis_block,
     )
     messages.append({'role': 'user', 'content': transcript_msg})
     # Fake assistant acknowledgement — anchors the model in "transcript
@@ -967,9 +997,24 @@ def _build_chat_messages(message, history, project_name, segments,
                 f'cite so I can play it. No thematic summary without the '
                 f'actual words.'
             )
-        messages.append({'role': 'user', 'content': f'{message}\n\n{final_tail}'})
+        # Final turn layout: excerpts (when retrieval matched) → question
+        # → contract tails. Excerpts lead so the question and the FINAL
+        # REMINDER keep the strongest recency positions; the header still
+        # says "from the transcript above", which remains literally true
+        # (the transcript rides an earlier message).
+        final_content = f'{message}\n\n{final_tail}'
+        if relevant_excerpts_block:
+            final_content = (
+                f'{relevant_excerpts_block.strip()}\n\n{final_content}'
+            )
+        messages.append({'role': 'user', 'content': final_content})
     else:
-        messages.append({'role': 'user', 'content': message})
+        final_content = message
+        if relevant_excerpts_block:
+            final_content = (
+                f'{relevant_excerpts_block.strip()}\n\n{final_content}'
+            )
+        messages.append({'role': 'user', 'content': final_content})
     return system_message, messages
 
 # Bounded LRU for Layer 2 chunked-search responses. Layer 2 fires
@@ -982,6 +1027,31 @@ def _build_chat_messages(message, history, project_name, segments,
 _CHUNK_CACHE_MAX = 512
 _CHUNK_CACHE: "OrderedDict[tuple, str]" = OrderedDict()
 _CHUNK_CACHE_LOCK = threading.Lock()
+
+
+
+def _chat_reply_budget_kwargs(message, segments=None):
+    """Optional per-intent reply budget (flag-gated, default OFF).
+
+    With ``DOZA_ADAPTIVE_REPLY_BUDGET=1``, conversational-routed asks cap
+    generation at 2048 tokens — enough for any real discussion answer
+    (P95 of natural conversational replies ends far below it; verify with
+    the [ai-timing] eval counts before enabling by default), while capping
+    the worst-case runaway ramble at ~40-60s instead of 2-3 minutes.
+    Extractive/structure asks and content-lookups keep the full 4096: card
+    lists and quoted passages legitimately run long. The num_ctx estimate
+    is NOT reduced along with it — rung stability matters more than the
+    few hundred tokens of window headroom (see _sticky_chat_num_ctx).
+    """
+    try:
+        if os.environ.get('DOZA_ADAPTIVE_REPLY_BUDGET') != '1':
+            return {}
+        if _is_conversational_query(message, segments=segments) and \
+                not _is_content_lookup_query(message):
+            return {'num_predict': 2048}
+    except Exception:
+        pass
+    return {}
 
 
 def chat_about_transcript(transcript, message, history=None, project_name="Interview",
@@ -1108,7 +1178,8 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         language_directive_text=directive,
     )
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
-    response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
+    response = _call_ai_chat(system_message, messages, num_ctx=num_ctx,
+                             **_chat_reply_budget_kwargs(message, segments))
     response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)
     cleaned = _validate_clip_markers_in_text(
@@ -1191,7 +1262,7 @@ _OLLAMA_STOP_TOKENS = [
 ]
 
 
-def _call_ai_chat_stream(system_message, messages, num_ctx=32768):
+def _call_ai_chat_stream(system_message, messages, num_ctx=32768, **kwargs):
     """Stream chat tokens through the active AI provider.
 
     ``system_message`` is the master system prompt (chat-system-prompt.md
@@ -1208,7 +1279,129 @@ def _call_ai_chat_stream(system_message, messages, num_ctx=32768):
     provider = get_active_provider(model_resolver=_get_ollama_model)
     yield from provider.generate_stream(
         system_message, messages, task_type="chat", num_ctx=num_ctx,
+        **kwargs,
     )
+
+
+def _stream_chat_events(system_message, messages, num_ctx, **call_kwargs):
+    """Shared token-streaming loop for every chat-shaped LLM call.
+
+    Yields ``('token', piece)`` for user-visible text, ``('heartbeat',
+    phase)`` while the model is in a silent reasoning phase or between
+    flushes, and finally exactly one ``('raw', full_text)`` carrying the
+    complete unprocessed reply for the caller's post-processing pipeline.
+
+    Behavior contracts (moved verbatim from chat_about_transcript_stream,
+    which now consumes this helper — as does the >60-min conversational
+    synthesis stream):
+      - <think>-style reasoning phases are consumed silently with
+        'reasoning'/'composing' heartbeats so SSE buffers keep flushing.
+      - A repetition-loop detector breaks generation early (letter
+        patterns at 6 repeats; punctuation-only structure at 5× that).
+      - A pre-first-token provider failure PROPAGATES (the SSE layer
+        surfaces its typed error); a mid-stream death after partial text
+        is logged and the partial still flows out via ('raw', …).
+    """
+    pieces = []
+    _think_buf = ''
+    _in_thinking = False
+    _THINK_OPENERS = ('<think>', '<thinking>', '[Thoughts]', '[Thought Process]', '[Reasoning]')
+    _THINK_CLOSERS = ('</think>', '</thinking>', '[/Thoughts]', '[/Thought Process]', '[/Reasoning]')
+
+    # Repetition-loop detector: if the last N tokens of visible output
+    # repeat the same short phrase, the model has degenerated — stop early.
+    _rep_tail = ''
+    _REP_WINDOW = 200  # chars to keep
+    _REP_MIN_PATTERN = 4  # shortest repeating unit (chars)
+    _REP_THRESHOLD = 6   # must repeat this many times to trigger
+
+    def _is_stuck(tail):
+        """Return True if *tail* ends with the same short phrase repeated."""
+        if len(tail) < _REP_MIN_PATTERN * _REP_THRESHOLD:
+            return False
+        for plen in range(_REP_MIN_PATTERN, len(tail) // _REP_THRESHOLD + 1):
+            pat = tail[-plen:]
+            # Punctuation-only units are usually legitimate structure —
+            # markdown table rows, '----' dividers, '. . .' ellipses — so
+            # they get a 5× trip threshold instead of the letter one. (No
+            # real divider repeats a letterless unit 30× back-to-back; a
+            # degenerated model does, and with no cutoff at all it would
+            # flood until num_predict exhausts.)
+            threshold = (_REP_THRESHOLD if any(c.isalpha() for c in pat)
+                         else _REP_THRESHOLD * 5)
+            count = 0
+            pos = len(tail) - plen
+            while pos >= 0 and tail[pos:pos + plen] == pat:
+                count += 1
+                pos -= plen
+            if count >= threshold:
+                print(f"[chat-stream] repetition cutoff fired on pattern "
+                      f"{pat!r} x{count}", flush=True)
+                return True
+        return False
+
+    # Heartbeat bookkeeping. When the model spends long stretches in a
+    # ``<think>...</think>`` phase, this loop consumes pieces silently and
+    # the SSE connection has nothing to flush. Browsers see "connection is
+    # alive but quiet" — typing dots forever. We emit a synthetic
+    # ``heartbeat`` event every ~25 silent pieces so the client knows
+    # we're still processing and so any intermediate buffering layer
+    # actually flushes bytes.
+    _piece_count = 0
+    _last_yield_piece = 0
+    _HEARTBEAT_PIECES = 25
+
+    # The stream can die mid-generation (read-timeout between bytes, an
+    # Ollama restart). Without the catch, the exception escaped the
+    # generator BEFORE the caller's ('done', cleaned) event — the client
+    # kept the raw, un-postprocessed token tail forever. Now whatever
+    # arrived still flows through the caller's cleaning pipeline.
+    try:
+        for piece in _call_ai_chat_stream(system_message, messages,
+                                          num_ctx=num_ctx, **call_kwargs):
+            _piece_count += 1
+            pieces.append(piece)
+            _think_buf += piece
+            if not _in_thinking:
+                if any(op in _think_buf for op in _THINK_OPENERS):
+                    _in_thinking = True
+                    _think_buf = ''
+                    # Tell the UI the model is in an internal reasoning phase
+                    # so it can show a less-confusing label than "Thinking…".
+                    yield ('heartbeat', 'reasoning')
+                    _last_yield_piece = _piece_count
+                else:
+                    for tag in _THINK_OPENERS:
+                        if any(_think_buf.endswith(tag[:i]) for i in range(1, len(tag))):
+                            break
+                    else:
+                        yield ('token', piece)
+                        _last_yield_piece = _piece_count
+                        _think_buf = _think_buf[-30:] if len(_think_buf) > 30 else _think_buf
+                        _rep_tail = (_rep_tail + piece)[-_REP_WINDOW:]
+                        if _is_stuck(_rep_tail):
+                            break
+            else:
+                if any(cl in _think_buf for cl in _THINK_CLOSERS):
+                    _in_thinking = False
+                    _think_buf = ''
+                    yield ('heartbeat', 'composing')
+                    _last_yield_piece = _piece_count
+
+            if _piece_count - _last_yield_piece >= _HEARTBEAT_PIECES:
+                yield ('heartbeat', 'reasoning' if _in_thinking else 'composing')
+                _last_yield_piece = _piece_count
+    except Exception as e:
+        if not pieces:
+            # Nothing arrived at all — a pre-first-token failure (Ollama
+            # down, model missing, OOM) must PROPAGATE so the SSE layer
+            # surfaces its typed error message; swallowing it left the
+            # user a permanently frozen 'Thinking…' bubble. Only a
+            # mid-stream death with partial text is worth salvaging.
+            raise
+        print(f"[chat-stream] stream aborted mid-generation: {e}", flush=True)
+
+    yield ('raw', ''.join(pieces))
 
 
 def chat_about_transcript_stream(transcript, message, history=None, project_name="Interview",
@@ -1348,108 +1541,17 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         language_directive_text=directive,
     )
 
-    pieces = []
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
-    _think_buf = ''
-    _in_thinking = False
-    _THINK_OPENERS = ('<think>', '<thinking>', '[Thoughts]', '[Thought Process]', '[Reasoning]')
-    _THINK_CLOSERS = ('</think>', '</thinking>', '[/Thoughts]', '[/Thought Process]', '[/Reasoning]')
-
-    # Repetition-loop detector: if the last N tokens of visible output
-    # repeat the same short phrase, the model has degenerated — stop early.
-    _rep_tail = ''
-    _REP_WINDOW = 200  # chars to keep
-    _REP_MIN_PATTERN = 4  # shortest repeating unit (chars)
-    _REP_THRESHOLD = 6   # must repeat this many times to trigger
-
-    def _is_stuck(tail):
-        """Return True if *tail* ends with the same short phrase repeated."""
-        if len(tail) < _REP_MIN_PATTERN * _REP_THRESHOLD:
-            return False
-        for plen in range(_REP_MIN_PATTERN, len(tail) // _REP_THRESHOLD + 1):
-            pat = tail[-plen:]
-            # Punctuation-only units are usually legitimate structure —
-            # markdown table rows, '----' dividers, '. . .' ellipses — so
-            # they get a 5× trip threshold instead of the letter one. (No
-            # real divider repeats a letterless unit 30× back-to-back; a
-            # degenerated model does, and with no cutoff at all it would
-            # flood until num_predict exhausts.)
-            threshold = (_REP_THRESHOLD if any(c.isalpha() for c in pat)
-                         else _REP_THRESHOLD * 5)
-            count = 0
-            pos = len(tail) - plen
-            while pos >= 0 and tail[pos:pos + plen] == pat:
-                count += 1
-                pos -= plen
-            if count >= threshold:
-                print(f"[chat-stream] repetition cutoff fired on pattern "
-                      f"{pat!r} x{count}", flush=True)
-                return True
-        return False
-
-    # Heartbeat bookkeeping. When the model spends long stretches in a
-    # ``<think>...</think>`` phase, this loop consumes pieces silently and
-    # the SSE connection has nothing to flush. Browsers see "connection is
-    # alive but quiet" — typing dots forever. We emit a synthetic
-    # ``heartbeat`` event every ~25 silent pieces so the client knows
-    # we're still processing and so any intermediate buffering layer
-    # actually flushes bytes.
-    _piece_count = 0
-    _last_yield_piece = 0
-    _HEARTBEAT_PIECES = 25
-
-    # The stream can die mid-generation (read-timeout between bytes, an
-    # Ollama restart). Without the catch, the exception escaped the
-    # generator BEFORE the ('done', cleaned) event — the client kept the
-    # raw, un-postprocessed token tail forever. Now whatever arrived
-    # still flows through the full cleaning pipeline below.
-    try:
-        for piece in _call_ai_chat_stream(system_message, messages, num_ctx=num_ctx):
-            _piece_count += 1
-            pieces.append(piece)
-            _think_buf += piece
-            if not _in_thinking:
-                if any(op in _think_buf for op in _THINK_OPENERS):
-                    _in_thinking = True
-                    _think_buf = ''
-                    # Tell the UI the model is in an internal reasoning phase
-                    # so it can show a less-confusing label than "Thinking…".
-                    yield ('heartbeat', 'reasoning')
-                    _last_yield_piece = _piece_count
-                else:
-                    for tag in _THINK_OPENERS:
-                        if any(_think_buf.endswith(tag[:i]) for i in range(1, len(tag))):
-                            break
-                    else:
-                        yield ('token', piece)
-                        _last_yield_piece = _piece_count
-                        _think_buf = _think_buf[-30:] if len(_think_buf) > 30 else _think_buf
-                        _rep_tail = (_rep_tail + piece)[-_REP_WINDOW:]
-                        if _is_stuck(_rep_tail):
-                            break
-            else:
-                if any(cl in _think_buf for cl in _THINK_CLOSERS):
-                    _in_thinking = False
-                    _think_buf = ''
-                    yield ('heartbeat', 'composing')
-                    _last_yield_piece = _piece_count
-
-            if _piece_count - _last_yield_piece >= _HEARTBEAT_PIECES:
-                yield ('heartbeat', 'reasoning' if _in_thinking else 'composing')
-                _last_yield_piece = _piece_count
-    except Exception as e:
-        if not pieces:
-            # Nothing arrived at all — a pre-first-token failure (Ollama
-            # down, model missing, OOM) must PROPAGATE so the SSE layer
-            # surfaces its typed error message; swallowing it left the
-            # user a permanently frozen 'Thinking…' bubble. Only a
-            # mid-stream death with partial text is worth salvaging
-            # through the cleaning pipeline below.
-            raise
-        print(f"[chat-stream] stream aborted mid-generation: {e}", flush=True)
+    full = ''
+    for _ev, _payload in _stream_chat_events(
+            system_message, messages, num_ctx=num_ctx,
+            **_chat_reply_budget_kwargs(message, segments)):
+        if _ev == 'raw':
+            full = _payload
+            break
+        yield (_ev, _payload)
 
     # Strip any trailing repetition the model produced before we cut it off.
-    full = ''.join(pieces)
     full = _strip_trailing_repetition(full)
     cleaned = _clean_chat_response(full)
     cleaned = _validate_clip_markers_in_text(
@@ -1503,16 +1605,18 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     yield ('done', cleaned)
 
 
-def _call_ai_chat(system_message, messages, num_ctx=32768):
+def _call_ai_chat(system_message, messages, num_ctx=32768, **kwargs):
     """Non-streaming chat call through the active provider.
 
     Same input shape as :func:`_call_ai_chat_stream` — a system string plus
-    a messages array. Returns the full reply as a single string.
+    a messages array. Returns the full reply as a single string. Extra
+    kwargs (num_predict, timing_tag, …) pass through to the provider.
     """
     from ai_providers import get_active_provider
     provider = get_active_provider(model_resolver=_get_ollama_model)
     return provider.generate(
         system_message, messages, task_type="chat", num_ctx=num_ctx,
+        **kwargs,
     )
 
 
@@ -3337,10 +3441,26 @@ def _salvage_clips_if_missing(cleaned_text, formatted_transcript, segments,
     if not prior:
         prior = '(the previous response was empty — extract clips that match the transcript)'
 
+    # Salvage diet: when retrieval already matched paragraphs, the
+    # extractor doesn't need the whole transcript re-sent — the matched
+    # excerpts (same [tc-tc] Speaker: text line shape) are a fraction of
+    # the prefill AND constrain the extractor to on-topic moments, the
+    # same grounding the deterministic fallback below draws from. The
+    # full transcript remains the source when matches are thin (<2) —
+    # a sparse menu could miss the moment the model described. num_ctx
+    # stays at the caller's (sticky chat) value either way: shrinking it
+    # per-call would flip the Ollama runner's context size and force a
+    # model reload both here and on the next chat turn.
+    salvage_source = formatted_transcript
+    if matched_paragraphs and len(matched_paragraphs) >= 2:
+        menu = _format_paragraphs_as_lines(matched_paragraphs[:30])
+        if menu.strip():
+            salvage_source = menu
+
     salvage_prompt = _SALVAGE_PROMPT.format(
         target_count=target_count,
         prior_response=prior,
-        formatted=formatted_transcript,
+        formatted=salvage_source,
     )
 
     salvage_system = (
@@ -3359,6 +3479,7 @@ def _salvage_clips_if_missing(cleaned_text, formatted_transcript, segments,
             salvage_system,
             [{'role': 'user', 'content': salvage_prompt}],
             num_ctx=num_ctx,
+            timing_tag='salvage',
         )
     except Exception as e:
         print(f"[salvage] LLM extractor call failed: {e}")
@@ -5240,7 +5361,8 @@ EXCERPT:
     return system_prompt, user_prompt
 
 
-def _call_ai_json(system_prompt, user_prompt, timeout=None, model_override=None):
+def _call_ai_json(system_prompt, user_prompt, timeout=None, model_override=None,
+                  timing_tag=None):
     """Low-temperature Ollama call optimized for structured output.
 
     Uses a smaller num_ctx than chat because each chunk fits comfortably
@@ -5297,6 +5419,7 @@ def _call_ai_json(system_prompt, user_prompt, timeout=None, model_override=None)
         result = provider.generate(
             system_prompt, user_prompt, task_type="analysis",
             timeout=timeout, model_override=model_override,
+            timing_tag=timing_tag or "json",
         )
     except RuntimeError as e:
         # Permanent provider problems (no key, bad key) must abort the
@@ -5912,22 +6035,18 @@ def _build_synthesis_context_block(project_name, segments, analysis, labeled_sec
     return '\n'.join(parts)
 
 
-def _chat_layer2_conversational_synthesis(message, history, project_name, segments,
-                                          analysis, profile_id, labeled_sections,
-                                          speaker_names=None,
-                                          language_directive_text='',
-                                          skip_title_anchor=False):
-    """Conversational synthesis on long interviews — the divert from
-    chunked clip search when the editor's question is discussion-style.
+def _conversational_synthesis_messages(message, history, project_name, segments,
+                                       analysis, profile_id, labeled_sections,
+                                       speaker_names=None,
+                                       language_directive_text=''):
+    """Build the (system_message, messages, num_ctx) triple for the
+    long-interview conversational synthesis call — shared by the blocking
+    and streaming variants so their prompts can never drift.
 
-    Builds a compact context (summary + analysis index + selected clips,
-    no full transcript), runs it through the standard conversational LLM
-    via _build_chat_messages so the orientation paragraph and framing
-    apply, and returns the prose response. Skips the clip-salvage
-    post-processor so a clean conversational answer doesn't get clips
-    bolted on. When the question names something concrete, query-matched
-    transcript excerpts ride along so the answer can quote real lines
-    instead of paraphrasing the summary.
+    Compact context (summary + analysis index + selected clips, no full
+    transcript) in the transcript slot, plus query-matched transcript
+    excerpts when the question names something concrete, plus the CONTENT
+    QUESTION grounding tail on speech-report asks.
     """
     context = _build_synthesis_context_block(project_name, segments, analysis, labeled_sections, speaker_names)
     # Query-matched excerpts: the synthesis context is summary-driven by
@@ -5979,8 +6098,12 @@ def _chat_layer2_conversational_synthesis(message, history, project_name, segmen
         language_directive_text=language_directive_text,
     )
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
-    response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
-    response = _strip_trailing_repetition(response)
+    return system_message, messages, num_ctx
+
+
+def _finish_synthesis_reply(raw_text, segments, skip_title_anchor=False):
+    """Post-processing shared by both synthesis variants."""
+    response = _strip_trailing_repetition(raw_text)
     cleaned = _clean_chat_response(response)
     cleaned = _validate_clip_markers_in_text(
         cleaned, segments, skip_title_anchor=skip_title_anchor,
@@ -5990,6 +6113,30 @@ def _chat_layer2_conversational_synthesis(message, history, project_name, segmen
     return cleaned
 
 
+def _chat_layer2_conversational_synthesis(message, history, project_name, segments,
+                                          analysis, profile_id, labeled_sections,
+                                          speaker_names=None,
+                                          language_directive_text='',
+                                          skip_title_anchor=False):
+    """Conversational synthesis on long interviews — the divert from
+    chunked clip search when the editor's question is discussion-style.
+
+    Prompt construction lives in :func:`_conversational_synthesis_messages`
+    (shared with the streaming variant); post-processing in
+    :func:`_finish_synthesis_reply`.
+    """
+    system_message, messages, num_ctx = _conversational_synthesis_messages(
+        message, history, project_name, segments,
+        analysis, profile_id, labeled_sections,
+        speaker_names=speaker_names,
+        language_directive_text=language_directive_text,
+    )
+    response = _call_ai_chat(system_message, messages, num_ctx=num_ctx,
+                             timing_tag='synthesis')
+    return _finish_synthesis_reply(response, segments,
+                                   skip_title_anchor=skip_title_anchor)
+
+
 def _chat_layer2_conversational_synthesis_stream(message, history, project_name, segments,
                                                   analysis, profile_id, labeled_sections,
                                                   speaker_names=None,
@@ -5997,23 +6144,56 @@ def _chat_layer2_conversational_synthesis_stream(message, history, project_name,
                                                   skip_title_anchor=False):
     """Streaming variant of :func:`_chat_layer2_conversational_synthesis`.
 
-    Yields ('progress', label) for the prep step, then ('done', reply) with
-    the synthesized prose. Keeps the SSE shape identical to the chunked
-    search variant so the frontend doesn't need a separate handler.
+    Historically this wrapped the BLOCKING call and yielded a single
+    'done' — on a 90-minute project the editor stared at a progress label
+    for the entire 1-3 minute generation. It now streams tokens through
+    the same shared loop Layer 1 uses (the frontend already renders
+    token events), then runs the identical post-processing on the full
+    text for the final 'done' payload.
     """
     yield ('progress', 'Reading the project context…')
     try:
-        reply = _chat_layer2_conversational_synthesis(
+        system_message, messages, num_ctx = _conversational_synthesis_messages(
             message, history, project_name, segments,
             analysis, profile_id, labeled_sections,
             speaker_names=speaker_names,
             language_directive_text=language_directive_text,
-            skip_title_anchor=skip_title_anchor,
         )
     except Exception as e:
+        print(f"[chat-stream] conversational synthesis prep failed: {e}")
+        yield ('done', '')
+        return
+    raw_text = ''
+    try:
+        for _ev, _payload in _stream_chat_events(
+                system_message, messages, num_ctx=num_ctx,
+                timing_tag='synthesis'):
+            if _ev == 'raw':
+                raw_text = _payload
+                break
+            yield (_ev, _payload)
+    except Exception as e:
+        # Pre-first-token provider failures propagate out of the shared
+        # loop; the SSE route maps ProviderError to a user-facing message.
+        # Anything else degrades to an empty reply, matching the old
+        # wrapper's behavior.
+        from ai_providers import ProviderError
+        if isinstance(e, ProviderError):
+            raise
         print(f"[chat-stream] conversational synthesis failed: {e}")
-        reply = ''
-    yield ('done', reply)
+        yield ('done', '')
+        return
+    try:
+        final = _finish_synthesis_reply(
+            raw_text, segments, skip_title_anchor=skip_title_anchor)
+    except Exception as e:
+        # The user already watched this answer stream in — a post-processor
+        # crash must not discard it (the frontend would fall back to a
+        # SECOND full generation). Ship the raw text instead.
+        print(f"[chat-stream] synthesis post-processing failed: {e}",
+              flush=True)
+        final = raw_text or ''
+    yield ('done', final)
 
 
 def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
@@ -6081,6 +6261,12 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
 
     all_candidates = []
     fast_model = _get_fast_chunk_model()
+    # The ladder only makes sense when the fast model actually DIFFERS
+    # from the tier model: _get_fast_chunk_model returns the MAIN model
+    # when the opt-in flag is unset (or e2b is already the tier), and
+    # 'retrying' the same model on a legitimately-empty chunk would
+    # double every timeout/empty-path call on default installs.
+    _ladder_active = bool(fast_model) and fast_model != _get_ollama_model()
 
     def _run_chunk(idx_chunk):
         idx, chunk = idx_chunk
@@ -6096,7 +6282,25 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
         # available (~2-3× faster decode on Apple Silicon). Synthesis
         # rerank below stays on the user's hardware-tier variant so
         # the global pick remains high-quality.
-        response = _call_ai_json(system_prompt, user_prompt, model_override=fast_model)
+        if _ladder_active:
+            # Retry ladder: the small variant's chunk JSON is shaky (the
+            # documented reason the fast path is off by default — a bad
+            # scan used to mean a silent zero-candidate answer). A failed
+            # or empty fast scan retries the SAME chunk on the tier model,
+            # bounding the failure to one extra per-chunk call.
+            try:
+                response = _call_ai_json(system_prompt, user_prompt,
+                                         model_override=fast_model,
+                                         timing_tag='chunk-fast')
+                parsed = _parse_chunk_response(response, chunk)
+            except Exception as e:
+                print(f"[layer2] fast-chunk scan failed ({e}); retrying on tier model")
+                parsed = []
+            if parsed:
+                return parsed
+        response = _call_ai_json(system_prompt, user_prompt,
+                                 model_override=fast_model if not _ladder_active else None,
+                                 timing_tag='chunk')
         return _parse_chunk_response(response, chunk)
 
     with ThreadPoolExecutor(max_workers=_CHAT_CHUNK_CONCURRENCY) as pool:
@@ -6194,6 +6398,12 @@ def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_nam
 
     all_candidates = []
     fast_model = _get_fast_chunk_model()
+    # The ladder only makes sense when the fast model actually DIFFERS
+    # from the tier model: _get_fast_chunk_model returns the MAIN model
+    # when the opt-in flag is unset (or e2b is already the tier), and
+    # 'retrying' the same model on a legitimately-empty chunk would
+    # double every timeout/empty-path call on default installs.
+    _ladder_active = bool(fast_model) and fast_model != _get_ollama_model()
 
     def _run_chunk(idx_chunk):
         idx, chunk = idx_chunk
@@ -6201,10 +6411,24 @@ def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_nam
             chunk, message, phrases, words, idx, len(chunks), project_name,
             strict_keyword=strict_keyword,
         )
-        # Mirror of the non-streaming variant — see _chat_layer2_chunked_search.
+        # Mirror of the non-streaming variant — see _chat_layer2_chunked_search
+        # (including the fast-chunk retry ladder).
         if language_directive_text:
             system_prompt = system_prompt + language_directive_text
-        response = _call_ai_json(system_prompt, user_prompt, model_override=fast_model)
+        if _ladder_active:
+            try:
+                response = _call_ai_json(system_prompt, user_prompt,
+                                         model_override=fast_model,
+                                         timing_tag='chunk-fast')
+                parsed = _parse_chunk_response(response, chunk)
+            except Exception as e:
+                print(f"[layer2] fast-chunk scan failed ({e}); retrying on tier model")
+                parsed = []
+            if parsed:
+                return parsed
+        response = _call_ai_json(system_prompt, user_prompt,
+                                 model_override=fast_model if not _ladder_active else None,
+                                 timing_tag='chunk')
         return _parse_chunk_response(response, chunk)
 
     completed = 0
@@ -7645,6 +7869,99 @@ def warmup_ollama():
         )
     except Exception:
         pass
+
+
+# Cooldown bookkeeping for the transcript prefix prewarm. One entry per
+# project: (payload_fingerprint, monotonic_ts). Prevents a tab-switch-happy
+# user from queueing redundant multi-second prefill calls.
+_PREWARM_STATE: "OrderedDict[str, tuple]" = OrderedDict()
+_PREWARM_STATE_MAX = 64
+_PREWARM_COOLDOWN_SECONDS = 600
+_PREWARM_LOCK = threading.Lock()
+
+
+def prewarm_chat_context(transcript, project_name="Interview", analysis=None,
+                         labeled_sections=None, speaker_names=None,
+                         output_language=None):
+    """Prefill the chat KV prefix so the FIRST question streams immediately.
+
+    The plain :func:`warmup_ollama` only loads the model weights — at a
+    throwaway num_ctx of 2048 that the first real chat call immediately
+    replaces (forcing a runner reload), and without the transcript, so
+    turn 1 still paid the full 10-20K-token prefill. This sends the exact
+    per-project-stable prefix a real chat turn starts with (system prompt
+    + language directive + STYLE/TRANSCRIPT/ack messages) at the rung the
+    real call will pick, with num_predict=1: the model prefills once in
+    the background and Ollama's longest-prefix slot matching serves turn 1
+    from cache. ``output_language`` must match what real chat turns will
+    resolve — the directive rides the END of the system message, so a
+    mismatch diverges the prefix BEFORE the transcript and wastes the
+    entire prefill.
+
+    The num_ctx rung is estimated with synthetic final-turn padding so the
+    real turn (question + reminder + excerpts) lands on the SAME rung —
+    a rung change would reload the runner and discard the warm cache.
+    Sticky grow-only bookkeeping then pins the project to that rung.
+
+    Return value = "the chat prefix is warm (or this call just made it
+    warm)": True on a fresh prefill AND on a cooldown hit. Callers use it
+    to decide whether to fall back to the plain weights-only warmup — a
+    cooldown hit must NOT trigger that fallback, because the 2048-ctx
+    warmup call would flip the runner's context size and destroy the
+    still-warm prefix (the original review-caught footgun). False only
+    when a prefix prewarm is structurally inapplicable here (no
+    transcript, >60-min project, non-Ollama provider, or failure).
+
+    The cooldown check is CHEAP and runs before any transcript formatting
+    (a chat-tab-toggling user must not pay MB-scale string assembly per
+    switch): the fingerprint is (segment count, duration) — enough to
+    bust the cooldown whenever the transcript actually changed.
+    """
+    if not _ollama_is_active():
+        return False
+    try:
+        segments = (transcript or {}).get('segments') or []
+        if not segments:
+            return False
+        duration = segments[-1].get('end', 0) or 0
+        if duration > _LONG_CHAT_SECONDS:
+            return False
+        key = str(project_name or '')
+        fingerprint = (len(segments), round(float(duration), 1),
+                       str(output_language or ''))
+        now = time.monotonic()
+        with _PREWARM_LOCK:
+            prior = _PREWARM_STATE.get(key)
+            if prior and prior[0] == fingerprint and \
+                    now - prior[1] < _PREWARM_COOLDOWN_SECONDS:
+                # Already warm — report success so callers don't "fall
+                # back" to the cache-destroying 2048-ctx warmup.
+                return True
+            _PREWARM_STATE[key] = (fingerprint, now)
+            _PREWARM_STATE.move_to_end(key)
+            while len(_PREWARM_STATE) > _PREWARM_STATE_MAX:
+                _PREWARM_STATE.popitem(last=False)
+        directive = language_directive(output_language, chat=True)
+        formatted = _format_transcript_for_ai(transcript, speaker_names)
+        analysis_block = _build_chat_analysis_index(analysis)
+        system_message, messages = _build_chat_messages(
+            'ok', [], project_name, segments,
+            formatted, analysis_block, '', None,
+            labeled_sections=labeled_sections, speaker_names=speaker_names,
+            include_final_reminder=False,
+            language_directive_text=directive,
+        )
+        # Rung padding: the real turn adds excerpts + reminder tails the
+        # prewarm message lacks (~up to 8K chars). Estimating with the
+        # padding keeps both calls on the same rung.
+        padded = messages + [{'role': 'user', 'content': ' ' * 8000}]
+        num_ctx = _sticky_chat_num_ctx(project_name, system_message, padded)
+        _call_ai_chat(system_message, messages, num_ctx=num_ctx,
+                      num_predict=1, timing_tag='prewarm')
+        return True
+    except Exception as e:
+        print(f"[chat-prewarm] failed (non-fatal): {e}", flush=True)
+        return False
 
 
 def _chunk_cache_get(key):

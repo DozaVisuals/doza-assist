@@ -1632,16 +1632,63 @@ def group_into_paragraphs(segments):
     return paragraphs
 
 
+def _prewarm_chat_for_project(project_id):
+    """Background chat pre-warm for one project (daemon-thread target).
+
+    Prefills the full chat prefix (system prompt + transcript) into
+    Ollama's KV cache so the first question streams immediately — see
+    ai_analysis.prewarm_chat_context (cooldown + >60-min skip live
+    there). Falls back to the plain model warm-load when the project
+    has no transcript yet, and stays out of the way while a transcribe
+    job owns the GPU.
+    """
+    try:
+        from ai_analysis import prewarm_chat_context, warmup_ollama
+        p = get_project(project_id)
+        transcript = (p or {}).get('transcript')
+        status = (p or {}).get('status') or ''
+        if transcript and status not in ('transcribing', 'processing'):
+            # True covers BOTH "just prefilled" and "still warm from the
+            # cooldown window" — either way the plain warmup below must
+            # not run: its throwaway 2048 num_ctx would flip the runner's
+            # context size and destroy the warm transcript prefix.
+            if prewarm_chat_context(
+                transcript,
+                project_name=p.get('name', 'Interview'),
+                analysis=p.get('analysis'),
+                labeled_sections=p.get('labeled_sections') or None,
+                speaker_names=p.get('speaker_names') or None,
+                output_language=resolve_output_language(p),
+            ):
+                return
+        warmup_ollama()
+    except Exception as e:
+        print(f"[chat-prewarm] project {project_id}: {e}", flush=True)
+
+
+@app.route('/project/<project_id>/chat-prewarm', methods=['POST'])
+def chat_prewarm(project_id):
+    """Fire-and-forget prefix pre-warm, triggered by the chat tab gaining
+    focus. Returns immediately; the prefill runs on a daemon thread and
+    ai_analysis-side cooldown makes repeat calls free."""
+    import threading
+    threading.Thread(target=_prewarm_chat_for_project, args=(project_id,),
+                     daemon=True).start()
+    return jsonify({'ok': True})
+
+
 @app.route('/project/<project_id>')
 def project_view(project_id):
     """View one or more projects. Accepts comma-separated IDs for multi-project workspace."""
-    # Pre-warm the Ollama model on project open so the user's first chat
-    # message starts with weights resident. Combined with the 30m
-    # keep_alive on every generate call, repeat questions never pay
-    # cold-load. Daemon thread so the page render isn't blocked.
+    # Pre-warm on project open so the user's first chat message streams
+    # immediately: with a transcript present this prefills the full chat
+    # prefix into Ollama's KV cache (not just the model weights, and at
+    # the rung the real call will use). Daemon thread so the page render
+    # isn't blocked.
     import threading
-    from ai_analysis import warmup_ollama
-    threading.Thread(target=warmup_ollama, daemon=True).start()
+    first_pid = project_id.split(',')[0].strip()
+    threading.Thread(target=_prewarm_chat_for_project, args=(first_pid,),
+                     daemon=True).start()
 
     project_ids = [pid.strip() for pid in project_id.split(',') if pid.strip()]
 

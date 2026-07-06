@@ -1399,6 +1399,18 @@ function switchTab(tab) {
     if (tab === 'export') {
         _refreshExportCounts();
     }
+
+    // Chat tab focus = strong signal a question is coming: fire the
+    // server-side prefix pre-warm so the first reply streams immediately.
+    // Fire-and-forget; the server enforces a cooldown so repeat switches
+    // are free.
+    if (tab === 'chat') {
+        try {
+            const firstId = String(COMBINED_ID).split(',')[0];
+            fetch(`/project/${firstId}/chat-prewarm`, { method: 'POST' })
+                .catch(() => {});
+        } catch (_) { /* non-fatal */ }
+    }
 }
 
 // ── Audio Player ──
@@ -2671,10 +2683,13 @@ async function streamChatReply({ message, typing, progressTimer }) {
     }
 
     if (progressTimer) clearTimeout(progressTimer);
-    // Keep the typing indicator visible throughout streaming. We accumulate
-    // tokens silently and only swap to the rendered clip cards + prose when
-    // the `done` event lands. Showing raw token stream led to model thoughts
-    // and "[No answer]" placeholders flashing visibly before being replaced.
+    // Live-paint the token stream as it arrives, then swap to the fully
+    // rendered clip cards + prose when the `done` event lands. The
+    // historical objections to live paint are handled upstream now: the
+    // server's stream loop consumes <think> phases silently (thoughts
+    // never arrive as tokens) and the "[No answer]" stop-token flashes
+    // are gone; the painter below masks bracketed spans so raw
+    // [CLIP: ...] marker grammar never flickers before the cards render.
     const bubble = typing;
     bubble.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> Thinking…';
     bubble.classList.add('chat-streaming');
@@ -2685,6 +2700,20 @@ async function streamChatReply({ message, typing, progressTimer }) {
     let streamedText = '';
     let finalReply = '';
     let sawDone = false;
+
+    // Progressive paint, throttled to ~7fps. Bracketed spans are masked
+    // so [CLIP: ...] grammar (and any bracketed leak) never flashes as
+    // raw text — the `done` swap renders them as playable cards.
+    let lastPaintAt = 0;
+    const paintLive = (force) => {
+        const now = Date.now();
+        if (!force && now - lastPaintAt < 150) return;
+        lastPaintAt = now;
+        let live = streamedText.replace(/\[[^\]\n]*\]?/g, ' ').trim();
+        if (!live) return;
+        bubble.innerHTML = escapeHtml(live).replace(/\n/g, '<br>') +
+            ' <span class="chat-typing"><span></span><span></span><span></span></span>';
+    };
 
     // Watchdog: if the SSE stream goes completely silent for SILENCE_MS
     // (no tokens, no heartbeats, no progress) we abort and fall back to
@@ -2720,12 +2749,13 @@ async function streamChatReply({ message, typing, progressTimer }) {
                 catch (_) { continue; }
                 const ev = payload.event;
                 if (ev === 'token') {
-                    // Accumulate silently — the bubble keeps the "Thinking…"
-                    // indicator visible until the `done` event delivers the
-                    // cleaned final reply, which renderChatReply then renders
-                    // as clip cards + prose. streamedText is preserved as a
-                    // fallback in case the stream cuts off before `done`.
+                    // Accumulate AND live-paint (masked + throttled). The
+                    // `done` event still delivers the cleaned final reply,
+                    // which renderChatReply renders as clip cards + prose.
+                    // streamedText doubles as the fallback in case the
+                    // stream cuts off before `done`.
                     streamedText += String(payload.data || '');
+                    paintLive(false);
                 } else if (ev === 'heartbeat') {
                     // Server is alive but the model is in a silent phase
                     // (reasoning / composing). Update the indicator so the

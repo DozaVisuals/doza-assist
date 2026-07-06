@@ -239,10 +239,10 @@ class TestDirectiveInjectionCoreSurfaces:
             lambda system_message, messages, num_ctx=32768:
                 (captured.append(system_message) or 'a fine answer'))
         t = self._transcript()
-        ai_analysis.chat_about_transcript(t, 'what is said here?')
-        ai_analysis.chat_about_transcript(t, 'what is said here?',
+        ai_analysis.chat_about_transcript(t, 'how should I open the piece?')
+        ai_analysis.chat_about_transcript(t, 'how should I open the piece?',
                                           output_language='en')
-        ai_analysis.chat_about_transcript(t, 'what is said here?',
+        ai_analysis.chat_about_transcript(t, 'how should I open the piece?',
                                           output_language='no')
         assert len(captured) >= 3
         assert 'OUTPUT LANGUAGE' not in captured[0]

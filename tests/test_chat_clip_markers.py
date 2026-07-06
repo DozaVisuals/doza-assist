@@ -115,14 +115,17 @@ class TestCleanChatResponseIntegration:
         assert '[CLIP: start=00:05:12 end=00:05:34 title="The turn"]' in out
         assert '**' not in out
 
-    def test_markdown_stripping_runs_outside_clip_markers(self):
-        # Bold/italic in prose should still be stripped — we don't want to
-        # skip markdown cleanup entirely, only protect the CLIP marker.
+    def test_markdown_bold_in_prose_is_preserved(self):
+        # Bold/italic in prose is KEPT — both chat frontends render
+        # **bold**/<em> natively and the system prompt asks the model to
+        # bold beat names. (The old stripper also fed the essay-scaffolding
+        # deleter by unwrapping "1. **Label:** text" into the exact shape
+        # that pass used to delete.) Only the marker itself must stay
+        # canonical.
         src = "This is **strong**. [CLIP: start=0:10 end=0:30 title='A']"
         out = _clean_chat_response(src)
-        assert 'This is strong.' in out
+        assert 'This is **strong**.' in out
         assert '[CLIP: start=0:10 end=0:30 title="A"]' in out
-        assert '**' not in out
 
     def test_variant_marker_survives_full_cleaner_pipeline(self):
         # End-to-end: a messy small-model reply should come out with a
@@ -134,9 +137,10 @@ class TestCleanChatResponseIntegration:
         )
         out = _clean_chat_response(src)
         assert '[CLIP: start=00:05:12 end=00:05:34 title="The turn"]' in out
-        # Markdown header and bold are stripped.
+        # Header hashes are stripped (collection chat can't render them);
+        # bold survives — the frontends render it.
         assert '# ' not in out
-        assert '**' not in out
+        assert '**Moment one**' in out
 
 
 class TestAutoWrapTimecodeRanges:

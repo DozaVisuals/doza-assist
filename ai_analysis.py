@@ -367,6 +367,61 @@ def _is_conversational_query(message: str, segments=None) -> bool:
     return True
 
 
+# Speech-report / content-lookup questions: "what does she say about X",
+# "did he mention the fire", "how does she describe the river". These are
+# conversational in VOICE (the editor wants an answer, not a card dump)
+# but extractive in SUBSTANCE — the answer must contain what was actually
+# said, not a thematic gloss. The negative lookahead keeps craft questions
+# aimed at the assistant ("what do you think about…") and interpretive
+# follow-ups with demonstrative subjects ("what does that say about the
+# piece?", "what do these clips tell us?") conversational — only an
+# animate/named subject reports speech.
+_CONTENT_LOOKUP_SUBJECT_GUARD = (
+    r'(?!you\b|we\b|i\b|that\b|this\b|these\b|those\b|it\b)')
+_CONTENT_LOOKUP_WH_RE = re.compile(
+    r'\b(?:what|where|when|how)\b[^?.!\n]{0,40}?'
+    r'\b(?:do|does|did)\s+' + _CONTENT_LOOKUP_SUBJECT_GUARD +
+    r'\w+[^?.!\n]{0,30}?'
+    r'\b(?:say|says|said|mention|mentions|mentioned|talk|talks|talked'
+    r'|describe|describes|described|tell|tells|told|explain|explains'
+    r'|explained|discuss|discusses|discussed)\b',
+    re.IGNORECASE)
+_CONTENT_LOOKUP_YN_RE = re.compile(
+    r'\b(?:do|does|did)\s+' + _CONTENT_LOOKUP_SUBJECT_GUARD +
+    r'\w+\s+(?:ever\s+|actually\s+)?'
+    r'(?:mention|say|talk\s+about|bring\s+up|discuss|address|explain)\b',
+    re.IGNORECASE)
+# Shapes without do-support: passives ("what was said about the merger"),
+# imperatives ("tell me what she says about X"), and factual-wh asks the
+# system prompt names as content questions ("what year did that happen").
+_CONTENT_LOOKUP_EXTRA_RES = (
+    re.compile(r'\bwhat\s+(?:was|were|is|are)\s+(?:said|mentioned'
+               r'|discussed|told|brought\s+up)\b', re.IGNORECASE),
+    re.compile(r'\btell\s+me\s+what\b[^?.!\n]{0,40}?'
+               r'\b(?:say|says|said|mention|mentions|mentioned|think'
+               r'|thinks|thought)\b', re.IGNORECASE),
+    re.compile(r'\bwhat\s+(?:year|date|day|month|time)\b[^?.!\n]{0,40}?'
+               r'\b(?:do|does|did|was|were|is|are)\b', re.IGNORECASE),
+)
+
+
+def _is_content_lookup_query(message: str) -> bool:
+    """True when the message asks what a SPEAKER said about something.
+
+    Suppressed entirely by an explicit no-clips signal — "no clips, just
+    tell me what she said" is a hard instruction the grounding tail and
+    salvage backstop must not override with bolted-on cards.
+    """
+    if not message:
+        return False
+    low = message.lower()
+    if any(s in low for s in _NO_CLIP_SIGNALS):
+        return False
+    return bool(_CONTENT_LOOKUP_WH_RE.search(message)
+                or _CONTENT_LOOKUP_YN_RE.search(message)
+                or any(r.search(message) for r in _CONTENT_LOOKUP_EXTRA_RES))
+
+
 # ── Clip-aware chat (editor selections context) ──────────────────────────
 #
 # When the editor has clips in `labeled_sections`, we replace the
@@ -527,7 +582,7 @@ def _build_clip_aware_framing(my_style_active: bool) -> str:
     if my_style_active:
         return (
             "\n\nYou have three layers of context:\n"
-            "1. <storytelling_foundation> describes how this editor builds stories based on their past work\n"
+            "1. The STYLE CONTEXT message describes how this editor builds stories based on their past work\n"
             "2. The transcript is the raw source material\n"
             "3. <editor_selections> are the clips the editor has already chosen for this project\n\n"
             "When the editor asks for suggestions, gaps, or sequence advice, always filter your "
@@ -664,8 +719,107 @@ _FINAL_REMINDER = (
     'line, so I can play it. Never describe a moment as a clip without its '
     'marker, and never substitute a prose summary for requested markers. For '
     'purely conversational questions (story, themes, craft) answer normally — '
-    'a marker only when a specific moment directly anchors your point.'
+    'a marker only when a specific moment directly anchors your point. '
+    'Whatever the question, GROUND your answer in this footage: name who is '
+    'speaking, cite what they actually said (short verbatim quotes are '
+    'welcome), and point at concrete moments — never generic film-speak that '
+    'could describe any documentary.'
 )
+
+
+def _compact_history_turn(content, cap=1200):
+    """Compact a replayed assistant turn: full [CLIP:] markers collapse to
+    one-line "‣ title (start–end)" references and the prose is capped.
+
+    Two independent wins: (a) history stops eating the context window —
+    prior card-heavy answers ran to thousands of tokens each and, because
+    Ollama evicts oldest-first on overflow, every history token pushed the
+    transcript message closer to silent eviction; (b) the model stops
+    seeing full marker grammar in history, so it re-emits old cards less
+    on "more"-style follow-ups (the spans themselves stay recoverable —
+    _history_clip_spans reads the RAW history, not this replay copy).
+    """
+    import re
+
+    def _as_reference(m):
+        full = m.group(0)
+        sm = re.search(r'start=([^\s\]]+)', full)
+        em = re.search(r'end=([^\s\]]+)', full)
+        tm = re.search(r'title\s*=\s*["\'“‘](.*?)["\'”’]', full)
+        if sm and em:
+            title = (tm.group(1) if tm else 'clip').strip()
+            return f'‣ {title} ({sm.group(1)}–{em.group(1)})'
+        return full
+    compact = re.sub(r'\[CLIP:[^\]]*\]', _as_reference, content)
+    if len(compact) > cap:
+        compact = compact[:cap].rstrip() + ' …'
+    return compact
+
+
+def _estimate_chat_num_ctx(system_message, messages, num_predict=4096):
+    """Pick a num_ctx that holds the FULL assembled chat payload plus the
+    reply budget.
+
+    The predecessor (:func:`_estimate_layer1_num_ctx`) budgeted from the
+    formatted transcript alone with a fixed 4096-token slack — but the
+    chat system prompt by itself is ~4.5K tokens, and the analysis block,
+    excerpts, style block, and history were never counted. The result on
+    mid-length interviews was a window smaller than the prompt, and
+    Ollama resolves that by silently DROPPING the oldest non-system
+    message — the transcript itself. The model then answers from the
+    system prompt and history alone: fluent, thematic, and completely
+    ungrounded. This estimator measures what is actually sent.
+
+    2.8 chars/token matches MEASURED gemma4 tokenization of real
+    timecode-formatted English transcript payloads (2.82 observed via
+    Ollama prompt_eval_count; plain prose runs looser but the transcript
+    dominates the payload). Non-Latin scripts tokenize far denser — CJK
+    measured ~1.5 chars/token — so payloads with a meaningful non-ASCII
+    share get the tighter divisor. Overestimating num_ctx costs a little
+    KV memory; underestimating silently evicts the transcript.
+    """
+    total_chars = len(system_message or '')
+    non_ascii = 0
+    for m in messages or []:
+        content = m.get('content') or ''
+        total_chars += len(content)
+        non_ascii += sum(1 for ch in content if ord(ch) > 0x2FFF)
+    divisor = 2.8
+    if total_chars and (non_ascii / total_chars) > 0.15:
+        divisor = 1.6
+    prompt_tokens = int(total_chars / divisor) + 256  # +template overhead
+    needed = prompt_tokens + num_predict
+    for ctx in (8192, 12288, 16384, 24576, 32768):
+        if needed <= ctx:
+            return ctx
+    # Above the 32K ceiling the payload no longer fits; warn loudly so an
+    # over-long context stops being an invisible quality cliff.
+    print(f"[chat] WARNING: assembled chat payload (~{prompt_tokens} tokens "
+          f"+ {num_predict} reply) exceeds the 32768 num_ctx ceiling — "
+          f"oldest context will be truncated by the model server", flush=True)
+    return 32768
+
+
+# Per-conversation num_ctx high-water marks. Ollama reloads the model
+# runner whenever num_ctx CHANGES (measured ~2.5s reload + full prompt
+# re-eval vs ~0.3s warm), so a conversation that bounces between rungs as
+# history grows and excerpt blocks come and go pays the reload on every
+# flip. Never shrink mid-conversation: grow-only per project.
+_NUM_CTX_HWM: "OrderedDict[str, int]" = OrderedDict()
+_NUM_CTX_HWM_MAX = 64
+
+
+def _sticky_chat_num_ctx(project_name, system_message, messages):
+    """Payload-aware num_ctx with a grow-only floor per project."""
+    est = _estimate_chat_num_ctx(system_message, messages)
+    key = str(project_name or '')
+    prior = _NUM_CTX_HWM.get(key, 0)
+    ctx = max(est, prior)
+    _NUM_CTX_HWM[key] = ctx
+    _NUM_CTX_HWM.move_to_end(key)
+    while len(_NUM_CTX_HWM) > _NUM_CTX_HWM_MAX:
+        _NUM_CTX_HWM.popitem(last=False)
+    return ctx
 
 
 def _build_chat_messages(message, history, project_name, segments,
@@ -736,6 +890,16 @@ def _build_chat_messages(message, history, project_name, segments,
     if language_directive_text:
         system_message = system_message + language_directive_text
 
+    # History hygiene BEFORE assembly. The client pushes the current user
+    # message into chatHistory before it fires the request, so the raw
+    # history usually arrives with the current question already at its
+    # tail — replaying it would show the model the question twice and burn
+    # a history slot. Drop it here (also repairs old persisted histories).
+    history = list(history or [])
+    if history and history[-1].get('role') == 'user' and \
+            (history[-1].get('content') or '').strip() == (message or '').strip():
+        history = history[:-1]
+
     messages = []
     if style_block:
         messages.append({
@@ -763,6 +927,10 @@ def _build_chat_messages(message, history, project_name, segments,
                 continue
             if role not in ('user', 'assistant'):
                 role = 'user'
+            if role == 'assistant':
+                content = _compact_history_turn(content)
+            elif len(content) > 600:
+                content = content[:600].rstrip() + ' …'
             messages.append({'role': role, 'content': content})
 
     if include_final_reminder:
@@ -783,6 +951,21 @@ def _build_chat_messages(message, history, project_name, segments,
                 f'{int(round(target_seconds))} seconds of material in total. '
                 f'Suggest roughly {hint_clips} clips so their combined runtime '
                 f'reaches that total — do not stop early.'
+            )
+        # Speech-report asks ("what does she say about X") ride the
+        # conversational route but their answer contract is extractive:
+        # report what was SAID. Same recency slot as the other contract
+        # restatements — a Gemma-class model ignores this rule when it
+        # only lives tens of thousands of tokens up in the system prompt.
+        if _is_content_lookup_query(message):
+            final_tail = (
+                f'{final_tail}\n\nCONTENT QUESTION: answer with what was '
+                f'actually said in the footage — name the speaker, quote '
+                f'their exact words briefly (copied verbatim from the '
+                f'transcript above), and put a [CLIP: start=HH:MM:SS '
+                f'end=HH:MM:SS title="..."] marker after each passage you '
+                f'cite so I can play it. No thematic summary without the '
+                f'actual words.'
             )
         messages.append({'role': 'user', 'content': f'{message}\n\n{final_tail}'})
     else:
@@ -844,7 +1027,17 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     phrases, words = _extract_query_keywords(message)
     theme_phrases = _collect_theme_phrases_from_vectors(segment_vectors, message)
     tfidf_hits = []
-    if paragraph_index is not None:
+    # Only run TF-IDF when the message carries real content words. On
+    # keyword-less questions ("whats this all about") the raw query is all
+    # stopwords the index doesn't filter, so the "matches" were arbitrary
+    # paragraphs — injected as RELEVANT EXCERPTS, they anchored whole-piece
+    # questions to noise. Exception: keyword-less EXTRACTIVE count asks
+    # ("give me 5 of the strongest moments") still need the ranked pool —
+    # the count top-up draws candidates from it on projects that carry no
+    # segment vectors.
+    _count_ask = (_detect_explicit_clip_count(message) is not None
+                  or _plural_clip_minimum(message) is not None)
+    if paragraph_index is not None and (phrases or words or _count_ask):
         try:
             tfidf_hits = paragraph_index.query_paragraphs(message, k=8) or []
         except Exception as e:
@@ -914,7 +1107,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         labeled_sections=labeled_sections, speaker_names=speaker_names,
         language_directive_text=directive,
     )
-    num_ctx = _estimate_layer1_num_ctx(formatted)
+    num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
     response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)
@@ -924,7 +1117,14 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     # Skip clip salvage when the editor's question is conversational
     # (themes, story, craft, chitchat, or explicit "no clips"). Forcing
     # markers into a discussion answer breaks the orientation contract.
-    if not _is_conversational_query(message, segments=segments):
+    # Exception: content-lookup asks ("what does she say about X") keep
+    # the conversational voice but promised playable passages — salvage
+    # backstops them when the model cited nothing. Only when the reply
+    # has actual prose, though: salvaging an EMPTY reply on a yes/no
+    # content question ("did she ever mention X?") would fabricate an
+    # implied 'yes' out of cards for a topic never discussed.
+    if not _is_conversational_query(message, segments=segments) \
+            or (_is_content_lookup_query(message) and cleaned.strip()):
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
@@ -1063,7 +1263,14 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         print(f"[chat-stream] theme phrase collection failed: {e}")
         theme_phrases = []
     tfidf_hits = []
-    if paragraph_index is not None:
+    # Keyword-or-count-ask gate mirrors the non-streaming path — see the
+    # comment there.
+    try:
+        _count_ask = (_detect_explicit_clip_count(message) is not None
+                      or _plural_clip_minimum(message) is not None)
+    except Exception:
+        _count_ask = False
+    if paragraph_index is not None and (phrases or words or _count_ask):
         try:
             tfidf_hits = paragraph_index.query_paragraphs(message, k=8) or []
         except Exception as e:
@@ -1142,7 +1349,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     )
 
     pieces = []
-    num_ctx = _estimate_layer1_num_ctx(formatted)
+    num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
     _think_buf = ''
     _in_thinking = False
     _THINK_OPENERS = ('<think>', '<thinking>', '[Thoughts]', '[Thought Process]', '[Reasoning]')
@@ -1161,12 +1368,22 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             return False
         for plen in range(_REP_MIN_PATTERN, len(tail) // _REP_THRESHOLD + 1):
             pat = tail[-plen:]
+            # Punctuation-only units are usually legitimate structure —
+            # markdown table rows, '----' dividers, '. . .' ellipses — so
+            # they get a 5× trip threshold instead of the letter one. (No
+            # real divider repeats a letterless unit 30× back-to-back; a
+            # degenerated model does, and with no cutoff at all it would
+            # flood until num_predict exhausts.)
+            threshold = (_REP_THRESHOLD if any(c.isalpha() for c in pat)
+                         else _REP_THRESHOLD * 5)
             count = 0
             pos = len(tail) - plen
             while pos >= 0 and tail[pos:pos + plen] == pat:
                 count += 1
                 pos -= plen
-            if count >= _REP_THRESHOLD:
+            if count >= threshold:
+                print(f"[chat-stream] repetition cutoff fired on pattern "
+                      f"{pat!r} x{count}", flush=True)
                 return True
         return False
 
@@ -1181,39 +1398,55 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     _last_yield_piece = 0
     _HEARTBEAT_PIECES = 25
 
-    for piece in _call_ai_chat_stream(system_message, messages, num_ctx=num_ctx):
-        _piece_count += 1
-        pieces.append(piece)
-        _think_buf += piece
-        if not _in_thinking:
-            if any(op in _think_buf for op in _THINK_OPENERS):
-                _in_thinking = True
-                _think_buf = ''
-                # Tell the UI the model is in an internal reasoning phase
-                # so it can show a less-confusing label than "Thinking…".
-                yield ('heartbeat', 'reasoning')
-                _last_yield_piece = _piece_count
-            else:
-                for tag in _THINK_OPENERS:
-                    if any(_think_buf.endswith(tag[:i]) for i in range(1, len(tag))):
-                        break
-                else:
-                    yield ('token', piece)
+    # The stream can die mid-generation (read-timeout between bytes, an
+    # Ollama restart). Without the catch, the exception escaped the
+    # generator BEFORE the ('done', cleaned) event — the client kept the
+    # raw, un-postprocessed token tail forever. Now whatever arrived
+    # still flows through the full cleaning pipeline below.
+    try:
+        for piece in _call_ai_chat_stream(system_message, messages, num_ctx=num_ctx):
+            _piece_count += 1
+            pieces.append(piece)
+            _think_buf += piece
+            if not _in_thinking:
+                if any(op in _think_buf for op in _THINK_OPENERS):
+                    _in_thinking = True
+                    _think_buf = ''
+                    # Tell the UI the model is in an internal reasoning phase
+                    # so it can show a less-confusing label than "Thinking…".
+                    yield ('heartbeat', 'reasoning')
                     _last_yield_piece = _piece_count
-                    _think_buf = _think_buf[-30:] if len(_think_buf) > 30 else _think_buf
-                    _rep_tail = (_rep_tail + piece)[-_REP_WINDOW:]
-                    if _is_stuck(_rep_tail):
-                        break
-        else:
-            if any(cl in _think_buf for cl in _THINK_CLOSERS):
-                _in_thinking = False
-                _think_buf = ''
-                yield ('heartbeat', 'composing')
-                _last_yield_piece = _piece_count
+                else:
+                    for tag in _THINK_OPENERS:
+                        if any(_think_buf.endswith(tag[:i]) for i in range(1, len(tag))):
+                            break
+                    else:
+                        yield ('token', piece)
+                        _last_yield_piece = _piece_count
+                        _think_buf = _think_buf[-30:] if len(_think_buf) > 30 else _think_buf
+                        _rep_tail = (_rep_tail + piece)[-_REP_WINDOW:]
+                        if _is_stuck(_rep_tail):
+                            break
+            else:
+                if any(cl in _think_buf for cl in _THINK_CLOSERS):
+                    _in_thinking = False
+                    _think_buf = ''
+                    yield ('heartbeat', 'composing')
+                    _last_yield_piece = _piece_count
 
-        if _piece_count - _last_yield_piece >= _HEARTBEAT_PIECES:
-            yield ('heartbeat', 'reasoning' if _in_thinking else 'composing')
-            _last_yield_piece = _piece_count
+            if _piece_count - _last_yield_piece >= _HEARTBEAT_PIECES:
+                yield ('heartbeat', 'reasoning' if _in_thinking else 'composing')
+                _last_yield_piece = _piece_count
+    except Exception as e:
+        if not pieces:
+            # Nothing arrived at all — a pre-first-token failure (Ollama
+            # down, model missing, OOM) must PROPAGATE so the SSE layer
+            # surfaces its typed error message; swallowing it left the
+            # user a permanently frozen 'Thinking…' bubble. Only a
+            # mid-stream death with partial text is worth salvaging
+            # through the cleaning pipeline below.
+            raise
+        print(f"[chat-stream] stream aborted mid-generation: {e}", flush=True)
 
     # Strip any trailing repetition the model produced before we cut it off.
     full = ''.join(pieces)
@@ -1226,8 +1459,11 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     # the model's first attempt produced zero markers — most calls return
     # immediately. Streamed clients see a brief pause after the prose
     # finishes, then the marker block lands as part of the final message.
-    # Skipped on conversational queries — see _is_conversational_query.
-    if not _is_conversational_query(message, segments=segments):
+    # Skipped on conversational queries — see _is_conversational_query —
+    # except content-lookup asks with surviving prose, which promised
+    # playable passages (empty-reply guard: see the non-streaming path).
+    if not _is_conversational_query(message, segments=segments) \
+            or (_is_content_lookup_query(message) and cleaned.strip()):
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
@@ -2640,33 +2876,45 @@ _REASONING_TAG_PAIRS = [
 
 
 def _strip_essay_scaffolding(text):
-    """Drop essay scaffolding small models emit despite the prompt
-    forbidding it: ``> blockquoted`` (and often hallucinated) speaker
-    quotes, numbered list items with section headers like ``1. The Aha
-    Moment: explanation``, and ``(hypothetical / fabricated / illustrative
-    / paraphrased ...)`` confessions of fabrication.
+    """Neutralize essay scaffolding without destroying the content it
+    carries. Historical behavior deleted whole lines here — ``> `` quote
+    lines and numbered ``1. Header: explanation`` items vanished with
+    their text, which is exactly how specific, grounded answers turned
+    into dangling headers ("Thematically, we are looking at:" followed by
+    nothing). Content is never deleted anymore:
 
-    Defense-in-depth — the prompt forbids all three. This catches what
-    Gemma 4B emits when it ignores the prompt anyway.
+      1. ``> quoted line`` keeps its text as a plain quoted-prose line —
+         the blockquote decoration goes, the words stay (conversational
+         answers have no clip card to carry the quote for them).
+      2. Numbered ``1. Header: explanation`` items are kept verbatim —
+         the frontends render numbered lists natively.
+      3. Parenthetical confessions of fabrication ("(hypothetical
+         selection)", "(paraphrased)") are still removed: they flag
+         content the model invented, and the flag itself is noise.
     """
     if not text:
         return text
     import re
 
-    # 1. Markdown blockquote lines starting with "> ". Drop the whole
-    # line; the clip card already shows the speaker text.
-    text = re.sub(r'^[ \t]*>\s+.*$\n?', '', text, flags=re.MULTILINE)
+    # 1. Markdown blockquote lines: keep the text, drop the "> " prefix,
+    # wrap in quotation marks when the model didn't supply its own.
+    # Bare ">" separator lines (multi-paragraph blockquotes) drop first so
+    # the content rule below can't wrap the FOLLOWING prose line; the
+    # content rule matches same-line whitespace only ([ \t], never \n).
+    text = re.sub(r'^[ \t]*>[ \t]*$\n?', '', text, flags=re.MULTILINE)
 
-    # 2. Numbered list items that double as section headers — the pattern
-    # is "1. Capitalized Phrase: explanation". The phrase before the colon
-    # can contain quoted titles like 'The "Aha!" Moment', so the char
-    # class is lenient (anything that's not the colon or newline).
-    text = re.sub(
-        r'^[ \t]*\d+\.\s+[A-Z][^:\n]{0,80}:\s*[^\n]*\n?',
-        '',
-        text,
-        flags=re.MULTILINE,
-    )
+    def _unquote_block(m):
+        inner = m.group(1).strip()
+        if not inner:
+            return ''
+        if inner[0] in '"“‘\'' or inner[-1] in '"”’\'':
+            return f'{inner}\n'
+        return f'“{inner}”\n'
+    text = re.sub(r'^[ \t]*>[ \t]+(.*)$\n?', _unquote_block, text,
+                  flags=re.MULTILINE)
+
+    # 2. (removed) Numbered "1. Header: explanation" items are legitimate
+    # structured answers — both chat frontends render numbered lists.
 
     # 3. Parenthetical confessions of fabrication: "(A hypothetical
     # selection ...)", "(illustrative quote)", "(paraphrased)", etc.
@@ -2701,7 +2949,27 @@ def _strip_no_answer_placeholders(text):
         r'[^\]\n]*\]?\s*$',
         re.MULTILINE | re.IGNORECASE,
     )
-    return pattern.sub('', text)
+
+    def _placeholder_only(m):
+        line = m.group(0).strip()
+        # A real negative ANSWER ("No quotes about the fire exist." /
+        # "No direct quotes, but she circles it at 12:40…") is content,
+        # not placeholder narration — deleting it flips an honest 'no'
+        # into silence (and downstream salvage could then fabricate an
+        # implied 'yes'). Placeholders are bracket-wrapped or terse
+        # sentence fragments; keep any bracket-free line that reads like
+        # a sentence (ends in punctuation) or carries substance markers
+        # (comma / 'but' / timecode / length).
+        bracketed = line.startswith('[')
+        substantive = (
+            ',' in line or ' but ' in line.lower()
+            or re.search(r'\d{1,2}:\d{2}', line)
+            or line.endswith(('.', '!', '?'))
+        )
+        if not bracketed and (len(line) >= 60 or substantive):
+            return m.group(0)
+        return ''
+    return pattern.sub(_placeholder_only, text)
 
 
 def _strip_meta_preamble(text):
@@ -2794,45 +3062,17 @@ def _strip_meta_preamble(text):
         flags=re.IGNORECASE | re.DOTALL,
     )
 
-    # 4. Follow-up offers — "If you'd like, I can pull…" / "Let me know if…"
-    # / "Would you like me to…" / "I can also…" / "Want me to…". Gemma
-    # signals availability for further work; the user just wants the answer.
-    # Line-anchored so a whole follow-up paragraph drops cleanly. In the
-    # rare case the trigger shares a line with real content we lose the
-    # content too — acceptable, the user came for the answer not the offer.
-    text = re.sub(
-        r'^[ \t]*(?:If you(?:[’\']?d| would| want)? like'
-        r'|If you want'
-        r'|Let me know if'
-        r'|Would you like(?: me)?'
-        r'|Want me to'
-        r'|I can (?:also |further |)?(?:pull|provide|find|offer|elaborate|'
-        r'expand|dig|share|extract|analyze))[^\n]*\n?',
-        '',
-        text,
-        flags=re.MULTILINE | re.IGNORECASE,
-    )
+    # 4. (removed) Follow-up offers ("Would you like me to pull those as
+    # clips?") used to be deleted wholesale — but an offer to do more
+    # editorial work is exactly what a producer says next, and the same
+    # regex was eating substantive lines that merely started with "I can
+    # pull the moment where…". Offers stay.
 
-    # 5. Section sub-headers between the opening sentence and the first
-    # [CLIP:] marker. Pattern: a paragraph that is one short Capitalized
-    # phrase followed by ": " and a sentence — e.g. "Natural Resilience:
-    # This is seen in…". The new prompt forbids these but Gemma still
-    # leaks them; strip the leading label-and-prose pair, keep nothing.
-    # Only applied to the prose ABOVE the first marker so legitimate
-    # post-marker prose (rare, but possible) is left alone.
-    first_clip = re.search(r'\[CLIP\s*:', text)
-    if first_clip:
-        head = text[:first_clip.start()]
-        tail = text[first_clip.start():]
-        # Match a line that starts with 1-5 Capitalized words then ":"
-        # then more text on the same line. Conservative width to avoid
-        # hitting natural prose like "But here's the thing: …".
-        sub_header_re = re.compile(
-            r'^[ \t]*[A-Z][A-Za-z]+(?:[ /\-][A-Z][A-Za-z]+){0,4}\s*:\s+[A-Z][^\n]*\n?',
-            re.MULTILINE,
-        )
-        head = sub_header_re.sub('', head)
-        text = head + tail
+    # 5. (removed) "Label: sentence" sub-headers above the first marker
+    # used to be deleted WITH their prose — which destroyed real content
+    # like "Speakers: Maria Sanchez and her daughter." and structured
+    # answers ("Setup: …", "Payoff: …"). Both frontends render these
+    # fine as plain lines; they stay.
 
     return text.strip()
 
@@ -2877,14 +3117,23 @@ def _strip_reasoning_tags(text):
     # 2. Open-ended: tag opens but never closes (model ran out of tokens
     #    or got cut off). Strip from the opener to the end of the message
     #    so the UI doesn't show "[Thoughts] half a thought…" garbage.
+    #    Strictly-internal tags (Thoughts/Thought Process/Reasoning/
+    #    Reflection) strip unconditionally — text after them is monologue
+    #    by definition, wherever it starts. Header-ambiguous tags
+    #    (Analysis/Plan/Response) only strip when they open near the HEAD
+    #    of the reply: a model using "[Analysis]" as a mid-answer section
+    #    header must not lose everything after it.
+    _HEADER_AMBIGUOUS = {'Analysis', 'Plan', 'Response'}
     for opener, _closer in _REASONING_TAG_PAIRS:
         opener_re = re.escape(opener)
-        text = re.sub(
-            rf'\[\s*{opener_re}\s*\].*?$',
-            '',
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
+        m = re.search(rf'\[\s*{opener_re}\s*\]', text, flags=re.IGNORECASE)
+        if m and (opener not in _HEADER_AMBIGUOUS or m.start() <= 200):
+            text = re.sub(
+                rf'\[\s*{opener_re}\s*\].*?$',
+                '',
+                text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
 
     # 3. Bare leftover tags that escaped both passes (e.g. just "[Thoughts]"
     #    on its own line). Drop the marker.
@@ -3252,6 +3501,16 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0,
 
     def _title_anchored(start_sec, end_sec, title):
         """False => the title clearly describes a different moment (drop)."""
+        # Mechanical titles minted by _auto_wrap_timecode_ranges ("Moment
+        # at 12:34") carry no editorial claim — their timecode came from
+        # the model's own prose and already passed the numeric check.
+        # Judging them on the word "moment" deleted the user's sentence
+        # whenever the speaker happened to say "moment" elsewhere. The
+        # exemption is pinned to the EXACT minted shape so a model-
+        # authored "Moment at the funeral" title still gets anchored.
+        if re.match(r'^Moment at \d{1,2}:\d{2}(?::\d{2})?\s*$',
+                    title or '', re.IGNORECASE):
+            return True
         tokens = _distinctive_tokens(title)
         if not tokens:
             return True  # nothing distinctive to judge — keep
@@ -3291,18 +3550,27 @@ def _validate_clip_markers_in_text(text, segments, grace_seconds=5.0,
                 pass
         return True
 
-    # Walk lines so we strip both the marker AND the editorial sentence that
-    # rides along with it. A "moment doesn't exist" line with explanatory
-    # prose underneath would just confuse the user.
+    # Walk lines. A line that is ESSENTIALLY the marker (marker + at most
+    # a few characters of glue) is dropped whole so no orphan card-intro
+    # survives. But when the marker rides inside a real prose sentence,
+    # only the marker is excised — deleting the editor's sentence because
+    # its attached card failed validation was destroying legitimate,
+    # specific answer content.
     cleaned_lines = []
     for line in text.split('\n'):
-        bad_marker = False
-        for m in marker_re.finditer(line):
-            if not _is_valid(m):
-                bad_marker = True
-                break
-        if not bad_marker:
+        bad_spans = [m.span() for m in marker_re.finditer(line)
+                     if not _is_valid(m)]
+        if not bad_spans:
             cleaned_lines.append(line)
+            continue
+        stripped_line = line
+        for s, e in reversed(bad_spans):
+            stripped_line = stripped_line[:s] + stripped_line[e:]
+        # ≥20 chars of surviving prose means the line said something of
+        # its own — keep it (minus the bad markers). Below that it was
+        # just marker scaffolding; drop the whole line.
+        if len(stripped_line.strip()) >= 20:
+            cleaned_lines.append(stripped_line.rstrip())
     cleaned = '\n'.join(cleaned_lines)
     # Collapse blank-line runs the dropped markers might have left behind.
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
@@ -3445,19 +3713,46 @@ def _validate_clip_timecodes(clips, segments, *, text_key=None,
 
 
 def _strip_trailing_repetition(text):
-    """Remove degenerate trailing repetition from model output."""
+    """Remove degenerate trailing repetition from model output.
+
+    Letter-bearing units trip at 4 repeats; punctuation-only units
+    (dividers, dotted lines) are usually formatting, so they only trip
+    at a 5× higher count — real degeneration floods far past that.
+    After cutting, backs up to the last sentence boundary so the reply
+    never ends mid-clause with a dangling colon or comma — skipping
+    boundary dots inside numbers ('92.5') so quantities don't get
+    corrupted by the retreat.
+    """
     if len(text) < 30:
         return text
+    import re
     for plen in range(4, 60):
         pat = text[-plen:]
+        threshold = 4 if any(c.isalpha() for c in pat) else 20
         count = 0
         pos = len(text) - plen
         while pos >= 0 and text[pos:pos + plen] == pat:
             count += 1
             pos -= plen
-        if count >= 4:
+        if count >= threshold:
             cut = len(text) - (count * plen)
-            return text[:cut].rstrip()
+            head = text[:cut].rstrip()
+            # Land on a clean boundary: if the cut left a dangling
+            # fragment (no terminal punctuation), retreat to the end of
+            # the last complete sentence/marker when one exists nearby.
+            # A '.' only counts when followed by whitespace/end AND not
+            # sandwiched between digits (decimal points are not sentence
+            # ends).
+            if head and head[-1] not in '.!?"”\']':
+                boundary = -1
+                for m in re.finditer(r'(?:(?<!\d)\.(?!\d)|[!?\]])(?=\s|$)',
+                                     head):
+                    boundary = m.start()
+                if boundary > len(head) - 200 and boundary > 0:
+                    head = head[:boundary + 1]
+            print(f"[chat] trailing repetition stripped (pattern "
+                  f"{pat!r} x{count})", flush=True)
+            return head.rstrip()
     return text
 
 
@@ -3485,10 +3780,14 @@ def _clean_chat_response(text):
     text = _auto_wrap_timecode_ranges(text)
     # Remove markdown headers
     text = re.sub(r'^#{1,4}\s*', '', text, flags=re.MULTILINE)
-    # Remove bold/italic markdown (but never inside a CLIP marker — the title
-    # may legitimately contain asterisks, and stripping them could also chew
-    # up the marker itself if the model wrapped it in **bold**).
-    text = _strip_markdown_outside_clips(text)
+    # Bold/italic markdown is KEPT: both chat frontends render **bold** and
+    # *italic* natively (project.html and collection.js), and the system
+    # prompt asks the model to bold beat names. The old stripper also had a
+    # nasty interaction: removing ** from "1. **Memory:** text" produced the
+    # exact "1. Header: text" shape a later pass then deleted wholesale.
+    # Only asterisks WRAPPING a CLIP marker are still unwrapped, so the
+    # marker starts its line clean for the frontend card regex.
+    text = re.sub(r'\*{1,3}(\[CLIP:[^\]]*\])\*{1,3}', r'\1', text)
     # Remove horizontal rules
     text = re.sub(r'^---+\s*$', '', text, flags=re.MULTILINE)
     # Remove emoji (common unicode ranges)
@@ -3528,16 +3827,16 @@ def _clean_chat_response(text):
     # admissions of fabrication. Defense in depth — the prompt asks Gemma
     # not to do these; this strips them when it does anyway.
     text = _strip_essay_scaffolding(text)
-    # Strip "[HH:MM:SS]" single-timecode brackets the frontend would
-    # otherwise render as standalone chips above the clip cards. The model
-    # emits these as a "table of contents" preamble — they aren't useful,
-    # the clip cards already show their own timecodes. Range-form
+    # Unwrap "[HH:MM:SS]" single-timecode brackets to a bare timecode.
+    # The frontend renders bare HH:MM:SS in prose as a clickable jump link
+    # with a +clip button — deleting these (the old behavior) threw away
+    # the model's most concrete grounding signal. Range-form
     # "[HH:MM:SS - HH:MM:SS]" is wrapped to a CLIP marker by
     # _auto_wrap_timecode_ranges above; this only handles the leftover
     # single-timecode brackets that don't form a range.
     text = re.sub(
-        r'\[(?!\s*[Cc][Ll][Ii][Pp]\b)\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]',
-        '',
+        r'\[(?!\s*[Cc][Ll][Ii][Pp]\b)\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]',
+        r'\1',
         text,
     )
     # Quality floor + residue sweep AFTER every marker-producing pass
@@ -4215,8 +4514,11 @@ def _build_chat_analysis_index(analysis) -> str:
         return ""
 
     return (
-        "\n\nPRE-ANALYZED MOMENTS (real timecodes — prefer citing from this list "
-        "when a question matches):\n" + "\n".join(lines)
+        "\n\nPRE-ANALYZED MOMENTS (real timecodes — when you need a timecode "
+        "for a [CLIP:] marker and a question matches one of these, prefer "
+        "citing from this list; but the TRANSCRIPT above is the source of "
+        "truth for what was actually said — answer from it, not from these "
+        "labels):\n" + "\n".join(lines)
     )
 
 
@@ -5619,12 +5921,50 @@ def _chat_layer2_conversational_synthesis(message, history, project_name, segmen
     chunked clip search when the editor's question is discussion-style.
 
     Builds a compact context (summary + analysis index + selected clips,
-    no transcript), runs it through the standard conversational LLM via
-    _build_chat_messages so the orientation paragraph and framing apply,
-    and returns the prose response. Skips the clip-salvage post-processor
-    so a clean conversational answer doesn't get clips bolted on.
+    no full transcript), runs it through the standard conversational LLM
+    via _build_chat_messages so the orientation paragraph and framing
+    apply, and returns the prose response. Skips the clip-salvage
+    post-processor so a clean conversational answer doesn't get clips
+    bolted on. When the question names something concrete, query-matched
+    transcript excerpts ride along so the answer can quote real lines
+    instead of paraphrasing the summary.
     """
     context = _build_synthesis_context_block(project_name, segments, analysis, labeled_sections, speaker_names)
+    # Query-matched excerpts: the synthesis context is summary-driven by
+    # design (a 100-min transcript doesn't fit), which used to mean a
+    # question like "what does she say about the dam?" could only be
+    # answered from vague summary memory. Pull the real lines the
+    # question points at, capped so they can't blow the compact budget.
+    try:
+        _phrases, _words = _extract_query_keywords(message)
+        if _phrases or _words:
+            _matched = _find_relevant_paragraphs(
+                segments, _phrases, _words, context=1,
+            )
+            if _matched:
+                _excerpts = _build_relevant_excerpts_block(
+                    _matched[:12], synthesis=True,
+                )
+                if len(_excerpts) > 5000:
+                    _excerpts = _excerpts[:5000].rsplit('\n', 1)[0]
+                if _excerpts.strip():
+                    context = context + '\n' + _excerpts.strip() + '\n'
+    except Exception as e:
+        print(f"[chat] synthesis excerpt retrieval failed: {e}")
+    # Content-lookup grounding on long projects: this path skips the
+    # final reminder (no marker pressure on discussion answers) which
+    # also skipped the CONTENT QUESTION contract — so "what does she say
+    # about X" on a 90-min interview got a summary-memory gloss. Append
+    # the grounding instruction to the message itself; the query-matched
+    # excerpts above give the model real lines to quote.
+    if _is_content_lookup_query(message):
+        message = (
+            f'{message}\n\nCONTENT QUESTION: answer with what was actually '
+            f'said — name the speaker and quote their exact words briefly, '
+            f'copied verbatim from the excerpts above. If the excerpts '
+            f"don't cover it, say so plainly. No thematic summary without "
+            f'the actual words.'
+        )
     system_message, messages = _build_chat_messages(
         message, history, project_name, segments,
         formatted=context,            # context block in the transcript slot
@@ -5638,7 +5978,7 @@ def _chat_layer2_conversational_synthesis(message, history, project_name, segmen
         include_final_reminder=False,
         language_directive_text=language_directive_text,
     )
-    num_ctx = max(8192, _estimate_layer1_num_ctx(context))
+    num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx)
     response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)

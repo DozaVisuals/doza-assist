@@ -160,7 +160,11 @@ class TestFramingParagraph(unittest.TestCase):
     def test_my_style_on_variant(self):
         framing = ai_analysis._build_clip_aware_framing(True)
         self.assertIn('three layers', framing)
-        self.assertIn('storytelling_foundation', framing)
+        # The framing must name the label the style block actually ships
+        # under — 'STYLE CONTEXT' — not a tag that never appears in the
+        # chat context (the old '<storytelling_foundation>' reference was
+        # dangling: chat never injects that block).
+        self.assertIn('STYLE CONTEXT', framing)
         self.assertIn('editorial patterns', framing)
 
     def test_my_style_off_variant(self):

@@ -121,6 +121,35 @@ DEFAULT_STOP_TOKENS = [
 ]
 
 
+def _log_timing(tag, model, num_ctx, payload):
+    """Log Ollama's per-call timing metrics (returned on every response and
+    previously discarded). One line per call, grep-able:
+
+        [ai-timing] tag=chat model=gemma4:e4b num_ctx=16384 \
+            prompt_eval=11873tok/9.42s eval=412tok/13.07s
+
+    prompt_eval_count is the definitive prefix-cache oracle: a turn that
+    reuses the cached transcript prefix reports hundreds of tokens; a cold
+    turn reports the whole payload. Never raises — telemetry must not be
+    able to take a reply down.
+    """
+    try:
+        pe_count = payload.get("prompt_eval_count")
+        pe_dur = payload.get("prompt_eval_duration")
+        ev_count = payload.get("eval_count")
+        ev_dur = payload.get("eval_duration")
+        if pe_count is None and ev_count is None:
+            return
+        def _fmt(count, dur_ns):
+            secs = (dur_ns or 0) / 1e9
+            return f"{count if count is not None else '?'}tok/{secs:.2f}s"
+        print(f"[ai-timing] tag={tag} model={model} num_ctx={num_ctx} "
+              f"prompt_eval={_fmt(pe_count, pe_dur)} "
+              f"eval={_fmt(ev_count, ev_dur)}", flush=True)
+    except Exception:
+        pass
+
+
 def _ollama_messages(system_prompt, user_or_messages):
     """Normalize input into Ollama's /api/chat messages array."""
     msgs = [{"role": "system", "content": system_prompt}]
@@ -255,7 +284,10 @@ class OllamaProvider(BaseProvider):
                 )
             if response.status_code != 200:
                 _raise_ollama_error(response, model)
-            return response.json().get("response", "")
+            payload = response.json()
+            _log_timing(kwargs.get("timing_tag", task_type), model,
+                        kwargs.get("num_ctx", 32768), payload)
+            return payload.get("response", "")
 
         # Chat / general path: /api/chat with messages array.
         messages = _ollama_messages(system_prompt, user_or_messages)
@@ -287,7 +319,10 @@ class OllamaProvider(BaseProvider):
         )
         if response.status_code != 200:
             _raise_ollama_error(response, model)
-        return (response.json().get("message") or {}).get("content", "")
+        payload = response.json()
+        _log_timing(kwargs.get("timing_tag", task_type), model,
+                    kwargs.get("num_ctx", 32768), payload)
+        return (payload.get("message") or {}).get("content", "")
 
     def generate_stream(self, system_prompt, user_or_messages, task_type="general", **kwargs):
         model = self._resolve_model(kwargs.get("model_override"))
@@ -342,6 +377,14 @@ class OllamaProvider(BaseProvider):
                 if piece:
                     yield piece
                 if chunk.get("done"):
+                    # The final chunk carries the run's timing metrics —
+                    # the only ground truth for prefill (prompt_eval) vs
+                    # decode (eval) cost, and the oracle for whether the
+                    # KV prefix cache was reused (a warm turn reports a
+                    # tiny prompt_eval_count; a cold one reports the whole
+                    # payload).
+                    _log_timing(kwargs.get("timing_tag", task_type), model,
+                                kwargs.get("num_ctx", 32768), chunk)
                     break
 
     def test_connection(self) -> dict:

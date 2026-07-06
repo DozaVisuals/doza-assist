@@ -33,6 +33,12 @@ def _capture_system_prompt(transcript, message, **kwargs):
         # RELEVANT EXCERPTS in a user-role turn). These tests assert on the
         # whole prompt the model sees, so capture the concatenation —
         # system first, then each message's content in order.
+        # FIRST call only: the router's clip-salvage backstop (which now
+        # also fires on content-lookup questions like "what did they
+        # say?") issues follow-up calls with its own extractor prompt
+        # that must not overwrite the main chat capture.
+        if 'system' in captured:
+            return "stub reply"
         parts = [system_message or '']
         for m in (messages or []):
             if isinstance(m, dict) and m.get('content'):
@@ -337,10 +343,28 @@ class TestDurationTargetPromptLine:
         assert final.index('FINAL REMINDER') < final.index('DURATION TARGET')
 
     def test_no_duration_ask_keeps_final_turn_byte_identical(self):
-        msg = "what did they say?"
+        # Neither a duration ask nor a content-lookup question — the final
+        # turn is exactly message + reminder, nothing else.
+        msg = "how should I open the piece?"
         final = self._final_turn(msg)
         assert final == f'{msg}\n\n{ai_analysis._FINAL_REMINDER}'
         assert 'DURATION TARGET' not in final
+        assert 'CONTENT QUESTION' not in final
+
+    def test_content_lookup_ask_injects_grounding_line(self):
+        # Speech-report questions ("what did they say about X") get the
+        # CONTENT QUESTION contract in the same recency slot the duration
+        # hint uses: quote the actual words, name the speaker, a marker
+        # per cited passage.
+        final = self._final_turn("what did they say about the river?")
+        assert 'CONTENT QUESTION' in final
+        assert 'verbatim' in final
+        assert final.index('FINAL REMINDER') < final.index('CONTENT QUESTION')
+
+    def test_assistant_directed_question_gets_no_grounding_line(self):
+        # Craft questions aimed at the assistant are not speech reports.
+        final = self._final_turn("what do you think about the pacing?")
+        assert 'CONTENT QUESTION' not in final
 
     def test_conversational_final_turn_never_carries_duration_line(self):
         # include_final_reminder=False is the conversational-synthesis path.

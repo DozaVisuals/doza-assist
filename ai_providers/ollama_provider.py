@@ -113,8 +113,11 @@ DEFAULT_STOP_TOKENS = [
     "\n<thinking>",
     "[/Response]\n[Thoughts]",
     "[/Response]\n[Thought",
-    "[No specific answer",
-    "[No answer",
+    # NOTE: the prose-like "[No specific answer" / "[No answer" stops were
+    # removed — as STOP sequences they hard-cut generation mid-reply and
+    # kept the partial text. The placeholder lines they targeted are
+    # handled after generation by _strip_no_answer_placeholders, which can
+    # tell a placeholder from a substantive negative answer.
 ]
 
 
@@ -267,7 +270,15 @@ class OllamaProvider(BaseProvider):
                     "temperature": kwargs.get("temperature", 0.4 if task_type == "chat" else 0.3),
                     "num_predict": kwargs.get("num_predict", 4096 if task_type == "chat" else 16384),
                     "num_ctx": kwargs.get("num_ctx", 32768),
-                    "repeat_penalty": kwargs.get("repeat_penalty", 1.3),
+                    # Chat runs at 1.1 (Ollama's default): the old 1.3 was
+                    # added against repetition loops before the server-side
+                    # loop guards existed, and at 1.3 the model is punished
+                    # for repeating speaker names, timecode digits, and the
+                    # verbatim transcript words a grounded answer must copy
+                    # — it drifts into vague paraphrase and reaches EOS
+                    # early. Non-chat structured tasks keep 1.3.
+                    "repeat_penalty": kwargs.get(
+                        "repeat_penalty", 1.1 if task_type == "chat" else 1.3),
                     "repeat_last_n": kwargs.get("repeat_last_n", 128),
                     "stop": kwargs.get("stop", DEFAULT_STOP_TOKENS),
                 },
@@ -306,7 +317,10 @@ class OllamaProvider(BaseProvider):
                     "temperature": kwargs.get("temperature", 0.4),
                     "num_predict": kwargs.get("num_predict", 4096),
                     "num_ctx": kwargs.get("num_ctx", 32768),
-                    "repeat_penalty": kwargs.get("repeat_penalty", 1.3),
+                    # Mirrors the non-stream chat setting — see the comment
+                    # there. The stream path is chat-only in practice.
+                    "repeat_penalty": kwargs.get(
+                        "repeat_penalty", 1.1 if task_type == "chat" else 1.3),
                     "repeat_last_n": kwargs.get("repeat_last_n", 128),
                     "stop": kwargs.get("stop", DEFAULT_STOP_TOKENS),
                 },

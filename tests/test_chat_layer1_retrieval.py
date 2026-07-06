@@ -41,6 +41,12 @@ def _capture_system_prompt(transcript, message, **kwargs):
         # prompt is split into a system message plus a messages array (the
         # transcript + RELEVANT EXCERPTS block live in a user-role turn now),
         # so capture the full prompt the model sees — system then messages.
+        # Keep the FIRST call only: extractive queries whose stub reply has
+        # zero markers trigger the salvage pass, which makes a SECOND
+        # _call_ai_chat with a different (salvage) prompt — these tests
+        # assert on the main chat prompt.
+        if 'system' in captured:
+            return "stub reply"
         parts = [system_message or '']
         for m in (messages or []):
             if isinstance(m, dict) and m.get('content'):

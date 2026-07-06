@@ -1322,6 +1322,97 @@ _NOT_NOUN_AGO = (
     r'(?!(?:\s+' + _COUNT_CLIP_NOUNS + r')?\s+ago\b)'
 )
 
+# Count-RANGE pieces ("8-10 strongest standalone soundbites", "8 to 10
+# clips", "eight to ten moments"). A unit after the SECOND number makes
+# the range a DURATION ("15 to 20 minute cut", "8-10s") — this lookahead
+# rejects it so parse_target_duration_seconds keeps ownership. The bare
+# [smh] letters catch the spaced-shorthand forms ("8-10 s") that the
+# word units can't; the attached form ("8-10s") is rejected structurally
+# by the (?!\d)\b anchor after the second number (see below).
+_RANGE_SEP = r'(?:\s*[-–—]\s*|\s+to\s+)'
+_RANGE_NOT_TIME_UNIT = (
+    r'(?![\s-]*(?:more[\s-]+)?'
+    r'(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|[smh]\b)\b)'
+)
+# The second number must END at a word boundary with no digits left over
+# ((?!\d)\b). Without it, regex backtracking re-splits "8-10 second
+# clips" as lo=8 hi=1 with "0 second clips" unconsumed — the time-unit
+# lookahead then inspects "0…" instead of the unit, the duration ask is
+# stolen as count=5, and "15 to 20 minutes of the best material" parses
+# hi=2 → count=9 (F1). Every digit-range pattern appends this.
+_RANGE_END_ANCHOR = r'(?!\d)\b'
+# Up to three filler words between the range and the clip noun ("8-10
+# STRONGEST STANDALONE soundbites", "8 to 10 OF THE BEST moments"). Lazy,
+# and only reachable when the time-unit lookahead already passed — so the
+# filler can never skip over a duration unit.
+_RANGE_NOUN_FILLER = r"(?:\s+[\w'-]+){0,3}?"
+_RANGE_WORD_NUMBERS = {
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+}
+_RANGE_WORD_ALT = '|'.join(_RANGE_WORD_NUMBERS)
+# Hyphen-tolerant ([\s-]+): "eight to ten-minute segments" attaches the
+# unit with a hyphen — a duration ask, never count=9 (F1).
+_RANGE_WORD_NOT_TIME_UNIT = (
+    r'(?![\s-]+(?:more[\s-]+)?(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)\b)'
+)
+
+
+def _detect_clip_count_range(msg):
+    """Parse a numeric clip-count RANGE from an already-lowercased message
+    and return the midpoint rounded UP (8-10 → 9), or ``None``.
+
+    Live tester bug (1.0.30 screenshot): "Identify the 8-10 strongest
+    standalone soundbites…" parsed no count at all, fell back to the
+    plural 3-minimum, and shipped THREE cards against an 8-10 ask.
+    Recognized shapes — digit and word forms, hyphen/dash/"to"
+    separators — anchored to a clip noun ("8-10 … soundbites") or to a
+    request verb ("give me 8-10"). Unit-suffixed ranges are durations,
+    never counts ("15 to 20 minute cut", "8-10s") — see
+    ``_RANGE_NOT_TIME_UNIT``.
+    """
+    # Digit range + clip noun: "8-10 strongest standalone soundbites".
+    m = re.search(
+        r'\b(\d{1,2})' + _RANGE_SEP + r'(\d{1,2})' + _RANGE_END_ANCHOR
+        + _RANGE_NOT_TIME_UNIT
+        + _RANGE_NOUN_FILLER + r'\s+' + _COUNT_CLIP_NOUNS + r'\b' + _NOT_AGO,
+        msg,
+    )
+    if not m:
+        # Digit range after a request verb, no noun needed: "give me 8-10".
+        m = re.search(
+            r'\b(?:find|give|pull|show|get|make|identify|pick|select)\s+'
+            r'(?:me\s+|us\s+)?(?:the\s+)?'
+            r'(\d{1,2})' + _RANGE_SEP + r'(\d{1,2})' + _RANGE_END_ANCHOR
+            + _RANGE_NOT_TIME_UNIT + _NOT_AGO,
+            msg,
+        )
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        return max(1, -(-(lo + hi) // 2))  # midpoint, rounded up
+
+    # Word range + clip noun: "eight to ten moments".
+    m = re.search(
+        r'\b(' + _RANGE_WORD_ALT + r')\s+to\s+(' + _RANGE_WORD_ALT + r')'
+        + _RANGE_WORD_NOT_TIME_UNIT
+        + _RANGE_NOUN_FILLER + r'\s+' + _COUNT_CLIP_NOUNS + r'\b' + _NOT_AGO,
+        msg,
+    )
+    if not m:
+        # Word range after a request verb: "pull eight to ten".
+        m = re.search(
+            r'\b(?:find|give|pull|show|get|make|identify|pick|select)\s+'
+            r'(?:me\s+|us\s+)?(?:the\s+)?'
+            r'(' + _RANGE_WORD_ALT + r')\s+to\s+(' + _RANGE_WORD_ALT + r')'
+            + _RANGE_WORD_NOT_TIME_UNIT + _NOT_AGO,
+            msg,
+        )
+    if m:
+        lo = _RANGE_WORD_NUMBERS[m.group(1)]
+        hi = _RANGE_WORD_NUMBERS[m.group(2)]
+        return max(1, -(-(lo + hi) // 2))
+    return None
+
 
 def _detect_explicit_clip_count(message):
     """Parse an explicit clip count from a user message, or return ``None``.
@@ -1348,6 +1439,14 @@ def _detect_explicit_clip_count(message):
         return None
     import re
     msg = message.lower().strip()
+
+    # Ranges FIRST — "8 to 10 clips" would otherwise half-match the
+    # single-digit pattern below as count=10 ("10 clips"), and "8-10
+    # strongest standalone soundbites" wouldn't match at all (falling to
+    # the plural 3-minimum — the 1.0.30 screenshot bug).
+    rng = _detect_clip_count_range(msg)
+    if rng is not None:
+        return rng
 
     # "1 clip" / "2 moments" / "3 quotes" / etc.
     m = re.search(
@@ -1377,8 +1476,14 @@ def _detect_explicit_clip_count(message):
     # The see-through lives INSIDE the lookahead (not as a consumed
     # optional group) because regex backtracking un-consumes an optional
     # "(?:\s+more)?" whenever consuming it would fail the lookahead.
+    # A digit that HEADS a range ("give me 8-10 second clips", "give me
+    # 15 to 20 minutes…") is never a bare count: the range parser above
+    # owns ranges, and when it rejected the message (unit-attached second
+    # number = a duration ask) this fallback must not seize the range's
+    # first number as count=8/15 (F1).
     m = re.search(
         r'\b(?:find|give|pull|show|get|make)\s+(?:me\s+)?(\d+)\b'
+        r'(?!\s*[-–—]\s*\d|\s+to\s+\d)'
         + _NOT_TIME_UNIT_THROUGH_MORE + _NOT_AGO,
         msg,
     )
@@ -1606,31 +1711,9 @@ def _drop_reemitted_clip_markers(text, exclude, group_key=None):
             grp = (gm.group(1).strip() if gm else '') or None
         return _grouped_spans_overlap(s, e, grp, exclude)
 
-    kept = []
-    dropping = False  # consuming a dropped marker's attached note lines
-    for line in text.splitlines():
-        markers = _CLIP_MARKER_RE.findall(line)
-        if markers:
-            dups = [m for m in markers if _is_dup(m)]
-            if dups and len(dups) == len(markers):
-                dropping = True
-                continue
-            for m in dups:  # mixed line: strip just the duplicate markers
-                line = line.replace(m, '')
-            dropping = False
-            kept.append(line)
-            continue
-        if not line.strip():
-            dropping = False  # a blank line ends the dropped clip's note
-            kept.append(line)
-            continue
-        if dropping:
-            continue
-        kept.append(line)
-    out = '\n'.join(kept)
-    # Collapse the blank-line runs the dropped paragraphs leave behind.
-    out = re.sub(r'\n[ \t]*\n(?:[ \t]*\n)+', '\n\n', out)
-    return out
+    # Line walk shared with the quality floor — drops each duplicate
+    # marker's line plus its attached note lines.
+    return _drop_marker_lines_where(text, _is_dup)
 
 
 def _enforce_clip_count(text, target, candidates=None, transcript=None,
@@ -1738,6 +1821,10 @@ def _enforce_clip_count(text, target, candidates=None, transcript=None,
         if span is None:
             continue
         s, e, title, why = span
+        # Never mint a sliver card: the quality floor just dropped those
+        # from the model's reply, so the top-up must not re-introduce one.
+        if e - s < _MIN_CLIP_MARKER_SECONDS:
+            continue
         # Keep top-up cards clip-sized — same cap _deterministic_clip_markers
         # applies. (The duration pass keeps full spans because it needs the
         # runtime; a COUNT ask wants usable cards.)
@@ -2368,6 +2455,10 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
             continue
         s, e, title, why = span
         dur = e - s
+        # No sliver cards from the duration top-up either — same floor
+        # the canonicalization pass applies to model-emitted markers.
+        if dur < _MIN_CLIP_MARKER_SECONDS:
+            continue
         cand_group = None
         if group_key:
             cand_group = str(cand.get(group_key) or '').strip() or None
@@ -2933,6 +3024,10 @@ def _deterministic_clip_markers(matched_paragraphs, target_count):
             continue
         if end_sec <= start_sec:
             continue
+        # No sliver cards from the deterministic fallback — same floor
+        # the canonicalization pass applies to model-emitted markers.
+        if end_sec - start_sec < _MIN_CLIP_MARKER_SECONDS:
+            continue
         # Cap ultra-long paragraphs at 60s to keep clips usable
         if end_sec - start_sec > 60:
             end_sec = start_sec + 45
@@ -3370,8 +3465,17 @@ def _clean_chat_response(text):
     """Strip markdown artifacts and emoji from chat responses."""
     import re
     text = text.strip()
-    # Normalize variant CLIP markers BEFORE markdown stripping so the
-    # canonical form survives downstream regexes.
+    # Tolerant canonicalization FIRST: markers whose attributes span
+    # newlines or whose quoted values contain ']'/parens were HALF-matched
+    # by the variant normalizer below (its candidate regex stops at the
+    # first ')'/']' even inside quotes), shipping a truncated card plus
+    # bracket debris to the UI — the 1.0.30 screenshot bug. The tolerant
+    # reader re-serializes every recoverable marker into the canonical
+    # single-line grammar before any lossier regex can touch it.
+    text = _canonicalize_clip_markers(text)
+    # Normalize the remaining variant CLIP markers (paren-bracketed forms
+    # etc.) BEFORE markdown stripping so the canonical form survives
+    # downstream regexes.
     text = _normalize_clip_markers(text)
     # Wrap stray prose timecode ranges — small models in STORY CONSULTING
     # mode often write "(00:12:34 - 00:13:00)" instead of the [CLIP:]
@@ -3436,6 +3540,13 @@ def _clean_chat_response(text):
         '',
         text,
     )
+    # Quality floor + residue sweep AFTER every marker-producing pass
+    # above (canonicalize / normalize / auto-wrap) so junk from ANY
+    # source is caught: sub-5s sliver cards are dropped (the count
+    # top-up refills them with real candidates downstream) and no
+    # partial-marker bracket debris can survive to the UI.
+    text = _enforce_marker_quality_floor(text)
+    text = _scrub_clip_marker_residue(text)
     # If the model fell into a generation loop, truncate at the first repeat.
     # Common with small models when they get confused by the strict format.
     text = _truncate_repetitions(text)
@@ -3486,6 +3597,13 @@ def _normalize_clip_markers(text: str) -> str:
     accepts the variants small local models actually emit and normalizes
     them so every valid clip the model meant to suggest shows up as a
     playable card in the chat.
+
+    Markers already matching :data:`_CANONICAL_CLIP_MARKER_RE` (the exact
+    shape :func:`_canonicalize_clip_markers` serializes) are skipped
+    byte-for-byte: the candidate regex below stops at the first ``)`` or
+    ``]`` even inside a quoted value, so re-running it over a canonical
+    marker whose title/note contains parens would truncate the marker and
+    leak the tail as prose — the 1.0.30 bracket-debris screenshot bug.
     """
     candidate_re, kv_re = _clip_regexes()
 
@@ -3514,9 +3632,421 @@ def _normalize_clip_markers(text: str) -> str:
         # Titles shouldn't break our own double-quote wrapping.
         title = title.replace('"', '').strip() or 'Clip'
         title = _format_clip_title(title)
-        return f'[CLIP: start={start} end={end} title="{title}"]'
+        # Preserve the collection-only project= field and the editorial
+        # note= one-liner when the variant carried them (historically they
+        # were dropped here, which is why the collection pipeline stashes
+        # them around _clean_chat_response — that stash still works, this
+        # just stops the single-project pipeline from losing notes).
+        extra = ''
+        project = _marker_attr_value(pairs.get('project') or '')
+        if project:
+            extra += f' project="{project}"'
+        note = _marker_attr_value(pairs.get('note') or pairs.get('why') or '')
+        marker = f'[CLIP: start={start} end={end}{extra} title="{title}"'
+        if note:
+            marker += f' note="{note}"'
+        return marker + ']'
 
-    return candidate_re.sub(_rewrite, text)
+    # Only rewrite OUTSIDE already-canonical markers. Canonical markers
+    # still get their title sentence-cased (a value-only touch that can't
+    # truncate the marker), matching what the full rewrite used to do.
+    parts = re.split('(' + _CANONICAL_CLIP_MARKER_RE.pattern + ')', text)
+    for i in range(0, len(parts), 2):
+        parts[i] = candidate_re.sub(_rewrite, parts[i])
+    for i in range(1, len(parts), 2):
+        parts[i] = re.sub(
+            r'(title=")([^"]*)(")',
+            lambda m: m.group(1) + _format_clip_title(m.group(2)) + m.group(3),
+            parts[i], count=1,
+        )
+    return ''.join(parts)
+
+
+# ── Canonical [CLIP:] marker grammar ────────────────────────────────────
+#
+# Every chat reply is canonicalized server-side so the UI only ever
+# receives markers in EXACTLY this shape (one line, this attribute order):
+#
+#   [CLIP: start=<tc> end=<tc> project="<v>" title="<v>" note="<v>"]
+#
+# project= appears only on collection markers, note= only when the model
+# or pipeline supplied one; start/end/title are always present. <tc> is
+# whatever parseable token the source carried (HH:MM:SS / MM:SS / bare
+# seconds), verbatim — the collection stash keys on the raw token.
+# Values are double-quoted and contain NO double quotes (normalized to
+# '), NO square brackets (normalized to parens), and NO newlines
+# (collapsed to spaces) — so the marker parses identically under
+# _CLIP_MARKER_RE, the naive [^\]]* regexes, and both frontends'
+# renderChatReply regexes, and round-trips through every enforcement
+# pass. Three passes maintain the grammar inside _clean_chat_response:
+#
+#   1. _canonicalize_clip_markers — TOLERANT reader: attributes may span
+#      newlines, quoted values may contain ']' and newlines, attribute
+#      order is free, alt key names accepted; every recoverable marker is
+#      re-serialized canonically, unrecoverable [CLIP spans are removed.
+#   2. _enforce_marker_quality_floor — drops junk cards (sub-5s slivers,
+#      unparseable/backwards timecodes, empty titles) WITH their attached
+#      prose; the count top-up then refills from the ranked pool.
+#   3. _scrub_clip_marker_residue — sweeps any bracket debris that
+#      survived: orphan attr="…"] tails, half-note fragments, lone ].
+
+# Model-emitted (or auto-wrapped) cards shorter than this are junk
+# slivers — interviewer-question fragments like "Tell me about that"
+# 00:15–00:16 in the 1.0.30 screenshot. Dropped by the quality floor and
+# skipped by every deterministic top-up.
+_MIN_CLIP_MARKER_SECONDS = 5.0
+
+# The EXACT serialized shape (attribute order fixed, double quotes only,
+# no ]/newlines in values). Used to protect canonical markers from the
+# lossier variant-normalizer and to verify grammar in tests. Keep every
+# group non-capturing — callers wrap the whole pattern in one group for
+# re.split.
+_CANONICAL_CLIP_MARKER_RE = re.compile(
+    r'\[CLIP: start=[^\s"\]]+ end=[^\s"\]]+'
+    r'(?: project="[^"\n\]]*")?'
+    r' title="[^"\n\]]*"'
+    r'(?: note="[^"\n\]]*")?\]'
+)
+
+_CANON_CLIP_HEAD_RE = re.compile(
+    r'\[\s*\*{0,3}\s*CLIP\b\s*\*{0,3}\s*:?', re.IGNORECASE,
+)
+# One attribute, tolerantly: quoted values may span newlines and contain
+# ']'; bare values run to whitespace/']'. Group 1 = key, groups 2-6 = the
+# value alternatives (double, single, curly-double, curly-single, bare).
+_CANON_ATTR_RE = re.compile(
+    r'[ \t]*(?:\r?\n[ \t]*)?,?[ \t]*(\w+)\s*=\s*'
+    r'(?:"([^"]*)"'
+    r"|'([^']*)'"
+    r'|“([^”]*)”'
+    r'|‘([^’]*)’'
+    r'|([^\s\]]+))'
+)
+_CANON_KEY_ALIASES = {
+    'start': 'start', 'start_time': 'start', 'begin': 'start',
+    'end': 'end', 'end_time': 'end', 'finish': 'end',
+    'title': 'title', 'label': 'title', 'name': 'title', 'heading': 'title',
+    'note': 'note', 'why': 'note',
+    'project': 'project',
+}
+
+# Placeholder timecode TEMPLATES ("MM:SS", "HH:MM:SS") — colon-separated
+# letter groups. A marker carrying these is someone TALKING ABOUT the
+# marker syntax ('I use [CLIP: start=MM:SS end=MM:SS title="..."]
+# markers.'), i.e. legitimate prose — never a recoverable card and never
+# junk to delete (F2).
+_PLACEHOLDER_TC_RE = re.compile(r'^[A-Za-z]{1,2}:[A-Za-z]{2}(?::[A-Za-z]{2})?$')
+
+# A COMPLETE timecode token: HH:MM:SS / MM:SS (two-digit trailing
+# fields) or bare seconds, optionally unit-suffixed. Bracketless marker
+# recovery requires start/end to match this shape — a stream cut mid-
+# token ("end=00:02:3") must be dropped as unrecoverable rather than
+# fabricating a card at the wrong end time (F9).
+_COMPLETE_TC_RE = re.compile(
+    r'^(?:\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?'
+    r'|\d+(?:\.\d+)?(?:s|secs?|seconds?)?)$',
+    re.IGNORECASE,
+)
+
+# Marker-vocabulary attribute keys (attr=), shared by the residue sweeps:
+# a fragment is only marker DEBRIS when it carries this vocabulary —
+# ordinary prose with brackets must never be swept (F5/F6/F7).
+_MARKER_ATTR_KEY_RE = re.compile(
+    r'\b(start|end|start_time|end_time|title|label|name|heading|note|why|project)'
+    r'\s*=',
+    re.IGNORECASE,
+)
+
+
+def _marker_attr_value(val):
+    """Normalize an attribute value for the canonical marker grammar:
+    whitespace runs (including newlines) collapse to a single space,
+    inner double quotes become ', square brackets become parens — so no
+    downstream regex can ever truncate mid-marker."""
+    val = re.sub(r'\s+', ' ', str(val or '')).strip()
+    return val.replace('"', "'").replace('[', '(').replace(']', ')')
+
+
+def _canonicalize_clip_markers(text):
+    """Tolerant [CLIP …] reader → canonical single-line serializer.
+
+    The naive normalizer's candidate regex stops at the first ``)``/``]``
+    even inside a quoted value and can't cross newlines, so a marker like
+
+        [CLIP: start=… end=… title="…"
+        note="A moment of realization…"]
+
+    or one whose note contains parens was HALF-rewritten: a truncated
+    card plus the rest of the attribute leaked to the UI as prose (the
+    1.0.30 bracket-debris screenshot). This reader parses attributes
+    key=value with quoted values allowed to span newlines and contain
+    ']'/parens, in any order, note/project optional, alt key names
+    accepted — then re-serializes every recoverable marker into the
+    canonical grammar. Unrecoverable ``[CLIP`` spans (no usable
+    start+end) are removed outright: bracket junk must never reach the
+    UI. Idempotent on canonical markers.
+    """
+    if not text or '[' not in text:
+        return text
+    out = []
+    pos = 0
+    while True:
+        m = _CANON_CLIP_HEAD_RE.search(text, pos)
+        if not m:
+            out.append(text[pos:])
+            break
+        out.append(text[pos:m.start()])
+        cursor = m.end()
+        attrs = {}
+        while True:
+            am = _CANON_ATTR_RE.match(text, cursor)
+            if not am:
+                break
+            key = _CANON_KEY_ALIASES.get(am.group(1).lower())
+            val = next(
+                (g for g in am.group(2, 3, 4, 5, 6) if g is not None), '')
+            # Runaway-quote guards: an unterminated quote can swallow the
+            # rest of the reply. A value that ate the NEXT marker or a
+            # blank line is garbage — stop the attribute run before it
+            # (the residue scrub sweeps the leftover fragment).
+            if '[clip' in val.lower() or re.search(r'\n[ \t]*\n', val):
+                break
+            # Unknown keys are consumed only on the marker's own line —
+            # never let attribute scanning cross a newline into prose
+            # that happens to contain an '=' ("The pacing = great.").
+            if key is None and '\n' in text[cursor:am.end(1)]:
+                break
+            if key:
+                attrs.setdefault(key, val)
+            cursor = am.end()
+        # Closing bracket: directly after the attributes (possibly on the
+        # next line), or past a short run of same-line junk.
+        closed = False
+        tail = re.match(r'[ \t]*(?:\r?\n[ \t]*)?\]', text[cursor:])
+        if tail:
+            cursor += tail.end()
+            closed = True
+        else:
+            jm = re.match(r'[^\[\]\n]{0,40}\]', text[cursor:])
+            if jm:
+                cursor += jm.end()
+                closed = True
+        head_had_colon = m.group(0).endswith(':')
+        start_tok = _marker_attr_value(attrs.get('start', '')).replace(' ', '')
+        end_tok = _marker_attr_value(attrs.get('end', '')).replace(' ', '')
+        recoverable = bool(start_tok and end_tok)
+        if recoverable and _PLACEHOLDER_TC_RE.match(start_tok) \
+                and _PLACEHOLDER_TC_RE.match(end_tok):
+            # Marker-syntax MENTION (template letters like start=MM:SS):
+            # prose about the format, not a marker — pass through (F2).
+            out.append(text[m.start():cursor])
+        elif recoverable and not closed \
+                and not (_COMPLETE_TC_RE.match(start_tok)
+                         and _COMPLETE_TC_RE.match(end_tok)):
+            # Bracketless recovery of a marker whose trailing timecode was
+            # cut mid-token ("end=00:02:3"): fabricating a card at the
+            # wrong end time is worse than no card — drop as debris (F9).
+            pass
+        elif recoverable:
+            title = _format_clip_title(_marker_attr_value(attrs.get('title', '')))
+            project = _marker_attr_value(attrs.get('project', ''))
+            note = _marker_attr_value(attrs.get('note', ''))
+            bits = [f'start={start_tok}', f'end={end_tok}']
+            if project:
+                bits.append(f'project="{project}"')
+            bits.append('title="{0}"'.format(title or 'Clip'))
+            if note:
+                bits.append(f'note="{note}"')
+            out.append('[CLIP: ' + ' '.join(bits) + ']')
+        elif not head_had_colon and not attrs:
+            # Bare bracket REFERENCE ("[clip 3]"): colon-less head with no
+            # marker attributes is prose pointing at an earlier card,
+            # never marker debris — pass through untouched (F6).
+            out.append(text[m.start():cursor])
+        # else: unrecoverable — the consumed span is dropped entirely.
+        pos = cursor
+    return ''.join(out)
+
+
+def _drop_marker_lines_where(text, is_junk, keep_shared_prose=False):
+    """Remove every [CLIP:] marker for which ``is_junk(marker_text)`` is
+    true, along with its attached prose: the marker's own line plus the
+    note lines that follow it up to the next blank line (mirroring
+    ``_strip_trimmed_clip_tail`` so the reply never describes cards that
+    no longer exist). Mixed lines keep their healthy markers and lose
+    only the junk ones. Shared by the quality floor and the re-emission
+    screen.
+
+    ``keep_shared_prose=True`` (the quality floor): a junk marker that
+    SHARES its line with narration loses only the marker — the whole
+    line (plus attached note lines) is dropped only when the marker
+    stands alone on it. Chat must never lose legitimate content: 'Great
+    line at [CLIP: …4s sliver…], very short but punchy.' keeps its
+    sentence (F2). The re-emission screen keeps the historical
+    whole-line behavior (a re-shown card's framing prose is itself
+    redundant)."""
+    kept = []
+    dropping = False  # consuming a dropped marker's attached note lines
+    for line in text.splitlines():
+        markers = _CLIP_MARKER_RE.findall(line)
+        if markers:
+            junk = [m for m in markers if is_junk(m)]
+            if junk and len(junk) == len(markers):
+                if keep_shared_prose:
+                    remainder = line
+                    for m in junk:
+                        remainder = remainder.replace(m, '')
+                    if remainder.strip():
+                        # Narration shares the marker's line — surgical
+                        # marker strip, the prose stays (F2).
+                        kept.append(remainder)
+                        dropping = False
+                        continue
+                dropping = True
+                continue
+            for m in junk:  # mixed line: strip just the junk markers
+                line = line.replace(m, '')
+            dropping = False
+            kept.append(line)
+            continue
+        if not line.strip():
+            dropping = False  # a blank line ends the dropped clip's note
+            kept.append(line)
+            continue
+        if dropping:
+            continue
+        kept.append(line)
+    out = '\n'.join(kept)
+    # Collapse the blank-line runs the dropped paragraphs leave behind.
+    out = re.sub(r'\n[ \t]*\n(?:[ \t]*\n)+', '\n\n', out)
+    return out
+
+
+def _enforce_marker_quality_floor(text):
+    """Drop junk [CLIP:] cards regardless of who emitted them: sub-
+    ``_MIN_CLIP_MARKER_SECONDS`` slivers (the 1s "Tell me about that"
+    interviewer fragments from the 1.0.30 screenshot), unparseable or
+    backwards timecode ranges, and empty titles. Runs inside
+    _clean_chat_response AFTER every marker-producing pass and BEFORE
+    count/duration enforcement — so the count top-up sees the honest
+    count and refills the gap with real candidates from the ranked
+    pool. Attached prose goes with the dropped marker
+    (``_drop_marker_lines_where``)."""
+    if not text or '[CLIP' not in text:
+        return text
+
+    def _is_junk(marker_text):
+        sm = re.search(r'start=([^\s"\]]+)', marker_text)
+        em = re.search(r'end=([^\s"\]]+)', marker_text)
+        if not (sm and em):
+            return True
+        if (_PLACEHOLDER_TC_RE.match(sm.group(1))
+                and _PLACEHOLDER_TC_RE.match(em.group(1))):
+            # Marker-syntax MENTION ("start=MM:SS end=MM:SS" template
+            # letters) — prose about the format, never a junk card (F2).
+            return False
+        s = _tc_to_seconds(sm.group(1))
+        e = _tc_to_seconds(em.group(1))
+        if e - s < _MIN_CLIP_MARKER_SECONDS:
+            return True  # sliver, backwards, or unparseable (0.0 - 0.0)
+        tm = re.search(r'title="([^"]*)"', marker_text)
+        if tm is not None and not tm.group(1).strip():
+            return True
+        return False
+
+    return _drop_marker_lines_where(text, _is_junk, keep_shared_prose=True)
+
+
+# Attribute fragments outside a well-formed marker — the partial-marker
+# shapes the 1.0.30 screenshot leaked as prose (`note="A moment of
+# realization…"]`). Key names are restricted to the marker vocabulary,
+# the run must actually TERMINATE in ']' , and _sweep_attr_tail_run
+# additionally requires a start=+end= pair or ≥2 marker attrs — so
+# legitimate prose like 'Set title="My Export" in the dialog' or an
+# FCPXML help snippet can never be swept (F5).
+_MARKER_ATTR_TAIL_RE = re.compile(
+    # The trailing ] stays OPTIONAL in the pattern so every attr run
+    # matches exactly once and re.sub scans linearly (requiring it here
+    # would make every non-]-terminated run fail and rescan from each
+    # attr — quadratic/ReDoS); _sweep_attr_tail_run then enforces the
+    # ]-termination. The bare-value alternative is disjoint from the
+    # quoted ones ((?!["\'])) so the run parses one way only.
+    r'(?:\b(?:start|end|start_time|end_time|title|label|name|heading|note|why|project)'
+    r'\s*=\s*(?:"[^"\n]*(?:"|$)|\'[^\'\n]*(?:\'|$)|(?!["\'])[^\s\]]+)[ \t]*)+\]?',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _sweep_attr_tail_run(m):
+    """Replacement for :data:`_MARKER_ATTR_TAIL_RE` matches: sweep the
+    run only when it is unmistakably marker debris — it actually
+    TERMINATES in ``]`` AND carries a start=+end= pair or at least two
+    marker-vocabulary attributes (F5). A stray ``title="…"`` in prose
+    stays put; single-attr NOTE tails on their own line are handled by
+    the line-level sweep below."""
+    run = m.group(0)
+    if not run.endswith(']'):
+        return run
+    keys = [k.lower() for k in _MARKER_ATTR_KEY_RE.findall(run)]
+    has_start = any(k in ('start', 'start_time') for k in keys)
+    has_end = any(k in ('end', 'end_time') for k in keys)
+    if (has_start and has_end) or len(keys) >= 2:
+        return ''
+    return run
+
+
+def _sweep_clip_fragment(m):
+    """Replacement for the unrecoverable-``[CLIP`` fragment sweep: only
+    fragments whose head carries the marker COLON ("[CLIP: …") or that
+    carry marker-attribute vocabulary are debris. A bare prose reference
+    like "[clip 3]" is a pointer at an earlier card — never swept (F6)."""
+    frag = m.group(0)
+    if re.match(r'\[\s*\*{0,3}\s*CLIP\b\s*\*{0,3}\s*:', frag, re.IGNORECASE) \
+            or _MARKER_ATTR_KEY_RE.search(frag):
+        return ''
+    return frag
+
+
+def _scrub_clip_marker_residue(text):
+    """Sweep bracket debris so no partial-marker fragment can render as
+    prose: unrecoverable ``[CLIP:`` fragments, orphan ``attr="…"]``
+    tails, half-note lines ending in ``"]``, and lone ``]`` lines.
+    Well-formed canonical markers are protected (split on
+    ``_CLIP_MARKER_RE``); ordinary prose — including legitimate brackets
+    like ``[note]``, "[clip 3]" references, JSON-style lines and
+    timecode pills — is untouched."""
+    if not text or (']' not in text and '[' not in text):
+        return text
+    parts = re.split('(' + _CLIP_MARKER_RE.pattern + ')', text)
+    for i in range(0, len(parts), 2):
+        p = parts[i]
+        # Unrecoverable [CLIP fragments: to the closing ] on the same
+        # line, or to end-of-line when the bracket never closes. Gated on
+        # marker colon/vocabulary so "[clip 3]" prose survives (F6).
+        p = re.sub(r'\[\s*\*{0,3}\s*CLIP\b[^\]\n]*\]?', _sweep_clip_fragment,
+                   p, flags=re.IGNORECASE)
+        # Orphan attribute tails ("start=… end=…]", "title="…" note="…"]")
+        # — must end in ']' and carry real marker vocabulary (F5).
+        p = _MARKER_ATTR_TAIL_RE.sub(_sweep_attr_tail_run, p)
+        parts[i] = p
+    text = ''.join(parts)
+    cleaned_lines = []
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped in (']', '"]'):
+            continue  # stray lone bracket line
+        # Half-note fragments: a line with no opening bracket and no
+        # surviving marker that ends in "] AND carries marker-attribute
+        # vocabulary is the tail of a marker whose head was consumed
+        # elsewhere. Without the vocabulary it is indistinguishable from
+        # legitimate content (JSON-style answers end lines in "]) and
+        # must be kept (F7).
+        if (stripped.endswith('"]') and '[' not in line
+                and not _CLIP_MARKER_RE.search(line)
+                and _MARKER_ATTR_KEY_RE.search(line)):
+            continue
+        cleaned_lines.append(line)
+    return '\n'.join(cleaned_lines)
 
 
 def _strip_markdown_outside_clips(text: str) -> str:
@@ -3580,11 +4110,14 @@ def _auto_wrap_timecode_ranges(text: str) -> str:
     def _rewrite(m):
         start = m.group('start')
         end = m.group('end')
-        # Only wrap if end is strictly after start — avoids turning an
-        # unrelated pair like "00:00:52 - 00:00:35" (backwards) into a
-        # broken clip card. _tc_to_seconds is tolerant of both MM:SS and
-        # HH:MM:SS forms.
-        if _tc_to_seconds(end) <= _tc_to_seconds(start):
+        # Only wrap ranges the quality floor would keep: backwards pairs
+        # ("00:00:52 - 00:00:35") were never clips, and a sub-floor
+        # sliver ("00:05:10 - 00:05:14") wrapped here would be junk-
+        # dropped downstream TOGETHER with the sentence mentioning it —
+        # leaving the prose reference intact is strictly better (F2).
+        # _tc_to_seconds is tolerant of both MM:SS and HH:MM:SS forms.
+        if (_tc_to_seconds(end) - _tc_to_seconds(start)
+                < _MIN_CLIP_MARKER_SECONDS):
             return m.group(0)
         # Generic title — the card shows the exact range + duration, so
         # "Moment at 00:12:34" is enough context. Users rename if they
@@ -4663,22 +5196,51 @@ def _format_clip_cards_from_candidates(candidates):
         return ("I searched across the full interview but couldn't find moments that clearly "
                 "answer that. Try rephrasing, or ask about a specific topic or theme.")
 
-    parts = []
-    for cand in candidates:
-        start_tc = _seconds_to_tc(cand['start_sec'])
-        end_tc = _seconds_to_tc(cand['end_sec'])
+    def _card(cand, start_sec, end_sec):
+        start_tc = _seconds_to_tc(start_sec)
+        end_tc = _seconds_to_tc(end_sec)
         raw_title = (cand.get('title') or 'Moment').strip()
         # Strip matching wrapping quotes the model sometimes includes
-        # (e.g. "Moment"), then neutralize any remaining internal " so
-        # it can't break our marker's own quoting.
+        # (e.g. "Moment"), then neutralize any remaining internal "/[]
+        # so they can't break our marker's own quoting or truncate the
+        # naive [^\]]* marker regexes (canonical grammar).
         if len(raw_title) >= 2 and raw_title[0] == raw_title[-1] and raw_title[0] in ('"', "'"):
             raw_title = raw_title[1:-1].strip()
-        title = _format_clip_title(raw_title.replace('"', "'"))
-        why = (cand.get('why') or '').strip().replace('"', "'")
+        title = _format_clip_title(_marker_attr_value(raw_title))
+        why = _marker_attr_value(cand.get('why') or '')
         if why:
-            parts.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}" note="{why}"]')
-        else:
-            parts.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}"]')
+            return f'[CLIP: start={start_tc} end={end_tc} title="{title}" note="{why}"]'
+        return f'[CLIP: start={start_tc} end={end_tc} title="{title}"]'
+
+    parts = []
+    sub_floor = []  # (duration, cand) — for the all-sub-floor rescue (F4)
+    for cand in candidates:
+        # No sliver cards from the Layer 2 pick either — same
+        # _MIN_CLIP_MARKER_SECONDS floor the canonicalization pass
+        # applies to model-emitted markers.
+        try:
+            start_sec = float(cand.get('start_sec', 0))
+            end_sec = float(cand.get('end_sec', 0))
+        except (TypeError, ValueError):
+            continue
+        dur = end_sec - start_sec
+        if dur < _MIN_CLIP_MARKER_SECONDS:
+            if dur > 0:
+                sub_floor.append((dur, cand))
+            continue
+        parts.append(_card(cand, start_sec, end_sec))
+    if not parts and sub_floor:
+        # Every candidate sat under the quality floor. Never claim
+        # nothing was found when something exists (F4): keep the single
+        # LONGEST candidate, snapped up to the floor so the belt-and-
+        # braces sliver guards in both frontends still render it.
+        dur, best = max(sub_floor, key=lambda t: t[0])
+        start_sec = float(best.get('start_sec', 0))
+        parts.append(_card(best, start_sec,
+                           start_sec + _MIN_CLIP_MARKER_SECONDS))
+    if not parts:
+        return ("I searched across the full interview but couldn't find moments that clearly "
+                "answer that. Try rephrasing, or ask about a specific topic or theme.")
     return '\n'.join(parts)
 
 
@@ -7093,6 +7655,14 @@ def _tc_to_seconds(tc):
     s = str(tc).strip()
     if not s:
         return 0.0
+    # Unit-suffixed seconds tokens ("125s", "140 sec") — models emit them
+    # in [CLIP:] markers and both frontends already play them (JS
+    # parseFloat ignores the suffix), so the server-side enforcement
+    # passes must parse them identically instead of scoring them 0.0 and
+    # junk-dropping the marker (F3). The lookbehind requires a digit so
+    # placeholder tokens like "MM:SS" stay unparseable.
+    s = re.sub(r'(?<=[\d.])\s*(?:s|secs?|seconds?)$', '', s,
+               flags=re.IGNORECASE)
     if ':' in s:
         parts = s.split(':')
         try:

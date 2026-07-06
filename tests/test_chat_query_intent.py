@@ -361,3 +361,213 @@ class TestExtractiveVerbRouting:
     ])
     def test_anchored_assembly_asks_are_extractive(self, message):
         assert not _is_conversational_query(message)
+
+
+class TestClipNounRouting:
+    """Clip-seeking questions must classify EXTRACTIVE even without a verb
+    start. The live tester bug: "What are the strongest emotional moments
+    in this interview?" routed conversational, so no salvage / count
+    enforcement / grounding ran — the reply said "three moments" with ONE
+    card under it."""
+
+    @pytest.mark.parametrize("message", [
+        # The tester's exact screenshot ask.
+        "What are the strongest emotional moments in this interview?",
+        "Which moments show her vulnerability?",
+        "Are there any quotes about the fire?",
+        "any good soundbites on the storm?",
+        "what are the highlights here?",
+        # Non-deictic singulars are retrieval asks too.
+        "what's the best moment",
+        "which quote sums her up?",
+    ])
+    def test_clip_noun_questions_are_extractive(self, message):
+        assert not _is_conversational_query(message)
+
+    @pytest.mark.parametrize("message", [
+        # Genuine analysis questions WITHOUT clip nouns stay discussion.
+        "what is this interview really about?",
+        "what themes emerge?",
+        "make sense of what she's saying",
+        "what do you make of her arc?",
+        # Deliverable-FORMAT nouns must not flip a question ("video" is in
+        # _DURATION_INTENT_NOUNS but not _CLIP_SEEKING_NOUNS).
+        "what is this video about?",
+        "how would you structure a 3 minute montage from these interviews?",
+        # 'beat'/'beats' is deliberately NOT a clip-seeking noun — as a
+        # music/pacing homonym, an idiom ("beats me"), and a plain verb it
+        # misfires on craft discussion (H8/H12). Precision tradeoff: a
+        # "story beats" retrieval ask routes conversational (prose answer,
+        # easy rephrase) instead of craft questions growing forced cards.
+        "what story beats stand out?",
+    ])
+    def test_analysis_questions_stay_conversational(self, message):
+        assert _is_conversational_query(message)
+
+    @pytest.mark.parametrize("message", [
+        # Deictic SINGULAR references discuss an already-identified point.
+        "at that moment she changes — why?",
+        "in this clip what does he mean?",
+        # Conversational filler.
+        "a moment ago you said something different",
+    ])
+    def test_deictic_singular_uses_stay_conversational(self, message):
+        assert _is_conversational_query(message)
+
+    def test_no_clip_signal_outranks_the_noun(self):
+        # The hard "no clips" instruction is checked FIRST — a clip noun
+        # later in the message must not override it.
+        assert _is_conversational_query(
+            "no clips, just tell me about the moments she describes")
+
+    def test_plural_deictics_still_extractive(self):
+        # "which of those moments…" SELECTS among delivered cards — a
+        # re-ranked card is the right answer, so 'which' overrides the
+        # plural-deictic back-reference guard.
+        assert not _is_conversational_query(
+            "which of those moments is strongest?")
+
+
+class TestClipNounReferenceGuards:
+    """Adversarial-review regressions (H0/H1/H8/H9/H12): a clip-noun
+    MENTION is not a clip-noun ASK. Negated/wound-down asks,
+    back-references to delivered cards, meta questions about the app's
+    choices, and idiom fillers must all stay conversational — a forced
+    clip card on a conversational message is worse than a missed
+    extractive ask. The message lists below are the verifiers' exact
+    repro messages."""
+
+    @pytest.mark.parametrize("message", [
+        # H0 — negation / wind-down before the noun.
+        "no more clips, what's the overall theme?",
+        "that's enough clips for now - summarize the interview",
+        "we don't need more moments, wrap it up",
+        "don't give me any more clips, just your opinion",
+        "stop with the clips",
+    ])
+    def test_negated_and_wind_down_asks_stay_conversational(self, message):
+        assert _is_conversational_query(message)
+
+    @pytest.mark.parametrize("message", [
+        # H1 — "moments ago" is a time reference, plural included.
+        "a few moments ago you mentioned her sister - what did she say?",
+        "moments ago you said something about the fire",
+        "a couple of moments ago you said she moved in 1990",
+    ])
+    def test_moments_ago_memory_questions_stay_conversational(self, message):
+        assert _is_conversational_query(message)
+
+    @pytest.mark.parametrize("message", [
+        # H1 — and they must not parse a clip count either ("a few" → 3
+        # used to force-fit the reply to exactly 3 cards).
+        "a few moments ago you mentioned her sister - what did she say?",
+        "a few moments ago you said the fire started in the kitchen — "
+        "what else did she say about that?",
+        "2 moments ago you said she moved",
+    ])
+    def test_moments_ago_never_parses_a_count(self, message):
+        assert _detect_explicit_clip_count(message) is None
+
+    @pytest.mark.parametrize("message", [
+        # H8 — gratitude / anaphora about delivered cards, 'beats' idiom.
+        "those clips were perfect, thanks! what should I ask her next time?",
+        "the quotes you pulled are great, what's the story arc?",
+        "I like the highlights so far. what's missing?",
+        "beats me, what do you think?",
+        "this beats the other interview, right?",
+    ])
+    def test_gratitude_and_idiom_messages_stay_conversational(self, message):
+        assert _is_conversational_query(message)
+
+    @pytest.mark.parametrize("message", [
+        # H9 — singular filler collocations.
+        "wait a moment, can you re-explain the summary?",
+        "hold on one moment",
+        "hang on a moment, what did you mean by that?",
+    ])
+    def test_filler_interjections_stay_conversational(self, message):
+        assert _is_conversational_query(message)
+
+    @pytest.mark.parametrize("message", [
+        # H12 — meta/discussion questions about the app's choices and
+        # craft; the full verifier message list.
+        "why did you pick those clips?",
+        "what do these moments have in common?",
+        "a few moments ago you said the fire started in the kitchen — "
+        "what else did she say about that?",
+        "the story beats feel off, can you explain the structure?",
+        "is the beat of the music too fast in this section?",
+        "can you remove the second clip?",
+        "wait a moment, what did you mean by that?",
+        "she pauses for a moment before answering — what does that tell us?",
+        # One-adjective deictic gaps.
+        "in that same moment she changes her mind, right?",
+        "this particular clip confuses me",
+    ])
+    def test_meta_and_craft_questions_stay_conversational(self, message):
+        assert _is_conversational_query(message)
+
+    @pytest.mark.parametrize("message", [
+        # H7 — cataphoric retrieval flips EXTRACTIVE: a relative clause
+        # after a deictic noun, or a retrieval verb before it, marks a
+        # fetch ask.
+        "I want that moment where he admits it",
+        "that moment where she breaks down - can you find it for me?",
+        "can you locate this quote: 'we never went back'",
+        "find that moment when the room goes quiet",
+    ])
+    def test_cataphoric_retrieval_is_extractive(self, message):
+        assert not _is_conversational_query(message)
+
+    @pytest.mark.parametrize("message", [
+        # The guards must NOT swallow genuine asks (both-ways check).
+        "Give me 5 more",
+        "compare the two moments where she talks about her father",
+        "no, show me the highlights",  # leading discourse 'no', not negation
+        "can you pull clips about the fire?",  # modal request, not past ref
+        "any moments where she talks about her mother?",
+    ])
+    def test_genuine_asks_still_flip_extractive(self, message):
+        assert not _is_conversational_query(message)
+
+
+class TestCountParserTimeUnitAndNounSet:
+    """H11 + H4/H15: the count parser must reject 'N more <unit>' shapes
+    (durations, never card counts) and accept the full clip-noun set for
+    word-number counts."""
+
+    @pytest.mark.parametrize("message", [
+        # H11 — the verifier's exact message: previously count=30 and,
+        # with the new top-up, a 30-card wall of slivers.
+        "give me 30 more seconds of selects",
+        "pull 2 more minutes of selects",
+        "two more minutes",
+        "give me 1 minute of selects",
+    ])
+    def test_duration_shapes_never_parse_a_count(self, message):
+        assert _detect_explicit_clip_count(message) is None
+
+    @pytest.mark.parametrize("message,expected", [
+        # H11 — the same messages route to the DURATION parser instead:
+        # "30 more seconds of selects" is a 30s target (floor is 15s).
+        ("give me 30 more seconds of selects", 30.0),
+        ("pull 2 more minutes of selects", 120.0),
+    ])
+    def test_n_more_unit_parses_as_duration(self, message, expected):
+        assert parse_target_duration_seconds(message) == expected
+
+    @pytest.mark.parametrize("message,expected", [
+        # H4/H15 — word-number counts accept clip-seeking nouns beyond
+        # "clips", which also suppresses the plural 3-minimum.
+        ("compare the two moments where she talks about her father", 2),
+        ("compare the two moments where she talks about her mother "
+         "and her father", 2),
+        ("the two quotes about the fire", 2),
+        ("three soundbites on the storm", 3),
+        ("compare both quotes about the fire", 2),
+        ("both moments", 2),
+        ("find 2 clips about the topic", 2),
+        ("give me 5 more", 5),
+    ])
+    def test_clip_noun_counts_parse(self, message, expected):
+        assert _detect_explicit_clip_count(message) == expected

@@ -64,6 +64,218 @@ _NO_CLIP_SIGNALS = (
     "don't surface", 'do not pull', 'do not find', 'do not return',
     'no need for clips', 'skip the clips', 'skip clips',
 )
+# Clip-seeking nouns: an editor whose message names "moments", "clips",
+# "quotes", "soundbites", or "highlights" wants playable material
+# even when the ask wears question syntax ("What are the strongest
+# emotional moments in this interview?"). Verb-start heuristics alone
+# routed those questions conversational, so no salvage, no count
+# enforcement, and no grounding ran — the card count was whatever the
+# model happened to emit (live tester bug: prose said "three moments",
+# ONE card rendered). Kept deliberately separate from
+# _DURATION_INTENT_NOUNS: that list carries deliverable FORMATS ("video",
+# "documentary", "podcast") that appear in genuinely conversational
+# questions ("what is this video about?") and must not flip them.
+# 'beat'/'beats' is deliberately ABSENT: as a music/pacing homonym, an
+# idiom ("beats me"), and a plain verb ("this beats the other take") it
+# misfires on craft discussion far more often than it names a retrieval
+# target ("the story beats feel off" is a structure question, not a clip
+# ask) — and a forced clip card on a conversational message is worse
+# than a missed extractive ask.
+_CLIP_SEEKING_NOUNS = frozenset({
+    'moment', 'moments', 'clip', 'clips', 'quote', 'quotes',
+    'soundbite', 'soundbites', 'highlight', 'highlights',
+})
+# The plural forms also promise SEVERAL cards — see _plural_clip_minimum.
+_PLURAL_CLIP_NOUNS = frozenset(
+    n for n in _CLIP_SEEKING_NOUNS if n.endswith('s'))
+# Domain reading of an unqualified plural ask ("the strongest moments"):
+# at least a few — the same bound "a few" already maps to in
+# _detect_explicit_clip_count.
+_PLURAL_CLIP_MINIMUM = 3
+
+# ── Clip-noun reference guards ────────────────────────────────────────────
+#
+# GUIDING PRINCIPLE for the clip-noun intent flip (and for the count
+# top-up further down): PRECISION over recall. A forced clip card on a
+# conversational message is WORSE than a missed extractive ask — a missed
+# ask still gets a prose answer and the editor can rephrase, while
+# unwanted cards break the conversation (and on >60-min projects the
+# misroute swallows the question entirely: chunked search returns ONLY
+# clip cards, so "why did you pick those clips?" would never be
+# answered). Every guard below therefore errs toward "conversational"
+# whenever the noun plausibly refers to clips the conversation ALREADY
+# produced, to the app's own choices, to an idiom/filler, or to a
+# negated / wound-down ask.
+
+# Negation / wind-down tokens shortly BEFORE a clip noun: "no more clips",
+# "that's enough clips", "we don't need more moments", "stop with the
+# clips" are stop signals, not asks.
+_CLIP_NOUN_NEGATIONS = frozenset({
+    "don't", 'dont', "doesn't", 'doesnt', "won't", 'wont',
+    'stop', 'enough', 'without',
+})
+# 'no'/'not' get a TIGHTER window (see the guard): as leading discourse
+# markers they also open genuine asks ("no, show me the highlights").
+_CLIP_NOUN_SHORT_NEGATIONS = frozenset({'no', 'not'})
+# Past-tense delivery verbs — "the quotes you PULLED": the noun refers to
+# cards already on the table. PAST forms only: base forms ("can you PULL
+# clips about the fire?") are live requests and must stay extractive —
+# they count as back-references only behind a past interrogative
+# ('did/have/had you', see _clip_noun_is_reference).
+_CLIP_NOUN_DELIVERY_PAST = frozenset({
+    'picked', 'pulled', 'chose', 'chosen', 'selected', 'showed', 'gave',
+    'suggested', 'found', 'said', 'mentioned', 'recommended',
+    'highlighted', 'sent', 'listed',
+})
+# Past-tense state verbs right after a determiner+noun — "those clips
+# WERE perfect", "the moments FELT right": assessment of delivered cards.
+_CLIP_NOUN_PAST_STATE = frozenset({
+    'were', 'was', 'felt', 'seemed', 'looked', 'sounded', 'worked',
+    'helped', 'landed', 'are',
+})
+# App-action verbs before the noun — "can you REMOVE the second clip?":
+# a meta request about existing cards, never a retrieval ask.
+_CLIP_NOUN_EDIT_VERBS = frozenset({
+    'remove', 'delete', 'drop', 'replace', 'swap', 'reorder', 'rearrange',
+    'rename', 'discard',
+})
+# First-person assessment — "I LIKE the highlights so far": gratitude /
+# feedback about delivered cards. Bigram-gated on a literal 'i'/'we'
+# subject so requests ("I'd like the best highlights") still flip.
+_CLIP_NOUN_ASSESSMENT_VERBS = frozenset({
+    'like', 'love', 'liked', 'loved', 'enjoy', 'enjoyed',
+    'appreciate', 'appreciated',
+})
+# Retrieval verbs ANYWHERE before a deictic noun override the deictic
+# guard — "I WANT that moment where he admits it", "can you LOCATE this
+# quote" are fetch asks even though 'that/this' precedes the noun (H7).
+_CLIP_NOUN_RETRIEVAL_VERBS = frozenset({
+    'find', 'locate', 'want', 'pull', 'grab', 'fetch', 'need', 'get',
+})
+# Word-numbers that keep a plural deictic extractive: "compare those TWO
+# moments" is a selection ask, not a back-reference.
+_CLIP_NOUN_COUNT_WORDS = frozenset({
+    'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+    'ten', 'couple', 'few', 'several',
+})
+
+
+def _clip_noun_is_reference(tokens, i):
+    """True when ``tokens[i]`` (a clip-seeking noun) is a CONVERSATIONAL
+    REFERENCE — a negated/wound-down ask, a back-reference to clips
+    already delivered, a meta question about the app's choices, an
+    idiom/filler, or a deictic mention — rather than a retrieval target.
+
+    Shared by ``_is_conversational_query`` (the intent flip) and
+    ``_plural_clip_minimum`` (the plural floor) so both stay consistent:
+    a noun occurrence that doesn't flip the message extractive must not
+    force a 3-card minimum either.
+    """
+    tok = tokens[i]
+    prev = tokens[i - 1] if i > 0 else ''
+    prev2 = tokens[i - 2] if i > 1 else ''
+    nxt = tokens[i + 1] if i + 1 < len(tokens) else ''
+    nxt2 = tokens[i + 2] if i + 2 < len(tokens) else ''
+    window = tokens[max(0, i - 5):i]
+
+    # Negation / wind-down shortly before the noun: "no more clips,
+    # what's the overall theme?", "don't give me any more clips".
+    if any(w in _CLIP_NOUN_NEGATIONS for w in window):
+        return True
+    if any(w in _CLIP_NOUN_SHORT_NEGATIONS for w in tokens[max(0, i - 3):i]):
+        return True
+    # Time reference, plural AND singular: "a few moments ago you said…",
+    # "a moment ago". Must run BEFORE the plural early-return below.
+    if nxt == 'ago':
+        return True
+    # Idiom fillers around a singular noun: "wait a moment", "hold on one
+    # moment", "hang on a moment", "she pauses for a moment".
+    if prev in ('a', 'one'):
+        if any(w in ('wait', 'hold', 'hang')
+               for w in tokens[max(0, i - 4):i]):
+            return True
+        if prev2 in ('for', 'after', 'in'):
+            return True
+    # App-action asks about existing cards: "can you remove the second
+    # clip?" wants an edit, not new material.
+    if any(w in _CLIP_NOUN_EDIT_VERBS for w in window):
+        return True
+    # Back-references to what the assistant already did: "why DID YOU
+    # PICK those clips?", "the quotes YOU PULLED are great". A modal
+    # request ("can you find clips about…") stays extractive — only past
+    # interrogatives ('did/have/had you' + a choice verb) and past-tense
+    # delivery verbs guard. 'find' is deliberately absent from the
+    # choice-verb set: "did you find any quotes about the fire?" is a
+    # polite retrieval ask, not a meta question.
+    for j in range(max(0, i - 5), i):
+        if tokens[j] != 'you':
+            continue
+        j_prev = tokens[j - 1] if j > 0 else ''
+        j_next = tokens[j + 1] if j + 1 < len(tokens) else ''
+        if j_next in _CLIP_NOUN_DELIVERY_PAST:
+            return True
+        if j_prev in ('did', 'have', 'had') and j_next in (
+                'pick', 'pull', 'choose', 'select', 'show', 'give',
+                'suggest', 'recommend', 'list', 'send'):
+            return True
+    # First-person assessment: "I like the highlights so far."
+    for j in range(max(0, i - 4), i):
+        if tokens[j] in _CLIP_NOUN_ASSESSMENT_VERBS and j > 0 \
+                and tokens[j - 1] in ('i', 'we'):
+            return True
+    # Determiner + noun + past-tense verb or 'you': "those clips were
+    # perfect", "the quotes you pulled".
+    if prev in ('those', 'these', 'the'):
+        if nxt == 'you' or nxt in _CLIP_NOUN_PAST_STATE \
+                or nxt in _CLIP_NOUN_DELIVERY_PAST:
+            return True
+
+    if tok in _PLURAL_CLIP_NOUNS:
+        # Plural deictics discuss delivered cards ("what do these moments
+        # have in common?") — UNLESS the message selects among them with
+        # 'which' ("which of those moments is strongest?" wants a
+        # re-ranked card) or counts them ("compare those two moments").
+        det = ''
+        if prev in ('those', 'these'):
+            det = prev
+        elif prev2 in ('those', 'these') \
+                and prev not in _CLIP_NOUN_COUNT_WORDS \
+                and not prev.isdigit():
+            det = prev2
+        if det and 'which' not in tokens[:i]:
+            return True
+        return False
+
+    # Singular deictic guard ("at that moment she changes — why?"), with
+    # a one-adjective gap ("in that same moment") — but CATAPHORIC
+    # retrieval overrides it (H7): a relative clause after the noun
+    # ("that moment WHERE he admits it") or a retrieval verb anywhere
+    # before it ("I WANT that moment…", "can you LOCATE this quote…")
+    # marks a fetch ask, not discussion of an already-identified point.
+    deictic = prev in ('that', 'this') or (
+        prev2 in ('that', 'this') and prev.isalpha())
+    if not deictic:
+        return False
+    if nxt in ('where', 'when') or (nxt == 'in' and nxt2 == 'which'):
+        return False
+    if any(w in _CLIP_NOUN_RETRIEVAL_VERBS for w in tokens[:i]):
+        return False
+    return True
+
+
+def _clip_noun_retrieval_targets(message):
+    """The clip-seeking noun tokens in ``message`` that are genuine
+    retrieval targets — every occurrence ``_clip_noun_is_reference``
+    guards as conversational is skipped. Empty list → no clip ask."""
+    tokens = re.findall(r"[a-z0-9']+", (message or '').lower())
+    out = []
+    for i, tok in enumerate(tokens):
+        if tok not in _CLIP_SEEKING_NOUNS:
+            continue
+        if _clip_noun_is_reference(tokens, i):
+            continue
+        out.append(tok)
+    return out
 
 
 def _is_conversational_query(message: str, segments=None) -> bool:
@@ -76,7 +288,10 @@ def _is_conversational_query(message: str, segments=None) -> bool:
       3. Mentions a known speaker name → extractive (route to chunk search
          which actually scans the transcript for that speaker's content)
       4. Starts with an extractive verb → extractive
-      5. Default → conversational (matches the orientation: default to talk)
+      5. Contains a clip-seeking noun (_CLIP_SEEKING_NOUNS) → extractive,
+         question phrasing notwithstanding — with a narrow deictic guard
+         (see the inline comment at the check)
+      6. Default → conversational (matches the orientation: default to talk)
 
     The speaker-name check matters on long interviews: the conversational
     synthesis path has only a summary + digest, not the full transcript,
@@ -130,6 +345,25 @@ def _is_conversational_query(message: str, segments=None) -> bool:
         rest_tokens = re.findall(r"[a-z0-9']+", stripped)[1:]
         if any(t in _DURATION_INTENT_NOUNS for t in rest_tokens):
             return False
+    # Clip-seeking nouns flip the ask extractive even when it's phrased as
+    # a question ("What are the strongest emotional moments?", "Are there
+    # any quotes about the fire?") — those are retrieval asks wearing
+    # question syntax, and a clip answer is what the editor wants. But a
+    # noun MENTION is not a noun ASK: negated/wound-down asks ("no more
+    # clips, what's the theme?"), back-references to cards already
+    # delivered ("those clips were perfect", "the quotes you pulled"),
+    # meta questions about the app's choices ("why did you pick those
+    # clips?"), idioms/fillers ("wait a moment", "a few moments ago you
+    # said…"), and deictic singulars ("at that moment she changes") all
+    # stay discussion — the guard set lives in _clip_noun_is_reference,
+    # which errs conversational by design (see the guiding-principle
+    # comment above it). Cataphoric retrieval still flips ("I want that
+    # moment where he admits it"). Non-deictic singulars ("what's the
+    # best moment?") stay extractive — even mid-discussion uses ("what do
+    # you make of the moment she cries?") benefit from a playable card,
+    # and on the Layer-1 path the prose answer rides along with it.
+    if _clip_noun_retrieval_targets(stripped):
+        return False
     return True
 
 
@@ -697,20 +931,49 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
             language_directive_text=directive_plain,
             skip_title_anchor=skip_title_anchor,
         )
-    # A duration ask and a clip-count ask contradict each other — "1 minute
-    # of selects" says nothing about clip count (and used to be misparsed
-    # as clip-count 1 and hard-trimmed to ONE clip). When a duration target
-    # parses, the deterministic duration pass owns the reply; otherwise the
-    # explicit-count trim applies as before.
+    # Count-vs-duration ownership: a count-less duration ask ("1 minute
+    # of selects" says nothing about clip count, and used to be misparsed
+    # as clip-count 1 and hard-trimmed to ONE clip) hands the reply to the
+    # deterministic duration pass. But when BOTH parse ("give me 5 clips,
+    # about 2 minutes total"), the COUNT is the card-by-card promise the
+    # user actually made — it owns the reply and the duration degrades to
+    # a soft bound (duration enforcement is skipped rather than padding or
+    # trimming past the promised count). Mirrored in Layer 2's final_top_k
+    # and in collection chat.
     target_seconds = parse_target_duration_seconds(message)
-    if target_seconds is None:
-        # Enforce explicit clip count from the user message. Gemma 4B
-        # routinely ignores "1 clip" / "one more" / "another" and emits 2-3.
-        # Trim server-side so the user sees what they asked for.
-        cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
-    elif not _is_conversational_query(message, segments=segments):
+    explicit_count = _detect_explicit_clip_count(message)
+    extractive = not _is_conversational_query(message, segments=segments)
+    if target_seconds is None or explicit_count is not None:
+        # Enforce the clip-count contract from the user message. Gemma 4B
+        # routinely ignores "1 clip" / "one more" / "another" and emits 2-3
+        # (trim), and just as routinely under-delivers ("Give me 5 more" →
+        # three cards) — the top-up half fills the gap deterministically
+        # from the ranked pool, skipping moments earlier turns already
+        # showed. Plural asks with no explicit count ("the strongest
+        # emotional moments") guarantee at least _PLURAL_CLIP_MINIMUM cards
+        # the same way. Top-up material is extractive-only: a conversational
+        # aside that happens to parse a count ("just one thing — what's her
+        # name?") must not grow clip cards, so it keeps the trim-only shape.
+        # On "more"-style asks, markers the model RE-EMITS from history are
+        # dropped as duplicates before counting ("5 more" = 5 NEW moments).
+        cleaned = _enforce_clip_count(
+            cleaned, explicit_count,
+            candidates=_count_topup_pool(matched, segments, segment_vectors,
+                                         message=message, history=history)
+            if extractive else None,
+            transcript=transcript,
+            exclude_spans=_history_clip_spans(history),
+            min_count=_plural_clip_minimum(message) if extractive else None,
+            drop_reemitted=bool(
+                _MORE_CLIPS_RE.search((message or '').lower())),
+        )
+    elif extractive:
+        # History exclusion mirrors the count path: "give me another 2
+        # minutes of selects" must top up with NEW footage, never re-issue
+        # clips earlier turns already showed.
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, matched, transcript=transcript,
+            exclude_spans=_history_clip_spans(history),
         )
     return cleaned
 
@@ -971,18 +1234,35 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             language_directive_text=directive_plain,
             skip_title_anchor=skip_title_anchor,
         )
-    # Same count-vs-duration fork the non-streaming path applies: a parsed
-    # duration target supersedes clip-count trimming (they contradict), and
-    # the deterministic duration pass runs in the same post-stream slot the
-    # salvage pass already occupies.
+    # Same count-vs-duration fork the non-streaming path applies: an
+    # explicit count owns the reply even when a duration also parses (the
+    # duration becomes a soft bound); only a count-less duration ask hands
+    # the reply to the duration pass. The deterministic passes run in the
+    # same post-stream slot the salvage pass already occupies.
     target_seconds = parse_target_duration_seconds(message)
-    if target_seconds is None:
-        # Enforce explicit clip count from the user message — same defense
-        # the non-streaming path applies. See _enforce_clip_count.
-        cleaned = _enforce_clip_count(cleaned, _detect_explicit_clip_count(message))
-    elif not _is_conversational_query(message, segments=segments):
+    explicit_count = _detect_explicit_clip_count(message)
+    extractive = not _is_conversational_query(message, segments=segments)
+    if target_seconds is None or explicit_count is not None:
+        # Trim over-delivery AND top up under-delivery against the user's
+        # count (plus the plural-ask minimum) — same defense as the
+        # non-streaming path. See _enforce_clip_count.
+        cleaned = _enforce_clip_count(
+            cleaned, explicit_count,
+            candidates=_count_topup_pool(matched, segments, segment_vectors,
+                                         message=message, history=history)
+            if extractive else None,
+            transcript=transcript,
+            exclude_spans=_history_clip_spans(history),
+            min_count=_plural_clip_minimum(message) if extractive else None,
+            drop_reemitted=bool(
+                _MORE_CLIPS_RE.search((message or '').lower())),
+        )
+    elif extractive:
+        # History exclusion mirrors the count path — see the
+        # non-streaming variant.
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, matched, transcript=transcript,
+            exclude_spans=_history_clip_spans(history),
         )
     yield ('done', cleaned)
 
@@ -1016,20 +1296,50 @@ def _count_clip_markers(text):
 # me 1 minute of selects" must never become clip-count 1 and get trimmed
 # to a single clip). parse_target_duration_seconds owns those asks.
 _NOT_TIME_UNIT = r'(?![\s-]*(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)\b)'
+# Variant that also rejects "N more <unit>" ("give me 30 more seconds of
+# selects" is a duration ask, never clip-count 30). Used by the request-
+# verb digit pattern, whose bare digit would otherwise stop looking at
+# the intervening "more".
+_NOT_TIME_UNIT_THROUGH_MORE = (
+    r'(?![\s-]*(?:more[\s-]+)?(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)\b)'
+)
+
+
+# Clip-noun alternation shared by the explicit-count patterns — the same
+# noun set the intent flip trusts (_CLIP_SEEKING_NOUNS, plus 'excerpts'
+# to match _parse_user_clip_count). "compare the two MOMENTS where…"
+# promises exactly two cards the same way "two clips" does; parsing only
+# next-to-"clips" made Layer 1 fall back to the plural 3-minimum and
+# append an unrequested third card.
+_COUNT_CLIP_NOUNS = r'(?:clips?|moments?|quotes?|soundbites?|highlights?|excerpts?)'
+_COUNT_ADJ = r'(?:great\s+|strong\s+|best\s+)?'
+# "…moments AGO" is a time reference, never a count: "a few moments ago
+# you said…" must not parse count=3 (and "2 moments ago" not count=2).
+_NOT_AGO = r'(?!\s+ago\b)'
+# Variant for patterns that end BEFORE the optional noun ("a few",
+# "several"): reject when a clip noun + "ago" follows.
+_NOT_NOUN_AGO = (
+    r'(?!(?:\s+' + _COUNT_CLIP_NOUNS + r')?\s+ago\b)'
+)
 
 
 def _detect_explicit_clip_count(message):
     """Parse an explicit clip count from a user message, or return ``None``.
 
     Pattern coverage matches the prompt's CLIP COUNT rules:
-    - "1 clip", "2 clips", "3 clips" (digits)
-    - "one clip", "two clips" through "five clips" (words)
+    - "1 clip", "2 moments", "3 quotes" (digits + any clip-seeking noun)
+    - "one clip", "two moments" through "five soundbites" (words)
+    - "both moments" / "both quotes" → 2
     - "give me one", "the best one", "just one" → 1
     - "one more", "another (clip|one)" → 1
     - "a few more", "some more" → 3 (upper bound of "a few")
 
     Numbers attached to time units never count ("give me 1 minute",
-    "two more minutes") — see ``_NOT_TIME_UNIT``.
+    "two more minutes", "give me 30 more seconds of selects") — see
+    ``_NOT_TIME_UNIT``, which every digit pattern applies AFTER consuming
+    an optional intervening "more". Numbers attached to "ago" never count
+    either ("a few moments ago you said…" is a memory reference) — see
+    ``_NOT_AGO`` / ``_NOT_NOUN_AGO``.
 
     Returns ``None`` if no explicit count is detectable — the model uses
     its judgment in that case (1-4 typical per the prompt).
@@ -1039,34 +1349,63 @@ def _detect_explicit_clip_count(message):
     import re
     msg = message.lower().strip()
 
-    # "1 clip" / "2 clips" / etc.
-    m = re.search(r'\b(\d+)' + _NOT_TIME_UNIT + r'\s+clips?\b', msg)
-    if m:
-        return max(1, int(m.group(1)))
-
-    # "1 more" / "2 more" / "3 more" — digit + "more" (with optional "clip"
-    # after). The user means N additional clips. Same parse as "1 clip"
-    # but with "more" as the noun.
-    m = re.search(r'\b(\d+)\s+more(?:\s+clips?)?\b' + _NOT_TIME_UNIT, msg)
-    if m:
-        return max(1, int(m.group(1)))
-
-    # "find me 3" / "give me 2" / "pull 4" — bare digit after a request verb.
+    # "1 clip" / "2 moments" / "3 quotes" / etc.
     m = re.search(
-        r'\b(?:find|give|pull|show|get|make)\s+(?:me\s+)?(\d+)\b' + _NOT_TIME_UNIT,
+        r'\b(\d+)' + _NOT_TIME_UNIT + r'\s+' + _COUNT_ADJ
+        + _COUNT_CLIP_NOUNS + r'\b' + _NOT_AGO,
+        msg,
+    )
+    if m:
+        return max(1, int(m.group(1)))
+
+    # "1 more" / "2 more" / "3 more" — digit + "more" (with optional clip
+    # noun after). The user means N additional clips. Same parse as
+    # "1 clip" but with "more" as the noun.
+    m = re.search(
+        r'\b(\d+)\s+more(?:\s+' + _COUNT_CLIP_NOUNS + r')?\b'
+        + _NOT_TIME_UNIT + _NOT_AGO,
+        msg,
+    )
+    if m:
+        return max(1, int(m.group(1)))
+
+    # "find me 3" / "give me 2" / "pull 4" — bare digit after a request
+    # verb. The time-unit lookahead must see THROUGH an intervening
+    # "more": "give me 30 more seconds of selects" is a duration ask, and
+    # with the plain lookahead, "seconds" hid behind the "more" and the
+    # message parsed count=30 → a 30-card wall from the top-up (H11).
+    # The see-through lives INSIDE the lookahead (not as a consumed
+    # optional group) because regex backtracking un-consumes an optional
+    # "(?:\s+more)?" whenever consuming it would fail the lookahead.
+    m = re.search(
+        r'\b(?:find|give|pull|show|get|make)\s+(?:me\s+)?(\d+)\b'
+        + _NOT_TIME_UNIT_THROUGH_MORE + _NOT_AGO,
         msg,
     )
     if m:
         return max(1, int(m.group(1)))
 
     word_to_num = {'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5}
-    m = re.search(r'\b(one|two|three|four|five)\s+clips?\b', msg)
+    m = re.search(
+        r'\b(one|two|three|four|five)\s+' + _COUNT_ADJ
+        + _COUNT_CLIP_NOUNS + r'\b' + _NOT_AGO,
+        msg,
+    )
     if m:
         return word_to_num[m.group(1)]
 
+    # "both moments" / "compare both quotes about the fire" → exactly 2.
+    if re.search(
+        r'\bboth\s+(?:of\s+the\s+)?' + _COUNT_ADJ + _COUNT_CLIP_NOUNS
+        + r'\b' + _NOT_AGO,
+        msg,
+    ):
+        return 2
+
     # Word-form + "more": "two more", "three more clips", etc.
     m = re.search(
-        r'\b(one|two|three|four|five)\s+more(?:\s+clips?)?\b' + _NOT_TIME_UNIT,
+        r'\b(one|two|three|four|five)\s+more(?:\s+'
+        + _COUNT_CLIP_NOUNS + r')?\b' + _NOT_TIME_UNIT + _NOT_AGO,
         msg,
     )
     if m:
@@ -1089,10 +1428,45 @@ def _detect_explicit_clip_count(message):
     ):
         return 1
 
-    # "A few more" / "some more" — cap at 3.
-    if re.search(r'\b(?:a\s+few(?:\s+more)?|some\s+more|several)\b' + _NOT_TIME_UNIT, msg):
+    # "A few more" / "some more" — cap at 3. "A few moments AGO you
+    # said…" is a memory reference, not a count (_NOT_NOUN_AGO).
+    if re.search(
+        r'\b(?:a\s+few(?:\s+more)?|some\s+more|several)\b'
+        + _NOT_TIME_UNIT + _NOT_NOUN_AGO,
+        msg,
+    ):
         return 3
 
+    return None
+
+
+def _plural_clip_minimum(message):
+    """Minimum marker count for a PLURAL clip-noun ask with no explicit
+    count ("the strongest emotional moments", "show me the best quotes").
+
+    Plural phrasing promises SEVERAL cards, but without a parsed count the
+    reply carried however many markers the model happened to emit — the
+    live tester screenshot: prose says "I've pulled three moments" with
+    ONE card under it. Returns ``_PLURAL_CLIP_MINIMUM`` when a plural
+    clip-seeking noun appears, else ``None``.
+
+    Only consulted when ``_detect_explicit_clip_count`` returned ``None``
+    (an explicit count always wins) and the message classified extractive
+    — both enforced at the call sites, mirroring how the duration pass is
+    gated. The minimum never trims: a model that volunteers five moments
+    for a plural ask keeps all five (see ``_enforce_clip_count``).
+
+    Uses the same reference guards as the intent flip
+    (``_clip_noun_is_reference``): a plural noun that only BACK-REFERENCES
+    delivered cards or sits in an idiom ("give me more of what you showed
+    a few moments ago") promises nothing and must not force a 3-card
+    floor onto the reply.
+    """
+    if not message:
+        return None
+    for tok in _clip_noun_retrieval_targets(message):
+        if tok in _PLURAL_CLIP_NOUNS:
+            return _PLURAL_CLIP_MINIMUM
     return None
 
 
@@ -1140,30 +1514,369 @@ def _strip_trimmed_clip_tail(tail):
     return out
 
 
-def _enforce_clip_count(text, target):
-    """Trim ``text`` so it contains at most ``target`` [CLIP:] markers.
+def _history_clip_spans(history):
+    """``(start, end, group)`` triples for every [CLIP:] marker in prior
+    conversation turns.
 
-    Strips excess markers and the prose attached to them (preamble lines
-    introducing each excess clip and the per-clip explanation paragraph
-    after it), but preserves the through-line opener and the first
-    ``target`` clips. Used to defend against Gemma 4 ignoring the
-    explicit count rule in the prompt — the prompt asks for "EXACTLY 1"
-    but the model emits 2-3 anyway, so we enforce server-side.
+    ``history`` is the chat-history list the pipeline already receives —
+    dicts with ``role``/``content``, where assistant turns store the raw
+    reply text including its markers. Both roles are scanned: a marker in
+    either side means that moment is already on the table. ``group`` is
+    the marker's ``project="..."`` field when present (the collection
+    pipeline's multi-timeline tag), ``None`` on single-project markers —
+    which conservatively collide with every group in
+    ``_grouped_spans_overlap``. Feed the result to ``_enforce_clip_count``
+    as ``exclude_spans`` so "give me 5 more" yields 5 NEW moments instead
+    of re-issuing cards the editor has already seen.
     """
-    if target is None or target < 1 or not text:
+    spans = []
+    for turn in (history or []):
+        if not isinstance(turn, dict):
+            continue
+        content = turn.get('content') or ''
+        if '[CLIP' not in content:
+            continue
+        for m in _CLIP_MARKER_RE.finditer(content):
+            sm = re.search(r'start=([\d:.]+)', m.group(0))
+            em = re.search(r'end=([\d:.]+)', m.group(0))
+            if not (sm and em):
+                continue
+            s = _tc_to_seconds(sm.group(1))
+            e = _tc_to_seconds(em.group(1))
+            gm = re.search(r'project="([^"]*)"', m.group(0))
+            grp = (gm.group(1).strip() if gm else '') or None
+            spans.append((s, max(s, e), grp))
+    return spans
+
+
+# Hard cap on the count top-up's append goal. _parse_user_clip_count
+# already clamps to 1-10; this is the same bound applied defensively at
+# the enforcement layer so a misparsed count (the "give me 30 more
+# seconds" family, or any future parser gap) can never append dozens of
+# cards. The TRIM half is uncapped — trimming to a large ask is harmless.
+_COUNT_TOPUP_MAX = 10
+
+
+def _normalize_exclude_spans(exclude_spans):
+    """``exclude_spans`` input (any iterable of (start, end[, group])) →
+    clean ``(start, end, group)`` float triples, malformed entries
+    skipped. Shared by the count and duration enforcement passes."""
+    out = []
+    for span in (exclude_spans or []):
+        try:
+            s, e = float(span[0]), float(span[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        grp = span[2] if len(span) > 2 else None
+        out.append((s, max(s, e), grp))
+    return out
+
+
+def _drop_reemitted_clip_markers(text, exclude, group_key=None):
+    """Remove model-emitted [CLIP:] markers that RE-ISSUE a span already
+    shown earlier in the conversation, along with their attached prose
+    (the marker's line plus the note lines that follow it, mirroring
+    ``_strip_trimmed_clip_tail`` so the reply never describes clips that
+    no longer exist).
+
+    Used by ``_enforce_clip_count`` on "more"-style asks only ("give me
+    5 more" promises 5 NEW moments): Gemma routinely re-emits previously
+    shown clips from the history in its prompt, and counting those toward
+    the target shipped repeats as "new" clips. The screen runs BEFORE the
+    trim and the have-count so an all-repeats reply doesn't survive the
+    trim path either. Overlap here is the plain >50% grouped rule — NO
+    adjacency margin: a marker that merely borders a shown clip is new
+    material; only a real re-issue is a duplicate. Fresh (non-"more")
+    asks never reach this — a fresh re-ask may legitimately repeat a
+    previously shown moment.
+    """
+    if not text or not exclude:
         return text
+
+    def _is_dup(marker_text):
+        sm = re.search(r'start=([\d:.]+)', marker_text)
+        em = re.search(r'end=([\d:.]+)', marker_text)
+        if not (sm and em):
+            return False
+        s = _tc_to_seconds(sm.group(1))
+        e = max(s, _tc_to_seconds(em.group(1)))
+        grp = None
+        if group_key:
+            gm = re.search(r'project="([^"]*)"', marker_text)
+            grp = (gm.group(1).strip() if gm else '') or None
+        return _grouped_spans_overlap(s, e, grp, exclude)
+
+    kept = []
+    dropping = False  # consuming a dropped marker's attached note lines
+    for line in text.splitlines():
+        markers = _CLIP_MARKER_RE.findall(line)
+        if markers:
+            dups = [m for m in markers if _is_dup(m)]
+            if dups and len(dups) == len(markers):
+                dropping = True
+                continue
+            for m in dups:  # mixed line: strip just the duplicate markers
+                line = line.replace(m, '')
+            dropping = False
+            kept.append(line)
+            continue
+        if not line.strip():
+            dropping = False  # a blank line ends the dropped clip's note
+            kept.append(line)
+            continue
+        if dropping:
+            continue
+        kept.append(line)
+    out = '\n'.join(kept)
+    # Collapse the blank-line runs the dropped paragraphs leave behind.
+    out = re.sub(r'\n[ \t]*\n(?:[ \t]*\n)+', '\n\n', out)
+    return out
+
+
+def _enforce_clip_count(text, target, candidates=None, transcript=None,
+                        exclude_spans=None, group_key=None, min_count=None,
+                        drop_reemitted=False):
+    """Hold a chat reply's [CLIP:] marker count to the user's ask — trim
+    past ``target`` AND top up model under-delivery from the ranked pool.
+
+    The trim half defends against Gemma 4 ignoring the explicit count rule
+    in the prompt — the prompt asks for "EXACTLY 1" but the model emits
+    2-3 anyway. The top-up half is the mirror defense: "Give me 5 more"
+    answered with three cards used to pass through untouched (live tester
+    bug), so when the reply carries FEWER markers than the ask, canonical
+    markers are appended from ``candidates`` — the same deterministic
+    machinery as ``_enforce_duration_target``, counting markers instead
+    of seconds. GUIDING PRINCIPLE: the top-up must be PRECISE — if the
+    pool can't fill the gap with genuinely new, non-adjacent material,
+    the reply ships with what exists. The honest under-count always beats
+    a padded sliver card.
+
+    ``target``        explicit user count (``_detect_explicit_clip_count``);
+                      trim and top-up both apply.
+    ``min_count``     floor for plural asks with NO explicit count
+                      (``_plural_clip_minimum`` — "the strongest momentS"
+                      promises several); top-up only, NEVER trims, ignored
+                      whenever ``target`` parses.
+    ``candidates``    ranked pool for the top-up (matched paragraphs or
+                      Layer-2 candidates — ``_duration_candidate_span``
+                      shapes). ``None`` keeps the historical trim-only
+                      behavior byte-for-byte.
+    ``exclude_spans`` ``(start, end, group)`` triples already shown earlier
+                      in the conversation (``_history_clip_spans``) — a
+                      top-up never re-issues a moment the editor has seen,
+                      nor a continuation within
+                      ``_TOPUP_ADJACENCY_GAP_SECONDS`` of one.
+    ``group_key``     per-source timeline field for multi-project pools,
+                      same contract as ``_enforce_duration_target``.
+                      Appended markers carry ``project="<group>"`` so the
+                      collection pipeline gets exact attribution instead
+                      of reconstructing it by string match.
+    ``drop_reemitted`` True on "more"-style asks (``_MORE_CLIPS_RE``):
+                      model-emitted markers that overlap an excluded span
+                      are duplicates — removed (with their prose) so they
+                      neither count toward the target nor ship as "new".
+    """
+    if not text:
+        return text
+    goal = None
+    allow_trim = False
+    if target is not None and target >= 1:
+        goal = target
+        allow_trim = True
+    elif min_count is not None and min_count >= 1:
+        goal = min_count
+    if goal is None:
+        return text
+    exclude = _normalize_exclude_spans(exclude_spans)
+    if drop_reemitted and exclude:
+        # An all-repeats reply can drop to empty prose here — the top-up
+        # below then rebuilds the cards from the pool, which is exactly
+        # the contract: "5 more" never ships repeats as "new".
+        text = _drop_reemitted_clip_markers(text, exclude, group_key)
     clips = list(_CLIP_MARKER_RE.finditer(text))
-    if len(clips) <= target:
+    if allow_trim and len(clips) > goal:
+        # Cut at the end of the target-th marker. Anything after gets the
+        # CLIP markers stripped along with their attached prose (so any
+        # salvageable standalone prose stays, but no excess clip cards —
+        # and no orphaned per-clip notes — render).
+        cut = clips[goal - 1].end()
+        head = text[:cut]
+        tail = _strip_trimmed_clip_tail(text[cut:])
+        result = (head + tail).rstrip()
+        return result
+    if len(clips) >= goal or not candidates:
         return text
-    # Cut at the end of the target-th marker. Anything after gets the
-    # CLIP markers stripped along with their attached prose (so any
-    # salvageable standalone prose stays, but no excess clip cards — and
-    # no orphaned per-clip notes — render).
-    cut = clips[target - 1].end()
-    head = text[:cut]
-    tail = _strip_trimmed_clip_tail(text[cut:])
-    result = (head + tail).rstrip()
-    return result
+
+    # TOP-UP: append ranked candidates until the marker count reaches the
+    # ask. Overlap bookkeeping mirrors _enforce_duration_target — emitted
+    # markers plus every prior-conversation span count as taken, per
+    # timeline group when the pool is multi-source — with the ADJACENCY
+    # rule on top: candidates within _TOPUP_ADJACENCY_GAP_SECONDS of a
+    # taken span are continuations, not new moments.
+    taken = []
+    for m in clips:
+        sm = re.search(r'start=([\d:.]+)', m.group(0))
+        em = re.search(r'end=([\d:.]+)', m.group(0))
+        if not (sm and em):
+            continue
+        s = _tc_to_seconds(sm.group(1))
+        e = max(s, _tc_to_seconds(em.group(1)))
+        grp = None
+        if group_key:
+            gm = re.search(r'project="([^"]*)"', m.group(0))
+            grp = (gm.group(1).strip() if gm else '') or None
+        taken.append((s, e, grp))
+    taken.extend(exclude)
+
+    have = len(clips)
+    lines = []
+    topup_goal = min(goal, _COUNT_TOPUP_MAX)
+    for cand in candidates:
+        if have >= topup_goal:
+            break
+        span = _duration_candidate_span(cand, transcript)
+        if span is None:
+            continue
+        s, e, title, why = span
+        # Keep top-up cards clip-sized — same cap _deterministic_clip_markers
+        # applies. (The duration pass keeps full spans because it needs the
+        # runtime; a COUNT ask wants usable cards.)
+        if e - s > 60:
+            e = s + 45
+        cand_group = None
+        if group_key:
+            cand_group = str(cand.get(group_key) or '').strip() or None
+        if _grouped_spans_overlap(s, e, cand_group, taken,
+                                  min_gap=_TOPUP_ADJACENCY_GAP_SECONDS):
+            continue
+        taken.append((s, e, cand_group))
+        have += 1
+        start_tc, end_tc = _seconds_to_tc(s), _seconds_to_tc(e)
+        attrs = [f'start={start_tc}', f'end={end_tc}']
+        if cand_group:
+            # Exact source attribution for multi-project pools: the
+            # candidate dict is in hand, so emit its timeline directly
+            # instead of leaving the collection pipeline to reconstruct
+            # it by string-matching capped spans (which went ambiguous
+            # exactly when two projects shared a capped span + title).
+            attrs.append('project="{0}"'.format(cand_group.replace('"', "'")))
+        attrs.append(f'title="{title}"')
+        if why:
+            attrs.append(f'note="{why}"')
+        lines.append('[CLIP: ' + ' '.join(attrs) + ']')
+    if not lines:
+        return text
+    return (text.rstrip() + '\n\n' + '\n'.join(lines)).strip()
+
+
+def _carryover_clip_queries(history):
+    """User turns from ``history`` whose assistant reply produced clip
+    cards, MOST RECENT FIRST. These are the themes the conversation is
+    actually mining — the seed for keyword carryover on count-only
+    follow-ups ("give me 5 more" after "strongest emotional moments").
+    """
+    turns = [t for t in (history or []) if isinstance(t, dict)]
+    out = []
+    for i in range(len(turns) - 1, -1, -1):
+        if turns[i].get('role') != 'user':
+            continue
+        for j in range(i + 1, len(turns)):
+            if turns[j].get('role') != 'assistant':
+                continue
+            if '[CLIP' in (turns[j].get('content') or ''):
+                content = (turns[i].get('content') or '').strip()
+                if content:
+                    out.append(content)
+            break
+    return out
+
+
+def _vector_window_candidates(segments, segment_vectors, limit=24):
+    """Fallback pool for keyword-less count top-ups: ONE candidate per
+    curated vector window, spanning the vector's own timecode_in/out —
+    never the raw 2-8s whisper segments inside it. Raw segments made the
+    old fallback append consecutive 4-second slivers of a single
+    highlight window and count each as a separate "more" clip; a padded
+    sliver card is worse than an honest under-count (guiding principle).
+
+    Ranked by narrative score — every 'high' window before any 'medium'
+    (the old pool was chronological despite the ranked-pool contract),
+    chronological within a band. 'low' windows never mint user-facing
+    cards. ``text`` carries the first overlapping segment's words so
+    ``_duration_candidate_span`` derives a real title.
+    """
+    if not segment_vectors or not segments:
+        return []
+    buckets = {'high': [], 'medium': []}
+    for v in segment_vectors:
+        if not isinstance(v, dict):
+            continue
+        score = str(v.get('narrative_score', 'medium')).lower()
+        if score not in buckets:
+            continue
+        try:
+            start = _tc_to_seconds(v.get('timecode_in'))
+            end = _tc_to_seconds(v.get('timecode_out'))
+        except Exception:
+            continue
+        if end <= start:
+            continue
+        text = ''
+        for seg in segments:
+            seg_start = float(seg.get('start', 0) or 0)
+            seg_end = float(seg.get('end', seg_start) or seg_start)
+            if seg_end <= start or seg_start >= end:
+                continue
+            seg_text = (seg.get('text') or '').strip()
+            if seg_text:
+                text = seg_text
+                break
+        buckets[score].append({'start': start, 'end': end, 'text': text})
+    return (buckets['high'] + buckets['medium'])[:limit]
+
+
+def _count_topup_pool(matched, segments, segment_vectors, message=None,
+                      history=None):
+    """Ranked candidate pool for the clip-count top-up.
+
+    Uses the retrieval matches when the query produced any. Count-only
+    follow-ups ("give me 5 more") carry no searchable keywords, so the
+    pool is built in two precision-ordered fallbacks:
+
+    1. THEME CARRYOVER — when the current message extracts no keywords,
+       re-run retrieval seeded with the most recent prior user turn that
+       actually produced clips ("strongest emotional moments" → "give me
+       5 more" keeps mining emotional moments instead of going
+       theme-blind). Earlier clip-producing turns are tried in turn when
+       the latest was itself keyword-less.
+    2. CURATED WINDOWS — one candidate per high/medium narrative-score
+       vector window (``_vector_window_candidates``), high first, never
+       raw whisper slivers.
+
+    Returns ``[]`` when nothing qualifies; the top-up then honestly
+    delivers only what the model emitted.
+    """
+    if matched:
+        return matched
+    if segments and history and message is not None:
+        cur_phrases, cur_words = _extract_query_keywords(message)
+        if not (cur_phrases or cur_words):
+            for carry in _carryover_clip_queries(history):
+                try:
+                    phrases, words = _extract_query_keywords(carry)
+                    theme_phrases = _collect_theme_phrases_from_vectors(
+                        segment_vectors, carry)
+                    if not (phrases or words or theme_phrases):
+                        continue
+                    carried = _find_relevant_paragraphs(
+                        segments, phrases, words, context=2,
+                        theme_phrases=theme_phrases,
+                    )
+                    if carried:
+                        return carried
+                except Exception:
+                    continue
+    return _vector_window_candidates(segments, segment_vectors)
 
 
 # ── Duration-target parsing + enforcement ────────────────────────────────
@@ -1358,11 +2071,16 @@ def parse_target_duration_seconds(message):
     )
 
     # Number + unit: "14 minute(s)", "14-minute", "90 sec", "1.5 hours",
-    # "one minute", "a minute", "half an hour".
+    # "one minute", "a minute", "half an hour". An intervening "more" is
+    # skippable ("give me 30 MORE seconds of selects", "pull 2 more
+    # minutes of selects" — follow-up phrasings of the same duration
+    # ask); without it these parsed neither as duration nor count and
+    # leaked into the count path's request-verb digit pattern.
     unit_re = re.compile(
         r'(?<![\d:.])\b'
         r'(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten'
         r'|an?|half\s+an?)'
+        r'(?:\s+more)?'
         r'[\s-]+'
         r'(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b'
     )
@@ -1507,7 +2225,16 @@ def _spans_overlap(start, end, spans):
     return False
 
 
-def _grouped_spans_overlap(start, end, group, spans):
+# Adjacency margin for the deterministic top-ups: a candidate whose span
+# overlaps — or merely sits within this many seconds of — a taken/history
+# span is a CONTINUATION of material the editor already has (the next
+# slice of the same window, the tail of an already-shown clip). Appending
+# it would fake variety with near-duplicates, and a padded sliver card is
+# worse than an honest under-count (guiding principle).
+_TOPUP_ADJACENCY_GAP_SECONDS = 10.0
+
+
+def _grouped_spans_overlap(start, end, group, spans, min_gap=0.0):
     """Group-aware variant of ``_spans_overlap`` for multi-source pools.
 
     ``spans`` are ``(start, end, group)`` triples where ``group`` names the
@@ -1518,11 +2245,24 @@ def _grouped_spans_overlap(start, end, group, spans):
     is unknown; it conservatively collides with every group (better to
     skip a candidate than emit the same moment twice). With every group
     ``None`` this reduces exactly to ``_spans_overlap``.
+
+    ``min_gap`` > 0 switches to the top-ups' ADJACENCY rule: any overlap,
+    or a same-timeline separation under ``min_gap`` seconds, collides —
+    no continuations of already-shown clips, no consecutive slices of one
+    window (see ``_TOPUP_ADJACENCY_GAP_SECONDS``). The default 0 keeps
+    the historical >50%-of-the-shorter-span semantics for every other
+    caller (dedupe of the model's own re-emissions).
     """
     dur = max(1.0, end - start)
     for os_, oe, og in spans:
         if group is not None and og is not None and og != group:
             continue  # different timelines — equal numbers, unrelated footage
+        if min_gap > 0.0:
+            # Separation is negative when the spans overlap, so this one
+            # comparison covers both "overlaps at all" and "too close".
+            if max(os_ - end, start - oe) < min_gap:
+                return True
+            continue
         overlap = max(0.0, min(end, oe) - max(start, os_))
         shorter = min(dur, max(1.0, oe - os_))
         if overlap / shorter > 0.5:
@@ -1531,7 +2271,7 @@ def _grouped_spans_overlap(start, end, group, spans):
 
 
 def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
-                             group_key=None):
+                             group_key=None, exclude_spans=None):
     """Deterministically hold a chat reply's [CLIP:] total to a duration ask.
 
     Measures the emitted markers with ``_tc_to_seconds``, tops up from the
@@ -1551,7 +2291,18 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
     (double-quoted, the shape this pipeline itself writes). Markers or
     candidates without a group conservatively collide with every group.
     Default ``None`` keeps the historical single-timeline behavior
-    byte-for-byte for existing callers.
+    byte-for-byte for existing callers. Appended markers carry
+    ``project="<group>"`` for exact multi-project attribution (same
+    contract as ``_enforce_clip_count``).
+
+    ``exclude_spans`` (optional, additive): ``(start, end, group)``
+    triples already shown earlier in the conversation
+    (``_history_clip_spans``) — same shape and semantics as the count
+    path's parameter. "Give me another 2 minutes of selects" must top up
+    with NEW footage, never re-issue (or continue — the adjacency rule
+    applies) moments the editor already has. Excluded spans block
+    candidates but do NOT count toward the time budget: they were
+    delivered in prior turns.
     """
     if not text or not target_seconds or target_seconds <= 0:
         return text
@@ -1598,11 +2349,16 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
     if total >= floor:
         return text
 
-    # TOP-UP: extend with ranked candidates the reply didn't already cover.
+    # TOP-UP: extend with ranked candidates the reply didn't already
+    # cover — nor prior turns (exclude_spans), with the same adjacency
+    # rule as the count top-up: a candidate within
+    # _TOPUP_ADJACENCY_GAP_SECONDS of taken/history material is a
+    # continuation of what the editor already has, not new footage.
     taken = [
         (s, e, marker_groups[i] if marker_groups else None)
         for i, (_m, s, e) in enumerate(markers)
     ]
+    taken.extend(_normalize_exclude_spans(exclude_spans))
     lines = []
     for cand in (candidates or []):
         if total >= floor:
@@ -1615,17 +2371,22 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
         cand_group = None
         if group_key:
             cand_group = str(cand.get(group_key) or '').strip() or None
-        if _grouped_spans_overlap(s, e, cand_group, taken):
+        if _grouped_spans_overlap(s, e, cand_group, taken,
+                                  min_gap=_TOPUP_ADJACENCY_GAP_SECONDS):
             continue
         if total + dur > ceiling:
             continue
         taken.append((s, e, cand_group))
         total += dur
         start_tc, end_tc = _seconds_to_tc(s), _seconds_to_tc(e)
+        attrs = [f'start={start_tc}', f'end={end_tc}']
+        if cand_group:
+            # Exact source attribution — see _enforce_clip_count.
+            attrs.append('project="{0}"'.format(cand_group.replace('"', "'")))
+        attrs.append(f'title="{title}"')
         if why:
-            lines.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}" note="{why}"]')
-        else:
-            lines.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}"]')
+            attrs.append(f'note="{why}"')
+        lines.append('[CLIP: ' + ' '.join(attrs) + ']')
     if not lines:
         return text
     return (text.rstrip() + '\n\n' + '\n'.join(lines)).strip()
@@ -3029,6 +3790,85 @@ def _parse_user_clip_count(message):
     return None
 
 
+def _layer2_explicit_count(message):
+    """Explicit user clip count for a Layer 2 pick, from EITHER parser,
+    or ``None``: "find me 3 clips" hits the Layer-2 parser above, but
+    count phrasings without a clip noun ("give me 5 more") only parse via
+    the chat-side ``_detect_explicit_clip_count`` — a long-transcript ask
+    must honor them the same way Layer 1's trim/top-up does."""
+    user_count = _parse_user_clip_count(message)
+    if user_count is None:
+        user_count = _detect_explicit_clip_count(message)
+    return user_count
+
+
+def _layer2_final_top_k(message):
+    """Clip count for a Layer 2 pick: an explicit user count wins
+    (``_layer2_explicit_count``); no count → the default top-K."""
+    user_count = _layer2_explicit_count(message)
+    return user_count if user_count is not None else _CHAT_TOP_K_CLIPS
+
+
+# Follow-up phrasings that ask for material BEYOND what the conversation
+# already surfaced. Deliberately narrow, and anchored to FOLLOW-UP SYNTAX
+# rather than bare content words: a fresh re-ask of the same question may
+# legitimately re-find the same best moment, and bare 'new'/'different'/
+# 'other'/'else' are ordinary content words ("moving to new york",
+# "different opinions", "her other siblings", "everything else she lost")
+# — matching them silently dropped a fresh ask's best candidates before
+# ranking. The words only count when they relate to the ask: modifying a
+# clip noun ("other moments", "different clips", "extra options"),
+# adjacent to a count ("5 more", "a few more", "another 2"), verb-
+# anchored ("show me more", "give me another", "find others"), or in a
+# standalone follow-up shape ("what else?", "any others?", "besides
+# those"). Precision beats recall here (guiding principle): a missed
+# follow-up merely repeats a clip, a false positive withholds the best
+# answer with no indication.
+_MORE_CLIPS_NOUN = (
+    r'(?:clips?|moments?|quotes?|soundbites?|highlights?|excerpts?'
+    r'|ones?|options?|selects?|picks?|angles?|takes?)'
+)
+_MORE_CLIPS_RE = re.compile(
+    # "more clips", "another moment", "extra/other/different/new ones"
+    r'\b(?:more|another|additional|extra|other|others|different|new|fresh)'
+    r'\s+' + _MORE_CLIPS_NOUN + r'\b'
+    # "5 more", "one more", "a few more", "some more", "any more"
+    r'|\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten'
+    r'|few|couple|some|several|any)\s+more\b'
+    # "more of those/these/them/the same"
+    r'|\bmore\s+of\s+(?:those|these|them|that|the\s+same)\b'
+    # verb-anchored bare follow-ups: "show me more", "give me another",
+    # "find others", "pull up some more"
+    r'|\b(?:show|give|find|pull|get|grab|surface|dig)\s+(?:me\s+|us\s+)?'
+    r'(?:up\s+)?(?:some\s+|a\s+few\s+)?(?:more|another|others)\b'
+    # "another 2 minutes of selects", "another few"
+    r'|\banother\s+(?:\d+|few|couple)\b'
+    # standalone follow-up shapes
+    r'|\b(?:what|who|anything|something|any)\s+else\b'
+    r'|\bany\s+others?\b'
+    r'|\bbesides\s+(?:that|those|these|them|what)\b'
+)
+
+
+def _exclude_shown_candidates(candidates, message, history):
+    """Drop Layer 2 candidates overlapping clips earlier turns already
+    showed — but only on "more"-style follow-ups ("give me 5 more",
+    "what other moments are there?"). "5 more" means 5 NEW moments; the
+    chunk search itself has no memory, so without this the same top
+    candidates come straight back. Non-"more" asks keep the full pool.
+    """
+    if not candidates or not _MORE_CLIPS_RE.search((message or '').lower()):
+        return candidates
+    prior = [(s, e) for s, e, _g in _history_clip_spans(history)]
+    if not prior:
+        return candidates
+    return [
+        c for c in candidates
+        if not _spans_overlap(
+            c.get('start_sec', 0), c.get('end_sec', 0), prior)
+    ]
+
+
 # English-only stopwords for Layer 1 keyword extraction. Kept short on purpose:
 # the point is to drop boilerplate question words, not to build a full NLP
 # stoplist. Anything a user would reasonably *search for* (nouns, proper nouns,
@@ -4366,18 +5206,28 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
                 print(f"Layer 2 chunk error: {e}")
 
     # Honor an explicit user-stated clip count ("find me 1", "the best one",
-    # "give me 3"). A duration ask overrides both the count parse and the
-    # hardcoded top-K: the clip count derives from the parsed time budget,
-    # and the ranked pool below tops the final pick up to that budget. The
-    # pre-rerank candidate pool is kept generous so the global rerank still
-    # has range to pick from, even when the final output is just one clip.
+    # "give me 5 more") — it wins even when a duration ALSO parses ("give
+    # me 5 clips, 2 minutes of selects": the count is the promise the user
+    # made card-by-card, the duration degrades to a soft bound — same H5
+    # contract as Layer 1). Only a count-less duration ask derives the
+    # clip count from the parsed time budget, and only then does the
+    # ranked pool below top the final pick up to that budget. The
+    # pre-rerank candidate pool is kept generous so the global rerank
+    # still has range to pick from, even when the final output is just
+    # one clip.
     target_seconds = parse_target_duration_seconds(message)
-    if target_seconds is not None:
+    explicit_count = _layer2_explicit_count(message)
+    if explicit_count is not None:
+        final_top_k = explicit_count
+    elif target_seconds is not None:
         final_top_k = _duration_clip_count_hint(target_seconds)
     else:
-        user_count = _parse_user_clip_count(message)
-        final_top_k = user_count if user_count is not None else _CHAT_TOP_K_CLIPS
+        final_top_k = _CHAT_TOP_K_CLIPS
     pool_top_k = max(final_top_k * 3, _CHAT_TOP_K_CLIPS * 3)
+
+    # "More" follow-ups must surface NEW footage — drop candidates that
+    # overlap clips earlier turns already showed before any ranking runs.
+    all_candidates = _exclude_shown_candidates(all_candidates, message, history)
 
     top = _aggregate_chunk_candidates(all_candidates, top_k=pool_top_k)
     duration_pool = list(top)
@@ -4387,7 +5237,7 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
     # if the synthesis call fails — better to ship the original aggregator's
     # answer than to drop everything.
     top = _rerank_candidates_globally(top, message, top_k=final_top_k)
-    if target_seconds is not None:
+    if target_seconds is not None and explicit_count is None:
         top = _extend_candidates_to_duration(top, duration_pool, target_seconds)
     return _format_clip_cards_from_candidates(top)
 
@@ -4466,22 +5316,29 @@ def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_nam
                 print(f"Layer 2 chunk error: {e}")
             yield ('progress', f'{completed}/{total} chunks searched')
 
-    # Mirror of the non-streaming variant: a duration ask derives the clip
-    # count from the parsed time budget and tops the pick up from the
-    # ranked pool afterward.
+    # Mirror of the non-streaming variant: an explicit count (either
+    # parser) overrides the default top-K AND a jointly-parsed duration
+    # (H5 — the duration degrades to a soft bound); only a count-less
+    # duration ask derives the clip count from the parsed time budget and
+    # tops the pick up from the ranked pool afterward. "More" follow-ups
+    # exclude already-shown clips.
     target_seconds = parse_target_duration_seconds(message)
-    if target_seconds is not None:
+    explicit_count = _layer2_explicit_count(message)
+    if explicit_count is not None:
+        final_top_k = explicit_count
+    elif target_seconds is not None:
         final_top_k = _duration_clip_count_hint(target_seconds)
     else:
-        user_count = _parse_user_clip_count(message)
-        final_top_k = user_count if user_count is not None else _CHAT_TOP_K_CLIPS
+        final_top_k = _CHAT_TOP_K_CLIPS
     pool_top_k = max(final_top_k * 3, _CHAT_TOP_K_CLIPS * 3)
+
+    all_candidates = _exclude_shown_candidates(all_candidates, message, history)
 
     yield ('progress', 'Picking the best moments…')
     top = _aggregate_chunk_candidates(all_candidates, top_k=pool_top_k)
     duration_pool = list(top)
     top = _rerank_candidates_globally(top, message, top_k=final_top_k)
-    if target_seconds is not None:
+    if target_seconds is not None and explicit_count is None:
         top = _extend_candidates_to_duration(top, duration_pool, target_seconds)
     yield ('done', _format_clip_cards_from_candidates(top))
 

@@ -3246,10 +3246,27 @@ function renderChatReply(text) {
     // the old "00:14:46" HH:MM:SS format instead of the compact "14:46".
     const CARD_STASH = [];
     html = html.replace(
-        /\[CLIP:?\s*start=([^\s]+)\s+end=([^\s]+)\s+title=(?:&quot;|"|'|&#39;|\u201c|\u2018)(.*?)(?:&quot;|"|'|&#39;|\u201d|\u2019)(?:\s+note=(?:&quot;|"|'|&#39;|\u201c|\u2018)(.*?)(?:&quot;|"|'|&#39;|\u201d|\u2019))?\s*\]/gi,
+        /\[CLIP:?\s*start=([^\s\]]+)\s+end=([^\s\]]+)(?:\s+project=(?:&quot;|"|'|&#39;|\u201c|\u2018).*?(?:&quot;|"|'|&#39;|\u201d|\u2019))?\s+title=(?:&quot;|"|'|&#39;|\u201c|\u2018)(.*?)(?:&quot;|"|'|&#39;|\u201d|\u2019)(?:\s+note=(?:&quot;|"|'|&#39;|\u201c|\u2018)(.*?)(?:&quot;|"|'|&#39;|\u201d|\u2019))?\s*\]/gi,
         (match, startRaw, endRaw, title, note) => {
+            // Marker-syntax MENTIONS carrying placeholder timecode
+            // TEMPLATES ('I use [CLIP: start=MM:SS end=MM:SS ...]
+            // markers.') are legitimate prose, not junk - stash them as
+            // sentinels so the debris sweeps below can't touch them (the
+            // html is already escapeHtml'd here, so restoring the raw
+            // match text is safe).
+            const TC_TEMPLATE = /^[a-z]{1,2}:[a-z]{2}(?::[a-z]{2})?$/i;
+            if (TC_TEMPLATE.test(startRaw) && TC_TEMPLATE.test(endRaw)) {
+                const idx = CARD_STASH.length;
+                CARD_STASH.push(match);
+                return `\uE000CCCARD${idx}\uE001`;
+            }
             const start = tcToSec(startRaw);
             const end = tcToSec(endRaw);
+            // Junk-card guard (belt-and-braces - the server-side quality
+            // floor already drops these): backwards/zero ranges and sub-5s
+            // slivers must never render as cards, even from old saved
+            // chat histories that predate the floor.
+            if (!(end > start) || (end - start) < 5) return '';
             const safeTitle = title.replace(/['"]/g, '').replace(/[^\w\s.,!?()-]/g, '').trim();
             const clipUid = `cc_${start}_${end}`.replace(/\./g, '_');
             const duration = Math.round(end - start);
@@ -3269,6 +3286,44 @@ function renderChatReply(text) {
             return `\uE000CCCARD${idx}\uE001`;
         }
     );
+
+    // Belt-and-braces debris sweep. The server canonicalizes every marker
+    // into the single-line form the regex above matches, but no
+    // partial-marker fragment that still slips through (old saved
+    // histories, unforeseen model shapes) may ever render as prose. Valid
+    // cards are already stashed as sentinels, so these only touch
+    // narration text.
+    // Every sweep is gated on marker vocabulary so legitimate prose can
+    // never be eaten: bare "[clip 3]" references, 'Set title="My Export"
+    // in the dialog' instructions, FCPXML help snippets, and JSON-style
+    // lines ending in "] all stay put.
+    const MARKER_VOCAB = /\b(?:start|end|start_time|end_time|title|label|name|heading|note|why|project)\s*=/i;
+    // 1. Unrecoverable [CLIP fragments - to the closing ] on the same
+    //    line, or to end-of-line when the bracket never closes. Only
+    //    heads with the marker colon ([CLIP: / [clip:) or marker
+    //    attributes are debris; "[clip 3]" is a prose reference.
+    html = html.replace(/\[\s*CLIP\b[^\]\n]*\]?/gi, (frag) =>
+        (/\[\s*CLIP\s*:/i.test(frag) || MARKER_VOCAB.test(frag)) ? '' : frag);
+    // 2. Orphan attribute tails (start=... end=...] / title="..." note="..."]).
+    //    The run must terminate in ] AND carry a start=+end= pair or at
+    //    least two marker attrs - a lone attr in prose is not debris.
+    //    (The ] stays optional in the pattern so runs match once and the
+    //    scan stays linear; the callback enforces the ]-termination.)
+    html = html.replace(/(?:\b(?:start|end|start_time|end_time|title|label|name|heading|note|why|project)\s*=\s*(?:(?:&quot;|")[^"\n]*?(?:&quot;|"|$)|(?!&quot;|")[^\s\]]+)[ \t]*)+\]?/gim, (run) => {
+        if (!run.endsWith(']')) return run;
+        const keys = (run.match(/\b(?:start|end|start_time|end_time|title|label|name|heading|note|why|project)(?=\s*=)/gi) || []).map(k => k.toLowerCase());
+        const hasStart = keys.includes('start') || keys.includes('start_time');
+        const hasEnd = keys.includes('end') || keys.includes('end_time');
+        return ((hasStart && hasEnd) || keys.length >= 2) ? '' : run;
+    });
+    // 3. Stray lone ] / "] lines.
+    html = html.replace(/^[ \t]*(?:&quot;|")?\][ \t]*$/gm, '');
+    // 4. Half-note tails: a line with no opening bracket that ends in "]
+    //    AND carries marker vocabulary is the leaked tail of a broken
+    //    marker. Without the vocabulary it is indistinguishable from
+    //    legitimate content (JSON-style answers) and must be kept.
+    html = html.replace(/^[^\[\n]*(?:&quot;|")\][ \t]*$/gm, (line) =>
+        MARKER_VOCAB.test(line) ? '' : line);
 
     // Markdown pass on narration only (cards are stashed). escapeHtml has
     // already neutralized real HTML, so these regexes operate on inert text.

@@ -233,6 +233,12 @@ class OllamaProvider(BaseProvider):
                     # truncation on long transcripts (25-min Gemma
                     # chunk ≈ 5K tokens of transcript text alone).
                     "num_ctx": kwargs.get("num_ctx", 32768),
+                    # Classic sampler pin — mirrors the chat paths; the
+                    # analysis/story JSON calls are just as exposed to the
+                    # runtime/manifest default drift.
+                    "top_k": kwargs.get("top_k", 40),
+                    "top_p": kwargs.get("top_p", 0.9),
+                    "min_p": kwargs.get("min_p", 0.05),
                 },
             }
             if force_json:
@@ -312,6 +318,15 @@ class OllamaProvider(BaseProvider):
                     "repeat_penalty": kwargs.get(
                         "repeat_penalty", 1.1 if task_type == "chat" else 1.3),
                     "repeat_last_n": kwargs.get("repeat_last_n", 128),
+                    # Classic sampler pin — see module comment above the
+                    # stream variant. Runtime/manifest defaults drifted
+                    # loose (gemma4 bakes top_k 64/top_p 0.95/min_p 0)
+                    # when Ollama 0.31 started honoring model-baked
+                    # params; all quality tuning assumed the tight
+                    # classic values.
+                    "top_k": kwargs.get("top_k", 40),
+                    "top_p": kwargs.get("top_p", 0.9),
+                    "min_p": kwargs.get("min_p", 0.05),
                     "stop": kwargs.get("stop", DEFAULT_STOP_TOKENS),
                 },
             },
@@ -357,6 +372,9 @@ class OllamaProvider(BaseProvider):
                     "repeat_penalty": kwargs.get(
                         "repeat_penalty", 1.1 if task_type == "chat" else 1.3),
                     "repeat_last_n": kwargs.get("repeat_last_n", 128),
+                    "top_k": kwargs.get("top_k", 40),
+                    "top_p": kwargs.get("top_p", 0.9),
+                    "min_p": kwargs.get("min_p", 0.05),
                     "stop": kwargs.get("stop", DEFAULT_STOP_TOKENS),
                 },
             },

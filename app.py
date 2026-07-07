@@ -2755,6 +2755,54 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         _analysis_run_lock.release()
         with _analysis_threads_lock:
             _analysis_threads.pop(project_id, None)
+            queue_empty = not _analysis_threads
+        # The analysis calls just evicted the chat transcript prefix from
+        # Ollama's cache slots (measured: the turn after an analysis or
+        # story build paid a full cold prefill). Re-warm in the
+        # background so the editor's next chat question is fast again —
+        # but ONLY when no other analysis is queued: a rewarm racing the
+        # next queued worker wastes a full prefill AND re-arms the
+        # cooldown against a cache that worker immediately destroys.
+        if queue_empty:
+            _rewarm_chat_after_heavy_call(project_id)
+
+
+def _rewarm_chat_after_heavy_call(project_id):
+    """Fire-and-forget chat-prefix re-warm after a slot-evicting AI call
+    (analysis, story build). Busts the prewarm cooldown first — the
+    cooldown exists to dedupe tab-switch spam and assumes the cache
+    SURVIVED, which is exactly false after a heavy multi-call pass.
+
+    Calls prewarm_chat_context DIRECTLY and does nothing when a prefix
+    prewarm is inapplicable (project gone, no transcript, >60-min) —
+    review-caught footgun: falling back to the 2048-ctx warmup_ollama
+    here flipped the runner's context size and destroyed whatever OTHER
+    project's warm prefix existed."""
+    try:
+        import threading
+        from ai_analysis import invalidate_prewarm, prewarm_chat_context
+        p = get_project(project_id)
+        transcript = (p or {}).get('transcript')
+        status = (p or {}).get('status') or ''
+        if not transcript or status in ('transcribing', 'processing'):
+            return
+        invalidate_prewarm(p.get('name', 'Interview'))
+
+        def _worker():
+            try:
+                prewarm_chat_context(
+                    transcript,
+                    project_name=p.get('name', 'Interview'),
+                    analysis=p.get('analysis'),
+                    labeled_sections=p.get('labeled_sections') or None,
+                    speaker_names=p.get('speaker_names') or None,
+                    output_language=resolve_output_language(p),
+                )
+            except Exception as e:
+                print(f"[chat-prewarm] rewarm worker failed: {e}", flush=True)
+        threading.Thread(target=_worker, daemon=True).start()
+    except Exception as e:
+        print(f"[chat-prewarm] rewarm after heavy call failed: {e}", flush=True)
 
 
 def _transcript_hash(transcript):
@@ -4880,6 +4928,9 @@ def story_build(project_id):
             # The model returned a valid shell (or nothing) but zero clips —
             # signalling it couldn't commit to a narrative from what it saw.
             # Don't persist the empty build; surface a friendly error instead.
+            # The heavy model pass STILL ran and evicted the chat prefix, so
+            # this branch re-warms like the success path does.
+            _rewarm_chat_after_heavy_call(project_id)
             return jsonify({
                 'error': (
                     "The AI returned 0 clips for this prompt. This usually means "
@@ -4928,6 +4979,9 @@ def story_build(project_id):
         if build_entry.get('duration_shortfall_note'):
             # Top-level copy so the UI can toast it without digging.
             response_payload['duration_shortfall_note'] = build_entry['duration_shortfall_note']
+        # Story builds evict the chat transcript prefix from Ollama's
+        # cache slots — re-warm so the editor's next question is fast.
+        _rewarm_chat_after_heavy_call(project_id)
         return jsonify(response_payload)
     except Exception as e:
         from ai_providers import ProviderError

@@ -2703,15 +2703,28 @@ async function streamChatReply({ message, typing, progressTimer }) {
 
     // Progressive paint, throttled to ~7fps. Bracketed spans are masked
     // so [CLIP: ...] grammar (and any bracketed leak) never flashes as
-    // raw text — the `done` swap renders them as playable cards.
+    // raw text — each masked span paints as a "pulling clip…" chip so a
+    // card-heavy answer visibly progresses through its 10-30s of
+    // generation instead of sitting on "Thinking…" (the `done` swap
+    // replaces the chips with the real playable cards). Sentinel char
+    // survives escapeHtml so the chip HTML can be injected afterward.
     let lastPaintAt = 0;
     const paintLive = (force) => {
         const now = Date.now();
         if (!force && now - lastPaintAt < 150) return;
         lastPaintAt = now;
-        let live = streamedText.replace(/\[[^\]\n]*\]?/g, ' ').trim();
+        // Only CLIP-shaped spans (and prose timecode ranges the server
+        // will auto-wrap into cards) become "pulling clip" chips; other
+        // bracketed text ([inaudible], [laughter] quoted from the
+        // transcript) is blanked, not mislabeled as a pending clip.
+        let live = streamedText
+            .replace(/\[\s*CLIP[^\]\n]*\]?/gi, '\ue003')
+            .replace(/\[[^\]\n]*\]?/g, ' ')
+            .trim();
         if (!live) return;
-        bubble.innerHTML = escapeHtml(live).replace(/\n/g, '<br>') +
+        bubble.innerHTML = escapeHtml(live)
+            .replace(/\ue003/g, '<em style="opacity:.65">⏳ pulling clip…</em>')
+            .replace(/\n/g, '<br>') +
             ' <span class="chat-typing"><span></span><span></span><span></span></span>';
     };
 
@@ -3138,7 +3151,14 @@ function renderChatReply(text) {
             // chat histories that predate the floor.
             if (!(end > start) || (end - start) < 5) return '';
             const safeTitle = title.replace(/['"]/g, '').replace(/[^\w\s.,!?()-]/g, '').trim();
-            const clipUid = `cc_${start}_${end}`.replace(/\./g, '_');
+            // Unique per RENDER, not per timecode: the same moment now
+            // legitimately appears in multiple replies (e.g. cited for
+            // Instagram and again for LinkedIn), and duplicate DOM ids
+            // made every getElementById-driven update — play/pause
+            // icons, cc-playing highlight, progress fill — land on the
+            // FIRST copy while the clicked copy sat visually inert.
+            window.__ccCardSeq = (window.__ccCardSeq || 0) + 1;
+            const clipUid = `cc_${start}_${end}_r${window.__ccCardSeq}`.replace(/\./g, '_');
             const duration = Math.round(end - start);
             // Pull transcript text from the word spans in the time range
             const clipWords = allWords.filter(w => {

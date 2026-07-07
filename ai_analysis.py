@@ -756,11 +756,23 @@ def _compact_history_turn(content, cap=1200):
     def _as_reference(m):
         full = m.group(0)
         sm = re.search(r'start=([^\s\]]+)', full)
-        em = re.search(r'end=([^\s\]]+)', full)
-        tm = re.search(r'title\s*=\s*["\'“‘](.*?)["\'”’]', full)
-        if sm and em:
+        # Canonical double-quoted title first — the loose quote-class
+        # fallback stops at apostrophes INSIDE titles ("She said 'no'
+        # twice" truncated to "She said").
+        tm = re.search(r'title="([^"]*)"', full) or \
+            re.search(r'title\s*=\s*["\'“‘](.*?)["\'”’]', full)
+        if sm:
             title = (tm.group(1) if tm else 'clip').strip()
-            return f'‣ {title} ({sm.group(1)}–{em.group(1)})'
+            # TITLES ONLY — no timecode range, no bullet glyph. The old
+            # "‣ Title (start–end)" shape read like an output template:
+            # the model imitated it in fresh answers, the auto-wrapper
+            # then converted the bare range into a mechanically-titled
+            # "Moment at" card and the real title stranded as prose. A
+            # plain parenthetical is not worth imitating, and if the
+            # model does imitate it the result is harmless prose. Spans
+            # for "more"-ask dedup come from RAW history, never this
+            # replay copy.
+            return f'(clip shown earlier: {title})'
         return full
     compact = re.sub(r'\[CLIP:[^\]]*\]', _as_reference, content)
     if len(compact) > cap:
@@ -1245,6 +1257,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, matched, transcript=transcript,
             exclude_spans=_history_clip_spans(history),
+            hard_cap_seconds=parse_duration_bound_seconds(message),
         )
     return cleaned
 
@@ -1601,6 +1614,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, matched, transcript=transcript,
             exclude_spans=_history_clip_spans(history),
+            hard_cap_seconds=parse_duration_bound_seconds(message),
         )
     yield ('done', cleaned)
 
@@ -2362,8 +2376,45 @@ _DURATION_INTENT_NOUNS = frozenset({
 # (as in: wait a moment) are common chat filler. Below this → None.
 _DURATION_MIN_TARGET_SECONDS = 15.0
 
+# CEILING asks ("under 60 seconds", "no more than 2 minutes", "90 seconds
+# max") parse to a target of BOUND × this factor: the chat band trims past
+# 1.25× the target (1.25 × 0.8 = the bound exactly) and the story band
+# past 1.15× (0.92 × bound), so an enforced build can never exceed the
+# ceiling the user named. Historically these phrasings parsed to nothing
+# and a "story under 60 seconds" ask built 2:14 unbudgeted.
+_DURATION_BOUND_FACTOR = 0.8
 
-def parse_target_duration_seconds(message):
+# Bound-specific vocab (review-hardened). Container nouns imply TOTAL
+# runtime ("story under 60 seconds"); per-clip nouns imply a LENGTH
+# FILTER ("a clip under 2 minutes") and reject the bound; only assembly/
+# revision verbs anchor a bound — retrieval verbs ("find") do not.
+_BOUND_CONTAINER_NOUNS = frozenset({
+    'cut', 'video', 'edit', 'version', 'story', 'sequence', 'reel',
+    'montage', 'piece', 'film', 'teaser', 'trailer', 'supercut', 'promo',
+    'selects', 'stringout', 'assembly', 'rough', 'draft', 'episode',
+    'short', 'documentary', 'doc', 'build', 'total', 'runtime',
+})
+_BOUND_PER_CLIP_NOUNS = frozenset({
+    'clip', 'clips', 'moment', 'moments', 'soundbite', 'soundbites',
+    'quote', 'quotes', 'excerpt', 'excerpts', 'highlight', 'highlights',
+    'bite', 'bites',
+})
+_BOUND_REQUEST_VERBS = frozenset({
+    'build', 'make', 'cut', 'create', 'assemble', 'edit', 'produce',
+    'compile', 'string', 'put', 'deliver', 'export',
+    'keep', 'hold', 'cap', 'trim', 'shorten', 'tighten', 'limit', 'stay',
+})
+_BOUND_CLAUSE_STOPS = frozenset({
+    'who', 'that', 'which', 'where', 'when', 'while', 'because', 'if',
+    'said', 'says', 'was', 'were',
+})
+_BOUND_MATERIAL_NOUNS = frozenset({
+    'selects', 'material', 'footage', 'broll', 'b-roll', 'content',
+    'clips', 'moments', 'highlights', 'soundbites', 'quotes', 'excerpts',
+})
+
+
+def parse_target_duration_seconds(message, _with_bound=False):
     """Parse a requested TOTAL output duration from a user message.
 
     Pure regex — no LLM. Recognized shapes: "14 minute" / "14-minute" /
@@ -2382,10 +2433,12 @@ def parse_target_duration_seconds(message):
     ambiguous. False positives here are worse than a missed ask: every
     hit activates deterministic duration enforcement downstream.
 
-    Returns float seconds or ``None``.
+    Returns float seconds or ``None``. With ``_with_bound=True`` returns
+    ``(target, raw_bound_or_None)`` instead — internal plumbing for
+    :func:`parse_duration_bound_seconds`.
     """
     if not message:
-        return None
+        return (None, None) if _with_bound else None
     import re
     msg = message.lower()
 
@@ -2427,6 +2480,117 @@ def parse_target_duration_seconds(message):
 
     candidates = []  # (seconds, classification)
 
+    # ── Ceiling asks (run FIRST; their spans are consumed so the range/
+    # unit/timecode passes below can't re-add the same number under a
+    # different classification and trip the competing-durations rule) ──
+    # Anchoring is deliberately narrower than the target rules (review-
+    # hardened): 'within'/'inside' are NOT cues (proximity idioms — "pull
+    # everything within 2 minutes of the crash" is a position, not a
+    # length); a per-clip noun near the cue rejects the bound ("find me a
+    # clip under 2 minutes" filters clip LENGTH, not total runtime); and
+    # only assembly/revision verbs anchor ("build/make/keep/trim/cap…"),
+    # never retrieval verbs ("find me something under 2 minutes" is a
+    # per-clip filter). The verb lookback stops at clause boundaries so
+    # "find the guy who ran a mile under 4 minutes" stays narrative.
+    _bound_num = r"(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|an?|half\s+an?)"
+    _bound_unit = r"(hours?|hrs?|minutes?|mins?|seconds?|secs?)"
+    _BOUND_CUE = (r"(under|below|max(?:imum)?|at\s+most"
+                  r"|no\s+(?:more|longer)\s+than|not\s+(?:more|longer)\s+than"
+                  r"|less\s+than|shorter\s+than"
+                  r"|cap(?:ped)?(?:\s+(?:it|this|that))?\s+at)")
+    _bound_prefix_re = re.compile(
+        r"\b" + _BOUND_CUE + r"\s+" + _bound_num + r"[\s-]+" + _bound_unit + r"\b")
+    _bound_postfix_re = re.compile(
+        r"(?<![\d:.])\b" + _bound_num + r"[\s-]+" + _bound_unit
+        + r"\s+(max|tops|or\s+less|or\s+under|or\s+shorter)\b")
+    _bound_tc_re = re.compile(
+        r"\b" + _BOUND_CUE + r"\s+"
+        r"(\d{1,2}):(\d{2})(?::(\d{2}))?(?![\d:.])")
+
+    def _bound_anchored(cue_start, span_end):
+        # Positional/per-clip AFTER-guards.
+        after = _token_after(span_end)
+        if after in _DURATION_POSITION_AFTER:
+            return False
+        # Clause-bounded lookback window before the cue: stop at sentence
+        # punctuation and relative-clause markers, cap at 8 tokens.
+        head = msg[:cue_start]
+        head = re.split(r'[.!?;]', head)[-1]
+        toks = re.findall(r"[a-z0-9']+", head)
+        window = []
+        for tok in reversed(toks):
+            if tok in _BOUND_CLAUSE_STOPS:
+                break
+            window.append(tok)
+            if len(window) >= 8:
+                break
+        # A per-clip noun anywhere in the window = length FILTER, never a
+        # total-runtime ceiling.
+        if any(t in _BOUND_PER_CLIP_NOUNS for t in window):
+            return False
+        # Cue is itself imperative ("cap it at 2 minutes").
+        if msg[cue_start:cue_start + 3] == 'cap':
+            return True
+        # Deliverable-container noun governing the cue ("story under 60
+        # seconds") or anywhere in the window ("build me a story that's
+        # under a minute").
+        if any(t in _BOUND_CONTAINER_NOUNS for t in window):
+            return True
+        # Assembly/revision verb in the window ("make it under 2 minutes",
+        # "keep it under a minute", "trim to 90 seconds max").
+        if any(t in _BOUND_REQUEST_VERBS for t in window):
+            return True
+        # "under 2 minutes of selects" — material-of anchor: the token
+        # after 'of' (skipping articles) must itself be deliverable
+        # material, so "within-style" content references never anchor.
+        if after == 'of':
+            tail = [t for t in re.findall(r"[a-z0-9']+", msg[span_end:])[:3]
+                    if t not in _DURATION_SKIP_BEFORE]
+            if tail and tail[0] in _BOUND_MATERIAL_NOUNS:
+                return True
+        # Deliverable container within the next few tokens ("under 60
+        # seconds for the teaser").
+        tail5 = re.findall(r"[a-z0-9']+", msg[span_end:])[:5]
+        if any(t in _BOUND_CONTAINER_NOUNS for t in tail5):
+            return True
+        return False
+
+    def _bound_qty_secs(raw, unit):
+        if raw.startswith('half'):
+            qty = 0.5
+        else:
+            try:
+                qty = float(raw)
+            except ValueError:
+                qty = _DURATION_WORD_NUMBERS.get(raw)
+        if not qty:
+            return None
+        mult = 3600.0 if unit[0] == 'h' else (60.0 if unit[0] == 'm' else 1.0)
+        return qty * mult
+
+    bound_spans = []
+    for _brx, _is_tc, _prefix in ((_bound_prefix_re, False, True),
+                                  (_bound_postfix_re, False, False),
+                                  (_bound_tc_re, True, True)):
+        for m in _brx.finditer(msg):
+            if _is_tc:
+                a, b, c = m.group(2), m.group(3), m.group(4)
+                bound_secs = (int(a) * 3600 + int(b) * 60 + int(c)
+                              if c is not None else int(a) * 60 + int(b))
+            else:
+                raw = m.group(1) if not _prefix else m.group(2)
+                unit = m.group(2) if not _prefix else m.group(3)
+                bound_secs = _bound_qty_secs(raw, unit)
+            if not bound_secs or bound_secs > 6 * 3600:
+                continue
+            target = bound_secs * _DURATION_BOUND_FACTOR
+            if target < _DURATION_MIN_TARGET_SECONDS:
+                continue
+            if not _bound_anchored(m.start(), m.end()):
+                continue
+            bound_spans.append((m.start(), m.end()))
+            candidates.append((float(target), 'anchored', float(bound_secs)))
+
     # Range asks: "15 to 20 minute", "15-20 minute", "15–20 minute", plus
     # word-number lows ("five to ten minute") and mixed units across the
     # connector ("90 second to 2 minute"). The single-number pass below
@@ -2454,8 +2618,11 @@ def parse_target_duration_seconds(message):
     def _unit_mult(unit):
         return 3600.0 if unit[0] == 'h' else (60.0 if unit[0] == 'm' else 1.0)
 
-    range_spans = []
+    range_spans = list(bound_spans)
     for m in range_re.finditer(msg):
+        if any(m.start() < b_end and m.end() > b_start
+               for b_start, b_end in bound_spans):
+            continue  # inside an already-consumed ceiling ask
         lo_qty = _range_qty(m.group(1))
         hi_qty = _range_qty(m.group(3))
         if not lo_qty or not hi_qty:
@@ -2555,6 +2722,9 @@ def parse_target_duration_seconds(message):
     # reference, so these only count when anchored to a request.
     tc_re = re.compile(r'(?<![\d:.])(\d{1,2}):(\d{2})(?::(\d{2}))?(?![\d:.])')
     for m in tc_re.finditer(msg):
+        if any(m.start() < b_end and m.end() > b_start
+               for b_start, b_end in bound_spans):
+            continue  # the timecode inside a consumed ceiling ask
         if _classify(m.start(), m.end()) != 'anchored':
             continue
         a, b, c = m.group(1), m.group(2), m.group(3)
@@ -2566,17 +2736,34 @@ def parse_target_duration_seconds(message):
             candidates.append((float(secs), 'anchored'))
 
     if not candidates:
-        return None
+        return (None, None) if _with_bound else None
     # Anchored-only: a 'plain' duration is a narrative fact the message
     # mentions ("it took 3 hours to set up", "her 5 minute speech"), not
     # a deliverable ask. Honoring a lone plain candidate turned ordinary
     # locate/discuss messages into duration-enforced clip floods, and
     # silently discarded explicit clip counts ("give me 3 clips from her
     # 5 minute speech" must enforce count=3, no duration).
-    anchored = {s for s, cls in candidates if cls == 'anchored'}
+    norm = [(c[0], c[1], c[2] if len(c) > 2 else None) for c in candidates]
+    anchored = {s for s, cls, _b in norm if cls == 'anchored'}
     if len(anchored) == 1:
-        return anchored.pop()
-    return None  # no anchored duration, or competing anchored ones
+        winner = anchored.pop()
+        if _with_bound:
+            bounds = [b for s, cls, b in norm
+                      if cls == 'anchored' and s == winner and b]
+            return (winner, bounds[0] if bounds else None)
+        return winner
+    # no anchored duration, or competing anchored ones
+    return (None, None) if _with_bound else None
+
+
+def parse_duration_bound_seconds(message):
+    """Return the RAW ceiling in seconds when the message is a bound ask
+    ("under 60 seconds" -> 60.0), else None. Companion of
+    :func:`parse_target_duration_seconds` (which returns bound x 0.8 as
+    the enforcement TARGET); callers use this as the hard never-exceed
+    cap for trim decisions."""
+    _t, bound = parse_target_duration_seconds(message, _with_bound=True)
+    return bound
 
 
 def _duration_clip_count_hint(target_seconds, avg_clip_seconds=35.0):
@@ -2698,7 +2885,8 @@ def _grouped_spans_overlap(start, end, group, spans, min_gap=0.0):
 
 
 def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
-                             group_key=None, exclude_spans=None):
+                             group_key=None, exclude_spans=None,
+                             hard_cap_seconds=None):
     """Deterministically hold a chat reply's [CLIP:] total to a duration ask.
 
     Measures the emitted markers with ``_tc_to_seconds``, tops up from the
@@ -2758,14 +2946,35 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
     floor = _DURATION_TARGET_FLOOR * float(target_seconds)
     ceiling = _DURATION_TARGET_CEILING * float(target_seconds)
 
-    if markers and total > ceiling:
+    # A bound ask ("under 60 seconds") carries a HARD cap: the named
+    # ceiling must win over both trim escape hatches below (the floor
+    # break and the never-trim-the-last-marker guard), otherwise a reply
+    # of 30s+45s markers ships 75s against a user-stated 60s cap.
+    hard_cap = float(hard_cap_seconds) if hard_cap_seconds else None
+    effective_ceiling = min(ceiling, hard_cap) if hard_cap else ceiling
+
+    if markers and total > effective_ceiling:
         keep = len(markers)
-        while keep > 1 and total > ceiling:
+        while keep > 1 and total > effective_ceiling:
             last_dur = markers[keep - 1][2] - markers[keep - 1][1]
-            if total - last_dur < floor:
+            if hard_cap is None and total - last_dur < floor:
                 break
             total -= last_dur
             keep -= 1
+        if keep == 1 and hard_cap is not None and total > hard_cap:
+            # Lone surviving marker still over the named cap: shrink its
+            # end so the deliverable honors the user's literal ceiling.
+            m, s, _e = markers[0]
+            new_end = _seconds_to_tc(s + hard_cap)
+            capped = re.sub(r'end=[\d:.]+', f'end={new_end}',
+                            m.group(0), count=1)
+            text = text[:m.start()] + capped + text[m.end():]
+            # Recompute the cut point against the EDITED text: the
+            # replacement may have changed offsets after marker 0.
+            first_end = m.start() + len(capped)
+            head = text[:first_end]
+            tail = _strip_trimmed_clip_tail(text[first_end:])
+            return (head + tail).rstrip()
         if keep == len(markers):
             return text
         cut = markers[keep - 1][0].end()
@@ -3899,6 +4108,11 @@ def _clean_chat_response(text):
     # pills rather than playable clip cards, which is the regression the
     # user reported after the Gemma 4 upgrade.
     text = _auto_wrap_timecode_ranges(text)
+    # Rescue passes for model-narrated moments: adopt the heading line an
+    # auto-wrapped card stranded above itself, then absorb dangling
+    # note="…" attribute lines into the card they belong to.
+    text = _adopt_adjacent_marker_titles(text)
+    text = _absorb_stray_note_lines(text)
     # Remove markdown headers
     text = re.sub(r'^#{1,4}\s*', '', text, flags=re.MULTILINE)
     # Bold/italic markdown is KEPT: both chat frontends render **bold** and
@@ -4467,6 +4681,104 @@ def _scrub_clip_marker_residue(text):
             continue
         cleaned_lines.append(line)
     return '\n'.join(cleaned_lines)
+
+
+def _adopt_adjacent_marker_titles(text: str) -> str:
+    """Give auto-wrapped "Moment at HH:MM:SS" cards the title the model
+    actually wrote.
+
+    When the model narrates a moment as a heading line followed by a bare
+    timecode range ("‣ From flax to fiber: Ancient craft process" over
+    "(16:09 - 18:03)"), _auto_wrap_timecode_ranges rescues the range into
+    a playable card but can only mint the mechanical "Moment at" title —
+    the real title strands above as prose. This pass moves an adjacent
+    title-ish line INTO the card: short (3-70 chars), no sentence-ending
+    period, optionally bullet-prefixed, sitting directly above a marker
+    whose title is the mechanical shape. Only mechanical titles are ever
+    replaced — a model-authored title is never overwritten — and the
+    heading text is moved, not deleted.
+    """
+    if not text or '[CLIP:' not in text:
+        return text
+    import re
+    lines = text.split('\n')
+    out = []
+    i = 0
+    title_line_re = re.compile(
+        r"^[\s\u2023\u2022\-\*>\u2013\u2014]*([^\n]{3,70}?)[\s:\u2013\u2014\-\*]*$")
+    mech_marker_re = re.compile(
+        r'^(\s*\[CLIP:[^\]]*?title=")Moment at [0-9:.]+("[^\]]*\]\s*)$')
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ''
+        mm = mech_marker_re.match(nxt)
+        if mm:
+            tm = title_line_re.match(line)
+            title = (tm.group(1).strip() if tm else '')
+            has_letters = bool(re.search(r'[A-Za-z]', title))
+            if (title and has_letters and not title.endswith('.')
+                    and '[' not in title and '=' not in title):
+                safe = title.replace('"', "'").replace('[', '(').replace(']', ')')
+                out.append(mm.group(1) + safe + mm.group(2))
+                i += 2
+                continue
+        out.append(line)
+        i += 1
+    return '\n'.join(out)
+
+
+def _absorb_stray_note_lines(text: str) -> str:
+    """Merge dangling ``note="…"`` lines into the card above them.
+
+    A model imitating marker grammar sometimes emits the note as its own
+    line AFTER the marker (or after a prose range the auto-wrapper turned
+    into a card). The residue scrub deliberately spares these lines (they
+    don't end in "]"), so they rendered as raw attribute text under the
+    card. If the preceding marker has no note, the stray value becomes
+    its note; if it already has one, the duplicate line is dropped — in
+    both cases the visible junk is gone and the content lands where the
+    UI shows it.
+    """
+    if not text or 'note=' not in text or '[CLIP:' not in text:
+        return text
+    import re
+    note_line_re = re.compile(
+        r'^\s*note\s*=\s*["\u201c\u2018\'](.*?)["\u201d\u2019\']?\s*$')
+    marker_tail_re = re.compile(r'\[CLIP:[^\]]*\]\s*$')
+    lines = text.split('\n')
+    out = []
+    for line in lines:
+        nm = note_line_re.match(line)
+        if nm:
+            # Walk back past blank lines to the nearest content line.
+            j = len(out) - 1
+            while j >= 0 and not out[j].strip():
+                j -= 1
+            # The line must END with a well-formed marker — endswith(']')
+            # alone matched other bracketed tokens ("[00:12:30]") and
+            # injected the note into the wrong bracket.
+            if j >= 0 and marker_tail_re.search(out[j]):
+                val = _marker_attr_value(nm.group(1))
+                if 'note="' not in out[j]:
+                    if val:
+                        # Lambda replacement: the note text is model-
+                        # authored and must be LITERAL — as an re.sub
+                        # template, a backslash sequence in it crashed
+                        # the whole chat turn.
+                        out[j] = re.sub(
+                            r'\]\s*$',
+                            lambda _m: f' note="{val}"]',
+                            out[j], count=1)
+                    continue
+                # Marker already carries a note: drop only a DUPLICATE;
+                # a differing stray note is real content — keep it as
+                # plain prose (unwrapped), never silently delete it.
+                existing = re.search(r'note="([^"]*)"', out[j])
+                if existing and val and val.strip() != existing.group(1).strip():
+                    out.append(val)
+                continue
+        out.append(line)
+    return '\n'.join(out)
 
 
 def _strip_markdown_outside_clips(text: str) -> str:
@@ -7878,6 +8190,19 @@ _PREWARM_STATE: "OrderedDict[str, tuple]" = OrderedDict()
 _PREWARM_STATE_MAX = 64
 _PREWARM_COOLDOWN_SECONDS = 600
 _PREWARM_LOCK = threading.Lock()
+
+
+def invalidate_prewarm(project_name):
+    """Drop the prewarm cooldown entry for a project so the next
+    prewarm_chat_context call actually re-prefills. Called after heavy
+    multi-call passes (analysis, story builds) that evict the chat
+    prefix from Ollama's cache slots — the cooldown otherwise reports
+    "still warm" for up to 10 minutes of cold turns."""
+    try:
+        with _PREWARM_LOCK:
+            _PREWARM_STATE.pop(str(project_name or ''), None)
+    except Exception:
+        pass
 
 
 def prewarm_chat_context(transcript, project_name="Interview", analysis=None,

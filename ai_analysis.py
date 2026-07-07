@@ -1226,6 +1226,11 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     target_seconds = parse_target_duration_seconds(message)
     explicit_count = _detect_explicit_clip_count(message)
     extractive = not _is_conversational_query(message, segments=segments)
+    # A parsed duration + a multi-card reply is a duration DELIVERABLE even
+    # when the message classified conversational (correction phrasings like
+    # "that should be a 60 second story" start with no extractive verb).
+    if _count_clip_markers(cleaned) >= 2:
+        extractive = True
     if target_seconds is None or explicit_count is not None:
         # Enforce the clip-count contract from the user message. Gemma 4B
         # routinely ignores "1 clip" / "one more" / "another" and emits 2-3
@@ -1593,6 +1598,11 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     target_seconds = parse_target_duration_seconds(message)
     explicit_count = _detect_explicit_clip_count(message)
     extractive = not _is_conversational_query(message, segments=segments)
+    # A parsed duration + a multi-card reply is a duration DELIVERABLE even
+    # when the message classified conversational (correction phrasings like
+    # "that should be a 60 second story" start with no extractive verb).
+    if _count_clip_markers(cleaned) >= 2:
+        extractive = True
     if target_seconds is None or explicit_count is not None:
         # Trim over-delivery AND top up under-delivery against the user's
         # count (plus the plural-ask minimum) — same defense as the
@@ -2493,15 +2503,15 @@ def parse_target_duration_seconds(message, _with_bound=False):
     # per-clip filter). The verb lookback stops at clause boundaries so
     # "find the guy who ran a mile under 4 minutes" stays narrative.
     _bound_num = r"(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|an?|half\s+an?)"
-    _bound_unit = r"(hours?|hrs?|minutes?|mins?|seconds?|secs?)"
+    _bound_unit = r"(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)"
     _BOUND_CUE = (r"(under|below|max(?:imum)?|at\s+most"
                   r"|no\s+(?:more|longer)\s+than|not\s+(?:more|longer)\s+than"
                   r"|less\s+than|shorter\s+than"
                   r"|cap(?:ped)?(?:\s+(?:it|this|that))?\s+at)")
     _bound_prefix_re = re.compile(
-        r"\b" + _BOUND_CUE + r"\s+" + _bound_num + r"[\s-]+" + _bound_unit + r"\b")
+        r"\b" + _BOUND_CUE + r"\s+" + _bound_num + r"[\s-]*" + _bound_unit + r"\b")
     _bound_postfix_re = re.compile(
-        r"(?<![\d:.])\b" + _bound_num + r"[\s-]+" + _bound_unit
+        r"(?<![\d:.])\b" + _bound_num + r"[\s-]*" + _bound_unit
         + r"\s+(max|tops|or\s+less|or\s+under|or\s+shorter)\b")
     _bound_tc_re = re.compile(
         r"\b" + _BOUND_CUE + r"\s+"
@@ -2600,7 +2610,10 @@ def parse_target_duration_seconds(message, _with_bound=False):
     # so the single-number pass skips the "20 minute" inside a consumed
     # range instead of double-counting it.
     _num_word = r'\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten'
-    _unit = r'hours?|hrs?|minutes?|mins?|seconds?|secs?'
+    # Shorthand units included: the live 'make me a 60s story' ask
+    # parsed to NOTHING (no budget ran) because bare s/m/h and glued
+    # forms ('60s', '2min') weren't in the vocab.
+    _unit = r'hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s'
     range_re = re.compile(
         rf'(?<![\d:.])\b({_num_word})'
         rf'(?:\s*({_unit}))?'
@@ -2675,8 +2688,8 @@ def parse_target_duration_seconds(message, _with_bound=False):
         r'(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten'
         r'|an?|half\s+an?)'
         r'(?:\s+more)?'
-        r'[\s-]+'
-        r'(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b'
+        r'[\s-]*'
+        r'(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b'
     )
     for m in unit_re.finditer(msg):
         if any(m.start() < r_end and m.end() > r_start
@@ -4113,6 +4126,10 @@ def _clean_chat_response(text):
     # note="…" attribute lines into the card they belong to.
     text = _adopt_adjacent_marker_titles(text)
     text = _absorb_stray_note_lines(text)
+    # Normalize LaTeX-ish arrow artifacts to a plain arrow (seen live:
+    # the model emitting "Motivation $\\rightarrow$ Conflict" which the
+    # frontend rendered as raw TeX). Decoration swap, content preserved.
+    text = re.sub(r'\$?\\(?:rightarrow|to|Rightarrow)\$?', '→', text)
     # Remove markdown headers
     text = re.sub(r'^#{1,4}\s*', '', text, flags=re.MULTILINE)
     # Bold/italic markdown is KEPT: both chat frontends render **bold** and
@@ -8307,6 +8324,48 @@ def _chunk_cache_put(key, value):
             _CHUNK_CACHE.popitem(last=False)
 
 
+def _story_clip_hygiene(clips):
+    """Unconditional story-build floor, budget or no budget: drop sub-5s
+    clips (a 2-second card is unusable as a story beat — seen live when
+    the model picked a 2s segment vector as its "hook") and heavy time
+    overlaps (the model selecting the same footage twice under two beat
+    names; arc order is non-chronological by design, so overlap is judged
+    on TIME spans, keeping the clip that appears first in arc order).
+    Returns the surviving clips — possibly empty, letting the existing
+    zero-clips / deterministic-fallback paths take over honestly.
+    """
+    kept = []
+    spans = []
+    for c in clips or []:
+        raw_s, raw_e = c.get('start_time'), c.get('end_time')
+        if not raw_s or not raw_e:
+            # No timecodes to judge — leave it for downstream validation
+            # (_tc_to_seconds coerces 'None' to 0, which would wrongly
+            # drop the clip as a sliver here).
+            kept.append(c)
+            continue
+        try:
+            s = _tc_to_seconds(str(raw_s))
+            e = _tc_to_seconds(str(raw_e))
+        except Exception:
+            kept.append(c)
+            continue
+        dur = e - s
+        if dur < _MIN_CLIP_MARKER_SECONDS:
+            continue
+        heavy_overlap = False
+        for ks, ke in spans:
+            ov = min(e, ke) - max(s, ks)
+            if ov > 0 and ov >= 0.5 * min(dur, ke - ks):
+                heavy_overlap = True
+                break
+        if heavy_overlap:
+            continue
+        spans.append((s, e))
+        kept.append(c)
+    return kept
+
+
 def build_story(transcript, message, project_name="Interview", segment_vectors=None, profile_id=None,
                 output_language=None):
     """
@@ -8395,6 +8454,8 @@ Return ONLY valid JSON. No markdown, no extra text."""
     # objects and the provider default truncated the JSON mid-array.
     response = _call_ai(prompt, system_prompt, num_predict=_STORY_NUM_PREDICT)
     result = _parse_json_response(response)
+    if isinstance(result, dict) and result.get('clips'):
+        result['clips'] = _story_clip_hygiene(result['clips'])
     if target_seconds and isinstance(result, dict) and result.get('clips'):
         # No vector pool on the raw path — the budget pass still measures,
         # trims overshoot, reports honest numbers, and flags shortfalls.
@@ -9268,6 +9329,7 @@ Return ONLY valid JSON in this shape:
             'beat_type': seg.get('beat_type'),
         })
 
+    hydrated = _story_clip_hygiene(hydrated)
     result = {
         'story_title': parsed.get('story_title', 'Untitled'),
         'target_duration': parsed.get('target_duration', ''),

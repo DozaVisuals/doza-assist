@@ -232,7 +232,13 @@ class TestHistoryHygiene:
                     and 'whale story' in m['content']]
         assert replayed, 'assistant turn should be replayed'
         assert '[CLIP:' not in replayed[0]
-        assert '‣ The whale story (00:00:10–00:00:40)' in replayed[0]
+        # Titles ONLY — no timecode range, no bullet glyph. The old
+        # "‣ Title (start–end)" reference read like an output template and
+        # the model imitated it in fresh answers (the 1.0.33 "Moment at"
+        # + stray note= bug).
+        assert '(clip shown earlier: The whale story)' in replayed[0]
+        assert '00:00:40' not in replayed[0]
+        assert '‣' not in replayed[0]
 
     def test_long_assistant_history_is_capped(self):
         history = [
@@ -247,7 +253,8 @@ class TestHistoryHygiene:
     def test_compact_history_turn_direct(self):
         text = 'Intro.\n[CLIP: start=0:10 end=0:40 title="A"]\nOutro.'
         out = _compact_history_turn(text)
-        assert '‣ A (0:10–0:40)' in out
+        assert '(clip shown earlier: A)' in out
+        assert '0:40' not in out
         assert 'Intro.' in out and 'Outro.' in out
 
 

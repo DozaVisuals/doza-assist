@@ -30,3 +30,6 @@ icon_build/
 
 # Claude
 .claude/
+
+# Internal reference doc — must never be committed to the public repo
+docs/storytelling-master.md

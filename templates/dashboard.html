@@ -898,10 +898,13 @@ function moveToNewFolder(projectId, dropdown) {
 function revealProjectInFinder(projectId) {
     const dd = document.querySelector('.move-dropdown');
     if (dd) dd.remove();
+    // Owner decision: reveal the SOURCE the user uploaded (video/FCPXML),
+    // not the app's internal project-data folder. target:'project' stays
+    // available on the route if a data-folder affordance is wanted later.
     fetch(`/project/${projectId}/reveal`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: 'project' }),
+        body: JSON.stringify({ target: 'source' }),
     }).then(r => r.json()).then(data => {
         if (data.error) alert(data.error);
     }).catch(() => {});

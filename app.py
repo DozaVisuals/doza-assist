@@ -1557,17 +1557,29 @@ def check_source(project_id):
 
 @app.route('/project/<project_id>/reveal', methods=['POST'])
 def reveal_in_finder(project_id):
-    """Open the source file location in Finder."""
+    """Reveal in Finder. Body {'target': 'project'} reveals the project's
+    own data folder (transcript/analysis/status files — tester ask: the
+    user is never asked where projects live, so give them a way to find
+    them). Default/'source' reveals the original media file, the historic
+    behavior of the project-page link."""
     project = get_project(project_id)
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
-    source_path = project.get('source_path', project.get('filepath', ''))
-    if not source_path or not os.path.exists(source_path):
-        return jsonify({'error': 'Source file not found. It may have been moved or deleted.'}), 404
+    target = (request.json or {}).get('target', 'source') if request.is_json else 'source'
+    if target == 'project':
+        project_dir = safe_project_dir(project_id)
+        if not project_dir or not os.path.isdir(project_dir):
+            return jsonify({'error': 'Project folder not found.'}), 404
+        reveal_path = project_dir
+    else:
+        source_path = project.get('source_path', project.get('filepath', ''))
+        if not source_path or not os.path.exists(source_path):
+            return jsonify({'error': 'Source file not found. It may have been moved or deleted.'}), 404
+        reveal_path = source_path
 
     try:
-        subprocess.run(['open', '-R', source_path], check=True)
+        subprocess.run(['open', '-R', reveal_path], check=True)
         return jsonify({'status': 'opened'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

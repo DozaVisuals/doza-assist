@@ -106,8 +106,12 @@
         </div>
         <div class="btn-group">
             {% if project.status == 'transcribed' %}
-            <button class="btn btn-purple" id="analyzeBtn" onclick="runAnalysis()">
-                <span class="btn-label">AI Analysis</span>
+            {# Fresh analysis -> subdued "Re-run" (clicking asks + forces a
+               real run); stale/absent -> primary one-click CTA. Keeps the
+               edit-transcript-then-reanalyze flow one click while ending
+               the silent-cache-hit "Analyzing… then nothing" confusion. #}
+            <button class="btn {{ 'btn-purple' if not analysis_fresh else '' }}" id="analyzeBtn" onclick="runAnalysis()">
+                <span class="btn-label">{{ 'Re-run Analysis' if analysis_fresh else 'AI Analysis' }}</span>
             </button>
             {% endif %}
         </div>
@@ -1066,6 +1070,9 @@ async function refreshActivePill() {
 window.addEventListener('DOMContentLoaded', refreshActivePill);
 
 const PROJECT_ID = '{{ project.id }}';
+// True when re-running analysis would silently cache-hit (unchanged
+// transcript). Drives the confirm-then-force flow in runAnalysis().
+const ANALYSIS_FRESH = {{ 'true' if analysis_fresh else 'false' }};
 const PROJECT = {{ project | tojson }};
 // Canonical language list — [code, English name] pairs, 'en' first then
 // alphabetical, injected from doza_assist.output_language.LANGUAGES via the
@@ -4318,6 +4325,15 @@ async function startTranscription() {
 let analyzeProgressTimer = null;
 
 async function runAnalysis() {
+    // Fresh analysis: a plain re-run would silently cache-hit ("Analyzing…"
+    // then nothing — tester report). Ask, and if confirmed, FORCE a real
+    // run past the cache. confirm() works in Electron; prompt() does not.
+    const forceRerun = (typeof ANALYSIS_FRESH !== 'undefined') && ANALYSIS_FRESH;
+    if (forceRerun && !confirm(
+        'This transcript already has an up-to-date analysis. Run it again anyway?')) {
+        return;
+    }
+
     const btn = document.getElementById('analyzeBtn');
     const runBtn = document.getElementById('runAnalysisBtn');
 
@@ -4354,14 +4370,20 @@ async function runAnalysis() {
         const res = await fetch(`/project/${PROJECT_ID}/analyze`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'all' }),
+            body: JSON.stringify({ type: 'all', force: forceRerun }),
         });
         const data = await res.json();
         // Cache hit returns the result synchronously — no polling needed.
         if (data.status === 'cached') {
+            // Nothing changed — reset honestly instead of a fake 3-second
+            // "Analyzing…" + reload into identical content (tester report).
+            // Normally unreachable now (fresh -> confirm+force), but older
+            // cache states can still land here.
             stopAnalyzeProgressPoll();
-            showToast('Loaded cached analysis');
-            setTimeout(() => reloadAndKeepTab('analysis'), 3000);
+            resetAnalyzeBtn();
+            const prog = document.getElementById('analysisProgress');
+            if (prog) prog.style.display = 'none';
+            showToast('Analysis is already up to date for this transcript.');
             return;
         }
         // Legacy synchronous path (older Flask). Treat the same as cache

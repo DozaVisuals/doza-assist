@@ -1880,6 +1880,10 @@ def project_view(project_id):
                            # the diarization extension's own JS covers
                            # queued/running/error visibly).
                            diarization_state=_diarization_state(project['id'], project),
+                           # Drives the AI Analysis button's honesty: fresh
+                           # analysis -> subdued "Re-run Analysis" + confirm
+                           # + force; stale/absent -> primary one-click run.
+                           analysis_fresh=_analysis_is_fresh(project),
                            recent_activity=recent_activity)
 
 
@@ -3211,6 +3215,27 @@ def _transcript_hash(transcript):
     segments = (transcript or {}).get('segments', []) or []
     payload = json.dumps(segments, sort_keys=True, default=str).encode('utf-8')
     return hashlib.sha256(payload).hexdigest()
+
+
+def _analysis_is_fresh(project):
+    """True when the project has an analysis AND the cache holds an entry
+    for the CURRENT transcript — i.e. a plain re-run would silently
+    cache-hit (the tester's "clicked it, nothing happened"). Projects
+    analyzed before the cache existed, or edited since, report False and
+    keep the one-click primary-button flow."""
+    try:
+        if not project.get('analysis') or not project.get('transcript'):
+            return False
+        cache = project.get('analysis_cache')
+        if not isinstance(cache, dict):
+            return False
+        bucket = cache.get(_transcript_hash(project['transcript']))
+        if not isinstance(bucket, dict):
+            return False
+        entry = bucket.get('all')
+        return isinstance(entry, dict) and isinstance(entry.get('analysis'), dict)
+    except Exception:
+        return False
 
 
 @app.route('/project/<project_id>/analyze', methods=['POST'])

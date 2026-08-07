@@ -2606,7 +2606,11 @@ async function sendChat() {
         });
         if (streamed.ok) {
             const finalReply = streamed.reply || '';
-            chatHistory.push({ role: 'assistant', content: finalReply });
+            // Busy notices (memory governor) render but never enter
+            // chatHistory — they'd be fake model context on later turns.
+            if (!streamed.busy) {
+                chatHistory.push({ role: 'assistant', content: finalReply });
+            }
             // Replace the streaming bubble's plain text with the rendered
             // version (clip cards instead of raw [CLIP:] markers).
             if (streamed.bubble && finalReply) {
@@ -2635,7 +2639,9 @@ async function sendChat() {
             if (data.reply) {
                 const rendered = renderChatReply(data.reply);
                 const msg = appendChatMessage('assistant', rendered, true);
-                chatHistory.push({ role: 'assistant', content: data.reply });
+                if (!data.busy) {
+                    chatHistory.push({ role: 'assistant', content: data.reply });
+                }
                 const clipCards = msg.querySelectorAll('.cc-card');
                 if (clipCards.length > 0) {
                     const pullPrompt = document.createElement('div');
@@ -2700,6 +2706,7 @@ async function streamChatReply({ message, typing, progressTimer }) {
     let streamedText = '';
     let finalReply = '';
     let sawDone = false;
+    let sawBusy = false;
 
     // Progressive paint, throttled to ~7fps. Bracketed spans are masked
     // so [CLIP: ...] grammar (and any bracketed leak) never flashes as
@@ -2789,6 +2796,10 @@ async function streamChatReply({ message, typing, progressTimer }) {
                 } else if (ev === 'done') {
                     finalReply = String(payload.data || '');
                     sawDone = true;
+                    // Memory-governor busy notice: render it, but flag it so
+                    // the caller keeps it OUT of chatHistory — it must not
+                    // become fake model context on later turns.
+                    if (payload.busy) sawBusy = true;
                 } else if (ev === 'error') {
                     clearInterval(watchdogTimer);
                     bubble.classList.remove('chat-streaming');
@@ -2816,7 +2827,7 @@ async function streamChatReply({ message, typing, progressTimer }) {
         }
         return { ok: false, fallback: true };
     }
-    return { ok: true, reply: finalReply || streamedText, bubble };
+    return { ok: true, reply: finalReply || streamedText, bubble, busy: sawBusy };
 }
 
 // Store pending chat story builds (not yet sent to Story Builder)

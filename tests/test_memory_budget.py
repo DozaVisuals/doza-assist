@@ -141,7 +141,12 @@ def test_heavy_stage_serializes_on_low(monkeypatch):
     assert 'second-in' not in order
     release_first.set()
     t1.join(timeout=5); t2.join(timeout=5)
-    assert order == ['first-in', 'first-out', 'second-in']
+    # Partial order only: the gate guarantees second-in happens after
+    # first RELEASES, but 'first-out' (user code after the with-block) may
+    # legitimately interleave after the waiter wakes — asserting the exact
+    # 3-element order was ~13% flaky (review-caught).
+    assert order[0] == 'first-in'
+    assert set(order) == {'first-in', 'first-out', 'second-in'}
     assert memory_budget.heavy_stage_active() is False
 
 
@@ -345,6 +350,35 @@ def test_evict_deadline_expires_loudly_not_forever(monkeypatch, capsys):
     assert 'could not evict' in capsys.readouterr().out
 
 
+def test_evict_transient_ps_failure_is_not_success(monkeypatch):
+    """A mid-poll /api/ps timeout must NOT read as 'all evicted' — on a
+    memory-starved machine that timeout is plausible at exactly the moment
+    eviction runs (review-caught). The poll keeps the last real observation
+    and keeps trying until the deadline."""
+    _force(monkeypatch, 16)
+    clock = {'t': 0.0}
+    monkeypatch.setattr(memory_budget.time, 'monotonic', lambda: clock['t'])
+    monkeypatch.setattr(memory_budget.time, 'sleep',
+                        lambda s: clock.__setitem__('t', clock['t'] + s))
+    calls = {'ps': 0}
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url if hasattr(req, 'full_url') else str(req)
+        if url.endswith('/api/ps'):
+            calls['ps'] += 1
+            if calls['ps'] == 1:
+                return _Resp(b'{"models": [{"name": "gemma4:e4b"}]}')
+            raise TimeoutError('starved')      # every verify poll times out
+        return _Resp(b'{}')
+
+    monkeypatch.setitem(sys.modules, 'ollama_url',
+                        types.SimpleNamespace(ollama_base_url=lambda: 'http://127.0.0.1:11434'))
+    monkeypatch.setattr(memory_budget.urllib.request, 'urlopen', fake_urlopen)
+    evicted = memory_budget.evict_ollama_models(reason='test')
+    assert evicted == 0                        # unknown ≠ evicted
+    assert clock['t'] >= 30                    # polled to the deadline
+
+
 def test_evict_survives_dead_ollama(monkeypatch):
     _force(monkeypatch, 8)
     monkeypatch.setitem(sys.modules, 'ollama_url',
@@ -376,21 +410,42 @@ def test_purge_mlx_modules_removes_phantom_namespace():
         sys.modules.pop('mlx.nn', None)
 
 
-def test_successful_mlx_probe_is_not_purged():
-    """A successfully loaded mlx must STAY in sys.modules.
+def test_purge_is_structurally_confined_to_the_failed_probe_branch():
+    """The purge call must live ONLY in the probe's except handler.
 
-    Purge-then-reimport of a loaded mlx aborts the interpreter (its native
-    core registers process-wide Metal state that can't init twice) — the
-    full suite caught exactly that when the purge briefly ran in a finally.
-    On machines where mlx imports cleanly, importing transcribe must leave
-    it resident; the purge is for the phantom (failed-probe) case only.
+    Purge-then-reimport of a successfully loaded mlx aborts the interpreter
+    (its native core registers process-wide Metal state that can't init
+    twice) — the full suite caught exactly that when the purge briefly ran
+    in a finally. A runtime assert can't pin this (the failure mode is a
+    crash, not a red test), so pin the AST: every call to
+    _purge_mlx_modules in transcribe.py sits inside an except handler.
     """
-    import transcribe  # noqa: F401 — probe ran at first import
-    try:
-        import mlx  # noqa: F401
-    except Exception:
-        pytest.skip('mlx not importable here — failure path covered above')
-    assert 'mlx' in sys.modules
+    import ast
+    import transcribe
+    src_path = transcribe.__file__.replace('.pyc', '.py')
+    tree = ast.parse(open(src_path).read())
+    calls_in_handlers, calls_elsewhere = 0, 0
+
+    class V(ast.NodeVisitor):
+        def __init__(self):
+            self.in_handler = 0
+        def visit_ExceptHandler(self, node):
+            self.in_handler += 1
+            self.generic_visit(node)
+            self.in_handler -= 1
+        def visit_Call(self, node):
+            nonlocal calls_in_handlers, calls_elsewhere
+            name = getattr(node.func, 'id', '')
+            if name == '_purge_mlx_modules':
+                if self.in_handler:
+                    calls_in_handlers += 1
+                else:
+                    calls_elsewhere += 1
+            self.generic_visit(node)
+
+    V().visit(tree)
+    assert calls_in_handlers >= 1     # the failed-probe purge exists
+    assert calls_elsewhere == 0       # and nowhere else — never on success
 
 
 # ── model_config steering ────────────────────────────────────────────

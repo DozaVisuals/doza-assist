@@ -54,9 +54,13 @@ def _get_ram_gb():
     forced = os.environ.get('DOZA_FORCE_RAM_GB')
     if forced:
         # Test/QA override: exercise the small-RAM code paths (memory_budget
-        # tiers, gemma steering) on a big development machine.
+        # tiers, gemma steering) on a big development machine. Non-positive
+        # values are ignored on BOTH sides (main.js mirrors this) so a bad
+        # value can't produce a python-tight / wrapper-comfortable split.
         try:
-            return float(forced)
+            v = float(forced)
+            if v > 0:
+                return v
         except ValueError:
             pass
     try:

@@ -1039,10 +1039,15 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
     model = None
     with _model_lock:
         # Reuse a previously loaded Whisper model — first cache hit wins,
-        # but only among models the current memory budget allows.
+        # but only among models the current memory budget allows. An
+        # out-of-budget cached entry (a turbo loaded via the last-resort
+        # fallback on a tight machine) is FREED, not just skipped —
+        # skipping would let a second turbo load beside the pinned first
+        # one on the machine least able to host two (review-caught).
+        for cached_name in [n for n in _whisper_cache if n not in _model_prefs]:
+            del _whisper_cache[cached_name]
+            print(f"Dropped out-of-budget cached Whisper model ({cached_name}).")
         for cached_name, cached_model in _whisper_cache.items():
-            if cached_name not in _model_prefs:
-                continue
             print(f"Using cached Whisper model ({cached_name}).")
             model = cached_model
             break

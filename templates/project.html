@@ -1263,9 +1263,14 @@ function reloadAndKeepTab(tabName) {
 
 // ── Tab Switching ──
 function switchTab(tab) {
+    // Null-guarded: callers may run on page variants where a tab's content
+    // div doesn't render (e.g. no transcript yet) — a throw here would
+    // abort the caller mid-flight (review-caught in runAnalysis).
+    const content = document.getElementById('tab-' + tab);
+    if (!content) return;
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-    document.getElementById('tab-' + tab).classList.add('active');
+    content.classList.add('active');
     document.querySelectorAll('.tab').forEach(t => {
         if (t.getAttribute('onclick')?.includes("'" + tab + "'")) {
             t.classList.add('active');
@@ -4335,8 +4340,13 @@ async function runAnalysis() {
 
     // Jump to the AI Analysis tab so the delay is self-explanatory — the
     // progress card lives there, and a grayed-out header button alone
-    // left testers wondering whether anything was happening.
-    switchTab('analysis');
+    // left testers wondering whether anything was happening. Only when the
+    // progress card actually renders (a RE-run over an existing analysis
+    // shows the stale results instead — switching there would just look
+    // frozen, review-caught).
+    if (document.getElementById('analysisProgress')) {
+        switchTab('analysis');
+    }
 
     startAnalyzeProgressPoll();
 

@@ -875,14 +875,24 @@ function moveToFolder(projectId, btn) {
     const projectItem = document.querySelector(`.project-item[data-project-id="${projectId}"]`);
     const currentFolder = projectItem?.closest('.folder-group')?.dataset.folder || '';
 
+    // Built with createElement/textContent, not innerHTML — a folder name
+    // containing quotes/angle brackets must render as text, never markup
+    // (review-caught: Rename can already produce such names today).
     const dropdown = document.createElement('div');
     dropdown.className = 'move-dropdown';
-    dropdown.innerHTML = `
-        ${folders.map(f => `<button class="move-option" onclick="doMove('${projectId}', '${f.replace(/'/g, "\\'")}')">${f}</button>`).join('')}
-        <button class="move-option" onclick="moveToNewFolder('${projectId}')">New Folder…</button>
-        ${currentFolder ? `<button class="move-option" style="color: var(--text-muted);" onclick="doMove('${projectId}', '')">Unfile</button>` : ''}
-        <button class="move-option" onclick="revealProjectInFinder('${projectId}')">Reveal in Finder</button>
-    `;
+    const addOption = (label, onClick, muted) => {
+        const b = document.createElement('button');
+        b.className = 'move-option';
+        b.textContent = label;
+        if (muted) b.style.color = 'var(--text-muted)';
+        b.addEventListener('click', onClick);
+        dropdown.appendChild(b);
+        return b;
+    };
+    for (const f of folders) addOption(f, () => doMove(projectId, f));
+    addOption('New Folder…', () => moveToNewFolder(projectId, dropdown));
+    if (currentFolder) addOption('Unfile', () => doMove(projectId, ''), true);
+    addOption('Reveal in Finder', () => revealProjectInFinder(projectId));
 
     btn.parentElement.style.position = 'relative';
     btn.parentElement.appendChild(dropdown);
@@ -905,13 +915,27 @@ function doMove(projectId, folder) {
     }).then(() => location.reload());
 }
 
-function moveToNewFolder(projectId) {
-    const dd = document.querySelector('.move-dropdown');
-    if (dd) dd.remove();
-    // Folders are implicit (a folder exists while a project's meta names
-    // it), so creating one IS moving the first project into it.
-    const name = prompt('New folder name:');
-    if (name && name.trim()) doMove(projectId, name.trim());
+function moveToNewFolder(projectId, dropdown) {
+    // window.prompt() THROWS in Electron (review-caught) — swap the
+    // dropdown's options for an inline input instead, mirroring the
+    // header New Folder button's pattern. Folders are implicit (a folder
+    // exists while a project's meta names it), so creating one IS moving
+    // the first project into it.
+    dropdown.textContent = '';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'New folder name';
+    input.className = 'form-input';
+    input.style.cssText = 'font-size: 0.85rem; padding: 0.3rem 0.5rem; width: 180px; margin: 0.25rem;';
+    dropdown.appendChild(input);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const name = input.value.trim();
+            if (name) doMove(projectId, name);
+        }
+        if (e.key === 'Escape') dropdown.remove();
+    });
+    input.focus();
 }
 
 function revealProjectInFinder(projectId) {

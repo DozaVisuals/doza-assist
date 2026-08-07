@@ -869,11 +869,19 @@ function moveToFolder(projectId, btn) {
 
     const folders = Array.from(document.querySelectorAll('.folder-group')).map(g => g.dataset.folder).filter(Boolean);
 
+    // Is this project currently inside a folder? Only then does "Unfile"
+    // do anything — on a fresh install the popup used to contain ONLY a
+    // muted "Unfile", which read as a single grayed-out dead menu.
+    const projectItem = document.querySelector(`.project-item[data-project-id="${projectId}"]`);
+    const currentFolder = projectItem?.closest('.folder-group')?.dataset.folder || '';
+
     const dropdown = document.createElement('div');
     dropdown.className = 'move-dropdown';
     dropdown.innerHTML = `
         ${folders.map(f => `<button class="move-option" onclick="doMove('${projectId}', '${f.replace(/'/g, "\\'")}')">${f}</button>`).join('')}
-        <button class="move-option" style="color: var(--text-muted);" onclick="doMove('${projectId}', '')">Unfile</button>
+        <button class="move-option" onclick="moveToNewFolder('${projectId}')">New Folder…</button>
+        ${currentFolder ? `<button class="move-option" style="color: var(--text-muted);" onclick="doMove('${projectId}', '')">Unfile</button>` : ''}
+        <button class="move-option" onclick="revealProjectInFinder('${projectId}')">Reveal in Finder</button>
     `;
 
     btn.parentElement.style.position = 'relative';
@@ -895,6 +903,27 @@ function doMove(projectId, folder) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ folder }),
     }).then(() => location.reload());
+}
+
+function moveToNewFolder(projectId) {
+    const dd = document.querySelector('.move-dropdown');
+    if (dd) dd.remove();
+    // Folders are implicit (a folder exists while a project's meta names
+    // it), so creating one IS moving the first project into it.
+    const name = prompt('New folder name:');
+    if (name && name.trim()) doMove(projectId, name.trim());
+}
+
+function revealProjectInFinder(projectId) {
+    const dd = document.querySelector('.move-dropdown');
+    if (dd) dd.remove();
+    fetch(`/project/${projectId}/reveal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: 'project' }),
+    }).then(r => r.json()).then(data => {
+        if (data.error) alert(data.error);
+    }).catch(() => {});
 }
 
 // Drag project to folder

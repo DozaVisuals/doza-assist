@@ -4333,6 +4333,11 @@ async function runAnalysis() {
         document.getElementById('analysisProgress').style.display = 'block';
     }
 
+    // Jump to the AI Analysis tab so the delay is self-explanatory — the
+    // progress card lives there, and a grayed-out header button alone
+    // left testers wondering whether anything was happening.
+    switchTab('analysis');
+
     startAnalyzeProgressPoll();
 
     try {
@@ -4511,18 +4516,29 @@ function renderAnalyzeProgress(data) {
     }
 
     if (tailEl) tailEl.textContent = '';
-    labelEl.firstChild && (labelEl.firstChild.textContent = `Analyzing — ${data.current || 'working'}`);
+    // Before the analyzer reports real steps, every status is step 0
+    // ('starting', the run-lock 'queued', the memory governor's queued
+    // wait). "Step 0 of 1" read like a stall — show an honest generic
+    // message until a real step count exists.
+    const preparing = step === 0;
+    const label = preparing
+        ? (data.current === 'queued'
+            ? 'Waiting for other AI work to finish…'
+            : 'Preparing for analysis…')
+        : `Analyzing — ${data.current || 'working'}`;
+    labelEl.firstChild && (labelEl.firstChild.textContent = label);
     if (labelEl.childNodes.length === 1) {
-        labelEl.textContent = `Analyzing — ${data.current || 'working'}`;
+        labelEl.textContent = label;
     }
 
-    barEl.style.display = 'block';
+    barEl.style.display = preparing ? 'none' : 'block';
     fillEl.style.width = `${(ratio * 100).toFixed(1)}%`;
 
     timesEl.style.display = 'block';
-    timesEl.textContent =
-        `Step ${step} of ${total} · ${formatProgressDuration(elapsedSec)} elapsed` +
-        (remainingSec > 0 ? ` · ~${formatProgressDuration(remainingSec)} remaining` : '');
+    timesEl.textContent = preparing
+        ? `${formatProgressDuration(elapsedSec)} elapsed`
+        : `Step ${step} of ${total} · ${formatProgressDuration(elapsedSec)} elapsed` +
+          (remainingSec > 0 ? ` · ~${formatProgressDuration(remainingSec)} remaining` : '');
 }
 
 function formatProgressDuration(sec) {

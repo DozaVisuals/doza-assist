@@ -2994,8 +2994,12 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
             progress(step=step, total=total + post_analyzer_steps, current=current)
 
         # evict_llm=False: analysis IS the LLM stage — the gate only keeps
-        # it from overlapping pyannote/whisper on small machines.
-        with _memory_heavy_stage('analyze', evict_llm=False):
+        # it from overlapping pyannote/whisper on small machines. on_wait
+        # surfaces 'queued' so the progress card isn't frozen at 'starting'
+        # for the duration of whatever holds the gate.
+        with _memory_heavy_stage(
+                'analyze', evict_llm=False,
+                on_wait=lambda h: progress(step=0, total=1, current='queued')):
             result = analyze_transcript(
                 project['transcript'],
                 project_name=project['name'],
@@ -3154,7 +3158,10 @@ def _rewarm_chat_after_heavy_call(project_id):
         status = (p or {}).get('status') or ''
         if not transcript or status in ('transcribing', 'processing'):
             return
-        invalidate_prewarm(p.get('name', 'Interview'))
+        # `or ''`: a project whose name key is literally null must target
+        # the '' cooldown key (what prewarm stores under), NOT trigger
+        # invalidate's None=clear-all semantics (review-caught edge).
+        invalidate_prewarm(p.get('name', 'Interview') or '')
 
         def _worker():
             try:
@@ -3495,7 +3502,7 @@ def chat_stream(project_id):
     if busy:
         def _busy_stream():
             yield f"data: {json.dumps({'event': 'heartbeat', 'data': 'connected'})}\n\n"
-            yield f"data: {json.dumps({'event': 'done', 'data': busy})}\n\n"
+            yield f"data: {json.dumps({'event': 'done', 'data': busy, 'busy': True})}\n\n"
         return Response(stream_with_context(_busy_stream()),
                         mimetype='text/event-stream')
 
@@ -5339,6 +5346,13 @@ def story_build(project_id):
     profile_id = data.get('profile_id')  # session-only override from the UI
     if not message:
         return jsonify({'error': 'No story description provided'}), 400
+
+    # Same busy path as /chat: story builds are minutes of LLM work and are
+    # reachable from the chat input — without this an 8 GB Mac reloads
+    # gemma next to an active transcription/diarization (review-caught).
+    busy = _llm_busy_message()
+    if busy:
+        return jsonify({'error': busy}), 503
 
     try:
         from ai_analysis import build_story, generate_segment_vectors

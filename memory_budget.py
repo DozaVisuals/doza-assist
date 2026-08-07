@@ -349,16 +349,23 @@ def evict_ollama_models(reason: str = '') -> int:
     for name in initial:
         _send_unload(base, name)
     deadline = time.monotonic() + (60 if ram_class() == 'tight' else 30)
+    # A transient /api/ps failure (None) must NOT read as "all evicted" —
+    # on a memory-starved machine a 3s timeout is plausible exactly now
+    # (review-caught). Keep the last successful observation and keep
+    # polling; only an actual empty list ends the wait early.
     remaining = _list_resident_models(base)
+    if remaining is None:
+        remaining = list(initial)
     while remaining and time.monotonic() < deadline:
         time.sleep(1.0)
-        remaining = _list_resident_models(base)
+        observed = _list_resident_models(base)
+        if observed is not None:
+            remaining = observed
         if remaining:
             # Survivor: an in-flight or brand-new call re-extended it.
             # Re-expire so it unloads the moment that call finishes.
             for name in remaining:
                 _send_unload(base, name)
-    remaining = remaining or []
     gone = [n for n in initial if n not in remaining]
     for n in gone:
         print(f"[mem-budget] evicted ollama model {n}"

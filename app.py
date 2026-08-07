@@ -1656,6 +1656,17 @@ def group_into_paragraphs(segments):
     return paragraphs
 
 
+def _prewarm_admission():
+    """memory_budget.prewarm_slot with a permissive fallback when the
+    governor is unavailable (OSS/dev checkouts keep today's behavior)."""
+    try:
+        from memory_budget import prewarm_slot
+        return prewarm_slot()
+    except Exception:
+        from contextlib import nullcontext
+        return nullcontext(True)
+
+
 def _prewarm_chat_for_project(project_id):
     """Background chat pre-warm for one project (daemon-thread target).
 
@@ -1667,25 +1678,37 @@ def _prewarm_chat_for_project(project_id):
     job owns the GPU.
     """
     try:
-        from ai_analysis import prewarm_chat_context, warmup_ollama
-        p = get_project(project_id)
-        transcript = (p or {}).get('transcript')
-        status = (p or {}).get('status') or ''
-        if transcript and status not in ('transcribing', 'processing'):
-            # True covers BOTH "just prefilled" and "still warm from the
-            # cooldown window" — either way the plain warmup below must
-            # not run: its throwaway 2048 num_ctx would flip the runner's
-            # context size and destroy the warm transcript prefix.
-            if prewarm_chat_context(
-                transcript,
-                project_name=p.get('name', 'Interview'),
-                analysis=p.get('analysis'),
-                labeled_sections=p.get('labeled_sections') or None,
-                speaker_names=p.get('speaker_names') or None,
-                output_language=resolve_output_language(p),
-            ):
+        # Memory governor: prewarm must HOLD the heavy-stage gate, not just
+        # peek at it — a peek leaves a window where a prewarm in flight
+        # when Transcribe is clicked still loads gemma mid-transcription
+        # (the tester's field failure, review-caught as surviving a plain
+        # check). tight: never admitted; low: admitted only while the gate
+        # is free, and holds it for the duration; comfortable: no gate,
+        # today's behavior.
+        with _prewarm_admission() as admitted:
+            if not admitted:
+                print(f"[chat-prewarm] skipped by memory budget "
+                      f"(project {project_id})", flush=True)
                 return
-        warmup_ollama()
+            from ai_analysis import prewarm_chat_context, warmup_ollama
+            p = get_project(project_id)
+            transcript = (p or {}).get('transcript')
+            status = (p or {}).get('status') or ''
+            if transcript and status not in ('transcribing', 'processing'):
+                # True covers BOTH "just prefilled" and "still warm from the
+                # cooldown window" — either way the plain warmup below must
+                # not run: its throwaway 2048 num_ctx would flip the runner's
+                # context size and destroy the warm transcript prefix.
+                if prewarm_chat_context(
+                    transcript,
+                    project_name=p.get('name', 'Interview'),
+                    analysis=p.get('analysis'),
+                    labeled_sections=p.get('labeled_sections') or None,
+                    speaker_names=p.get('speaker_names') or None,
+                    output_language=resolve_output_language(p),
+                ):
+                    return
+            warmup_ollama()
     except Exception as e:
         print(f"[chat-prewarm] project {project_id}: {e}", flush=True)
 
@@ -2434,6 +2457,39 @@ def _make_transcribe_progress_writer(project_id):
     return writer
 
 
+def _memory_heavy_stage(name, evict_llm=True, on_wait=None):
+    """Cross-component memory gate for small-RAM machines (memory_budget).
+
+    On <24 GB Macs exactly one heavy background component may be resident
+    at a time — otherwise the stacked models starve WindowServer of unified
+    memory and the *display* corrupts (FX tester, M1 16 GB, macOS 15.7.8).
+    No-op on big machines or when the governor module is unavailable.
+    ``on_wait(holder)`` fires once if the gate is contended, so the caller
+    can surface a queued state instead of a frozen progress phase.
+    """
+    try:
+        from memory_budget import heavy_stage
+        return heavy_stage(name, evict_llm=evict_llm, on_wait=on_wait)
+    except Exception:
+        from contextlib import nullcontext
+        return nullcontext()
+
+
+def _release_transcribe_caches_if_budgeted():
+    """Drop the in-process Whisper/Parakeet caches on small-RAM machines.
+
+    Must run INSIDE the transcribe heavy_stage — the gate serializes
+    residency, so the next stage may not start loading until these are
+    actually gone (review-caught ordering bug)."""
+    try:
+        import memory_budget
+        if memory_budget.release_models_after_use():
+            from transcribe import release_transcribe_caches
+            release_transcribe_caches()
+    except Exception:
+        pass
+
+
 def _run_transcribe_job(project_id, source_path, num_speakers, language,
                        interviewer_name, subject_name, audio_channel=None):
     """Background worker that runs transcribe_file under a per-project
@@ -2452,18 +2508,25 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
         progress_cb({"phase": "queued", "pct": 0})
         _transcribe_run_lock.acquire()
     try:
-        result = transcribe_file(
-            source_path,
-            project_dir=project_dir,
-            speaker_labels={
-                'SPEAKER_00': interviewer_name,
-                'SPEAKER_01': subject_name,
-            },
-            num_speakers=num_speakers,
-            language=language,
-            progress_cb=progress_cb,
-            audio_channel=audio_channel,
-        )
+        with _memory_heavy_stage(
+                'transcribe',
+                on_wait=lambda holder: progress_cb(
+                    {"phase": "queued", "pct": 0})):
+            try:
+                result = transcribe_file(
+                    source_path,
+                    project_dir=project_dir,
+                    speaker_labels={
+                        'SPEAKER_00': interviewer_name,
+                        'SPEAKER_01': subject_name,
+                    },
+                    num_speakers=num_speakers,
+                    language=language,
+                    progress_cb=progress_cb,
+                    audio_channel=audio_channel,
+                )
+            finally:
+                _release_transcribe_caches_if_budgeted()
         # A transcript with no usable speech is a failure, not a success —
         # whether it's EMPTY, a DEGENERATE hallucination (silent/scratch audio
         # makes Whisper repeat one subtitle-credit line per 30 s window), or
@@ -2930,14 +2993,17 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
             analyzer_state['total'] = total
             progress(step=step, total=total + post_analyzer_steps, current=current)
 
-        result = analyze_transcript(
-            project['transcript'],
-            project_name=project['name'],
-            analysis_type=analysis_type,
-            segment_vectors=existing_vectors or None,
-            progress_callback=_from_analyzer,
-            output_language=resolve_output_language(project),
-        )
+        # evict_llm=False: analysis IS the LLM stage — the gate only keeps
+        # it from overlapping pyannote/whisper on small machines.
+        with _memory_heavy_stage('analyze', evict_llm=False):
+            result = analyze_transcript(
+                project['transcript'],
+                project_name=project['name'],
+                analysis_type=analysis_type,
+                segment_vectors=existing_vectors or None,
+                progress_callback=_from_analyzer,
+                output_language=resolve_output_language(project),
+            )
         if not (result.get('story_beats') or result.get('social_clips')
                 or result.get('strongest_soundbites')):
             # Empty-but-healthy: the backend responded but produced nothing
@@ -2962,15 +3028,20 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
             progress(step=analyzer_total + int(chunk_idx),
                      total=global_total, current=label)
 
+        # Gated like the analysis itself: one gemma call per ~15-min chunk,
+        # i.e. minutes of LLM work — without the gate a queued diarization
+        # wakes the instant analyze_transcript returns, evicts gemma, loads
+        # pyannote, and this reload puts both resident (review-caught).
         segment_vectors = []
-        try:
-            segment_vectors = generate_segment_vectors(
-                project['transcript'],
-                project_name=project['name'],
-                progress_callback=_from_vectors,
-            )
-        except Exception as ve:
-            print(f"Segment vector generation failed: {ve}")
+        with _memory_heavy_stage('analyze-vectors', evict_llm=False):
+            try:
+                segment_vectors = generate_segment_vectors(
+                    project['transcript'],
+                    project_name=project['name'],
+                    progress_callback=_from_vectors,
+                )
+            except Exception as ve:
+                print(f"Segment vector generation failed: {ve}")
 
         if segment_vectors:
             project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
@@ -3019,7 +3090,10 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         # empty, and it never raises. Wrapped here for belt-and-braces.
         try:
             from diarization import auto_name_speakers  # type: ignore
-            auto_name_speakers(project_id, app.config['PROJECTS_DIR'])
+            # Gated: this is an LLM call (provider.generate) — see the
+            # analyze-vectors note above.
+            with _memory_heavy_stage('speaker-naming', evict_llm=False):
+                auto_name_speakers(project_id, app.config['PROJECTS_DIR'])
         except ImportError:
             pass  # OSS / no Pro extension loaded
         except Exception as e:
@@ -3084,14 +3158,22 @@ def _rewarm_chat_after_heavy_call(project_id):
 
         def _worker():
             try:
-                prewarm_chat_context(
-                    transcript,
-                    project_name=p.get('name', 'Interview'),
-                    analysis=p.get('analysis'),
-                    labeled_sections=p.get('labeled_sections') or None,
-                    speaker_names=p.get('speaker_names') or None,
-                    output_language=resolve_output_language(p),
-                )
+                # Same atomic admission as _prewarm_chat_for_project: the
+                # rewarm must hold the gate while it loads, never race a
+                # heavy stage that just evicted gemma (review-caught).
+                with _prewarm_admission() as admitted:
+                    if not admitted:
+                        print(f"[chat-rewarm] skipped by memory budget "
+                              f"(project {project_id})", flush=True)
+                        return
+                    prewarm_chat_context(
+                        transcript,
+                        project_name=p.get('name', 'Interview'),
+                        analysis=p.get('analysis'),
+                        labeled_sections=p.get('labeled_sections') or None,
+                        speaker_names=p.get('speaker_names') or None,
+                        output_language=resolve_output_language(p),
+                    )
             except Exception as e:
                 print(f"[chat-prewarm] rewarm worker failed: {e}", flush=True)
         threading.Thread(target=_worker, daemon=True).start()
@@ -3250,6 +3332,36 @@ def analyze_status(project_id):
     return jsonify(payload)
 
 
+def _llm_busy_message():
+    """Busy notice when the LLM must not load right now, else None.
+
+    Small-RAM machines only: while an evicting heavy stage (transcription,
+    speaker ID) holds the memory gate, a chat generate would reload gemma
+    alongside that stage's model — the exact stack that corrupts the
+    display. Waits a short grace period (a stage that is just finishing
+    shouldn't bounce the user), then returns an honest, friendly notice
+    the UI renders as a normal assistant reply. Never raises; big machines
+    and governor-less checkouts always return None (today's behavior).
+    """
+    try:
+        import memory_budget
+        if not memory_budget.llm_blocked():
+            return None
+        for _ in range(10):                       # ~5 s grace
+            time.sleep(0.5)
+            if not memory_budget.llm_blocked():
+                return None
+        labels = {'transcribe': 'transcribing', 'batch-transcribe': 'transcribing',
+                  'diarize': 'identifying speakers'}
+        doing = labels.get(memory_budget.active_stage_name() or '',
+                           'processing media')
+        return (f"I'm busy {doing} right now and this Mac's memory can't "
+                "run both at once — ask me again in a bit, once the "
+                "progress banner clears.")
+    except Exception:
+        return None
+
+
 @app.route('/project/<project_id>/chat', methods=['POST'])
 def chat(project_id):
     """Chat with AI about the transcript. Supports comma-separated IDs for multi-project."""
@@ -3270,6 +3382,12 @@ def chat(project_id):
 
     if not message:
         return jsonify({'error': 'No message provided'}), 400
+
+    busy = _llm_busy_message()
+    if busy:
+        # Rendered as a normal assistant reply; deliberately NOT persisted
+        # to chat history (transient state notice, not conversation).
+        return jsonify({'reply': busy, 'busy': True})
 
     try:
         from ai_analysis import chat_about_transcript
@@ -3372,6 +3490,14 @@ def chat_stream(project_id):
     profile_id = data.get('profile_id')
     if not message:
         return jsonify({'error': 'No message provided'}), 400
+
+    busy = _llm_busy_message()
+    if busy:
+        def _busy_stream():
+            yield f"data: {json.dumps({'event': 'heartbeat', 'data': 'connected'})}\n\n"
+            yield f"data: {json.dumps({'event': 'done', 'data': busy})}\n\n"
+        return Response(stream_with_context(_busy_stream()),
+                        mimetype='text/event-stream')
 
     from ai_analysis import chat_about_transcript_stream
 
@@ -6490,5 +6616,16 @@ if __name__ == '__main__':
     # daemon doesn't block Flask startup.
     import threading
     from ai_analysis import warmup_ollama
-    threading.Thread(target=warmup_ollama, daemon=True).start()
+
+    def _boot_warmup():
+        # Memory governor: 8 GB machines skip the boot warm-load (the model
+        # would be evicted by the first transcription anyway); 16 GB holds
+        # the gate while loading so a first-launch transcription can't
+        # start mid-warm-load.
+        with _prewarm_admission() as admitted:
+            if not admitted:
+                print('[warmup] skipped by memory budget', flush=True)
+                return
+            warmup_ollama()
+    threading.Thread(target=_boot_warmup, daemon=True).start()
     app.run(host='127.0.0.1', port=port, debug=False, threaded=True)

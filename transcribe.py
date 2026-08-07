@@ -36,10 +36,37 @@ ssl.create_default_context = _create_ssl_context
 # transcribe path silently falls through to Whisper-CPU (~10x slower,
 # ~7 GB RAM). Surfacing the failure here makes the support flow obvious
 # instead of looking like a generic "transcription is slow" ticket.
+def _purge_mlx_modules():
+    """Drop every mlx* entry from sys.modules — FAILED-probe path only.
+
+    mlx is a NAMESPACE package (no __init__.py): a bare ``import mlx``
+    "succeeds" even when the native core can never load, leaving a phantom
+    module behind. einops probes backends by checking sys.modules — with
+    the phantom present it tries ``import mlx.core`` mid-inference, and on
+    a machine where the dylib can't load (macOS 14 + a macOS-15 wheel) the
+    resulting dlopen ImportError aborted the WHOLE pyannote run ("speaker-ID
+    engine failed on this audio: dlopen(...)" — FX tester, 2026-08-06).
+
+    Only called when the probe FAILS. Never purge a successfully loaded
+    mlx: its native core registers process-wide Metal state that cannot be
+    initialized twice — a purge-then-reimport aborts the interpreter
+    (caught by the test suite on this exact line of history). A loaded mlx
+    is harmless to einops; a phantom one is fatal to diarization.
+    """
+    import sys as _sys
+    for _name in [k for k in list(_sys.modules)
+                  if k == 'mlx' or k.startswith('mlx.')]:
+        _sys.modules.pop(_name, None)
+
+
 try:
     import mlx  # noqa: F401
     import mlx.nn  # triggers metallib load
-    _mlx_version = getattr(mlx, "__version__", "?")
+    try:
+        from importlib.metadata import version as _pkg_version
+        _mlx_version = _pkg_version('mlx')
+    except Exception:
+        _mlx_version = getattr(mlx, "__version__", "?")
     print(f"mlx OK: {_mlx_version}", flush=True)
 except Exception as _mlx_err:
     print(
@@ -52,6 +79,7 @@ except Exception as _mlx_err:
         "requirements-bundle.txt and rebuild the bundle.",
         flush=True,
     )
+    _purge_mlx_modules()
 
 
 def _ensure_ffmpeg_on_path():
@@ -94,6 +122,27 @@ _parakeet_model = None
 _whisperx_model = None          # (model, device, compute_type)
 _whisperx_align_cache = {}      # {lang_code: (model_a, metadata, device)}
 _whisper_cache = {}             # {model_name: model}
+
+
+def release_transcribe_caches():
+    """Drop every cached transcription model and reclaim the memory.
+
+    Called by the app worker after a job on small-RAM machines
+    (memory_budget.release_models_after_use()): the "memory stays high
+    while the app runs — fine" note above assumed a machine with headroom;
+    on an 8-16 GB Mac a resident Whisper turbo (~5 GB FP32) starves the
+    next stage and, ultimately, WindowServer. The next transcription
+    pays the load again (~10s) — the right trade below 24 GB.
+    """
+    global _parakeet_model, _whisperx_model
+    with _model_lock:
+        _parakeet_model = None
+        _whisperx_model = None
+        _whisperx_align_cache.clear()
+        _whisper_cache.clear()
+    import gc
+    gc.collect()
+    print("[mem-budget] transcription model caches released", flush=True)
 
 
 def _find_ffmpeg():
@@ -922,17 +971,34 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
             pass
 
     # Try turbo first (best quality/speed balance, matches MacWhisper)
-    # Fall back to large-v3 or base if turbo unavailable (older whisper versions)
+    # Fall back to large-v3 or base if turbo unavailable (older whisper
+    # versions). On <12 GB machines the governor swaps in a smaller
+    # preference list — turbo runs ~5 GB in FP32 on CPU and an 8 GB Mac
+    # cannot host that next to WindowServer without display corruption.
+    try:
+        from memory_budget import whisper_model_prefs
+        _model_prefs = whisper_model_prefs()
+    except Exception:
+        _model_prefs = ("turbo", "large-v3", "base")
+    # Last resort, AFTER the budget prefs: an offline 8 GB Mac that already
+    # has turbo cached in ~/.cache/whisper (pre-governor install) must
+    # transcribe — slowly, serialized — rather than fail because 'small'
+    # can't be downloaded. Only reached when every preferred model fails.
+    _fallback_names = tuple(n for n in ("turbo", "large-v3", "base")
+                            if n not in _model_prefs)
     model = None
     with _model_lock:
-        # Reuse any previously loaded Whisper model — first cache hit wins.
+        # Reuse a previously loaded Whisper model — first cache hit wins,
+        # but only among models the current memory budget allows.
         for cached_name, cached_model in _whisper_cache.items():
+            if cached_name not in _model_prefs:
+                continue
             print(f"Using cached Whisper model ({cached_name}).")
             model = cached_model
             break
 
         if model is None:
-            for model_name in ("turbo", "large-v3", "base"):
+            for model_name in (*_model_prefs, *_fallback_names):
                 try:
                     print(f"Loading Whisper model ({model_name})...")
                     model = whisper.load_model(model_name)

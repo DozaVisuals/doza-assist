@@ -19,7 +19,34 @@ from .base import BaseProvider
 from . import ProviderError
 
 
-_KEEP_ALIVE = "30m"
+def _tiered_keep_alive():
+    # RAM-tiered residency: 30m of idle gemma is free on a big machine and
+    # a display-corrupting liability on an 8 GB one (memory_budget governs).
+    try:
+        from memory_budget import ollama_keep_alive
+        return ollama_keep_alive()
+    except Exception:
+        return "30m"
+
+
+_KEEP_ALIVE = _tiered_keep_alive()
+
+
+def _budget_num_ctx(kwargs):
+    """Requested num_ctx, clamped to the memory governor's ceiling on
+    tight machines only. Chat callers clamp upstream (_sticky_chat_num_ctx)
+    — this catches the analysis/story/pro callers that default or pass
+    32768 explicitly. On >=12 GB the ceiling is 32768 and any requested
+    value passes through untouched (today's behavior)."""
+    requested = kwargs.get("num_ctx", 32768)
+    try:
+        from memory_budget import analysis_num_ctx_ceiling
+        ceiling = analysis_num_ctx_ceiling()
+    except Exception:
+        return requested
+    if ceiling >= 32768:
+        return requested
+    return min(requested, ceiling)
 
 # Connection-refused recovery. The bundled Ollama can die mid-batch (an OOM
 # on a heavy model load is the usual culprit on lower-RAM machines); the
@@ -232,7 +259,7 @@ class OllamaProvider(BaseProvider):
                     # calls, a generous context window prevents
                     # truncation on long transcripts (25-min Gemma
                     # chunk ≈ 5K tokens of transcript text alone).
-                    "num_ctx": kwargs.get("num_ctx", 32768),
+                    "num_ctx": _budget_num_ctx(kwargs),
                     # Classic sampler pin — mirrors the chat paths; the
                     # analysis/story JSON calls are just as exposed to the
                     # runtime/manifest default drift.
@@ -292,7 +319,7 @@ class OllamaProvider(BaseProvider):
                 _raise_ollama_error(response, model)
             payload = response.json()
             _log_timing(kwargs.get("timing_tag", task_type), model,
-                        kwargs.get("num_ctx", 32768), payload)
+                        _budget_num_ctx(kwargs), payload)
             return payload.get("response", "")
 
         # Chat / general path: /api/chat with messages array.
@@ -307,7 +334,7 @@ class OllamaProvider(BaseProvider):
                 "options": {
                     "temperature": kwargs.get("temperature", 0.4 if task_type == "chat" else 0.3),
                     "num_predict": kwargs.get("num_predict", 4096 if task_type == "chat" else 16384),
-                    "num_ctx": kwargs.get("num_ctx", 32768),
+                    "num_ctx": _budget_num_ctx(kwargs),
                     # Chat runs at 1.1 (Ollama's default): the old 1.3 was
                     # added against repetition loops before the server-side
                     # loop guards existed, and at 1.3 the model is punished
@@ -336,7 +363,7 @@ class OllamaProvider(BaseProvider):
             _raise_ollama_error(response, model)
         payload = response.json()
         _log_timing(kwargs.get("timing_tag", task_type), model,
-                    kwargs.get("num_ctx", 32768), payload)
+                    _budget_num_ctx(kwargs), payload)
         return (payload.get("message") or {}).get("content", "")
 
     def generate_stream(self, system_prompt, user_or_messages, task_type="general", **kwargs):
@@ -366,7 +393,7 @@ class OllamaProvider(BaseProvider):
                 "options": {
                     "temperature": kwargs.get("temperature", 0.4),
                     "num_predict": kwargs.get("num_predict", 4096),
-                    "num_ctx": kwargs.get("num_ctx", 32768),
+                    "num_ctx": _budget_num_ctx(kwargs),
                     # Mirrors the non-stream chat setting — see the comment
                     # there. The stream path is chat-only in practice.
                     "repeat_penalty": kwargs.get(
@@ -402,7 +429,7 @@ class OllamaProvider(BaseProvider):
                     # tiny prompt_eval_count; a cold one reports the whole
                     # payload).
                     _log_timing(kwargs.get("timing_tag", task_type), model,
-                                kwargs.get("num_ctx", 32768), chunk)
+                                _budget_num_ctx(kwargs), chunk)
                     break
 
     def test_connection(self) -> dict:

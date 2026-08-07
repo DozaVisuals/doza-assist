@@ -19,9 +19,18 @@ from doza_assist.output_language import language_directive
 
 # Keep the Ollama model resident in memory between requests. Default is
 # 5 minutes — too short for an editor reading a reply before typing the
-# next question. 30 minutes covers normal session rhythm. Set on every
-# generate call in this module so a single tweak propagates everywhere.
-_OLLAMA_KEEP_ALIVE = '30m'
+# next question. 30 minutes covers normal session rhythm on machines with
+# headroom; small-RAM machines get a shorter leash from memory_budget so
+# an idle gemma doesn't crowd the next transcription/diarization stage.
+def _tiered_keep_alive():
+    try:
+        from memory_budget import ollama_keep_alive
+        return ollama_keep_alive()
+    except Exception:
+        return '30m'
+
+
+_OLLAMA_KEEP_ALIVE = _tiered_keep_alive()
 
 
 # ── Conversational vs extractive intent ──────────────────────────────────
@@ -844,6 +853,14 @@ def _sticky_chat_num_ctx(project_name, system_message, messages):
     exists to prevent.
     """
     est = _estimate_chat_num_ctx(system_message, messages)
+    # Memory governor: on 8 GB machines the 32K-rung KV cache is a real
+    # slice of the unified pool; clamp BEFORE the grow-only max so the
+    # high-water mark itself can never exceed the machine's ceiling.
+    try:
+        from memory_budget import chat_num_ctx_ceiling
+        est = min(est, chat_num_ctx_ceiling())
+    except Exception:
+        pass
     key = str(project_name or '')
     with _NUM_CTX_HWM_LOCK:
         prior = _NUM_CTX_HWM.get(key, 0)
@@ -1136,7 +1153,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     #             a RELEVANT EXCERPTS block between transcript and final
     #             reminder so recency bias reinforces the answer.
     # ─────────────────────────────────────────────────────────────────────
-    if duration > _LONG_CHAT_SECONDS:
+    if duration > _long_chat_threshold():
         # Conversational divert: long interviews normally go straight to
         # chunked clip search, which only ever returns clip cards. When the
         # editor's question is conversational ("what's the story", "no
@@ -1489,7 +1506,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             tfidf_hits = []
     yield ('heartbeat', 'preparing')
 
-    if duration > _LONG_CHAT_SECONDS:
+    if duration > _long_chat_threshold():
         # Conversational divert (mirror of the non-streaming variant): when
         # the editor asked a discussion-style question, skip chunk search
         # and yield a synthesized prose answer instead. Speaker-name
@@ -4990,6 +5007,23 @@ _LONG_INTERVIEW_SECONDS = CHUNK_MINUTES * 60
 # model's attention window.
 _LONG_CHAT_SECONDS = 60 * 60
 
+
+def _long_chat_threshold():
+    """Tier-aware long-interview routing threshold (seconds).
+
+    On 8 GB machines the chat num_ctx ceiling is 16K — a full-transcript
+    single-prompt chat past ~20-25 min would silently overflow that window
+    and Ollama would evict the transcript head (the 1.0.32 vagueness bug,
+    reborn). Route those interviews to the chunked-search path instead,
+    which never needs the whole transcript in one window. Big machines
+    keep the 60-min threshold unchanged.
+    """
+    try:
+        from memory_budget import long_chat_seconds
+        return long_chat_seconds()
+    except Exception:
+        return _LONG_CHAT_SECONDS
+
 # Layer 2 (chunked search) knobs. Only consulted when the transcript is past
 # `_LONG_CHAT_SECONDS` AND no keyword matches can be extracted from the user's
 # question — i.e. abstract/synthesis queries on multi-hour interviews. Kept as
@@ -8209,15 +8243,22 @@ _PREWARM_COOLDOWN_SECONDS = 600
 _PREWARM_LOCK = threading.Lock()
 
 
-def invalidate_prewarm(project_name):
+def invalidate_prewarm(project_name=None):
     """Drop the prewarm cooldown entry for a project so the next
     prewarm_chat_context call actually re-prefills. Called after heavy
     multi-call passes (analysis, story builds) that evict the chat
     prefix from Ollama's cache slots — the cooldown otherwise reports
-    "still warm" for up to 10 minutes of cold turns."""
+    "still warm" for up to 10 minutes of cold turns.
+
+    ``None`` clears EVERY project's cooldown — the memory governor's
+    eviction is global (it unloads all Ollama models), so no per-project
+    entry may survive it."""
     try:
         with _PREWARM_LOCK:
-            _PREWARM_STATE.pop(str(project_name or ''), None)
+            if project_name is None:
+                _PREWARM_STATE.clear()
+            else:
+                _PREWARM_STATE.pop(str(project_name or ''), None)
     except Exception:
         pass
 
@@ -8266,7 +8307,7 @@ def prewarm_chat_context(transcript, project_name="Interview", analysis=None,
         if not segments:
             return False
         duration = segments[-1].get('end', 0) or 0
-        if duration > _LONG_CHAT_SECONDS:
+        if duration > _long_chat_threshold():
             return False
         key = str(project_name or '')
         fingerprint = (len(segments), round(float(duration), 1),

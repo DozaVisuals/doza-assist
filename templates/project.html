@@ -1071,8 +1071,11 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
 
 const PROJECT_ID = '{{ project.id }}';
 // True when re-running analysis would silently cache-hit (unchanged
-// transcript). Drives the confirm-then-force flow in runAnalysis().
+// transcript). Drives the force flag in runAnalysis().
 const ANALYSIS_FRESH = {{ 'true' if analysis_fresh else 'false' }};
+// True when ANY analysis exists — every re-run asks first (owner ask:
+// popup whenever the user already ran an analysis, fresh or stale).
+const ANALYSIS_EXISTS = {{ 'true' if project.analysis else 'false' }};
 const PROJECT = {{ project | tojson }};
 // Canonical language list — [code, English name] pairs, 'en' first then
 // alphabetical, injected from doza_assist.output_language.LANGUAGES via the
@@ -4325,12 +4328,16 @@ async function startTranscription() {
 let analyzeProgressTimer = null;
 
 async function runAnalysis() {
-    // Fresh analysis: a plain re-run would silently cache-hit ("Analyzing…"
-    // then nothing — tester report). Ask, and if confirmed, FORCE a real
-    // run past the cache. confirm() works in Electron; prompt() does not.
+    // Any existing analysis: ask before re-running (owner ask — the popup
+    // fires whether the analysis is fresh or stale). When it's FRESH, a
+    // confirmed run also sends force=true so it can't silently cache-hit
+    // ("Analyzing…" then nothing — tester report). confirm() works in
+    // Electron; prompt() does not.
+    const hasAnalysis = (typeof ANALYSIS_EXISTS !== 'undefined') && ANALYSIS_EXISTS;
     const forceRerun = (typeof ANALYSIS_FRESH !== 'undefined') && ANALYSIS_FRESH;
-    if (forceRerun && !confirm(
-        'This transcript already has an up-to-date analysis. Run it again anyway?')) {
+    if (hasAnalysis && !confirm(
+        'You already ran an analysis for this project. Re-analyze? '
+        + 'This will replace the current results.')) {
         return;
     }
 

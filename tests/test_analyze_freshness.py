@@ -97,6 +97,7 @@ def test_fresh_project_renders_rerun_button(client, tmp_path):
     html = client.get('/project/p6').data.decode()
     assert 'Re-run Analysis' in html
     assert 'const ANALYSIS_FRESH = true;' in html
+    assert 'const ANALYSIS_EXISTS = true;' in html
 
 
 def test_stale_project_renders_primary_button(client, tmp_path):
@@ -105,3 +106,4 @@ def test_stale_project_renders_primary_button(client, tmp_path):
     assert 'AI Analysis' in html
     assert 'Re-run Analysis' not in html
     assert 'const ANALYSIS_FRESH = false;' in html
+    assert 'const ANALYSIS_EXISTS = true;' in html   # stale analysis still exists -> popup

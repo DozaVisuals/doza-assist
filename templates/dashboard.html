@@ -880,6 +880,14 @@ function moveToFolder(projectId, btn) {
     // (review-caught: Rename can already produce such names today).
     const dropdown = document.createElement('div');
     dropdown.className = 'move-dropdown';
+    // The dropdown lives INSIDE the row's <a href="/project/…"> — without
+    // this guard every click on an option (or the New Folder input)
+    // bubbles to the anchor and navigates into the project (tester
+    // report: "clicking move opens the project").
+    dropdown.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+    });
     const addOption = (label, onClick, muted) => {
         const b = document.createElement('button');
         b.className = 'move-option';

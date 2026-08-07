@@ -91,6 +91,46 @@ def _clear_mlx_cache() -> None:
         pass
 
 
+def _apply_mlx_memory_caps() -> None:
+    """Cap MLX allocations on small-RAM machines BEFORE the model loads.
+
+    MLX's default memory limit is ~1.5x the device working set — on an
+    8 GB Mac that lets a single decode legally starve WindowServer of
+    unified memory until Metal itself aborts with
+    kIOGPUCommandBufferCallbackErrorOutOfMemory (FX tester, M1 16 GB).
+    set_memory_limit is a guideline for the allocator, not a hard wall,
+    so the cross-component serialization in the parent still matters;
+    this bounds cache growth inside one decode. hasattr-guarded like
+    _clear_mlx_cache because the MLX API surface moves between versions.
+    """
+    try:
+        import memory_budget
+        limit_mb = memory_budget.mlx_memory_limit_mb()
+        cache_mb = memory_budget.mlx_cache_limit_mb()
+    except Exception:
+        return
+    if not limit_mb:
+        return
+    try:
+        import mlx.core as mx
+        if hasattr(mx, 'set_memory_limit'):
+            mx.set_memory_limit(limit_mb * 1024 * 1024)
+        if cache_mb and hasattr(mx, 'set_cache_limit'):
+            mx.set_cache_limit(cache_mb * 1024 * 1024)
+        print(f"[mem-budget] mlx caps: memory={limit_mb}MB cache={cache_mb}MB",
+              flush=True)
+    except Exception as e:
+        print(f"[mem-budget] mlx cap setup failed (continuing): {e}", flush=True)
+
+
+def _budget_chunk_sec(default: int = 60) -> int:
+    try:
+        import memory_budget
+        return memory_budget.parakeet_chunk_sec()
+    except Exception:
+        return default
+
+
 def transcribe(audio_path: str, speaker_name: str) -> dict:
     import numpy as np
     import soundfile as sf
@@ -99,6 +139,7 @@ def transcribe(audio_path: str, speaker_name: str) -> dict:
 
     print("Loading Parakeet TDT model...", flush=True)
     _emit('load_model', 5)
+    _apply_mlx_memory_caps()
     model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
 
     print("Loading audio...", flush=True)
@@ -112,7 +153,8 @@ def transcribe(audio_path: str, speaker_name: str) -> dict:
     # 60s chunks + 1s overlap (down from the old in-process 300s): smaller
     # per-chunk command buffers reduce the odds of hitting Metal's error
     # path at all, and emit progress 5x as often — both wins for Pro.
-    chunk_sec = 60
+    # 8 GB machines drop to 30s: halves the per-chunk activation peak.
+    chunk_sec = _budget_chunk_sec(60)
     overlap_sec = 1
     chunk_samples = int(chunk_sec * sr)
     overlap_samples = int(overlap_sec * sr)

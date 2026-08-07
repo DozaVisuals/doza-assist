@@ -51,6 +51,14 @@ def _get_ram_gb():
     of actual hardware. Migrating to ``os.sysconf`` removes the
     subprocess dependency entirely.
     """
+    forced = os.environ.get('DOZA_FORCE_RAM_GB')
+    if forced:
+        # Test/QA override: exercise the small-RAM code paths (memory_budget
+        # tiers, gemma steering) on a big development machine.
+        try:
+            return float(forced)
+        except ValueError:
+            pass
     try:
         page_size = os.sysconf('SC_PAGE_SIZE')
         phys_pages = os.sysconf('SC_PHYS_PAGES')
@@ -116,12 +124,27 @@ def detect_hardware_tier():
     # pipeline is tuned against it, and it outperforms gemma4:26b on the
     # single-request inference Doza Assist actually runs. The small/large/
     # xlarge tiers stay defined so users can opt in via --model-tier or the
-    # in-app picker, but auto-detection no longer steers anyone away from e4b.
-    tier = 'medium'
-    reason = (
-        f"{ram_gb:.0f} GB RAM detected — using gemma4:e4b, the model the "
-        "analysis pipeline is tuned for."
-    )
+    # in-app picker, but auto-detection no longer steers anyone away from
+    # e4b — with ONE exception: on <12 GB machines (8 GB Macs) e4b plus the
+    # transcription/diarization stack exhausts unified memory and corrupts
+    # the display compositor (memory_budget 'tight' class), so those get
+    # e2b. The user can still opt up via the picker.
+    if ram_gb < 12:
+        # e2b is the SMALLEST gemma4 tag we ship (8.4 GB download; MoE with
+        # ~2B active params, so resident footprint is well under the file
+        # size — but NOT yet measured on real 8 GB hardware; see
+        # NEXT_REBUILD_NOTES). Least-bad choice, not a verified fit.
+        tier = 'small'
+        reason = (
+            f"{ram_gb:.0f} GB RAM detected — using gemma4:e2b, the smallest "
+            "variant. Larger models available in settings."
+        )
+    else:
+        tier = 'medium'
+        reason = (
+            f"{ram_gb:.0f} GB RAM detected — using gemma4:e4b, the model the "
+            "analysis pipeline is tuned for."
+        )
 
     variant, download_size, description = GEMMA4_VARIANTS[tier]
     return {

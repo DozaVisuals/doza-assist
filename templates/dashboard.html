@@ -109,7 +109,29 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
         <style>@keyframes spin { to { transform: rotate(360deg); } }
         /* Dashed drop-zone affordance: the card accepts drag-and-drop, so it
            reads as a drop target at rest and brightens on hover/drag. */
-        #dropCard:hover { border-color: var(--accent); }</style>
+        #dropCard:hover { border-color: var(--accent); }
+
+        /* Drag-and-drop organizing: while a project is mid-drag, every
+           drop target (folder groups + the Unfiled zone) shows a dashed
+           outline; the hovered one lights up. */
+        body.is-dragging-project .folder-group,
+        body.is-dragging-project #unfiledDropZone {
+            outline: 2px dashed var(--border, rgba(128,128,128,0.45));
+            outline-offset: 2px;
+            border-radius: 8px;
+        }
+        .folder-group.drag-over,
+        #unfiledDropZone.drag-over {
+            outline-color: var(--accent, #7c5cff);
+            background: var(--accent-dim, rgba(124, 92, 255, 0.08));
+        }
+        .unfiled-drop-hint {
+            display: none;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            padding: 0.5rem 0.25rem;
+        }
+        body.is-dragging-project .unfiled-drop-hint { display: block; }</style>
 
         <!-- Multiple matches selector -->
         <div id="multipleMatches" style="display: none; margin-top: 0.75rem; padding: 0.75rem; background: var(--bg-input); border-radius: var(--radius);">
@@ -266,14 +288,20 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
     </div>
     {% endfor %}
 
-    {% if unfiled %}
-    {% if folders %}
-    <div style="margin-top: 0.5rem; margin-bottom: 0.5rem; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; padding-left: 0.25rem;">Unfiled</div>
-    {% endif %}
-    <div class="project-list">
-        {% for p in unfiled %}
-        {% include '_project_row.html' %}
-        {% endfor %}
+    {# Rendered whenever folders exist — even with zero unfiled projects —
+       so there is always a drop target for dragging a project OUT of a
+       folder. The hint row only becomes visible mid-drag (CSS). #}
+    {% if unfiled or folders %}
+    <div id="unfiledDropZone">
+        {% if folders %}
+        <div style="margin-top: 0.5rem; margin-bottom: 0.5rem; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; padding-left: 0.25rem;">Unfiled</div>
+        {% endif %}
+        <div class="project-list">
+            {% for p in unfiled %}
+            {% include '_project_row.html' %}
+            {% endfor %}
+        </div>
+        <div class="unfiled-drop-hint">Drop here to remove from its folder</div>
     </div>
     {% endif %}
 
@@ -786,7 +814,7 @@ function confirmNewFolder() {
             <div style="display: flex; align-items: center; gap: 0.6rem;">
                 <svg class="folder-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M4 2l4 4-4 4"/></svg>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
-                <span class="folder-name">${name}</span>
+                <span class="folder-name"></span>
                 <span class="folder-count">0</span>
             </div>
         </div>
@@ -798,22 +826,12 @@ function confirmNewFolder() {
     const insertBefore = firstFolder || document.querySelector('.project-list') || document.querySelector('.empty-state');
     insertBefore.parentNode.insertBefore(group, insertBefore);
 
-    // Enable drop on the new folder
-    const header = group.querySelector('.folder-header');
-    header.addEventListener('dragover', (e) => { e.preventDefault(); header.style.background = 'var(--accent-dim)'; });
-    header.addEventListener('dragleave', () => { header.style.background = ''; });
-    header.addEventListener('drop', (e) => {
-        e.preventDefault();
-        header.style.background = '';
-        const projectId = e.dataTransfer.getData('text/plain');
-        if (projectId && !e.dataTransfer.files.length) {
-            fetch(`/project/${projectId}/move`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ folder: name }),
-            }).then(() => location.reload());
-        }
-    });
+    // textContent, not template interpolation — a folder name with quotes
+    // or angle brackets must render as text, never markup.
+    group.querySelector('.folder-name').textContent = name;
+
+    // Same full-surface drop wiring as every server-rendered group.
+    wireFolderDropTarget(group);
 }
 
 function toggleFolder(header) {
@@ -965,31 +983,48 @@ function revealProjectInFinder(projectId) {
 function dragProject(e, projectId) {
     e.dataTransfer.setData('text/plain', projectId);
     e.dataTransfer.effectAllowed = 'move';
+    // Light up every drop target for the duration of the drag.
+    document.body.classList.add('is-dragging-project');
+    e.target.addEventListener('dragend', () => {
+        document.body.classList.remove('is-dragging-project');
+        document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+    }, { once: true });
 }
 
-// Allow folders to accept drops
-document.querySelectorAll('.folder-group').forEach(group => {
-    const header = group.querySelector('.folder-header');
-    header.addEventListener('dragover', (e) => {
+// ── Drag-and-drop organizing ──
+// Every folder group — server-rendered or created client-side by the New
+// Folder button — accepts drops on its ENTIRE surface (the old header-only
+// target was easy to miss), and the Unfiled zone accepts drops to pull a
+// project back out of a folder. Collection side needs no extra wiring: the
+// dashboard's Collection buttons re-derive from live folder membership on
+// the post-move reload, and an already-built collection detects membership
+// drift itself ("Rebuild — projects changed" on its page).
+function wireDropTarget(el, folderName) {
+    el.addEventListener('dragover', (e) => {
         e.preventDefault();
-        header.style.background = 'var(--accent-dim)';
+        e.dataTransfer.dropEffect = 'move';
+        el.classList.add('drag-over');
     });
-    header.addEventListener('dragleave', () => {
-        header.style.background = '';
+    el.addEventListener('dragleave', (e) => {
+        if (!el.contains(e.relatedTarget)) el.classList.remove('drag-over');
     });
-    header.addEventListener('drop', (e) => {
+    el.addEventListener('drop', (e) => {
         e.preventDefault();
-        header.style.background = '';
+        el.classList.remove('drag-over');
         const projectId = e.dataTransfer.getData('text/plain');
         if (projectId && !e.dataTransfer.files.length) {
-            fetch(`/project/${projectId}/move`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ folder: group.dataset.folder }),
-            }).then(() => location.reload());
+            doMove(projectId, typeof folderName === 'function' ? folderName() : folderName);
         }
     });
-});
+}
+function wireFolderDropTarget(group) {
+    wireDropTarget(group, () => group.dataset.folder);
+}
+document.querySelectorAll('.folder-group').forEach(wireFolderDropTarget);
+{
+    const unfiledZone = document.getElementById('unfiledDropZone');
+    if (unfiledZone) wireDropTarget(unfiledZone, '');
+}
 
 // ── Project Actions (from list) ──
 function renameProject(id, btn) {

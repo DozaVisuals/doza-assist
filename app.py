@@ -6337,14 +6337,48 @@ if __name__ == '__main__':
     from ai_analysis import warmup_ollama
 
     def _boot_warmup():
-        # Memory governor: 8 GB machines skip the boot warm-load (the model
-        # would be evicted by the first transcription anyway); 16 GB holds
-        # the gate while loading so a first-launch transcription can't
-        # start mid-warm-load.
+        # Memory governor: boot-time warm-loads use the strict boot policy
+        # (comfortable only) — the same gate as the pyannote boot preload.
+        # On 16 GB the eager gemma load at every Flask spawn was the FX
+        # tester's meltdown: on a first run it lands on top of the
+        # just-downloaded model page cache and starves WindowServer of
+        # unified memory (compositor garbage, frozen macOS UI). Interactive
+        # prewarms (project open, chat) keep prewarm_slot() semantics; the
+        # cost here is a 4-12s first-chat cold start on low/tight machines.
+        try:
+            from memory_budget import allow_boot_preload
+            boot_allowed = allow_boot_preload()
+        except Exception:
+            # OSS/dev checkouts without the governor keep today's behavior —
+            # but say so LOUDLY: on a packaged machine this line firing means
+            # memory_budget itself is broken/missing (e.g. a partial in-place
+            # patch) and the whole governor is dead, not just this gate.
+            boot_allowed = True
+            print('[warmup] boot gate unavailable — failing open (governor '
+                  'missing or broken; expected only on OSS/dev checkouts)',
+                  flush=True)
+        if not boot_allowed:
+            print('[warmup] boot warm-load skipped by memory budget', flush=True)
+            return
         with _prewarm_admission() as admitted:
             if not admitted:
                 print('[warmup] skipped by memory budget', flush=True)
                 return
+            t0 = time.monotonic()
             warmup_ollama()
+            # The completion line must not be hostage to the telemetry call:
+            # a /api/ps hiccup would otherwise erase the 'done' evidence and
+            # make a finished warm-load log-indistinguishable from a hung one.
+            resident = ''
+            try:
+                import requests as _req
+                from ollama_url import ollama_base_url
+                ps = _req.get(f'{ollama_base_url()}/api/ps', timeout=5).json()
+                mb = sum(int(m.get('size', 0)) for m in ps.get('models', [])) // (1024 * 1024)
+                resident = f', resident={mb} MB'
+            except Exception:
+                pass
+            print(f'[warmup] boot warm-load done in {time.monotonic() - t0:.1f}s'
+                  f'{resident}', flush=True)
     threading.Thread(target=_boot_warmup, daemon=True).start()
     app.run(host='127.0.0.1', port=port, debug=False, threaded=True)

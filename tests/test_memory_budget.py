@@ -480,3 +480,70 @@ def test_invalidate_prewarm_none_clears_all():
     ai_analysis.invalidate_prewarm(None)
     with ai_analysis._PREWARM_LOCK:
         assert not ai_analysis._PREWARM_STATE
+
+
+# ── boot warm-load policy (FX round-3 incident, ported to direct) ─────
+
+def test_boot_preload_policy_denies_low_and_tight(monkeypatch):
+    """A 16 GB machine must NOT warm-load gemma at boot.
+
+    FX tester round 3 (M1 16 GB, macOS 15.7.8, clean config): the boot
+    warm-load fired on every Flask spawn via prewarm_slot(), which only
+    refuses 'tight'. On a first run the 9.6 GB load landed on top of the
+    just-downloaded model page cache and starved WindowServer. Boot-time
+    loads use allow_boot_preload() — comfortable only.
+    """
+    for gb, allowed in ((8, False), (16, False), (23.9, False), (24, True), (64, True)):
+        _force(monkeypatch, gb)
+        assert memory_budget.allow_boot_preload() is allowed, f'{gb} GB'
+
+
+def test_boot_warmup_is_gated_by_allow_boot_preload_before_admission():
+    """Pin app.py's _boot_warmup structure: the strict boot policy gate
+    must run BEFORE the permissive _prewarm_admission() context, and its
+    result must actually gate the warm-load (mutation-hardened).
+    """
+    import ast
+    src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'app.py')
+    tree = ast.parse(open(src_path).read())
+
+    boot_fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == '_boot_warmup':
+            boot_fn = node
+            break
+    assert boot_fn is not None, '_boot_warmup missing from app.py'
+
+    gate_line = None
+    gate_var = None
+    admission_line = None
+    for node in ast.walk(boot_fn):
+        if isinstance(node, ast.Call):
+            name = getattr(node.func, 'id', '') or getattr(node.func, 'attr', '')
+            if name == 'allow_boot_preload' and gate_line is None:
+                gate_line = node.lineno
+            if name == '_prewarm_admission' and admission_line is None:
+                admission_line = node.lineno
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            call_name = (getattr(node.value.func, 'id', '')
+                         or getattr(node.value.func, 'attr', ''))
+            if (call_name == 'allow_boot_preload' and node.targets
+                    and isinstance(node.targets[0], ast.Name)):
+                gate_var = node.targets[0].id
+    assert gate_line is not None, 'boot warm-load no longer consults allow_boot_preload'
+    assert admission_line is not None, '_prewarm_admission call vanished — restructure the pin'
+    assert gate_line < admission_line, 'strict boot gate must run before the permissive admission'
+
+    assert gate_var is not None, 'gate result no longer bound to a variable — restructure the pin'
+    enforcing_if = False
+    for node in ast.walk(boot_fn):
+        if not isinstance(node, ast.If) or node.lineno >= admission_line:
+            continue
+        test_names = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+        has_return = any(isinstance(n, ast.Return)
+                         for stmt in node.body for n in ast.walk(stmt))
+        if gate_var in test_names and has_return:
+            enforcing_if = True
+            break
+    assert enforcing_if, ('the allow_boot_preload result no longer gates the warm-load '
+                          '(no early-return `if` on it before the admission) — the P0 is back')

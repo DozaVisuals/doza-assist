@@ -1,0 +1,412 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+
+<fcpxml version="1.14">
+    <resources>
+        <format id="r1" name="FFVideoFormat3840x2160p25" frameDuration="100/2500s" width="3840" height="2160" colorSpace="1-1-1 (Rec. 709)"/>
+        <media id="r2" name="MultiCam">
+            <multicam format="r1" tcStart="0s" tcFormat="NDF">
+                <mc-angle name="1" angleID="ANGLE_1">
+                    <asset-clip ref="r3" offset="0s" name="SRC_001" duration="14460000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="14460000/25000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="14460000/25000s" start="3600s" duration="2285000/25000s"/>
+                    <asset-clip ref="r4" offset="16745000/25000s" name="SRC_002" duration="7416000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <adjust-volume amount="12dB"/>
+                        <keyword start="0s" duration="7416000/25000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="24161000/25000s" start="3600s" duration="1590000/25000s"/>
+                    <asset-clip ref="r5" offset="25751000/25000s" name="SRC_003" duration="41916000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="41916000/25000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="67667000/25000s" start="3600s" duration="3944000/25000s"/>
+                    <asset-clip ref="r6" offset="71611000/25000s" name="SRC_004" duration="14952000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="14952000/25000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="86563000/25000s" start="3600s" duration="6529000/25000s"/>
+                    <asset-clip ref="r7" offset="93092000/25000s" name="SRC_005" duration="8508000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="8508000/25000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="4064s" start="3600s" duration="507s"/>
+                    <asset-clip ref="r8" offset="4571s" name="SRC_006" duration="23472000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="23472000/25000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="137747000/25000s" start="3600s" duration="7844000/25000s"/>
+                    <asset-clip ref="r9" offset="145591000/25000s" name="SRC_007" duration="28644000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="28644000/25000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="174235000/25000s" start="3600s" duration="3722000/25000s"/>
+                    <asset-clip ref="r10" offset="177957000/25000s" name="SRC_008" duration="7260000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="7260000/25000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="185217000/25000s" start="3600s" duration="24604000/25000s"/>
+                    <asset-clip ref="r11" offset="209821000/25000s" name="SRC_009" duration="9432000/50000s" format="r12" tcFormat="NDF" audioRole="dialogue">
+                        <conform-rate scaleEnabled="0" srcFrameRate="50"/>
+                        <keyword start="0s" duration="9432000/50000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="429074000/50000s" start="3600s" duration="10690000/50000s"/>
+                    <asset-clip ref="r13" offset="439764000/50000s" name="SRC_010" duration="25296000/50000s" format="r12" tcFormat="NDF" audioRole="dialogue">
+                        <conform-rate scaleEnabled="0" srcFrameRate="50"/>
+                        <keyword start="0s" duration="25296000/50000s" value="1"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="465060000/50000s" start="3600s" duration="12772000/50000s"/>
+                    <asset-clip ref="r14" offset="477832000/50000s" name="SRC_011" duration="13968000/50000s" format="r12" tcFormat="NDF" audioRole="dialogue">
+                        <conform-rate scaleEnabled="0" srcFrameRate="50"/>
+                        <keyword start="0s" duration="13968000/50000s" value="1"/>
+                    </asset-clip>
+                </mc-angle>
+                <mc-angle name="2" angleID="ANGLE_2">
+                    <asset-clip ref="r15" offset="0s" name="SRC_012" duration="14460000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="14460000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="14460000/25000s" start="3600s" duration="2711000/25000s"/>
+                    <asset-clip ref="r16" offset="17171000/25000s" name="SRC_013" duration="6864000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="6864000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="24035000/25000s" start="3600s" duration="1716000/25000s"/>
+                    <asset-clip ref="r17" offset="25751000/25000s" name="SRC_014" duration="41916000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="41916000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="67667000/25000s" start="3600s" duration="3932000/25000s"/>
+                    <asset-clip ref="r18" offset="71599000/25000s" name="SRC_015" duration="14892000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="14892000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="86491000/25000s" start="3600s" duration="6601000/25000s"/>
+                    <asset-clip ref="r19" offset="93092000/25000s" name="SRC_016" duration="8508000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="8508000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="4064s" start="3600s" duration="507s"/>
+                    <asset-clip ref="r20" offset="4571s" name="SRC_017" duration="23472000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="23472000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="137747000/25000s" start="3600s" duration="7844000/25000s"/>
+                    <asset-clip ref="r21" offset="145591000/25000s" name="SRC_018" duration="28644000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="28644000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="174235000/25000s" start="3600s" duration="3722000/25000s"/>
+                    <asset-clip ref="r22" offset="177957000/25000s" name="SRC_019" duration="7260000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="7260000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="185217000/25000s" start="3600s" duration="24604000/25000s"/>
+                    <asset-clip ref="r23" offset="209821000/25000s" name="SRC_020" duration="4716000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="4716000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="214537000/25000s" start="3600s" duration="5345000/25000s"/>
+                    <asset-clip ref="r24" offset="219882000/25000s" name="SRC_021" duration="12672000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="12672000/25000s" value="2"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="232554000/25000s" start="3600s" duration="6362000/25000s"/>
+                    <asset-clip ref="r25" offset="238916000/25000s" name="SRC_022" duration="6984000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="6984000/25000s" value="2"/>
+                    </asset-clip>
+                </mc-angle>
+                <mc-angle name="3" angleID="ANGLE_3">
+                    <asset-clip ref="r26" offset="0s" name="SRC_023" duration="14460000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="14460000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="14460000/25000s" start="3600s" duration="2470000/25000s"/>
+                    <asset-clip ref="r27" offset="16930000/25000s" name="SRC_024" duration="14304000/50000s" format="r12" tcFormat="NDF" audioRole="dialogue">
+                        <conform-rate scaleEnabled="0" srcFrameRate="50"/>
+                        <adjust-volume amount="12dB"/>
+                        <keyword start="0s" duration="14304000/50000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="48164000/50000s" start="3600s" duration="3338000/50000s"/>
+                    <asset-clip ref="r28" offset="51502000/50000s" name="SRC_025" duration="41916000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="41916000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="135334000/50000s" start="3600s" duration="7864000/50000s"/>
+                    <asset-clip ref="r29" offset="143198000/50000s" name="SRC_026" duration="14964000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="14964000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="173126000/50000s" start="3600s" duration="13058000/50000s"/>
+                    <asset-clip ref="r30" offset="186184000/50000s" name="SRC_027" duration="8508000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="8508000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="4064s" start="3600s" duration="507s"/>
+                    <asset-clip ref="r31" offset="4571s" name="SRC_028" duration="23472000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="23472000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="275494000/50000s" start="3600s" duration="15688000/50000s"/>
+                    <asset-clip ref="r32" offset="291182000/50000s" name="SRC_029" duration="28644000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="28644000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="348470000/50000s" start="3600s" duration="7444000/50000s"/>
+                    <asset-clip ref="r33" offset="355914000/50000s" name="SRC_030" duration="7260000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="7260000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="370434000/50000s" start="3600s" duration="49208000/50000s"/>
+                    <asset-clip ref="r34" offset="419642000/50000s" name="SRC_031" duration="4716000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="4716000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="429074000/50000s" start="3600s" duration="10690000/50000s"/>
+                    <asset-clip ref="r35" offset="439764000/50000s" name="SRC_032" duration="12624000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="12624000/25000s" value="3"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="465012000/50000s" start="3600s" duration="12820000/50000s"/>
+                    <asset-clip ref="r36" offset="477832000/50000s" name="SRC_033" duration="6984000/25000s" tcFormat="NDF" audioRole="dialogue">
+                        <keyword start="0s" duration="6984000/25000s" value="3"/>
+                    </asset-clip>
+                </mc-angle>
+                <mc-angle name="Ton" angleID="ANGLE_4">
+                    <gap name="Gap" offset="0s" start="3600s" duration="3081600/720000s"/>
+                    <asset-clip ref="r37" offset="3081600/720000s" name="SRC_034" start="251831711/720000s" duration="415608289/720000s" audioRole="dialogue">
+                        <keyword start="0s" duration="44496064/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="418689889/720000s" start="3600s" duration="76727711/720000s"/>
+                    <asset-clip ref="r39" offset="495417600/720000s" name="SRC_035" start="57181283/720000s" duration="196790400/720000s" audioRole="dialogue">
+                        <adjust-volume amount="12dB"/>
+                        <keyword start="0s" duration="19615680/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="692208000/720000s" start="3600s" duration="29664000/720000s"/>
+                    <asset-clip ref="r40" offset="721872000/720000s" name="SRC_036" start="142424700/720000s" duration="1226937600/720000s" audioRole="dialogue">
+                        <keyword start="0s" duration="159960512/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="1948809600/720000s" start="3600s" duration="113241600/720000s"/>
+                    <asset-clip ref="r40" offset="2062051200/720000s" name="SRC_036" start="1482603900/720000s" duration="430963200/720000s" audioRole="dialogue">
+                        <keyword start="0s" duration="159960512/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="2493014400/720000s" start="3600s" duration="188035200/720000s"/>
+                    <asset-clip ref="r40" offset="2681049600/720000s" name="SRC_036" start="2101602300/720000s" duration="245030400/720000s" audioRole="dialogue">
+                        <keyword start="0s" duration="159960512/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="4064s" start="3600s" duration="507s"/>
+                    <asset-clip ref="r41" offset="4571s" name="SRC_037" start="763777864/720000s" duration="673457336/720000s" audioRole="dialogue">
+                        <keyword start="0s" duration="95816624/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="3964577336/720000s" start="3600s" duration="223720264/720000s"/>
+                    <asset-clip ref="r42" offset="4188297600/720000s" name="SRC_038" start="102845611/720000s" duration="829670400/720000s" audioRole="dialogue">
+                        <keyword start="0s" duration="80328448/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="5017968000/720000s" start="3600s" duration="1024876800/720000s"/>
+                    <asset-clip ref="r43" offset="6042844800/720000s" name="SRC_039" start="43847606/720000s" duration="135820800/720000s" audioRole="dialogue">
+                        <keyword start="0s" duration="41742960/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="6178665600/720000s" start="3600s" duration="153561600/720000s"/>
+                    <asset-clip ref="r43" offset="6332227200/720000s" name="SRC_039" start="243360280/720000s" duration="364636800/720000s" audioRole="dialogue">
+                        <keyword start="0s" duration="41742960/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                    <gap name="Gap" offset="6696864000/720000s" start="3600s" duration="183916800/720000s"/>
+                    <asset-clip ref="r44" offset="6880780800/720000s" name="SRC_040" start="176800/2500s" duration="70343920/240000s" format="r45" audioRole="dialogue">
+                        <keyword start="0s" duration="17463344/48000s" value="Audio"/>
+                        <audio-channel-source srcCh="1" role="dialogue.dialogue-1">
+                            <adjust-voiceIsolation amount="25"/>
+                        </audio-channel-source>
+                        <filter-audio ref="r38" name="Compressor"/>
+                    </asset-clip>
+                </mc-angle>
+            </multicam>
+        </media>
+        <asset id="r3" name="SRC_001" start="0s" duration="52056000/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_001.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r4" name="SRC_002" start="0s" duration="26697600/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_002.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r5" name="SRC_003" start="0s" duration="150897600/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_003.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r6" name="SRC_004" start="0s" duration="53827200/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_004.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r7" name="SRC_005" start="0s" duration="30628800/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_005.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r8" name="SRC_006" start="0s" duration="84499200/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_006.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r9" name="SRC_007" start="0s" duration="103118400/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_007.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r10" name="SRC_008" start="0s" duration="26136000/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_008.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r11" name="SRC_009" start="0s" duration="9432000/50000s" hasVideo="1" format="r12" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_009.MP4">
+                </media-rep>
+            </asset>
+        <format id="r12" name="FFVideoFormat3840x2160p50" frameDuration="100/5000s" width="3840" height="2160" colorSpace="1-1-1 (Rec. 709)"/>
+        <asset id="r13" name="SRC_010" start="0s" duration="25296000/50000s" hasVideo="1" format="r12" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_010.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r14" name="SRC_011" start="0s" duration="13968000/50000s" hasVideo="1" format="r12" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_011.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r15" name="SRC_012" start="0s" duration="52056000/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_012.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r16" name="SRC_013" start="0s" duration="24710400/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_013.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r17" name="SRC_014" start="0s" duration="150897600/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_014.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r18" name="SRC_015" start="0s" duration="53611200/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_015.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r19" name="SRC_016" start="0s" duration="30628800/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_016.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r20" name="SRC_017" start="0s" duration="84499200/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_017.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r21" name="SRC_018" start="0s" duration="103118400/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_018.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r22" name="SRC_019" start="0s" duration="26136000/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_019.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r23" name="SRC_020" start="0s" duration="16977600/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_020.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r24" name="SRC_021" start="0s" duration="45619200/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_021.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r25" name="SRC_022" start="0s" duration="25142400/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_022.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r26" name="SRC_023" start="0s" duration="52056000/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_023.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r27" name="SRC_024" start="0s" duration="14304000/50000s" hasVideo="1" format="r12" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_024.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r28" name="SRC_025" start="0s" duration="150897600/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_025.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r29" name="SRC_026" start="0s" duration="53870400/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_026.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r30" name="SRC_027" start="0s" duration="30628800/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_027.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r31" name="SRC_028" start="0s" duration="84499200/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_028.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r32" name="SRC_029" start="0s" duration="103118400/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_029.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r33" name="SRC_030" start="0s" duration="26136000/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_030.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r34" name="SRC_031" start="0s" duration="16977600/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_031.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r35" name="SRC_032" start="0s" duration="45446400/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_032.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r36" name="SRC_033" start="0s" duration="25142400/90000s" hasVideo="1" format="r1" hasAudio="1" videoSources="1" audioSources="1" audioChannels="2" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_033.MP4">
+                </media-rep>
+            </asset>
+        <asset id="r37" name="SRC_034" start="0s" duration="44496064/48000s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_034.wav">
+                </media-rep>
+            </asset>
+        <effect id="r38" name="Compressor" uid="AudioUnit: 0x617566780000009a454d4147"/>
+        <asset id="r39" name="SRC_035" start="0s" duration="19615680/48000s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_035.wav">
+                </media-rep>
+            </asset>
+        <asset id="r40" name="SRC_036" start="0s" duration="159960512/48000s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_036.wav">
+                </media-rep>
+            </asset>
+        <asset id="r41" name="SRC_037" start="0s" duration="95816624/48000s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_037.wav">
+                </media-rep>
+            </asset>
+        <asset id="r42" name="SRC_038" start="0s" duration="80328448/48000s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_038.wav">
+                </media-rep>
+            </asset>
+        <asset id="r43" name="SRC_039" start="0s" duration="41742960/48000s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_039.wav">
+                </media-rep>
+            </asset>
+        <asset id="r44" name="SRC_040" start="0s" duration="17463344/48000s" hasAudio="1" audioSources="1" audioChannels="1" audioRate="48000">
+            <media-rep kind="original-media" src="file:///Volumes/EditDrive/MultiSeg/SRC_040.wav">
+                </media-rep>
+            </asset>
+        <format id="r45" name="FFVideoFormatRateUndefined"/>
+    </resources>
+    <library location="file:///Users/t/Movies/Fixture.fcpbundle/">
+        <event name="Fixture">
+            <project name="MultiSeg MC">
+                <sequence format="r1" duration="24624300/2500s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <mc-clip ref="r2" offset="0s" name="MultiCam" duration="24624300/2500s">
+                            <mc-source angleID="ANGLE_4" srcEnable="all"/>
+                        </mc-clip>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+        </library>
+</fcpxml>

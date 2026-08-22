@@ -187,6 +187,11 @@ class SegmentAudioSource:
     is_muted: bool = False
     container_tc_start_fraction: Fraction = Fraction(0)
     asset_start_fraction: Fraction = Fraction(0)
+    # Duration of this source's asset-clip within its container (zero-based
+    # container time). Zero = unknown/whole-file — the legacy single-source
+    # meaning; non-zero only matters when a segment carries multiple parts
+    # (a segmented multicam angle), where it bounds each part's render window.
+    part_duration_fraction: Fraction = Fraction(0)
 
     def to_dict(self) -> dict:
         def _frac(f: Fraction) -> str:
@@ -200,6 +205,7 @@ class SegmentAudioSource:
             "is_muted": self.is_muted,
             "container_tc_start_fraction": _frac(self.container_tc_start_fraction),
             "asset_start_fraction": _frac(self.asset_start_fraction),
+            "part_duration_fraction": _frac(self.part_duration_fraction),
         }
 
 
@@ -233,6 +239,14 @@ class SpineSegment:
     # projects — but they play as black/silence, so they are never rendered,
     # transcribed, or matched by the writer's select locator.
     enabled: bool = True
+    # Every source file the segment plays, in container order. Multicam angles
+    # built from many stop-start camera files (the camera recording in takes)
+    # carry one entry per file overlapping the mc-clip's window; every other
+    # segment kind (and single-file angles) carries exactly one, identical to
+    # ``audio_source``. Parts hang UNDER the segment — never extra
+    # SpineSegments — because the parser walk and the writer's original-spine
+    # indexer are under a hard 1:1 index-lockstep contract.
+    audio_parts: List[SegmentAudioSource] = field(default_factory=list)
 
     @property
     def offset_seconds(self) -> float:
@@ -265,6 +279,10 @@ class SpineSegment:
         }
         if self.audio_source is not None:
             d["audio_source"] = self.audio_source.to_dict()
+        if len(self.audio_parts) > 1:
+            # Only genuinely-segmented sources serialize parts — single-part
+            # segments keep the exact meta.json shape existing projects have.
+            d["audio_parts"] = [p.to_dict() for p in self.audio_parts]
         return d
 
 
@@ -330,18 +348,23 @@ class ParsedFCPXML:
         return float(Fraction(fd.denominator, fd.numerator))
 
     def unique_audio_sources(self) -> List[SegmentAudioSource]:
-        """Distinct audio sources across all segments, keyed by (path, asset_id)."""
+        """Distinct audio sources across all segments, keyed by (path, asset_id).
+
+        Includes every part of a segmented multicam angle — callers use this
+        to validate/locate the referenced media, and a segmented angle plays
+        all of its files, not just the representative one.
+        """
         seen = set()
         out: List[SegmentAudioSource] = []
         for seg in self.spine_segments:
-            src = seg.audio_source
-            if src is None:
-                continue
-            key = (src.path, src.asset_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(src)
+            sources = seg.audio_parts or (
+                [seg.audio_source] if seg.audio_source is not None else [])
+            for src in sources:
+                key = (src.path, src.asset_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(src)
         return out
 
     def to_metadata_dict(self) -> dict:
@@ -496,21 +519,30 @@ def _resolve_multicam_audio(
     container_ref: str,
     angle_id: Optional[str],
     segment_start: Fraction = Fraction(0),
-) -> dict:
-    """Resolve the active audio angle within a ``<media>/<multicam>`` → asset path.
+    segment_duration: Fraction = Fraction(0),
+) -> tuple:
+    """Resolve the active audio angle within a ``<media>/<multicam>`` → asset paths.
 
-    When a multicam angle contains multiple asset-clips (e.g. several camera
-    files stitched into one angle), ``segment_start`` — the mc-clip's ``start``
-    attribute — is used to pick the asset-clip whose time range covers that
-    position within the multicam container.
+    Returns ``(primary, parts)`` — dicts describing the angle's asset-clips.
+    ``parts`` is every asset-clip whose container range intersects the
+    mc-clip's window ``[segment_start, segment_start + segment_duration)``, in
+    container order: a multicam angle built from many stop-start camera files
+    (the camera recording in takes) plays ALL of them across the segment, and
+    resolving just one transcribed ~10 minutes of a 2h44 interview
+    (2026-08-21 field bug). ``primary`` is the part covering the window start
+    — the same clip the previous single-pick behavior chose — else the first
+    overlapping part; single-file angles yield exactly one part identical to
+    the old result.
 
     ``segment_start`` is in the multicam's timecode space, which is offset by
     the multicam's ``tcStart`` (jam-synced cameras and time-of-day TC make this
     non-zero — e.g. 7464.48s for an interview that started at 02:04:24:11). The
     asset-clips inside the multicam are positioned in zero-based container
     time, so the comparison must subtract ``tcStart`` first; otherwise every
-    spine clip lands past every asset-clip range and the loop falls through to
-    ``all_clips[0]``, sending every segment to the first .MOV's audio.
+    spine clip lands past every asset-clip range and the window matches
+    nothing, sending every segment to the first .MOV's audio via the
+    fallback. A non-positive ``segment_duration`` (defensive: the DTD requires
+    one on spine clips) degrades to the legacy covering-clip-else-first pick.
     """
     media_el = resource_by_id.get(container_ref)
     if media_el is None:
@@ -579,40 +611,68 @@ def _resolve_multicam_audio(
             "audio-only angle formats are not supported"
         )
 
-    # When an angle has multiple asset-clips, pick the one whose range covers
-    # the segment's start position within the multicam container. Compare in
-    # zero-based container time, not multicam-tc space.
+    # Collect every asset-clip intersecting the mc-clip's window, in container
+    # order. Compare in zero-based container time, not multicam-tc space.
     zero_based_start = segment_start - mcam_tc_start
-    asset_clip = all_clips[0]
-    if len(all_clips) > 1:
+    window_hi = zero_based_start + segment_duration
+
+    def _clip_info(ac) -> dict:
+        asset_ref = ac.get("ref")
+        asset_el = resource_by_id.get(asset_ref)
+        if asset_el is None or asset_el.tag != "asset":
+            raise ParseError(
+                f"asset-clip ref {asset_ref!r} does not resolve to an <asset>")
+        return {
+            "path": _resolve_asset_path(asset_el),
+            "asset_id": asset_ref,
+            "angle_offset": _strict_parse_rational(
+                ac.get("offset"), what="multicam asset-clip offset",
+            ),
+            "angle_start": _strict_parse_rational(
+                ac.get("start"), what="multicam asset-clip start",
+            ),
+            "container_tc_start": mcam_tc_start,
+            "asset_start": _safe_parse_rational(
+                asset_el.get("start"), what=f"asset {asset_ref!r} start",
+            ),
+            "part_duration": _safe_parse_rational(
+                ac.get("duration"), what="multicam asset-clip duration",
+            ),
+        }
+
+    parts = []
+    if segment_duration > 0:
         for ac in all_clips:
             ac_offset = _safe_parse_rational(ac.get("offset"), what="asset-clip offset")
             ac_duration = _safe_parse_rational(ac.get("duration"), what="asset-clip duration")
             if ac_duration <= 0:
                 continue
-            if ac_offset <= zero_based_start < ac_offset + ac_duration:
-                asset_clip = ac
-                break
+            if ac_offset + ac_duration <= zero_based_start or ac_offset >= window_hi:
+                continue
+            parts.append(_clip_info(ac))
 
-    asset_ref = asset_clip.get("ref")
-    asset_el = resource_by_id.get(asset_ref)
-    if asset_el is None or asset_el.tag != "asset":
-        raise ParseError(f"asset-clip ref {asset_ref!r} does not resolve to an <asset>")
+    if not parts:
+        # Legacy fallback (also the whole path when segment_duration is
+        # unusable): the clip covering the window start, else the first.
+        asset_clip = all_clips[0]
+        if len(all_clips) > 1:
+            for ac in all_clips:
+                ac_offset = _safe_parse_rational(ac.get("offset"), what="asset-clip offset")
+                ac_duration = _safe_parse_rational(ac.get("duration"), what="asset-clip duration")
+                if ac_duration <= 0:
+                    continue
+                if ac_offset <= zero_based_start < ac_offset + ac_duration:
+                    asset_clip = ac
+                    break
+        parts = [_clip_info(asset_clip)]
 
-    return {
-        "path": _resolve_asset_path(asset_el),
-        "asset_id": asset_ref,
-        "angle_offset": _strict_parse_rational(
-            asset_clip.get("offset"), what="multicam asset-clip offset",
-        ),
-        "angle_start": _strict_parse_rational(
-            asset_clip.get("start"), what="multicam asset-clip start",
-        ),
-        "container_tc_start": mcam_tc_start,
-        "asset_start": _safe_parse_rational(
-            asset_el.get("start"), what=f"asset {asset_ref!r} start",
-        ),
-    }
+    primary = next(
+        (p for p in parts
+         if p["angle_offset"] <= zero_based_start
+         < p["angle_offset"] + p["part_duration"]),
+        parts[0],
+    )
+    return primary, parts
 
 
 def _sync_source_dialogue_muted(sync_clip_el) -> bool:
@@ -929,8 +989,14 @@ def _resolve_clip_audio(clip_el, resource_by_id: dict) -> dict:
 
 def _resolve_segment_audio(
     child, resource_by_id: dict, mc_sources: List[dict]
-) -> SegmentAudioSource:
-    """Resolve the audio source for a single spine segment."""
+) -> tuple:
+    """Resolve the audio for a single spine segment.
+
+    Returns ``(audio_source, audio_parts)``. ``audio_parts`` lists every
+    source file the segment plays in container order — multiple entries only
+    for a segmented multicam angle (many stop-start camera files under one
+    mc-clip); every other kind returns exactly ``[audio_source]``.
+    """
     if child.tag == "mc-clip":
         angle_id = None
         for ms in mc_sources:
@@ -942,56 +1008,50 @@ def _resolve_segment_audio(
         segment_start = _strict_parse_rational(
             child.get("start"), what="mc-clip start",
         )
-        info = _resolve_multicam_audio(
+        segment_duration = _strict_parse_rational(
+            child.get("duration"), what="mc-clip duration",
+        )
+        primary_info, part_infos = _resolve_multicam_audio(
             resource_by_id, child.get("ref") or "", angle_id,
             segment_start=segment_start,
+            segment_duration=segment_duration,
         )
-        return SegmentAudioSource(
-            path=info["path"],
-            asset_id=info["asset_id"],
-            angle_offset_fraction=info["angle_offset"],
-            angle_start_fraction=info["angle_start"],
-            active_audio_angle_id=angle_id,
-            is_muted=False,
-            container_tc_start_fraction=info["container_tc_start"],
-            asset_start_fraction=info["asset_start"],
-        )
+
+        def _mc_source(info: dict) -> SegmentAudioSource:
+            return SegmentAudioSource(
+                path=info["path"],
+                asset_id=info["asset_id"],
+                angle_offset_fraction=info["angle_offset"],
+                angle_start_fraction=info["angle_start"],
+                active_audio_angle_id=angle_id,
+                is_muted=False,
+                container_tc_start_fraction=info["container_tc_start"],
+                asset_start_fraction=info["asset_start"],
+                part_duration_fraction=info["part_duration"],
+            )
+
+        parts = [_mc_source(info) for info in part_infos]
+        # primary_info IS one of part_infos — reuse that element so the
+        # representative and its part are the same object.
+        primary = parts[part_infos.index(primary_info)]
+        return primary, parts
     elif child.tag == "asset-clip":
         info = _resolve_asset_clip_audio(child, resource_by_id)
-        return SegmentAudioSource(
-            path=info["path"],
-            asset_id=info["asset_id"],
-            angle_offset_fraction=info["angle_offset"],
-            angle_start_fraction=info["angle_start"],
-            active_audio_angle_id=None,
-            is_muted=info["is_muted"],
-            container_tc_start_fraction=info["container_tc_start"],
-            asset_start_fraction=info["asset_start"],
-        )
     elif child.tag == "clip":
         info = _resolve_clip_audio(child, resource_by_id)
-        return SegmentAudioSource(
-            path=info["path"],
-            asset_id=info["asset_id"],
-            angle_offset_fraction=info["angle_offset"],
-            angle_start_fraction=info["angle_start"],
-            active_audio_angle_id=None,
-            is_muted=info["is_muted"],
-            container_tc_start_fraction=info["container_tc_start"],
-            asset_start_fraction=info["asset_start"],
-        )
     else:  # sync-clip
         info = _resolve_sync_clip_audio(child, resource_by_id)
-        return SegmentAudioSource(
-            path=info["path"],
-            asset_id=info["asset_id"],
-            angle_offset_fraction=info["angle_offset"],
-            angle_start_fraction=info["angle_start"],
-            active_audio_angle_id=None,
-            is_muted=info["is_muted"],
-            container_tc_start_fraction=info["container_tc_start"],
-            asset_start_fraction=info["asset_start"],
-        )
+    src = SegmentAudioSource(
+        path=info["path"],
+        asset_id=info["asset_id"],
+        angle_offset_fraction=info["angle_offset"],
+        angle_start_fraction=info["angle_start"],
+        active_audio_angle_id=None,
+        is_muted=info["is_muted"],
+        container_tc_start_fraction=info["container_tc_start"],
+        asset_start_fraction=info["asset_start"],
+    )
+    return src, [src]
 
 
 def _segment_parse_warnings(child, frame_duration: Fraction) -> List[str]:
@@ -1179,7 +1239,7 @@ def parse_fcpxml(path) -> ParsedFCPXML:
                     child.get("name"),
                 )
 
-        audio_source = _resolve_segment_audio(child, resource_by_id, mc_sources)
+        audio_source, audio_parts = _resolve_segment_audio(child, resource_by_id, mc_sources)
 
         what_prefix = f"<{child.tag} name={child.get('name')!r}>"
         offset_fraction = _strict_parse_rational(
@@ -1203,7 +1263,10 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         if not enabled and audio_source is not None:
             # Disabled clips play as silence — never render/transcribe their
             # audio. The segment itself stays (index + multi-source stability).
+            # Parts mute in lockstep so path validation and the renderer see
+            # the same silence the representative source reports.
             audio_source = replace(audio_source, is_muted=True)
+            audio_parts = [replace(p, is_muted=True) for p in audio_parts]
 
         seg = SpineSegment(
             kind=child.tag,
@@ -1220,6 +1283,7 @@ def parse_fcpxml(path) -> ParsedFCPXML:
             audio_source=audio_source,
             lane=lane,
             enabled=enabled,
+            audio_parts=audio_parts,
         )
         segments.append(seg)
         parse_warnings.extend(_segment_parse_warnings(child, frame_duration))
@@ -1272,7 +1336,18 @@ def parse_fcpxml(path) -> ParsedFCPXML:
     distinct_sources = {(s.audio_source.path, s.audio_source.asset_id)
                         for s in primary_segments if s.audio_source is not None}
     distinct_kinds = {s.kind for s in primary_segments}
-    is_multi_source = len(distinct_sources) > 1 or len(distinct_kinds) > 1
+    # A segmented multicam angle (>1 part under one mc-clip) is multi-source
+    # even when the spine holds a single segment: transcription must run on
+    # the composed timeline WAV to cover every file, and selects then live in
+    # timeline coordinates. Single-part segments can't flip this, so every
+    # previously-ingested single-file project keeps its stored-select
+    # convention; multi-part projects were transcribing one file of many —
+    # broken — so no working stored selects exist to misread.
+    is_multi_source = (
+        len(distinct_sources) > 1
+        or len(distinct_kinds) > 1
+        or any(len(s.audio_parts) > 1 for s in primary_segments)
+    )
 
     library_el = root.find("library")
     library_location = library_el.get("location") if library_el is not None else None

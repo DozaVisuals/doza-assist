@@ -394,7 +394,13 @@
            spurious metadata probe fires. The waveform's AnalyserNode
            attaches to this one element exactly once (see
            _wfAttachToAudioEl) — it must never be recreated. #}
-        <audio id="audioPlayer" preload="metadata" {% if not is_video %}src="/project/{{ project.id }}/media"{% endif %} style="display:none"></audio>
+        {# mp3-family sources (VBR/ADTS) seek by byte-estimate in Chromium, so
+           playback position drifts off the decode-exact transcript timestamps
+           on long files — those projects play the extracted WAV (/media/audio,
+           the same decoded PCM the engines timestamped). Sample-table and PCM
+           formats keep the original source for full quality. #}
+        {% set _pb_ext = '.' ~ ((project.source_path or project.filepath or '') | lower).rsplit('.', 1)[-1] %}
+        <audio id="audioPlayer" preload="metadata" {% if not is_video %}src="/project/{{ project.id }}/media{% if _pb_ext in ('.mp3', '.mp2', '.mpga', '.aac') %}/audio{% endif %}"{% endif %} style="display:none"></audio>
 
         <div class="player-controls-box">
             <div class="player-inner">
@@ -1172,6 +1178,10 @@ const PROJECT = {{ project | tojson }};
 const LANGS = {{ languages | tojson }};
 const PROJECT_IDS = {{ active_ids | tojson }};
 const PROJECTS_META = {{ projects_meta | tojson }};
+// mp3-family sources seek by byte-estimate in Chromium — cross-project jumps
+// must play those projects' extracted WAV (decode-exact), mirroring the
+// audioPlayer src gate in the player markup above.
+const ESTIMATE_SEEKED_AUDIO = { {% for p in projects %}{{ p.id | tojson }}: {{ 'true' if ('.' ~ ((p.source_path or p.filepath or '') | lower).rsplit('.', 1)[-1]) in ('.mp3', '.mp2', '.mpga', '.aac') else 'false' }}{{ ', ' if not loop.last }}{% endfor %} };
 const IS_MULTI = {{ 'true' if is_multi else 'false' }};
 const IS_SHARED = {{ 'true' if is_shared else 'false' }};
 const SHARED_TABS = {{ (shared_tabs or {})|tojson if is_shared else '{}' }};
@@ -1914,7 +1924,9 @@ function jumpTo(seconds, projectId) {
             audio.src = `/project/${projectId}/media/audio`;
         } else {
             switchPlayerElement(needsVideo);
-            audio.src = `/project/${projectId}/media`;
+            audio.src = (!needsVideo && ESTIMATE_SEEKED_AUDIO[projectId])
+                ? `/project/${projectId}/media/audio`
+                : `/project/${projectId}/media`;
             if (needsVideo) currentVideoProject = projectId;
         }
         currentAudioProject = projectId;

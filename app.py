@@ -2609,6 +2609,23 @@ def transcribe_status(project_id):
     return jsonify({'state': snap or {"phase": "idle", "pct": 0}})
 
 
+@app.route('/project/<project_id>/transcript-export')
+def transcript_export_json(project_id):
+    """Fresh transcript + speaker rename map for the client-side downloads.
+
+    The page's PROJECT object is a render-time snapshot: speaker renames (and
+    the diarization worker's labels) land in meta.json AFTER render, so
+    txt/srt/json downloads built from the snapshot leaked raw SPEAKER_NN
+    labels until the user happened to reload. The download handlers re-fetch
+    this before building the file.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    return jsonify({'transcript': project.get('transcript') or {},
+                    'speaker_names': project.get('speaker_names') or {}})
+
+
 def _analyze_status_path(project_id):
     return os.path.join(app.config['PROJECTS_DIR'], project_id, 'analyze_status.json')
 

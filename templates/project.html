@@ -5128,8 +5128,21 @@ async function exportFCPXMLMulticam() {
 }
 
 // ── Download Formats ──
-function downloadOtherFormat() {
+async function downloadOtherFormat() {
     const fmt = document.getElementById('otherFormat')?.value || 'json';
+    // PROJECT is a render-time snapshot; speaker renames (and the diarization
+    // worker's labels) land in meta.json later. Re-fetch before building the
+    // file, falling back to the snapshot silently if the fetch fails.
+    try {
+        const r = await fetch(`/project/${PROJECT_ID}/transcript-export`, { cache: 'no-store' });
+        if (r.ok) {
+            const fresh = await r.json();
+            if (fresh.transcript && fresh.transcript.segments) {
+                PROJECT.transcript = fresh.transcript;
+            }
+            PROJECT.speaker_names = fresh.speaker_names || {};
+        }
+    } catch (_) {}
     if (fmt === 'srt') downloadSRT();
     else if (fmt === 'txt') downloadTXT();
     else downloadJSON();
@@ -5137,7 +5150,19 @@ function downloadOtherFormat() {
 
 function downloadJSON() {
     if (!PROJECT.transcript) { showToast('Transcript not ready yet — nothing to download.'); return; }
-    const blob = new Blob([JSON.stringify(PROJECT.transcript, null, 2)], { type: 'application/json' });
+    // Resolved display names per segment (raw label kept as speaker_raw), plus
+    // the rename map itself — a bare engine-label dump reads as "speaker names
+    // missing" to anyone consuming the JSON downstream.
+    const out = {
+        ...PROJECT.transcript,
+        speaker_names: PROJECT.speaker_names || {},
+        segments: (PROJECT.transcript.segments || []).map(s => ({
+            ...s,
+            speaker: displaySpeaker(s.speaker),
+            speaker_raw: s.speaker,
+        })),
+    };
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
     downloadBlob(blob, PROJECT.name.replace(/\s+/g, '_') + '_transcript.json');
 }
 

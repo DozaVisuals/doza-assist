@@ -1,9 +1,9 @@
-"""FCPXML parser for multicam, sync-clip, and plain asset-clip spines.
+"""FCPXML parser for multicam, sync-clip, asset-clip, and plain clip spines.
 
 Walks an FCPXML document to:
 
-- Identify every ``<mc-clip>``, ``<sync-clip>``, or ``<asset-clip>`` element on
-  the main spine.
+- Identify every ``<mc-clip>``, ``<sync-clip>``, ``<asset-clip>``, or ``<clip>``
+  element on the main spine.
 - For each segment, resolve the audio source:
   - mc-clip → find the angle enabled by ``<mc-source srcEnable="audio">`` on
     that segment, locate it in the referenced ``<media>/<multicam>``, and
@@ -17,6 +17,11 @@ Walks an FCPXML document to:
     or a synced pair). Resolve its ``ref`` straight to the ``<asset>`` and use
     that file as both video and audio. A spine of these laid end-to-end (a
     "rush" timeline) is the common single-cam case.
+  - clip → the connected-clip wrapper form: a spine ``<clip>`` windowing a
+    ``<video ref>``/``<audio ref>`` over one asset (Resolve exports, and our
+    own flat exporter's dialogue-channel routing). Resolve the dialogue media
+    child to the asset, mapping the clip-local coordinates onto the container
+    convention (see :func:`_resolve_clip_audio`).
 - Preserve the verbatim ``<resources>`` block and full source bytes so the
   writer module can round-trip output without regenerating asset IDs or
   bookmark data.
@@ -60,7 +65,7 @@ NLE_UNKNOWN = "unknown"
 # the order it visits them (document order). The writer's original-spine walker
 # MUST filter on this exact tuple so its element index lines up one-for-one with
 # ``ParsedFCPXML.spine_segments`` — keep them sourced from here, never inline.
-SPINE_SEGMENT_TAGS = ("mc-clip", "sync-clip", "asset-clip")
+SPINE_SEGMENT_TAGS = ("mc-clip", "sync-clip", "asset-clip", "clip")
 
 
 def iter_spine_clip_elements(spine):
@@ -200,7 +205,8 @@ class SegmentAudioSource:
 
 @dataclass
 class SpineSegment:
-    """One ``<mc-clip>``, ``<sync-clip>``, or ``<asset-clip>`` entry in the spine.
+    """One ``<mc-clip>``, ``<sync-clip>``, ``<asset-clip>``, or ``<clip>``
+    entry in the spine.
 
     ``mc_sources`` captures the full ``<mc-source>`` enablement on this spine
     mc-clip (typically one audio + one video angle). The writer replays these
@@ -210,8 +216,8 @@ class SpineSegment:
     ``audio_source`` is the resolved audio for this segment specifically.
     """
 
-    kind: str                     # 'mc-clip' | 'sync-clip' | 'asset-clip'
-    ref: str                      # <resources> id (mc-clip/asset-clip) or "" (inline sync-clip)
+    kind: str                     # 'mc-clip' | 'sync-clip' | 'asset-clip' | 'clip'
+    ref: str                      # <resources> id (mc-clip/asset-clip) or "" (inline sync-clip/clip)
     name: str
     offset_fraction: Fraction
     start_fraction: Fraction
@@ -269,7 +275,7 @@ class ParsedFCPXML:
     version: str
     source_path: str
 
-    container_type: str                           # first segment's kind: mc-clip | sync-clip | asset-clip
+    container_type: str                           # first segment's kind: mc-clip | sync-clip | asset-clip | clip
     container_ref: str                            # first segment's ref ("" for inline sync-clip)
 
     audio_file_path: str                          # first non-muted segment's audio path
@@ -848,6 +854,79 @@ def _resolve_asset_clip_audio(asset_clip_el, resource_by_id: dict) -> dict:
     }
 
 
+def _resolve_clip_audio(clip_el, resource_by_id: dict) -> dict:
+    """Resolve the audio source for a spine-level ``<clip>``.
+
+    The connected-clip wrapper form: the clip's ``start``/``offset`` are
+    CLIP-LOCAL, and the media lives in a ``<video ref>``/``<audio ref>`` child
+    positioned at the child's ``offset`` (clip-local) with in-point
+    ``child.start`` (asset-local). Resolve/DaVinci writes this shape, and so
+    does our own flat exporter when it routes a detected dialogue channel
+    (``fcpxml_export._spine_clip`` — the srcCh ``<audio>`` nested in
+    ``<video>``), so a Doza flat export must re-import through here.
+
+    Mapping onto the container convention the renderer/writer already use
+    (``seek = seg.start - angle_offset + (angle_start - asset_start)``):
+    ``angle_offset`` = the media child's clip-local position, ``angle_start``
+    = its asset-local in-point (defaulting to the asset's own origin when the
+    child carries no ``start``), so the seek math lands on zero-based media
+    time unchanged. ``<audio>`` children win over ``<video>`` (dialogue role
+    first) — the audio element is the one that says which channels FCP plays.
+
+    ``is_muted`` mirrors the asset-clip rule: an asset that declares no audio
+    (video-only B-roll) occupies timeline space but contributes silence.
+    """
+    item = None
+    for tag in ("audio", "video"):
+        cands = clip_el.findall(f".//{tag}[@ref]")
+        if cands:
+            item = next(
+                (c for c in cands
+                 if (c.get("role") or c.get("audioRole") or "").startswith("dialogue")),
+                cands[0],
+            )
+            break
+    if item is None:
+        # Resolve-style wrapper: the media is a nested <asset-clip> instead of
+        # <video>/<audio> children — delegate to the plain asset-clip resolver.
+        ac = clip_el.find(".//asset-clip")
+        if ac is not None:
+            return _resolve_asset_clip_audio(ac, resource_by_id)
+        raise ParseError(
+            f"<clip name={clip_el.get('name')!r}> has no <video>/<audio> media children"
+        )
+    asset_ref = item.get("ref")
+    asset_el = resource_by_id.get(asset_ref)
+    if asset_el is None or asset_el.tag != "asset":
+        raise ParseError(f"clip media ref {asset_ref!r} does not resolve to an <asset>")
+    asset_start = _safe_parse_rational(
+        asset_el.get("start"), what=f"asset {asset_ref!r} start",
+    )
+    item_start = (
+        _strict_parse_rational(item.get("start"), what="clip media start")
+        if item.get("start") is not None else asset_start
+    )
+    has_audio_attr = asset_el.get("hasAudio")
+    if has_audio_attr is not None:
+        declares_audio = has_audio_attr == "1"
+    else:
+        declares_audio = (
+            (asset_el.get("audioSources") or "0") not in ("", "0")
+            or (asset_el.get("audioChannels") or "0") not in ("", "0")
+        )
+    return {
+        "path": _resolve_asset_path(asset_el),
+        "asset_id": asset_ref,
+        "angle_offset": _safe_parse_rational(
+            item.get("offset"), what="clip media offset",
+        ),
+        "angle_start": item_start,
+        "container_tc_start": Fraction(0),
+        "asset_start": asset_start,
+        "is_muted": not declares_audio,
+    }
+
+
 def _resolve_segment_audio(
     child, resource_by_id: dict, mc_sources: List[dict]
 ) -> SegmentAudioSource:
@@ -879,6 +958,18 @@ def _resolve_segment_audio(
         )
     elif child.tag == "asset-clip":
         info = _resolve_asset_clip_audio(child, resource_by_id)
+        return SegmentAudioSource(
+            path=info["path"],
+            asset_id=info["asset_id"],
+            angle_offset_fraction=info["angle_offset"],
+            angle_start_fraction=info["angle_start"],
+            active_audio_angle_id=None,
+            is_muted=info["is_muted"],
+            container_tc_start_fraction=info["container_tc_start"],
+            asset_start_fraction=info["asset_start"],
+        )
+    elif child.tag == "clip":
+        info = _resolve_clip_audio(child, resource_by_id)
         return SegmentAudioSource(
             path=info["path"],
             asset_id=info["asset_id"],
@@ -956,9 +1047,9 @@ def _segment_parse_warnings(child, frame_duration: Fraction) -> List[str]:
 def _unsupported_spine_warnings(spine) -> List[str]:
     """Warnings for spine entries the segment walk drops.
 
-    A dropped ``<ref-clip>`` (FCP compound clip), ``<clip>`` (Resolve-style
-    wrapper), or ``<audio>`` leaves silence over its time range in the
-    composed timeline WAV and an unexplained hole in the transcript — with at
+    A dropped ``<ref-clip>`` (FCP compound clip) or ``<audio>`` leaves
+    silence over its time range in the composed timeline WAV and an
+    unexplained hole in the transcript — with at
     least one supported clip present the parse succeeds, so without this the
     editor gets zero surfacing. Only dialogue-capable containers warn:
     ``<title>``/``<video>``/``<transition>`` carry no speech, and warning on
@@ -994,12 +1085,12 @@ def _unsupported_spine_warnings(spine) -> List[str]:
             # the supported tags — anything dialogue-capable it would never
             # yield gets the warning instead of vanishing.
             for sub in child:
-                if isinstance(sub.tag, str) and sub.tag in ("ref-clip", "clip", "audio"):
+                if isinstance(sub.tag, str) and sub.tag in ("ref-clip", "audio"):
                     _warn(sub)
             continue
         if tag in SPINE_SEGMENT_TAGS:
             continue
-        if tag not in ("ref-clip", "clip", "audio"):
+        if tag not in ("ref-clip", "audio"):
             continue
         _warn(child)
     return warnings
@@ -1154,7 +1245,8 @@ def parse_fcpxml(path) -> ParsedFCPXML:
                     "clips) before exporting XML")
         raise ParseError(
             "spine has no clips Doza Assist can read — expected one or more "
-            "<asset-clip>, <mc-clip>, or <sync-clip> elements" + found + hint
+            "<asset-clip>, <mc-clip>, <sync-clip>, or <clip> elements"
+            + found + hint
         )
 
     # Representative source: first non-muted PRIMARY segment (connected

@@ -124,16 +124,58 @@ def _fraction_to_seconds_str(f: Fraction) -> str:
 
 
 def plan_render(parsed: ParsedFCPXML) -> List[dict]:
-    """Return the per-segment render plan. Exposed for testing.
+    """Return the render plan. Exposed for testing.
 
     Each entry: {segment_index, input_path, source_start_seconds,
-    duration_seconds, timeline_offset_ms}.
+    duration_seconds, timeline_offset_ms}. One entry per segment — except a
+    segmented multicam angle (``seg.audio_parts`` > 1: many stop-start camera
+    files under one mc-clip), which emits one entry per part so the composed
+    WAV plays every file at its true timeline position; the gaps between
+    files stay silence.
     """
     plan: List[dict] = []
     for i, seg in enumerate(parsed.spine_segments):
         if seg.audio_source is None or seg.audio_source.is_muted:
             continue
         if seg.duration_fraction <= 0:
+            continue
+        parts = getattr(seg, "audio_parts", None) or []
+        if len(parts) > 1:
+            # Per-part windows, intersected with the segment's zero-based
+            # container window. Mirrors _segment_source_window's mapping with
+            # the part's own offset/in-point:
+            #   source_seek = (win_lo - part_offset) + (part_start - asset_start)
+            #   delay       = seg.offset + (win_lo - segment_window_lo)
+            tc = seg.audio_source.container_tc_start_fraction
+            seg_win_lo = seg.start_fraction - tc
+            seg_win_hi = seg_win_lo + seg.duration_fraction
+            for part in parts:
+                if part.is_muted or part.part_duration_fraction <= 0:
+                    continue
+                win_lo = max(part.angle_offset_fraction, seg_win_lo)
+                win_hi = min(
+                    part.angle_offset_fraction + part.part_duration_fraction,
+                    seg_win_hi,
+                )
+                if win_hi <= win_lo:
+                    continue
+                source_start = (
+                    (win_lo - part.angle_offset_fraction)
+                    + (part.angle_start_fraction - part.asset_start_fraction)
+                )
+                if source_start < 0:
+                    source_start = Fraction(0)
+                delay = seg.offset_fraction + (win_lo - seg_win_lo)
+                plan.append({
+                    "segment_index": i,
+                    "input_path": part.path,
+                    "source_start_seconds": float(source_start),
+                    "duration_seconds": float(win_hi - win_lo),
+                    "timeline_offset_ms": _fraction_to_ms(delay),
+                    "source_start_fraction": source_start,
+                    "duration_fraction": win_hi - win_lo,
+                    "timeline_offset_fraction": delay,
+                })
             continue
         source_start, duration = _segment_source_window(seg)
         # Guard against negative trim starts (malformed input — fall back to 0).

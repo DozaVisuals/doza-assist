@@ -409,14 +409,19 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     unique_paths = []
     seen = set()
     for seg in parsed.spine_segments:
-        src = seg.audio_source
-        if src is None or src.is_muted:
+        if seg.audio_source is None or seg.audio_source.is_muted:
             continue
-        p = src.path
-        if p in seen:
-            continue
-        seen.add(p)
-        unique_paths.append(p)
+        # Every part of a segmented multicam angle, not just the
+        # representative file — a later camera file on an unmounted drive
+        # must fail here with the drive hint, not mid-render.
+        for src in (getattr(seg, 'audio_parts', None) or [seg.audio_source]):
+            if src.is_muted:
+                continue
+            p = src.path
+            if p in seen:
+                continue
+            seen.add(p)
+            unique_paths.append(p)
 
     for p in unique_paths:
         if not os.path.exists(p):

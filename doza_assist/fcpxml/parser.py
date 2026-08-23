@@ -329,6 +329,11 @@ class ParsedFCPXML:
     audio_container_tc_start_fraction: Fraction = Fraction(0)
     audio_asset_start_fraction: Fraction = Fraction(0)
 
+    # The sequence's start timecode. Spine offsets are NORMALIZED to 0-based
+    # timeline seconds at parse time (subtracting this when the document was
+    # written tc-based); kept for display/metadata.
+    sequence_tc_start_fraction: Fraction = Fraction(0)
+
     # Human-readable, non-fatal conditions found at parse time (unsupported
     # spine entries whose dialogue is dropped, retimed/rate-conformed clips
     # whose 1:1 time math drifts). Stored in project metadata so ingest / the
@@ -389,6 +394,7 @@ class ParsedFCPXML:
             "sequence_framerate": self.sequence_framerate,
             "timeline_duration_fraction": _frac(self.timeline_duration_fraction),
             "timeline_duration_seconds": self.timeline_duration_seconds,
+            "sequence_tc_start_fraction": _frac(self.sequence_tc_start_fraction),
             "project_name": self.project_name,
             "event_name": self.event_name,
             "library_location": self.library_location,
@@ -481,7 +487,14 @@ def _resolve_asset_path(asset_el) -> str:
     """
     media_reps = asset_el.findall("media-rep")
     if not media_reps:
-        raise ParseError(f"asset {asset_el.get('id')!r} has no <media-rep>")
+        # FCPXML 1.8 (older Resolve) has no <media-rep> in its DTD: the asset
+        # itself carries ``src``. Fall back to it before failing — without
+        # this, every genuine v1.8 file died here despite the documented
+        # 1.8 support (2026-08-23 certification sweep, bug 2).
+        src = asset_el.get("src")
+        if src:
+            return strip_file_url(src)
+        raise ParseError(f"asset {asset_el.get('id')!r} has no <media-rep> or src")
 
     def _on_disk(mr) -> bool:
         src = mr.get("src")
@@ -1202,6 +1215,9 @@ def parse_fcpxml(path) -> ParsedFCPXML:
     sequence_duration = _strict_parse_rational(
         sequence.get("duration"), what="sequence duration",
     )
+    sequence_tc_start = _safe_parse_rational(
+        sequence.get("tcStart"), what="sequence tcStart",
+    )
     fmt_el = resource_by_id.get(sequence_format_id)
     if fmt_el is None:
         if nle == NLE_RESOLVE:
@@ -1211,6 +1227,12 @@ def parse_fcpxml(path) -> ParsedFCPXML:
                 sequence_format_id,
             )
             frame_duration = Fraction(1001, 24000)
+            # The id resolves to nothing: writing it back out is a dangling
+            # IDREF Final Cut rejects on import. Blank it so Mode A's
+            # synthesized dozaFmt1 format engages (writer.py) — the output
+            # then validates instead of referencing a ghost id (2026-08-23
+            # certification sweep, bug 3).
+            sequence_format_id = ""
         else:
             raise ParseError(f"sequence references missing format id {sequence_format_id!r}")
     else:
@@ -1287,6 +1309,24 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         )
         segments.append(seg)
         parse_warnings.extend(_segment_parse_warnings(child, frame_duration))
+
+    # FCP and Resolve write spine offsets in the sequence's timecode space:
+    # on a project whose start TC is non-zero (broadcast 01:00:00:00,
+    # Resolve's default timeline), the FIRST clip's offset equals tcStart.
+    # The renderer and the multi-source select matcher assume 0-based
+    # timeline seconds, so raw tc-based offsets composed a timeline WAV with
+    # every clip delayed past the WAV's own end (pure silence) and made every
+    # select "outside the timeline" (2026-08-23 certification sweep, bug 1).
+    # Normalize — but only when every primary offset actually sits at/after
+    # tcStart, so a producer that already writes 0-based offsets with a
+    # non-zero tcStart is left untouched (fail-safe both ways). Lane clips'
+    # offsets were composed from spine-level gap offsets, so they live in the
+    # same space and shift with everything else.
+    if sequence_tc_start > 0 and segments and all(
+            s.offset_fraction >= sequence_tc_start
+            for s in segments if not s.lane):
+        for s in segments:
+            s.offset_fraction -= sequence_tc_start
 
     parse_warnings.extend(_unsupported_spine_warnings(spine))
     for w in parse_warnings:
@@ -1374,6 +1414,7 @@ def parse_fcpxml(path) -> ParsedFCPXML:
         sequence_format_id=sequence_format_id,
         sequence_frame_duration=frame_duration,
         timeline_duration_fraction=sequence_duration,
+        sequence_tc_start_fraction=sequence_tc_start,
         project_name=project_name,
         event_name=event_name,
         library_location=library_location,

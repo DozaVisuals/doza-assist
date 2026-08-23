@@ -20,6 +20,12 @@
         <span class="app-version" title="Doza Assist version">v{{ app_version }}</span>
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
+        {% if doza_trial_active %}
+        {# Free-trial pill: the dashboard is the first screen, so the cap and
+           the way out are stated up front. Hidden once the wrapper respawns
+           the backend without DOZA_TRIAL (license activated). #}
+        <a href="{{ doza_buy_url }}" target="_blank" rel="noopener" class="header-trial-pill" title="Transcripts are capped at 2 minutes per file during the free trial — buy a license to unlock full-length transcripts">Free trial · 2-min transcripts — <strong>Buy full version</strong></a>
+        {% endif %}
         <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="openAIModelModal()" title="AI model settings">AI Model</button>

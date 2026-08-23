@@ -433,6 +433,23 @@ body {
     color: #dca028;
 }
 
+.header-trial-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    line-height: 1;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    text-decoration: none;
+    background: rgba(220, 160, 40, 0.12);
+    border: 1px solid rgba(220, 160, 40, 0.45);
+    color: #dca028;
+    white-space: nowrap;
+}
+.header-trial-pill strong { color: inherit; }
+.header-trial-pill:hover { background: rgba(220, 160, 40, 0.22); }
+
 .project-action-btn {
     opacity: 0;
     transition: opacity 0.15s;

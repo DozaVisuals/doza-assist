@@ -95,3 +95,11 @@ def test_dashboard_row_badge(client, monkeypatch):
     html = client.get('/').get_data(as_text=True)
     assert 'status-trial' in html
     assert 'Trial-length' in html
+
+
+def test_dashboard_trial_pill_only_while_trial_active(client, monkeypatch):
+    monkeypatch.setenv('DOZA_TRIAL', '1')
+    monkeypatch.delenv('DOZA_BUY_URL', raising=False)
+    assert 'header-trial-pill' in client.get('/').get_data(as_text=True)
+    monkeypatch.delenv('DOZA_TRIAL', raising=False)
+    assert 'header-trial-pill' not in client.get('/').get_data(as_text=True)

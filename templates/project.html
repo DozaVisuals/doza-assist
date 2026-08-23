@@ -1007,17 +1007,34 @@
             </div>
 
             <div class="card">
-                <div class="card-title" style="margin-bottom: 1rem;">Other Formats</div>
-                <div class="form-row" style="align-items: end;">
-                    <div class="form-group" style="flex: 1;">
-                        <label class="form-label">Format</label>
-                        <select class="form-input" id="otherFormat">
-                            <option value="txt" selected>Plain Text</option>
-                            <option value="srt">SRT</option>
-                            <option value="json">JSON</option>
-                        </select>
+                <div class="card-title" style="margin-bottom: 0.35rem;">Documents</div>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.9rem;">
+                    Word, PDF, or Excel — for producers, clients, and transcript review. Saved to your Exports folder and revealed in Finder.
+                </p>
+                <div class="form-group" style="margin-bottom: 0.75rem;">
+                    <label class="form-label">What</label>
+                    <div class="doc-seg" id="docWhat" role="group" aria-label="Document">
+                        <button type="button" class="btn btn-sm" data-value="transcript" aria-pressed="true" onclick="docPick('docWhat', this)">Full transcript</button>
+                        <button type="button" class="btn btn-sm" data-value="selects" aria-pressed="false" onclick="docPick('docWhat', this)">Selects</button>
+                        <button type="button" class="btn btn-sm" data-value="quotes" aria-pressed="false" onclick="docPick('docWhat', this)">Story quote sheet</button>
                     </div>
-                    <button class="btn btn-primary" onclick="downloadOtherFormat()">Download</button>
+                </div>
+                <div class="form-group" style="margin-bottom: 0.75rem;">
+                    <label class="form-label">Format</label>
+                    <div class="doc-seg" id="docFormat" role="group" aria-label="Format">
+                        <button type="button" class="btn btn-sm" data-value="docx" aria-pressed="true" onclick="docPick('docFormat', this)">Word (.docx)</button>
+                        <button type="button" class="btn btn-sm" data-value="pdf" aria-pressed="false" onclick="docPick('docFormat', this)">PDF</button>
+                        <button type="button" class="btn btn-sm" data-value="xlsx" aria-pressed="false" onclick="docPick('docFormat', this)">Excel (.xlsx)</button>
+                    </div>
+                </div>
+                <div id="docHint" style="font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 0.85rem;">The complete transcript with speaker names and timecodes.</div>
+                <div style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
+                    <button class="btn btn-primary" id="docDownloadBtn" onclick="downloadDocument()">Download</button>
+                    <span style="font-size: 0.78rem; color: var(--text-secondary);">More formats:
+                        <a href="#" onclick="event.preventDefault(); downloadOtherFormat('txt')">TXT</a> ·
+                        <a href="#" onclick="event.preventDefault(); downloadOtherFormat('srt')">SRT</a> ·
+                        <a href="#" onclick="event.preventDefault(); downloadOtherFormat('json')">JSON</a>
+                    </span>
                 </div>
             </div>
         </div>
@@ -5034,9 +5051,91 @@ async function exportFCPXMLMulticam() {
     }
 }
 
+// ── Documents (Word / PDF / Excel) ──
+// Segmented pickers drive one POST: transcript + selects go to
+// /export/document (core), the quote sheet to the quote-sheet extension's
+// own export route. Responses share the NLE file-export shape
+// ({delivery:'file', file}) so showExportOutcome's toast + reveal apply.
+function docPick(groupId, btn) {
+    document.querySelectorAll('#' + groupId + ' .btn').forEach(b => {
+        b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+    });
+    updateDocHint();
+}
+
+function _docValue(groupId) {
+    const b = document.querySelector('#' + groupId + ' .btn[aria-pressed="true"]');
+    return b ? b.dataset.value : '';
+}
+
+function updateDocHint() {
+    const el = document.getElementById('docHint');
+    if (!el) return;
+    const what = _docValue('docWhat');
+    el.textContent = what === 'selects'
+        ? 'Selects use the categories checked above (My Clips · Social · Story Beats), with timecodes, the spoken words, and your notes.'
+        : what === 'quotes'
+            ? 'Exports the quote sheet from the AI Analysis tab — generate it there first.'
+            : 'The complete transcript with speaker names and timecodes.';
+}
+
+async function downloadDocument() {
+    const what = _docValue('docWhat') || 'transcript';
+    const fmt = _docValue('docFormat') || 'docx';
+    const fmtLabel = { docx: 'Word', pdf: 'PDF', xlsx: 'Excel' }[fmt] || fmt.toUpperCase();
+    const btn = document.getElementById('docDownloadBtn');
+    let url, payload, summary;
+    if (what === 'quotes') {
+        url = `/project/${PROJECT_ID}/quote-sheet/export`;
+        payload = { format: fmt, deliver_to: 'file' };
+        summary = 'Quote sheet (' + fmtLabel + ')';
+    } else {
+        const categories = what === 'selects'
+            ? _collectExportCategories().filter(c => c !== 'transcript')
+            : [];
+        if (what === 'selects' && categories.length === 0) {
+            showToast('Check at least one category above (My Clips, Social, Story Beats).');
+            return;
+        }
+        // Same pre-flight as the NLE export: persist fresh highlights so the
+        // server-side selects include what is on screen right now.
+        if (what === 'selects' && categories.includes('labels')
+                && typeof labelSections !== 'undefined' && labelSections.length) {
+            const sections = labelSections.map(s => ({
+                start: s.start, end: s.end, color: s.color, text: s.text
+            }));
+            if (!(await _persistLabelSections(sections))) {
+                showToast('Could not save your clips before export — export cancelled.', true);
+                return;
+            }
+        }
+        url = `/project/${PROJECT_ID}/export/document`;
+        payload = { what: what, format: fmt, categories: categories };
+        summary = (what === 'selects' ? 'Selects' : 'Transcript') + ' (' + fmtLabel + ')';
+    }
+    if (btn) btn.disabled = true;
+    try {
+        const r = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            showToast((d && d.error) || 'Export failed', true);
+            return;
+        }
+        showExportOutcome(_directExportSuccessMsg(d, null, summary), d);
+    } catch (err) {
+        showToast('Export failed: ' + ((err && err.message) || err), true);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 // ── Download Formats ──
-async function downloadOtherFormat() {
-    const fmt = document.getElementById('otherFormat')?.value || 'json';
+async function downloadOtherFormat(fmtArg) {
+    const fmt = fmtArg || document.getElementById('otherFormat')?.value || 'json';
     // PROJECT is a render-time snapshot; speaker renames (and the diarization
     // worker's labels) land in meta.json later. Re-fetch before building the
     // file, falling back to the snapshot silently if the fetch fails.

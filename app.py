@@ -2963,6 +2963,56 @@ def transcript_export_json(project_id):
                     'speaker_names': project.get('speaker_names') or {}})
 
 
+@app.route('/project/<project_id>/export/document', methods=['POST'])
+def export_document_route(project_id):
+    """Documents export: the full transcript or the editor's selects as
+    Word / PDF / Excel (see ``exporters.documents``). Body:
+    ``{"what": "transcript"|"selects", "format": "docx"|"pdf"|"xlsx",
+    "categories": ["labels","social","story"]}`` — categories apply to
+    selects only and use the same semantics as the NLE export. The file is
+    written to the Exports folder and revealed in Finder, and the response
+    carries the same ``delivery: file`` shape the NLE file exports use so
+    the page can reuse its outcome toast. NLE/FCPXML paths are untouched.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    body = request.get_json(silent=True) or {}
+    what = str(body.get('what') or 'transcript').strip().lower()
+    fmt = str(body.get('format') or 'docx').strip().lower()
+    categories = body.get('categories') or []
+    if not isinstance(categories, list):
+        categories = []
+    from exporters.documents import export_document, FORMATS
+    try:
+        path, count = export_document(
+            project, what, fmt, app.config['EXPORTS_DIR'],
+            [str(c).strip().lower() for c in categories],
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except ImportError as e:
+        # The app bundle ships python-docx + reportlab; a bare source
+        # install may not. Say which library, not "No module named docx".
+        lib = 'python-docx' if 'docx' in str(e) else 'reportlab'
+        return jsonify({'error': f'{fmt.upper()} export needs the {lib} package '
+                                 f'(pip install {lib}).'}), 400
+    except Exception as e:
+        app.logger.exception('Document export failed')
+        return jsonify({'error': f'{fmt.upper()} generation failed: {e}'}), 500
+    _reveal_in_finder(path)
+    return jsonify({
+        'status': 'ok',
+        'delivery': 'file',
+        'file': path,
+        'filename': os.path.basename(path),
+        'format': fmt,
+        'format_label': FORMATS[fmt][0],
+        'what': what,
+        'count': count,
+    })
+
+
 def _analyze_status_path(project_id):
     return os.path.join(app.config['PROJECTS_DIR'], project_id, 'analyze_status.json')
 

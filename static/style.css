@@ -428,6 +428,15 @@ body {
     color: var(--red);
 }
 
+
+/* Documents export: segmented pickers (What / Format) */
+.doc-seg { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.doc-seg .btn[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
 .project-action-btn {
     opacity: 0;
     transition: opacity 0.15s;

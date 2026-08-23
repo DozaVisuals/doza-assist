@@ -334,6 +334,29 @@ def inject_languages():
     return {'languages': OUTPUT_LANGUAGES}
 
 
+@app.context_processor
+def inject_trial_state():
+    """Expose the live trial state (and where to buy) to templates.
+
+    The Electron wrapper sets ``DOZA_TRIAL=1`` in this process's environment
+    at spawn time while the install is unlicensed (direct channel: no
+    activated key; FxFactory channel: no FxFactory purchase). Once the user
+    licenses the app the wrapper respawns the backend without it. Templates
+    use this to distinguish "you are in the trial" (show the purchase CTA)
+    from "this project was transcribed during the trial" (show a
+    re-transcribe hint instead — the stored ``transcript.truncated_for_trial``
+    flag outlives the trial itself).
+
+    ``doza_buy_url`` is the channel's purchase page: the wrapper passes
+    ``DOZA_BUY_URL`` (FxFactory builds point at the FxFactory product page);
+    the default is the direct-download store.
+    """
+    return {
+        'doza_trial_active': os.environ.get('DOZA_TRIAL') == '1',
+        'doza_buy_url': os.environ.get('DOZA_BUY_URL') or 'https://doza.ai/buy',
+    }
+
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -1969,6 +1992,15 @@ def serve_media_audio(project_id):
         response.headers['Cache-Control'] = 'private, no-cache'
         return response
 
+    # Trial artifact first: when a trial-mode transcription produced a
+    # capped WAV, playback should match the capped transcript on screen —
+    # even for FCPXML projects whose ingest rendered a full-length
+    # timeline_audio.wav. /retranscribe deletes audio_trial.wav, so a
+    # licensed re-run restores the full-length sources below.
+    trial_wav = os.path.join(project_dir, 'audio_trial.wav')
+    if os.path.exists(trial_wav):
+        return _send_audio(trial_wav)
+
     # Prefer timeline WAV for FCPXML projects (already composed)
     timeline_wav = os.path.join(project_dir, 'timeline_audio.wav')
     if os.path.exists(timeline_wav):
@@ -1996,8 +2028,19 @@ def serve_media_audio(project_id):
                 _cached_audio_valid(audio_wav, source_path, channel):
             return _send_audio(audio_wav)
 
+    # Trial artifact: the capped WAV a trial-mode transcription produced.
+    # Serving it is PLAYBACK-ONLY and matches the capped transcript on
+    # screen; transcription never reads this file back (extract_audio
+    # always re-encodes it), and /media already serves the full source
+    # video, so this is not a licensing surface — just a way to avoid
+    # re-running ffmpeg on every Range request below.
+    trial_wav = os.path.join(project_dir, 'audio_trial.wav')
+    if os.path.exists(trial_wav):
+        return _send_audio(trial_wav)
+
     # Extract on the fly (not yet transcribed, or the cache failed
-    # validation — extract_audio deletes and rebuilds it).
+    # validation — extract_audio deletes and rebuilds it). In trial mode
+    # this returns the capped audio_trial.wav, never a full extraction.
     if source_path and os.path.exists(source_path):
         from transcribe import extract_audio
         try:

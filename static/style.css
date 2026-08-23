@@ -428,6 +428,11 @@ body {
     color: var(--red);
 }
 
+.status-trial {
+    background: rgba(220, 160, 40, 0.12);
+    color: #dca028;
+}
+
 .project-action-btn {
     opacity: 0;
     transition: opacity 0.15s;

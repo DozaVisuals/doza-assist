@@ -487,6 +487,40 @@
 
     <!-- Transcript Tab -->
     <div class="tab-content active" id="tab-transcript">
+                {% if project.transcript.truncated_for_trial %}
+                {# Trial-truncation notice. transcript.truncated_for_trial is baked
+                   into the stored transcript by core/transcribe.py on the trial
+                   path (the wrapper sets DOZA_TRIAL while the install is
+                   unlicensed). doza_trial_active (context processor in app.py)
+                   reflects the LIVE state: once the user has licensed the app and
+                   the backend restarted, we stop selling and point at Retranscribe
+                   instead — the stored transcript stays a trial-length excerpt
+                   until they re-run it. doza_buy_url is the channel's store. #}
+                {% set trial_mins = (project.transcript.trial_max_seconds or 120) // 60 %}
+                {% if doza_trial_active %}
+                <div class="my-style-banner my-style-banner-warn" id="trialBanner">
+                    <strong>Free trial:</strong> only the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} of this file {{ 'were' if trial_mins != 1 else 'was' }} transcribed.
+                    <div style="margin-top: 6px;">
+                        Everything here — speakers, story analysis, clips, exports — runs on the complete interview once unlocked. One-time purchase, no subscription.
+                        <a href="{{ doza_buy_url }}" target="_blank" rel="noopener" style="margin-left: 6px; font-weight: 600; color: var(--accent);">Get Full Access</a>
+                    </div>
+                    <div style="margin-top: 6px; color: var(--text-secondary);">
+                        Already purchased? Enter your license key (Doza Assist menu ▸ Manage License…) and a <strong>Transcribe Again</strong> button will appear here.
+                    </div>
+                </div>
+                {% else %}
+                {# Licensed, but the stored transcript is still a trial-length
+                   excerpt: prominent message + a Transcribe Again button that opens
+                   the existing retranscribe modal (keeps the language choice and the
+                   non-English Whisper-install guard). #}
+                <div class="my-style-banner my-style-banner-warn">
+                    <strong>Trial-length transcript:</strong> the previous transcription was limited to the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} because Doza Assist was running in trial mode. Transcribe again now to get the complete interview.
+                    <div style="margin-top: 8px;">
+                        <button class="btn btn-sm btn-purple" onclick="showRetranscribe()">Transcribe Again</button>
+                    </div>
+                </div>
+                {% endif %}
+                {% endif %}
                 {# Speaker-separation honesty banner: shown when the project
                    was configured multi-speaker, the transcript carries a
                    single distinct label, AND diarization is in a SILENT
@@ -494,10 +528,14 @@
                    queued/running/done states have the diarization
                    extension's own live banners. Keyed on segment labels so
                    it self-clears once labels diverge (pyannote rewrite or
-                   manual reassignment); dismissal persists per project. #}
+                   manual reassignment); dismissal persists per project.
+                   Suppressed on trial-length transcripts: the trial banner
+                   above already owns this slot, and a capped excerpt's
+                   speaker labels aren't worth a second stacked warning. #}
                 {% set diar_silent_banner = (diarization_state | default('unavailable')) not in ('queued', 'running', 'done') %}
                 {% if not is_shared and project.num_speakers and project.num_speakers > 1
-                      and transcript_speakers|length == 1 and diar_silent_banner %}
+                      and transcript_speakers|length == 1 and diar_silent_banner
+                      and not project.transcript.truncated_for_trial %}
                 <div id="speakerHonestyBanner" data-project="{{ project.id }}" style="margin: 0 0 0.75rem; padding: 0.7rem 0.9rem; background: color-mix(in srgb, var(--orange) 8%, transparent); border: 1px solid color-mix(in srgb, var(--orange) 35%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.45; display: flex; gap: 0.6rem; align-items: flex-start;">
                     <span style="flex-shrink: 0;">🎙️</span>
                     <span style="color: var(--text-secondary);">

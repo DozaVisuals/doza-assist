@@ -429,6 +429,22 @@ def _cached_audio_valid(audio_path, filepath, channel=None):
     return True
 
 
+def _trial_max_seconds():
+    """Trial cap length, parsed fail-SAFE for licensing.
+
+    Only the FxFactory wrapper sets DOZA_TRIAL_MAX_SECONDS (main.js). A
+    malformed value must not crash trial transcription, and an inflated
+    value must not quietly disable the cap (env vars can be injected
+    around the wrapper, e.g. launchctl setenv) — so anything unparsable
+    falls back to 120 and the result is clamped to [1, 600]."""
+    raw = os.environ.get('DOZA_TRIAL_MAX_SECONDS', '120') or '120'
+    try:
+        val = int(float(raw))
+    except (TypeError, ValueError):
+        val = 120
+    return min(max(val, 1), 600)
+
+
 def extract_audio(filepath, project_dir=None, audio_channel=None):
     """
     Extract / convert any media file to a 16 kHz mono WAV for processing.
@@ -454,12 +470,75 @@ def extract_audio(filepath, project_dir=None, audio_channel=None):
     are detected and re-extracted automatically — no uninstall needed.
     """
     channel = normalize_audio_channel(audio_channel)
+    # Trial cap (fxfactory channel). Read once. Only the fxfactory channel sets
+    # DOZA_TRIAL=1 (see main.js), so on the direct channel `trial` is always
+    # False and every line below the trial block runs exactly as it does today.
+    trial = os.environ.get('DOZA_TRIAL') == '1'
+    trial_max = _trial_max_seconds()
+
     # Determine output path for extracted audio
     if project_dir:
         audio_path = os.path.join(project_dir, 'audio.wav')
     else:
         audio_path = filepath.rsplit('.', 1)[0] + '_audio.wav'
 
+    if trial:
+        # Trial mode: bypass BOTH early-returns (the cached-wav shortcut and the
+        # already-16k-mono-WAV passthrough) so the cap always runs; write to a
+        # DISTINCT filename so a capped clip never overwrites — or is mistaken
+        # for — a full audio.wav, and a previously cached full audio.wav is
+        # never served here. Always re-encode through ffmpeg with -t <trial_max>.
+        # Fail safe: -t is applied even when the source duration is unknown,
+        # ambiguous, or shorter than the cap.
+        if project_dir:
+            trial_path = os.path.join(project_dir, 'audio_trial.wav')
+        else:
+            trial_path = filepath.rsplit('.', 1)[0] + '_audio_trial.wav'
+        ffmpeg = _find_ffmpeg()
+        stream_count, mix_args = _audio_stream_plan(filepath, channel)
+        if stream_count == 0:
+            raise RuntimeError(
+                'This file has no audio track to transcribe.')
+        # Same atomic-write hardening as the main invocation below: unique
+        # temp path (transcribe job / media route / batch worker can extract
+        # the same project concurrently) + os.replace so an interrupted run
+        # can't leave a truncated trial WAV behind; `-y` BEFORE `-i`
+        # (trailing it was a no-op); -nostdin so a confused ffmpeg can't
+        # block on a TTY that isn't there.
+        tmp_trial = f'{trial_path}.part-{os.getpid()}-{threading.get_ident()}.wav'
+        try:
+            result = subprocess.run([
+                ffmpeg, '-nostdin', '-y', '-i', filepath,
+                '-vn', *mix_args, '-acodec', 'pcm_s16le',
+                '-ar', '16000', '-ac', '1',
+                '-t', str(trial_max),
+                tmp_trial,
+            ], capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    'ffmpeg audio extraction failed: '
+                    f'{_ffmpeg_error_excerpt(result.stderr)}')
+            os.replace(tmp_trial, trial_path)
+        finally:
+            if os.path.exists(tmp_trial):
+                try:
+                    os.remove(tmp_trial)
+                except OSError:
+                    pass
+        # Same zero-CONTENT guard as the main invocation: an empty trial WAV
+        # would sail into the engines and crash Whisper on a 0-element tensor.
+        if _wav_duration_seconds(trial_path) < 0.1:
+            try:
+                os.remove(trial_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                'Extracted audio is empty — the file may have no usable audio '
+                'track. Check that the source plays sound in QuickTime.'
+            )
+        return trial_path
+
+    # Reuse the cached extraction only if it passes recipe/source validation.
     # Same-path guard: callers may hand us our own previous OUTPUT as the
     # input (My Style import extracts first, then transcribe_file re-enters
     # here with the WAV). The sidecar records the ORIGINAL source's
@@ -620,6 +699,21 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
         except Exception:
             pass
 
+    # Trial cap (fxfactory channel) — the same flags extract_audio() reads,
+    # used here only to tag the result so the UI can show "truncated for trial".
+    # On the direct channel DOZA_TRIAL is unset, so `trial` is False and the
+    # annotator below is a pass-through (nothing is added to the result dict).
+    trial = os.environ.get('DOZA_TRIAL') == '1'
+    trial_max = _trial_max_seconds()
+
+    def _apply_trial(result):
+        """Tag the engine result when the trial cap is active; otherwise return
+        it unchanged — the paying/direct path gets the identical dict."""
+        if trial and isinstance(result, dict):
+            result['truncated_for_trial'] = True
+            result['trial_max_seconds'] = trial_max
+        return result
+
     _emit("extract_audio", 0)
     # Extract audio first — needed for all engines (video files are too large for direct processing)
     audio_path = extract_audio(filepath, project_dir=project_dir,
@@ -635,7 +729,7 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     if language == 'en':
         try:
             _emit("load_model", 5, engine="parakeet-mlx")
-            return _transcribe_parakeet(audio_path, speaker_labels, progress_cb=progress_cb)
+            return _apply_trial(_transcribe_parakeet(audio_path, speaker_labels, progress_cb=progress_cb))
         except ImportError:
             print("Parakeet MLX not available, trying Whisper...", flush=True)
         except Exception as e:
@@ -666,17 +760,17 @@ def transcribe_file(filepath, project_dir=None, speaker_labels=None, num_speaker
     # Try WhisperX
     try:
         _emit("load_model", 5, engine="whisperx", slow_mode=True)
-        return _transcribe_whisperx(audio_path, speaker_labels, language=language, progress_cb=progress_cb)
+        return _apply_trial(_transcribe_whisperx(audio_path, speaker_labels, language=language, progress_cb=progress_cb))
     except ImportError:
         print("WhisperX not available, trying standard Whisper...")
 
     # Fall back to standard Whisper
     try:
         _emit("load_model", 5, engine="whisper", slow_mode=True)
-        return _transcribe_whisper(
+        return _apply_trial(_transcribe_whisper(
             audio_path, speaker_labels, num_speakers=num_speakers,
             language=language, progress_cb=progress_cb,
-        )
+        ))
     except ImportError:
         raise RuntimeError(
             "No transcription engine found. Install one of:\n"

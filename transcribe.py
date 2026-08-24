@@ -157,7 +157,20 @@ def _count_audio_streams(filepath):
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:
-            return len([ln for ln in result.stdout.strip().splitlines() if ln.strip()])
+            tokens = [ln.strip() for ln in result.stdout.strip().splitlines()
+                      if ln.strip()]
+            distinct = set(tokens)
+            if len(tokens) > len(distinct):
+                # Program containers (MPEG-TS: .ts/.m2ts/.mts, or broadcast
+                # files misnamed .mp4) list every stream once per enclosing
+                # section, so a one-audio TS shows up twice. Feeding that
+                # inflated count into the amix path maps a nonexistent
+                # [0:a:1] and kills extraction outright. Duplicated listings
+                # collapse to the distinct set — and program multi-audio is
+                # alternate services/languages, not separate mics, so the
+                # single-stream default selection is the right behaviour.
+                return 1 if distinct else 0
+            return len(distinct)
     except Exception:
         pass
     return None

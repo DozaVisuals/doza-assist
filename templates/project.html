@@ -4792,6 +4792,34 @@ function _collectExportCategories() {
     return picked;
 }
 
+// Documents-card collector — the Export tab renders EITHER the unified NLE
+// card (exportCat*) or the round-trip card (rtCat*), never both ({% raw %}
+// {% if rt_src ... %}{% endraw %} above). Read whichever card is present and
+// normalize to the documents route's vocabulary: labels | social | story |
+// soundbites (exporters/documents.py _CATEGORY_TITLES). Deliberately NOT
+// _collectRtSources(): that returns 'client_selects' (the round-trip
+// WRITER's key), which the documents route silently drops — reusing it
+// would turn the checked-clips state into a spurious "No selects" 400.
+function _collectDocumentCategories() {
+    if (document.getElementById('rtExportCategories')) {
+        const map = {
+            rtCatLabels: 'labels',
+            rtCatSocial: 'social',
+            rtCatStory: 'story',
+            rtCatSoundbites: 'soundbites',
+        };
+        const picked = [];
+        for (const [id, key] of Object.entries(map)) {
+            const el = document.getElementById(id);
+            if (el && el.checked) picked.push(key);
+        }
+        return picked;
+    }
+    // Unified card: same keys minus 'transcript' — that is the separate
+    // full-transcript document, not a selects category.
+    return _collectExportCategories().filter(c => c !== 'transcript');
+}
+
 // Keep the single "Export to FCPX" button in sync with checkbox state —
 // disabled when nothing is selected, enabled otherwise. Call after any
 // checkbox change AND when clip counts update (labelSections mutates often).
@@ -5180,7 +5208,9 @@ function updateDocHint() {
     if (!el) return;
     const what = _docValue('docWhat');
     el.textContent = what === 'selects'
-        ? 'Selects use the categories checked above (My Clips · Social · Story Beats), with timecodes, the spoken words, and your notes.'
+        ? (document.getElementById('rtExportCategories')
+            ? 'Selects use the categories checked above (My Clips · Social · Story Beats · Soundbites), with timecodes, the spoken words, and your notes.'
+            : 'Selects use the categories checked above (My Clips · Social · Story Beats), with timecodes, the spoken words, and your notes.')
         : what === 'quotes'
             ? 'Exports the quote sheet from the AI Analysis tab — generate it there first.'
             : 'The complete transcript with speaker names and timecodes.';
@@ -5197,11 +5227,12 @@ async function downloadDocument() {
         payload = { format: fmt, deliver_to: 'file' };
         summary = 'Quote sheet (' + fmtLabel + ')';
     } else {
-        const categories = what === 'selects'
-            ? _collectExportCategories().filter(c => c !== 'transcript')
-            : [];
+        const categories = what === 'selects' ? _collectDocumentCategories() : [];
         if (what === 'selects' && categories.length === 0) {
-            showToast('Check at least one category above (My Clips, Social, Story Beats).');
+            const catHint = document.getElementById('rtExportCategories')
+                ? 'My Clips, Social, Story Beats, Soundbites'
+                : 'My Clips, Social, Story Beats';
+            showToast(`Check at least one category above (${catHint}).`);
             return;
         }
         // Same pre-flight as the NLE export: persist fresh highlights so the

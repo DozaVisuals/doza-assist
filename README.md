@@ -256,17 +256,22 @@ The app automatically tries Ollama first and falls back to Claude if configured.
 
 ## Doza Assist Pro
 
-Everything in this repository is the complete free tier — full transcription, AI analysis, clip-library-aware chat, My Style, Story Builder, and FCPXML round-trip. [Doza Assist Pro](https://doza.ai) adds higher-level workflow features on top of the same local-first engine:
+Everything in this repository is the complete free tier — full transcription, AI analysis, clip-library-aware chat, My Style, Story Builder, and FCPXML import/export. [Doza Assist Pro](https://doza.ai) adds higher-level workflow features on top of the same local-first engine, packaged as a signed, notarized one-click Mac app (models bundled, auto-updates — no Python or Homebrew setup):
 
 | | Free / OSS (this repo) | Doza Assist Pro |
 |---|---|---|
 | **Transcription, Analysis, Chat, Story Builder, My Style, FCPXML export** | Full | Full |
 | **Speaker labels (diarization)** | — | Included |
+| **Multicam round-trip** (selects return to Final Cut Pro as a new project built from your original multicam clips — angles and sync intact) | — | Included |
+| **Documents export** (full transcript, selects, quote sheet as Word / PDF / Excel) | — | Included |
 | **Collections** (cross-interview analysis) | — | Included |
 | **Story Brief** | — | Included |
 | **Quote Sheets** | — | Included |
+| **One-click install** (signed app, bundled models, auto-updates) | — | Included |
 
-Learn more at [doza.ai](https://doza.ai).
+**Try Pro free**: the [doza.ai](https://doza.ai) download now includes a free trial — every feature works on the first 2 minutes of each file; a license unlocks full length in place.
+
+Contributions to this repository are accepted under the [Contributor License Agreement](CLA.md), which keeps every contribution available here under MIT while allowing it to ship in the commercial editions too.
 
 ---
 

@@ -659,7 +659,23 @@ def _transcribe_whisper(audio_path, speaker_labels=None, num_speakers=2, languag
         raise RuntimeError("Could not load any Whisper model")
 
     print(f"Transcribing (language: {language})...")
-    transcribe_kwargs = {"word_timestamps": True}
+    # Anti-hallucination decode params. On silent or speech-empty audio the
+    # plain-Whisper path otherwise emits a confident, identical
+    # subtitle-credit line per 30 s window (e.g. Norwegian "Teksting av …"
+    # repeated for the whole file). Not conditioning on previous text stops
+    # the repetition self-reinforcing; the no-speech / logprob /
+    # compression-ratio thresholds let the decoder drop a degenerate window
+    # instead of committing it; an empty initial_prompt avoids seeding any
+    # phrase. These are at or near Whisper's own defaults, so real speech
+    # is unaffected.
+    transcribe_kwargs = {
+        "word_timestamps": True,
+        "condition_on_previous_text": False,
+        "no_speech_threshold": 0.6,
+        "logprob_threshold": -1.0,
+        "compression_ratio_threshold": 2.4,
+        "initial_prompt": "",
+    }
     if language != 'auto':
         transcribe_kwargs["language"] = language
 

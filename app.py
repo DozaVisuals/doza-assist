@@ -4225,11 +4225,17 @@ NLE_DISPLAY_NAMES = {
     'resolve': 'DaVinci Resolve',
 }
 
-# Server-side twin of the UI's round-trip toast (project.html
-# _warnRoundTripFcpOnly) — keep the first sentence in lockstep with it.
+# Raw-HTTP guard message for FLAT exports of round-trip-shaped projects
+# (the UI never posts that combination — round-trip pages only render the
+# round-trip card). The round-trip FCPXML export itself is platform-aware
+# now (see _hand_round_trip_to_nle): FCP auto-imports, Resolve/Premiere get
+# save + reveal + hint — so this string only ever reaches raw HTTP callers
+# hitting the flat routes, where the constraint still holds (their
+# source_path is the app-internal timeline_audio.wav).
 ROUND_TRIP_FCP_ONLY_ERROR = (
     'FCPXML round-trips can only be sent back to Final Cut Pro. '
-    'Switch the target editor to Final Cut Pro and export again.'
+    'Use the FCPXML Round-Trip export instead — it can also save the file '
+    'for other editors.'
 )
 
 
@@ -4637,6 +4643,70 @@ def _reveal_in_finder(file_path: str):
         app.logger.error('Reveal in Finder failed: %s', e)
 
 
+def _hand_round_trip_to_nle(file_path: str, nle: str, *,
+                            source_media_path: str | None = None,
+                            project_name: str = '',
+                            timeline_name: str = ''):
+    """Deliver a round-trip FCPXML per the user's Edit-in platform.
+
+    The round-trip writer's output is a Final Cut Pro container by
+    construction (mc-clip / sync-clip spine), so only FCP can auto-import it
+    faithfully. Delivery therefore branches on the editor, not the format:
+
+      - ``fcp``      — bundle-ID launch, FCP auto-imports (the same handoff
+                       the flat routes use).
+      - ``resolve``  — save + reveal in Finder + best-effort focus Resolve,
+                       with an import hint. Deliberately NOT the scripted
+                       Resolve import: 1.0.24 field testing (commit 8918d4d)
+                       showed Resolve imports the mc-clip timeline EMPTY, so
+                       each scripted attempt would burn the 180s import
+                       timeout and leave an empty timeline polluting the
+                       user's Resolve project.
+      - ``premiere`` — save + reveal, with a hint that Premiere cannot read
+                       FCPXML at all.
+
+    Same ``(opened_in, info)`` contract as ``_hand_file_to_nle``.
+    """
+    if nle == 'fcp':
+        return _hand_file_to_nle(
+            file_path, 'fcp',
+            source_media_path=source_media_path,
+            project_name=project_name,
+            timeline_name=timeline_name,
+        )
+    revealed, reveal_err = _run_open(['-R', file_path])
+    if not revealed:
+        app.logger.warning('Finder reveal failed for %s: %s',
+                           file_path, reveal_err)
+    opened_in = 'finder'
+    if nle == 'resolve':
+        app_path = _find_nle_app_path('resolve')
+        if app_path:
+            focused, _focus_err = _run_open(['-a', app_path])
+            if focused:
+                opened_in = 'finder+app'
+        return opened_in, {
+            'import_fallback': True,
+            'reason': 'round_trip_fcp_container',
+            'hint': ('This is a Final Cut Pro round-trip FCPXML — DaVinci '
+                     'Resolve may import the multicam timeline empty. In '
+                     'Resolve, use File → Import → Timeline… and choose the '
+                     '.fcpxml. For full multicam fidelity, open it in Final '
+                     'Cut Pro.'),
+        }
+    # premiere: XML-file-only by design everywhere else too, but here the
+    # file is FCPXML, which Premiere cannot read at all — say so.
+    return opened_in, {
+        'import_fallback': True,
+        'premiere_manual_import': True,
+        'reason': 'round_trip_fcp_container',
+        'hint': ('Premiere Pro cannot read FCPXML, so the round-trip file '
+                 'was saved instead of sent. Open it in Final Cut Pro or '
+                 'DaVinci Resolve — or switch Edit in to Final Cut Pro to '
+                 'send it there directly.'),
+    }
+
+
 @app.route('/export/send-to-nle', methods=['POST'])
 def send_to_nle():
     """Generate the export for ``project_id`` and hand it to the chosen NLE.
@@ -4661,13 +4731,15 @@ def send_to_nle():
         return jsonify({'error': 'Invalid project_id'}), 400
     export_type = str(body.get('export_type') or 'selects').strip().lower()
 
-    # Multicam round-trip is FCP-specific (it preserves FCP's multicam /
-    # sync-clip container) — force the target NLE to fcp regardless of what
-    # the selector says, so the file lands in the only editor that can use it.
-    if export_type == 'multicam':
+    # The multicam round-trip FILE stays FCP-format by construction, but
+    # delivery follows the user's chosen editor (fcp auto-imports; resolve /
+    # premiere get save + reveal + hint via _hand_round_trip_to_nle). The
+    # old code force-launched Final Cut Pro here even with Resolve selected
+    # — the 1.0.44 field bug. Absent nle on a multicam body still means fcp:
+    # legacy raw-HTTP callers never had to send one (it was forced).
+    nle = str(body.get('nle') or '').strip().lower()
+    if not nle and export_type == 'multicam':
         nle = 'fcp'
-    else:
-        nle = str(body.get('nle') or '').strip().lower()
 
     if nle not in NLE_DISPLAY_NAMES:
         return jsonify({'error': f'Unknown NLE: {nle!r}'}), 400
@@ -4677,15 +4749,20 @@ def send_to_nle():
         return jsonify({'error': 'Project not found'}), 404
 
     # Server-side round-trip gate — same rule /export/fcpxml enforces: a
-    # round-trip project may only be SENT to Final Cut Pro. The UI never
-    # posts that combination, but this route is raw-HTTP reachable.
-    if nle != 'fcp' and _round_trip_fcp_only(project):
+    # round-trip project's FLAT exports may only target Final Cut Pro
+    # (their source_path is the app-internal timeline_audio.wav). The
+    # round-trip export itself (export_type == 'multicam') is exempt: its
+    # output is the stored FCPXML re-emitted, safe to save for any editor.
+    if export_type != 'multicam' and nle != 'fcp' and _round_trip_fcp_only(project):
         return jsonify({'error': ROUND_TRIP_FCP_ONLY_ERROR}), 400
 
     # Premiere delivery is XML-file-only (write + reveal in Finder) — it
     # neither launches nor requires Premiere Pro on this Mac, so there is
-    # no install gate for it (see _hand_file_to_nle).
-    if nle != 'premiere':
+    # no install gate for it (see _hand_file_to_nle). Same reasoning for
+    # a round-trip file bound for Resolve: it is saved + revealed, so a
+    # missing Resolve must not fail the export.
+    needs_app = nle == 'fcp' or (nle == 'resolve' and export_type != 'multicam')
+    if needs_app:
         app_path = _find_nle_app_path(nle)
         if not app_path:
             return jsonify({
@@ -4739,7 +4816,8 @@ def send_to_nle():
     # forward source_media_path/project_name/timeline_name so Resolve can add
     # the source clip to the Media Pool and name the timeline (this route
     # previously dropped them, so Clips/Send-to-NLE imports landed offline).
-    opened_in, info = _hand_file_to_nle(
+    hand = _hand_round_trip_to_nle if export_type == 'multicam' else _hand_file_to_nle
+    opened_in, info = hand(
         file_path, nle,
         source_media_path=project.get('source_path') or project.get('filepath'),
         project_name=project.get('name') or '',
@@ -5071,10 +5149,13 @@ def export_fcpxml_multicam(project_id):
       - ``markers_timeline``: emits the original timeline with markers injected
         at each select's in-point.
 
-    Honors ``deliver_to`` like ``/export/fcpxml``: ``'nle'`` always launches
-    Final Cut Pro (the round-trip writer is FCP-only by construction);
-    ``'file'`` reveals in Finder; omitted preserves the legacy attachment
-    download.
+    Honors ``deliver_to`` like ``/export/fcpxml``: ``'nle'`` delivers per the
+    optional ``nle`` body field (absent → ``'fcp'``, preserving the legacy
+    always-launch-FCP contract for raw-HTTP callers) — FCP auto-imports;
+    Resolve/Premiere get save + reveal + import hint, because the writer's
+    output is an FCP container by construction (see
+    ``_hand_round_trip_to_nle``). ``'file'`` reveals in Finder; omitted
+    preserves the legacy attachment download.
     """
     project = get_project(project_id)
     if not project:
@@ -5082,6 +5163,11 @@ def export_fcpxml_multicam(project_id):
 
     body = request.json or {}
     deliver_to = str(body.get('deliver_to') or '').strip().lower()
+    # Target editor for 'nle' delivery. Absent → 'fcp' so raw-HTTP callers
+    # that relied on the old guaranteed-FCP-launch contract are unchanged.
+    nle = str(body.get('nle') or 'fcp').strip().lower()
+    if nle not in NLE_DISPLAY_NAMES:
+        return jsonify({'error': f'Unknown NLE: {nle!r}'}), 400
 
     try:
         (out_path, filename, mode, skipped_labels,
@@ -5090,22 +5176,33 @@ def export_fcpxml_multicam(project_id):
         return jsonify({'error': str(e)}), e.status
 
     if deliver_to == 'nle':
-        # Round-trip is FCP-only — ignore whatever NLE the user has selected
-        # and always hand the file to Final Cut Pro.
-        opened_in, info = _hand_file_to_nle(out_path, 'fcp')
+        # Delivery follows the user's Edit-in editor; the FILE stays an FCP
+        # container by construction (Resolve/Premiere get save + reveal +
+        # hint — the old code force-launched Final Cut Pro even with
+        # Resolve selected, the 1.0.44 field bug).
+        opened_in, info = _hand_round_trip_to_nle(
+            out_path, nle,
+            source_media_path=(project.get('source_path')
+                               or project.get('filepath')),
+            project_name=project.get('name') or '',
+            timeline_name=os.path.splitext(filename)[0] if filename else '',
+        )
         if opened_in is None:
             return jsonify({'error': info.get('error', 'NLE delivery failed'),
                             'file': out_path}), 500
         payload = {
             'status': 'ok', 'delivery': 'nle', 'opened_in': opened_in,
-            'nle': 'fcp', 'nle_name': NLE_DISPLAY_NAMES['fcp'],
+            'nle': nle, 'nle_name': NLE_DISPLAY_NAMES[nle],
             'file': out_path, 'filename': filename,
             'format_name': 'FCPXML', 'mode': mode,
             'skipped': skipped_labels, 'skipped_count': len(skipped_labels),
         }
+        # Handoff details (Resolve/Premiere import hints, scripted
+        # timeline_name) ride along so the UI can render honest guidance.
+        payload.update(info)
         if parse_warnings:
             payload.setdefault('warnings', []).extend(parse_warnings)
-        warning = _mpegts_media_warning(project, 'fcp')
+        warning = _mpegts_media_warning(project, nle)
         if warning:
             payload['media_warning'] = warning
         return jsonify(payload)

@@ -941,7 +941,7 @@
                         </div>
                     </div>
                 </div>
-                <button class="btn btn-primary" id="rtExportBtn" onclick="exportFCPXMLMulticam()" style="width:100%;">
+                <button class="btn btn-primary" id="rtExportBtn" data-export-label-key="rt-export" onclick="exportFCPXMLMulticam()" style="width:100%;">
                     Export to Final Cut Pro
                 </button>
             {% else %}
@@ -1161,6 +1161,12 @@ const SHORT_NAMES    = { fcp: 'FCPX',          premiere: 'PrPro',        resolve
 
 const EXPORT_LABELS = {
     'unified':    p => `Export to ${SHORT_NAMES[p]}`,
+    // Round-trip card: the FILE is always an FCP container, but the button
+    // must say what actually happens per the Edit-in platform (the 1.0.44
+    // field bug was this button promising FCP while DELIVER TO said Resolve).
+    'rt-export':  p => p === 'fcp' ? 'Export to Final Cut Pro'
+                   : p === 'resolve' ? 'Export FCPXML for DaVinci Resolve'
+                   : 'Export FCPXML (Final Cut format)',
     'send-to-nle':p => `Send to ${PLATFORM_NAMES[p]}`,
     'story-seq':  p => `Export to ${PLATFORM_NAMES[p]}`,
     'section':    p => SHORT_NAMES[p],
@@ -4851,15 +4857,28 @@ function _useRoundTripExport() {
 // Final Cut Pro can import: Resolve opens the FCPXML but the timeline comes in
 // empty, and Premiere can't read FCPXML at all. If the editor has another NLE
 // selected, say plainly that the file is going to FCP regardless.
-function _warnRoundTripFcpOnly(delivery) {
-    // Send-to-NLE delivery shows a busy toast in the same tick, which would
-    // overwrite this warning before it renders a single frame (#toast is a
-    // single mutable element). For that path the explanation is folded into
-    // the outcome toast instead — only pre-toast for file delivery.
-    if (delivery === 'nle') return;
-    if (typeof EDITING_PLATFORM !== 'undefined' && EDITING_PLATFORM !== 'fcp') {
-        showToast('FCPXML round-trips can only be sent back to Final Cut Pro — exporting to Final Cut Pro.', true);
+// Round-trip busy toast: FCP genuinely launches-and-imports, so it keeps
+// the shared "Sending to…" busy; Resolve/Premiere deliveries are a fast
+// save + reveal (+ focus for Resolve), so promise exactly that. (Replaces
+// _warnRoundTripFcpOnly — the old flow force-sent to FCP regardless of the
+// Edit-in platform and pre-warned about it; delivery is honest now.)
+function _rtShowExportBusy(delivery) {
+    const p = typeof EDITING_PLATFORM !== 'undefined' ? EDITING_PLATFORM : 'fcp';
+    if (p === 'fcp') return maybeShowExportBusy(delivery, 'fcp');
+    if (delivery !== 'nle') return false;
+    showBusy('Saving FCPXML for ' + (PLATFORM_NAMES[p] || 'your editor') + '…');
+    return true;
+}
+
+// Round-trip outcome phrasing: what actually happened, per platform.
+function _rtDeliveryMsg(data) {
+    const dest = data.nle_name
+        || (typeof EDITING_PLATFORM !== 'undefined' && PLATFORM_NAMES[EDITING_PLATFORM])
+        || 'your editor';
+    if (data.opened_in === 'app' || data.opened_in === 'scripted') {
+        return `Sent to ${dest}`;
     }
+    return `Saved for ${dest} — revealed in Finder`;
 }
 
 // Returns { ok, data } so callers can gate their own follow-up toasts —
@@ -4867,12 +4886,12 @@ function _warnRoundTripFcpOnly(delivery) {
 // rather than throwing.
 async function _exportFCPXMLRoundTrip(opts, summary) {
     const delivery = getDelivery();
-    _warnRoundTripFcpOnly(delivery);
     const body = Object.assign(
-        { mode: 'selects_project', deliver_to: delivery },
+        { mode: 'selects_project', deliver_to: delivery,
+          nle: typeof EDITING_PLATFORM !== 'undefined' ? EDITING_PLATFORM : 'fcp' },
         opts || {},
     );
-    maybeShowExportBusy(delivery, 'fcp');  // round-trip always targets FCP
+    _rtShowExportBusy(delivery);
     try {
         const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
             method: 'POST',
@@ -4885,17 +4904,14 @@ async function _exportFCPXMLRoundTrip(opts, summary) {
             showToast((data && data.error) || 'Export failed', true);
             return { ok: false, data };
         }
-        // When the round-trip ran despite a non-FCP platform selection
-        // (round-trips re-emit the FCP container, which only FCP imports),
-        // say why the file went to FCP instead of pretending that was the
-        // user's choice.
-        const platformIsFcp = typeof EDITING_PLATFORM === 'undefined' || EDITING_PLATFORM === 'fcp';
-        const fcpOnlyNote = platformIsFcp ? '' : ' (round-trips preserve the FCP container, so this went to Final Cut Pro)';
+        // Delivery now follows the Edit-in platform (server: nle body
+        // field) — describe what actually happened; any Resolve/Premiere
+        // import hint arrives via data.hint through showExportOutcome.
         let msg;
         if (data.delivery === 'nle') {
-            msg = (summary ? `${summary} → Final Cut Pro` : 'Sent to Final Cut Pro') + fcpOnlyNote;
+            msg = summary ? `${summary} → ${_rtDeliveryMsg(data)}` : _rtDeliveryMsg(data);
         } else {
-            msg = `Exported to ${data.file || data.filename || 'disk'}` + fcpOnlyNote;
+            msg = `Exported to ${data.file || data.filename || 'disk'}`;
         }
         // One consolidated toast: success + media warning + skipped selects
         // (partial drops used to be invisible — the lane-1-gap bug class).
@@ -4994,7 +5010,6 @@ async function exportFCPXMLMulticam() {
     const mode = modeBtn ? modeBtn.getAttribute('data-mode') : 'selects_project';
     const delivery = getDelivery();
     const modeLabel = mode === 'markers_timeline' ? 'markers on timeline' : 'selects as new project';
-    _warnRoundTripFcpOnly(delivery);
 
     if (!_beginExport(triggerBtn)) return;
     try {
@@ -5017,13 +5032,14 @@ async function exportFCPXMLMulticam() {
         const preserveOrder = clipOrderMode === 'manual'
             && sources.length === 1 && sources[0] === 'client_selects';
 
-        maybeShowExportBusy(delivery, 'fcp');  // multicam round-trip targets FCP
+        _rtShowExportBusy(delivery);
         try {
             const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode, sources, deliver_to: delivery,
-                                       preserve_order: preserveOrder }),
+                                       preserve_order: preserveOrder,
+                                       nle: typeof EDITING_PLATFORM !== 'undefined' ? EDITING_PLATFORM : 'fcp' }),
             });
             const data = await res.json().catch(() => ({}));
             hideBusy();
@@ -5031,14 +5047,12 @@ async function exportFCPXMLMulticam() {
                 showToast((data && data.error) || 'Export failed', true);
                 return;
             }
-            // When a non-FCP platform is selected the pre-export warning is
-            // suppressed for NLE delivery (the busy toast would overwrite it
-            // in the same tick) — fold the explanation into the outcome.
-            const platformIsFcp = typeof EDITING_PLATFORM === 'undefined' || EDITING_PLATFORM === 'fcp';
-            const fcpOnlyNote = platformIsFcp ? '' : ' (round-trips preserve the FCP container, so this went to Final Cut Pro)';
+            // Delivery follows the Edit-in platform (server: nle body
+            // field) — describe what actually happened; Resolve/Premiere
+            // import hints arrive via data.hint through showExportOutcome.
             const msg = data.delivery === 'nle'
-                ? `Sent to Final Cut Pro — ${modeLabel}${fcpOnlyNote}`
-                : `Exported to ${data.file || data.filename || 'disk'} — ${modeLabel}${fcpOnlyNote}`;
+                ? `${_rtDeliveryMsg(data)} — ${modeLabel}`
+                : `Exported to ${data.file || data.filename || 'disk'} — ${modeLabel}`;
             // One consolidated toast: success + media warning + skipped
             // selects (dropped selects used to be invisible on this path —
             // the primary round-trip export button).

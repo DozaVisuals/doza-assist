@@ -645,3 +645,179 @@ class TestAllSkipped400CarriesWarnings:
         assert len(data['warnings']) == 2
         assert all('unreadable timecode' in w for w in data['warnings'])
         assert any('Corrupt A' in w for w in data['warnings'])
+
+
+# ── 1.0.45: round-trip delivery follows the Edit-in platform ────────────────
+
+class TestRoundTripPlatformDelivery:
+    """The 1.0.44 field bug: with Edit-in = DaVinci Resolve, the round-trip
+    export force-launched Final Cut Pro. Delivery now follows the ``nle``
+    body field (_hand_round_trip_to_nle): fcp auto-imports; resolve gets
+    save + reveal + focus + hint; premiere gets save + reveal + hint. The
+    FILE stays an FCP container by construction — scripted Resolve import is
+    deliberately NOT attempted (1.0.24: mc-clip timelines import EMPTY)."""
+
+    def _project(self, pid, tmp_path):
+        return _make_roundtrip_project(
+            pid, tmp_path,
+            labeled_sections=[{'start': 1.0, 'end': 2.0,
+                               'color': 'green', 'text': 'x'}])
+
+    def _no_scripted_resolve(self, monkeypatch):
+        def _boom(*a, **k):
+            raise AssertionError('scripted Resolve import must not run for '
+                                 'round-trip files (imports empty, 1.0.24)')
+        monkeypatch.setattr(app_module, '_hand_file_to_resolve', _boom)
+
+    def test_multicam_route_resolve_reveals_instead_of_launching_fcp(
+            self, client, tmp_path, monkeypatch):
+        self._project('rp1', tmp_path)
+        _stub_multicam_writer(monkeypatch)
+        self._no_scripted_resolve(monkeypatch)
+        fcp_handoffs = []
+        monkeypatch.setattr(
+            app_module, '_hand_file_to_nle',
+            lambda *a, **k: fcp_handoffs.append((a, k)) or ('app', {}))
+        opens = []
+
+        def _fake_open(args, timeout=5.0):
+            opens.append(list(args))
+            return True, ''
+
+        monkeypatch.setattr(app_module, '_run_open', _fake_open)
+        monkeypatch.setattr(app_module, '_find_nle_app_path',
+                            lambda nle: '/Applications/DaVinci Resolve.app')
+        res = client.post('/project/rp1/export/fcpxml-multicam',
+                          json={'deliver_to': 'nle', 'nle': 'resolve',
+                                'sources': ['client_selects']})
+        assert res.status_code == 200, res.data
+        data = res.get_json()
+        assert data['nle'] == 'resolve'
+        assert data['nle_name'] == 'DaVinci Resolve'
+        assert data['opened_in'] == 'finder+app'
+        assert data['import_fallback'] is True
+        assert 'Import' in data['hint'] and 'Timeline' in data['hint']
+        # The old force-FCP handoff must NOT have run…
+        assert fcp_handoffs == []
+        # …and the file was revealed + Resolve focused instead.
+        assert any(a and a[0] == '-R' for a in opens)
+        assert any(a and a[0] == '-a' for a in opens)
+
+    def test_multicam_route_absent_nle_keeps_fcp_contract(
+            self, client, tmp_path, monkeypatch):
+        # Raw-HTTP callers that never sent `nle` relied on the guaranteed
+        # FCP launch — absent must still mean fcp.
+        self._project('rp2', tmp_path)
+        _stub_multicam_writer(monkeypatch)
+        handoffs = []
+
+        def _hand(path, nle, **k):
+            handoffs.append((nle, k))
+            return 'app', {}
+
+        monkeypatch.setattr(app_module, '_hand_file_to_nle', _hand)
+        res = client.post('/project/rp2/export/fcpxml-multicam',
+                          json={'deliver_to': 'nle',
+                                'sources': ['client_selects']})
+        assert res.status_code == 200, res.data
+        data = res.get_json()
+        assert data['nle'] == 'fcp'
+        assert data['opened_in'] == 'app'
+        assert [h[0] for h in handoffs] == ['fcp']
+
+    def test_multicam_route_fcp_passes_media_context(
+            self, client, tmp_path, monkeypatch):
+        # The multicam FCP handoff used to drop source_media_path /
+        # project_name / timeline_name (unlike every other export route).
+        self._project('rp3', tmp_path)
+        _stub_multicam_writer(monkeypatch)
+        handoffs = []
+
+        def _hand(path, nle, **k):
+            handoffs.append(k)
+            return 'app', {}
+
+        monkeypatch.setattr(app_module, '_hand_file_to_nle', _hand)
+        res = client.post('/project/rp3/export/fcpxml-multicam',
+                          json={'deliver_to': 'nle', 'nle': 'fcp',
+                                'sources': ['client_selects']})
+        assert res.status_code == 200, res.data
+        (kwargs,) = handoffs
+        assert 'source_media_path' in kwargs
+        assert kwargs['timeline_name']  # splitext of the export filename
+
+    def test_multicam_route_premiere_saves_with_honest_hint(
+            self, client, tmp_path, monkeypatch):
+        self._project('rp4', tmp_path)
+        _stub_multicam_writer(monkeypatch)
+        monkeypatch.setattr(app_module, '_run_open',
+                            lambda args, timeout=5.0: (True, ''))
+        res = client.post('/project/rp4/export/fcpxml-multicam',
+                          json={'deliver_to': 'nle', 'nle': 'premiere',
+                                'sources': ['client_selects']})
+        assert res.status_code == 200, res.data
+        data = res.get_json()
+        assert data['nle'] == 'premiere'
+        assert data['opened_in'] == 'finder'
+        assert data['import_fallback'] is True
+        assert data['premiere_manual_import'] is True
+        assert 'cannot read FCPXML' in data['hint']
+
+    def test_multicam_route_unknown_nle_rejected(self, client, tmp_path):
+        self._project('rp5', tmp_path)
+        res = client.post('/project/rp5/export/fcpxml-multicam',
+                          json={'deliver_to': 'nle', 'nle': 'avid',
+                                'sources': ['client_selects']})
+        assert res.status_code == 400
+        assert 'Unknown NLE' in res.get_json()['error']
+
+    def test_multicam_route_resolve_missing_app_still_succeeds(
+            self, client, tmp_path, monkeypatch):
+        # Resolve delivery is save + reveal — a missing Resolve must not
+        # fail the export (same rule Premiere has always had).
+        self._project('rp6', tmp_path)
+        _stub_multicam_writer(monkeypatch)
+        self._no_scripted_resolve(monkeypatch)
+        monkeypatch.setattr(app_module, '_run_open',
+                            lambda args, timeout=5.0: (True, ''))
+        monkeypatch.setattr(app_module, '_find_nle_app_path', lambda nle: None)
+        res = client.post('/project/rp6/export/fcpxml-multicam',
+                          json={'deliver_to': 'nle', 'nle': 'resolve',
+                                'sources': ['client_selects']})
+        assert res.status_code == 200, res.data
+        data = res.get_json()
+        assert data['opened_in'] == 'finder'
+        assert data['import_fallback'] is True
+
+    def test_send_to_nle_multicam_resolve_no_longer_forced_to_fcp(
+            self, client, tmp_path, monkeypatch):
+        # /export/send-to-nle used to hard-force nle='fcp' for multicam.
+        self._project('rp7', tmp_path)
+        _stub_multicam_writer(monkeypatch)
+        self._no_scripted_resolve(monkeypatch)
+        fcp_handoffs = []
+        monkeypatch.setattr(
+            app_module, '_hand_file_to_nle',
+            lambda *a, **k: fcp_handoffs.append((a, k)) or ('app', {}))
+        monkeypatch.setattr(app_module, '_run_open',
+                            lambda args, timeout=5.0: (True, ''))
+        monkeypatch.setattr(app_module, '_find_nle_app_path',
+                            lambda nle: '/Applications/DaVinci Resolve.app')
+        res = client.post('/export/send-to-nle',
+                          json={'project_id': 'rp7', 'export_type': 'multicam',
+                                'nle': 'resolve'})
+        assert res.status_code == 200, res.data
+        data = res.get_json()
+        assert data['nle'] == 'resolve'
+        assert data['import_fallback'] is True
+        assert fcp_handoffs == []
+
+    def test_send_to_nle_flat_types_still_gated(self, client, tmp_path):
+        # The round-trip exemption is multicam-only: flat exports of a
+        # round-trip-shaped project still 400 for non-FCP targets (their
+        # source_path is the app-internal timeline_audio.wav).
+        self._project('rp8', tmp_path)
+        res = client.post('/export/send-to-nle',
+                          json={'project_id': 'rp8', 'nle': 'resolve'})
+        assert res.status_code == 400
+        assert 'Final Cut Pro' in res.get_json()['error']

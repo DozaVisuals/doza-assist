@@ -21,6 +21,13 @@
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
         <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
+        {# ── Doza Assist Pro link (remove this block to strip it from a fork).
+           Plain local link, no telemetry — attribution is the ?ref URL param
+           only. Pro adds speaker ID, multicam round-trip, and Word/PDF/Excel
+           exports on the same local-first engine; the doza.ai download has a
+           free trial (every feature on the first 2 minutes of each file). #}
+        <a href="https://doza.ai/?ref=oss-app" target="_blank" rel="noopener" class="btn btn-sm" style="text-decoration:none;"
+           title="Speaker ID, multicam round-trip, Word/PDF/Excel exports — every feature free on the first 2 minutes of each file">Try Pro free</a>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="openAIModelModal()" title="AI model settings">AI Model</button>
         <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">

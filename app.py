@@ -261,7 +261,7 @@ def inject_brand():
     """Make the user-visible app brand and logo configurable from the
     launching shell.
 
-    Defaults: brand = "Doza Assist", logo_url = "/static/logo.jpg".
+    Defaults: brand = "Doza Assist Core", logo_url = "/static/logo.jpg".
     An external launcher (a downstream shell that bundles this Flask
     backend) can override by setting DOZA_BRAND and/or DOZA_LOGO_URL in
     the environment before spawning python -- the shell is responsible
@@ -288,7 +288,7 @@ def inject_brand():
         )
         _doza_version = 'unknown'
     return {
-        'brand': os.environ.get('DOZA_BRAND', 'Doza Assist'),
+        'brand': os.environ.get('DOZA_BRAND', 'Doza Assist Core'),
         'logo_url': os.environ.get('DOZA_LOGO_URL', '/static/logo.jpg'),
         'app_version': _doza_version,
     }

@@ -30,7 +30,7 @@ royalty-free, irrevocable copyright license to reproduce, prepare
 derivative works of, publicly display, publicly perform, sublicense, and
 distribute your Contributions and such derivative works, **including the
 right to distribute them under licenses other than the Project's public
-license** (for example, in Doza Assist Pro and other commercial editions).
+license** (for example, in the commercial Doza Assist Mac app and other commercial editions).
 
 ## 3. Grant of Patent License
 

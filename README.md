@@ -1,10 +1,10 @@
-# Doza Assist
+# Doza Assist Core
 
 <a href="https://www.producthunt.com/products/doza-assist?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-doza-assist" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1133645&theme=light" alt="Doza Assist - Open-source local AI that learns how you edit video | Product Hunt" width="250" height="54" /></a>
 
 ### Find the story inside your footage, not just the clips.
 
-> *Doza Assist is free and open source. [Doza Assist Pro](https://doza.ai) adds multi-interview and press-ready workflow features for documentary and series work.*
+> *Doza Assist Core is free and open source. [Doza Assist](https://doza.ai) — the commercial Mac app — adds multi-interview and press-ready workflow features for documentary and series work.*
 
 [![Doza Assist Demo](https://img.youtube.com/vi/VDJN8pzdLq0/maxresdefault.jpg)](https://www.youtube.com/watch?v=VDJN8pzdLq0)
 
@@ -254,11 +254,11 @@ The app automatically tries Ollama first and falls back to Claude if configured.
 
 ---
 
-## Doza Assist Pro
+## The Doza Assist Mac app
 
-Everything in this repository is the complete free tier — full transcription, AI analysis, clip-library-aware chat, My Style, Story Builder, and FCPXML import/export. [Doza Assist Pro](https://doza.ai) adds higher-level workflow features on top of the same local-first engine, packaged as a signed, notarized one-click Mac app (models bundled, auto-updates — no Python or Homebrew setup):
+Everything in this repository is the complete free tier — full transcription, AI analysis, clip-library-aware chat, My Style, Story Builder, and FCPXML import/export. [Doza Assist](https://doza.ai) adds higher-level workflow features on top of the same local-first engine, packaged as a signed, notarized one-click Mac app (models bundled, auto-updates — no Python or Homebrew setup):
 
-| | Free / OSS (this repo) | Doza Assist Pro |
+| | Doza Assist Core (this repo) | Doza Assist (Mac app) |
 |---|---|---|
 | **Transcription, Analysis, Chat, Story Builder, My Style, FCPXML export** | Full | Full |
 | **Speaker labels (diarization)** | — | Included |
@@ -269,7 +269,7 @@ Everything in this repository is the complete free tier — full transcription, 
 | **Quote Sheets** | — | Included |
 | **One-click install** (signed app, bundled models, auto-updates) | — | Included |
 
-**Try Pro free**: the [doza.ai](https://doza.ai) download now includes a free trial — every feature works on the first 2 minutes of each file; a license unlocks full length in place.
+**Try the app free**: the [doza.ai](https://doza.ai) download now includes a free trial — every feature works on the first 2 minutes of each file; a license unlocks full length in place.
 
 Contributions to this repository are accepted under the [Contributor License Agreement](CLA.md), which keeps every contribution available here under MIT while allowing it to ship in the commercial editions too.
 

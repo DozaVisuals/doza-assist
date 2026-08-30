@@ -284,14 +284,14 @@
                 </div>
                 {% endfor %}
             </div>
-            {# ── Doza Assist Pro note (remove this block to strip it from a
-               fork). Shown only on multi-speaker projects — the one spot the
-               OSS/Pro gap is felt daily: here speakers are assigned by hand,
-               Pro's diarization labels them automatically. Plain link, no
-               telemetry. #}
+            {# ── Doza Assist Mac-app note (remove this block to strip it from
+               a fork). Shown only on multi-speaker projects — the one spot the
+               Core/app gap is felt daily: here speakers are assigned by hand,
+               the commercial app's diarization labels them automatically.
+               Plain link, no telemetry. #}
             {% if sidebar_speakers|length > 1 %}
             <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.5rem; line-height: 1.4;">
-                Tired of clicking names? <a href="https://doza.ai/?ref=oss-speakers" target="_blank" rel="noopener" style="color: var(--accent);">Pro labels speakers automatically</a> — try it free.
+                Tired of clicking names? <a href="https://doza.ai/?ref=oss-speakers" target="_blank" rel="noopener" style="color: var(--accent);">The Doza Assist app labels speakers automatically</a> — try it free.
             </p>
             {% endif %}
         </div>

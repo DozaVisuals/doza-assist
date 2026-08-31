@@ -129,6 +129,29 @@ class TestEnumerate:
         assert skipped == 1  # the sync-clip
         assert clips[0].duration_seconds == pytest.approx(10.0)
 
+    def test_library_wrapped_shape(self, tmp_path):
+        # What FCP 12.3 ACTUALLY writes for a browser export (field file
+        # 2026-08-31): the event sits under <library>, with smart-collection
+        # siblings. The first shipped walker missed this entirely.
+        doc = _event_doc(tmp_path)
+        doc = doc.replace(
+            b'<event name="Shoot Day 1">',
+            b'<library location="file:///Users/x/Movies/X.fcpbundle/">\n'
+            b'<event name="Shoot Day 1">')
+        doc = doc.replace(
+            b'</event>',
+            b'</event>\n<smart-collection name="Favorites">'
+            b'<match-ratings value="favorites"/></smart-collection>\n</library>')
+        clips, skipped = enumerate_event_clips(doc)
+        assert [c.name for c in clips] == ["Interview A", "Interview B"]
+        assert skipped == 1  # the sync-clip; smart-collections aren't counted
+        wrapper, info = synthesize_wrapper(doc, 0)
+        p = tmp_path / "w.fcpxml"
+        p.write_bytes(wrapper)
+        parsed = parse_fcpxml(p)
+        assert parsed.project_name == "Interview A"
+        assert parsed.event_name == "Shoot Day 1"
+
     def test_bare_fcpxml_shape(self, tmp_path):
         doc = _event_doc(tmp_path)
         doc = doc.replace(b'<event name="Shoot Day 1">', b"").replace(b"</event>", b"")

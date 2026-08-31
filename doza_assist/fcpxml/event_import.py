@@ -86,16 +86,30 @@ def _event_only_root(fcpxml_bytes: bytes):
 
 
 def _iter_event_level_clips(root):
-    """Yield ``(event_el_or_None, clip_el)`` for both event-item shapes, in
-    document order: children of each ``<event>``, then clips sitting directly
-    under ``<fcpxml>`` (a bare browser-clip export)."""
-    for event_el in root.findall("event"):
-        for child in event_el:
-            if isinstance(child.tag, str) and child.tag in KNOWN_CLIP_KINDS:
-                yield event_el, child
-    for child in root:
-        if isinstance(child.tag, str) and child.tag in KNOWN_CLIP_KINDS:
-            yield None, child
+    """Yield ``(event_el_or_None, clip_el)`` for every event-item shape, in
+    document order.
+
+    The DTD allows three top-level layouts and real exporters use all of
+    them: ``fcpxml > library > event > clips`` (what FCP 12.3 actually
+    writes for a browser export — field file 2026-08-31), ``fcpxml > event
+    > clips`` (library omitted), and clips directly under ``<fcpxml>``
+    (a bare clip selection). Smart-collections and other non-clip event
+    items are skipped by the tag filter.
+    """
+    for top in root:
+        if not isinstance(top.tag, str):
+            continue
+        if top.tag == "library":
+            for event_el in top.findall("event"):
+                for child in event_el:
+                    if isinstance(child.tag, str) and child.tag in KNOWN_CLIP_KINDS:
+                        yield event_el, child
+        elif top.tag == "event":
+            for child in top:
+                if isinstance(child.tag, str) and child.tag in KNOWN_CLIP_KINDS:
+                    yield top, child
+        elif top.tag in KNOWN_CLIP_KINDS:
+            yield None, top
 
 
 def _walk(root):

@@ -86,8 +86,15 @@ app = Flask(__name__)
 # for `python3 app.py` dev runs. Must never default to a path inside a signed
 # .app bundle — those are read-only and os.makedirs below would EPERM.
 _data_dir = os.environ.get('DOZA_DATA_DIR') or os.path.dirname(__file__)
-app.config['PROJECTS_DIR'] = os.path.join(_data_dir, 'projects')
-app.config['EXPORTS_DIR'] = os.path.join(_data_dir, 'exports')
+# Projects and exports are user documents, not runtime state. The Electron
+# wrapper points these at ~/Documents/Doza Assist (visible, backed up,
+# iCloud-syncable) while DOZA_DATA_DIR stays on Application Support for
+# models, caches, logs, and config. Unset (OSS, dev runs, older wrappers)
+# falls back to the legacy layout under the data dir.
+app.config['PROJECTS_DIR'] = (os.environ.get('DOZA_PROJECTS_DIR')
+                              or os.path.join(_data_dir, 'projects'))
+app.config['EXPORTS_DIR'] = (os.environ.get('DOZA_EXPORTS_DIR')
+                             or os.path.join(_data_dir, 'exports'))
 
 # Small file drag-and-drop limit (500MB)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 * 1024  # 32 GB — My Style imports multiple large masters

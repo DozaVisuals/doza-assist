@@ -4261,12 +4261,15 @@ def export_fcpxml(project_id):
     # EDL even if the project was originally configured for FCP).
     force_platform = nle if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES) else None
 
-    # Server-side round-trip gate: the UI shows the same warning, but raw
-    # HTTP callers (and any future view without the PROJECT binding) used to
-    # bypass it and hand Resolve/Premiere a flat timeline over the
-    # app-internal timeline_audio.wav.
-    if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES and nle != 'fcp'
-            and _round_trip_fcp_only(project)):
+    # Server-side round-trip gate: the UI never offers the flat export for
+    # round-trip projects, but raw HTTP callers used to reach it — and a
+    # flat export of a round-trip project references only the audio
+    # angle's file (or the app-internal timeline WAV), so the output is
+    # broken for EVERY delivery target, not just scripted non-FCP imports
+    # (2026-08-31: the same defect class shipped visibly through the
+    # collection exporter). Single-source asset-clip imports stay exempt
+    # inside _round_trip_fcp_only.
+    if _round_trip_fcp_only(project):
         return jsonify({'error': ROUND_TRIP_FCP_ONLY_ERROR}), 400
 
     export_warnings: list[str] = []
@@ -6015,6 +6018,13 @@ def story_export(project_id):
     data = request.json or {}
     if not data.get('clips'):
         return jsonify({'error': 'No clips in sequence'}), 400
+
+    # Same round-trip gate as /export/fcpxml: a flat story export of a
+    # round-trip project references only the audio angle's file — broken
+    # output for every target. The UI sends round-trip story builds
+    # through /export/fcpxml-multicam (sources=['story_build']) instead.
+    if _round_trip_fcp_only(project):
+        return jsonify({'error': ROUND_TRIP_FCP_ONLY_ERROR}), 400
 
     deliver_to = str(data.get('deliver_to') or '').strip().lower()
     nle = str(data.get('nle') or '').strip().lower()

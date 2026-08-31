@@ -250,9 +250,13 @@ class TestRoundTripFcpOnlyGate:
                           json={'project_id': 'rt7', 'export_type': 'multicam'})
         assert res.status_code == 200, res.data
 
-    def test_file_delivery_not_gated(self, client, tmp_path, monkeypatch):
-        # 'file' delivery isn't a SEND to an NLE — round-trip projects can
-        # still write the flat file to disk if a caller asks for it.
+    def test_file_delivery_gated_too(self, client, tmp_path, monkeypatch):
+        # A flat export of a round-trip project references only the audio
+        # angle's file (or the app-internal timeline WAV) — broken output
+        # for EVERY delivery target, so 'file' delivery is gated as well
+        # (2026-08-31: the same defect class shipped visibly through the
+        # collection exporter as audio-only 'visuals never reconnect'
+        # files). The Round-Trip export is the steer.
         _quiet_probes(monkeypatch)
         stub = _StubExporter()
         monkeypatch.setattr(app_module, 'get_exporter', lambda p: stub)
@@ -262,7 +266,8 @@ class TestRoundTripFcpOnlyGate:
                                                    'color': 'green', 'text': 'x'}])
         res = client.post('/project/rt8/export/fcpxml',
                           json={'deliver_to': 'file', 'types': ['labels']})
-        assert res.status_code == 200, res.data
+        assert res.status_code == 400, res.data
+        assert 'Round-Trip' in (res.get_json() or {}).get('error', '')
 
 
 # ── C24/C56: Premiere delivery is XML-file-only ─────────────────────────────

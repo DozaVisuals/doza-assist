@@ -4421,7 +4421,17 @@ def _mpegts_media_warning(project: dict, nle: str | None = None) -> str | None:
 # users who install to ~/Applications, Setapp, external volumes, or
 # year-versioned Adobe directories).
 _NLE_BUNDLE_IDS = {
-    'fcp':      ('com.apple.FinalCut',),
+    # Final Cut ships under more than one bundle id: the one-time-purchase
+    # app (com.apple.FinalCut), the trial (com.apple.FinalCutTrial), and —
+    # since Jan 2026 — the Apple Creator Studio subscription copy, a
+    # SEPARATE app that installs alongside the purchase SKU (Apple support:
+    # "Both the one-time-purchase apps and the Apple Creator Studio
+    # subscription apps can be installed on the same Mac"). The exact id
+    # comes first so a full install always wins; the glob then catches
+    # every other Final Cut SKU — mdfind treats '*' inside a quoted
+    # comparison as a glob — so a subscription-only editor still gets
+    # "Send to Final Cut Pro" instead of "not installed".
+    'fcp':      ('com.apple.FinalCut', 'com.apple.FinalCut*'),
     'premiere': ('com.adobe.PremierePro',),
     # Free and Studio variants of Resolve register different bundle IDs.
     'resolve':  ('com.blackmagic-design.DaVinciResolveStudio',
@@ -4431,7 +4441,8 @@ _NLE_BUNDLE_IDS = {
 # Hardcoded fallback paths for the (rare) case where Spotlight is
 # disabled on the volume the NLE lives on, or mdfind isn't on PATH.
 _NLE_FALLBACK_PATHS = {
-    'fcp': ('/Applications/Final Cut Pro.app',),
+    'fcp': ('/Applications/Final Cut Pro.app',
+            '/Applications/Final Cut Pro Trial.app',),
     'resolve': ('/Applications/DaVinci Resolve/DaVinci Resolve.app',
                 '/Applications/DaVinci Resolve Studio/DaVinci Resolve Studio.app'),
     'premiere': (

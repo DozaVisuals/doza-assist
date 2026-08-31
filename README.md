@@ -351,7 +351,10 @@ doza-assist/
 Run `bash install.sh --clean` to wipe the setup and start completely fresh.
 
 **Want to completely remove Doza Assist?**
-Run `bash uninstall.sh` — it will walk you through what gets removed and ask before doing anything.
+Run `bash uninstall.sh` — it will walk you through what gets removed and ask before doing anything. Your projects and transcripts are kept.
+
+**Resetting a testing machine?**
+Run `bash scripts/clean_slate.sh` for a full factory reset: app bundles, all app data (projects and transcripts included), preferences, Ollama and its models (Gemma), and downloaded transcription models. Add `--yes` to skip the confirmation.
 
 **Getting a Python error or "command not found"?**
 Make sure Xcode Command Line Tools are installed:

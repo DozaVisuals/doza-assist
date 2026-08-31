@@ -96,8 +96,10 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
         <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
             Drag a file here, paste a path, or click Browse. Your file stays in place -- nothing gets copied.
             <br>Supported media: WAV, MP3, MP4, MOV, AAC, M4A, FLAC, AIF, AIFF, MXF, MKV, AVI, TS/M2TS.
-            <br>Or drop an <strong>FCPXML</strong> (or <code>.fcpxmld</code> bundle) from Final Cut — {{ brand }} will
-            read the multicam or sync-clip container and transcribe the active audio angle automatically.
+            <br>Or drop an <strong>FCPXML</strong> (or <code>.fcpxmld</code> bundle) from Final Cut — a timeline, or
+            multicam clips selected right in the browser (File &rsaquo; Export XML — no timeline needed). {{ brand }}
+            transcribes the active audio angle automatically, and an export holding several multicam clips becomes
+            one project per clip.
         </p>
 
         <!-- Drag overlay -->

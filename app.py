@@ -30,6 +30,9 @@ from doza_assist.fcpxml import (
     parse_fcpxml, ParseError, Select, WriterError,
     write_selects_as_new_project, write_markers_on_timeline,
 )
+from doza_assist.fcpxml.event_import import (
+    enumerate_event_clips, synthesize_wrapper,
+)
 from doza_assist.fcpxml.timeline_audio import (
     render_timeline_audio, TimelineAudioError,
 )
@@ -404,7 +407,7 @@ def _is_fcpxml_input(path: str) -> bool:
     return lower.endswith('.fcpxml') or lower.endswith('.fcpxmld')
 
 
-def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
+def _ingest_fcpxml(fcpxml_path: str, project_dir: str, event_clip_index=None) -> dict:
     """Parse an FCPXML, verify its audio source(s) are on disk, and return a
     dict of fields to merge into the project's meta.json.
 
@@ -414,15 +417,50 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     the project directory and used as ``audio_path`` — transcription then
     produces timestamps aligned to the sequence timeline.
 
+    Event/browser exports (no ``<project>``/``<sequence>``; multicam clips
+    sitting at event level) are imported by synthesizing a one-clip scratch
+    sequence around the clip at ``event_clip_index`` (default: the first) —
+    the wrapper becomes the stored FCPXML, so exports re-parse a normal
+    sequence-shaped document. See ``doza_assist/fcpxml/event_import.py``.
+
     Raises :class:`ValueError` with an editor-friendly message if any audio
     source cannot be located — typically because the edit drive is not mounted.
     """
     inner_path = _resolve_fcpxml_path(fcpxml_path)
 
+    event_import_info = None
+    wrapper_path = None
     try:
         parsed = parse_fcpxml(inner_path)
     except ParseError as e:
-        raise ValueError(f'Could not read FCPXML: {e}') from e
+        # Not sequence-shaped? Try the event-level import path before giving
+        # up. enumerate_event_clips returns [] for anything that is NOT an
+        # event-only export — including documents that DO have a sequence but
+        # failed to parse for another reason — so every existing failure mode
+        # re-raises its original message unchanged.
+        try:
+            with open(inner_path, 'rb') as f:
+                raw_bytes = f.read()
+            event_clips, _skipped = enumerate_event_clips(raw_bytes)
+        except OSError:
+            event_clips = []
+        if not event_clips:
+            raise ValueError(f'Could not read FCPXML: {e}') from e
+        idx = 0 if event_clip_index is None else int(event_clip_index)
+        try:
+            wrapper_bytes, event_import_info = synthesize_wrapper(raw_bytes, idx)
+        except ParseError as e2:
+            raise ValueError(f'Could not import event clip: {e2}') from e2
+        os.makedirs(project_dir, exist_ok=True)
+        wrapper_path = os.path.join(project_dir, 'event-import.fcpxml')
+        with open(wrapper_path, 'wb') as f:
+            f.write(wrapper_bytes)
+        try:
+            parsed = parse_fcpxml(wrapper_path)
+        except ParseError as e2:
+            raise ValueError(f'Could not read FCPXML event clip: {e2}') from e2
+        event_import_info['source_file'] = os.path.basename(
+            fcpxml_path.rstrip('/')) or 'event export'
 
     # Check every referenced source, not just the representative one — a
     # multi-source spine can reference several drives. Muted segments are
@@ -519,10 +557,19 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     # module can round-trip selects back out without needing the user to still
     # have the source file accessible.
     os.makedirs(project_dir, exist_ok=True)
-    fcpxml_copy_name = os.path.basename(inner_path) or 'source.fcpxml'
-    fcpxml_copy_path = os.path.join(project_dir, fcpxml_copy_name)
-    if os.path.abspath(inner_path) != os.path.abspath(fcpxml_copy_path):
-        shutil.copy2(inner_path, fcpxml_copy_path)
+    if wrapper_path is not None:
+        # Event import: the synthesized wrapper IS the stored FCPXML (exports
+        # re-parse it, so it must be the sequence-shaped one). Keep the raw
+        # event export alongside for provenance/debugging.
+        fcpxml_copy_path = wrapper_path
+        provenance_path = os.path.join(project_dir, 'original-event-export.fcpxml')
+        if os.path.abspath(inner_path) != os.path.abspath(provenance_path):
+            shutil.copy2(inner_path, provenance_path)
+    else:
+        fcpxml_copy_name = os.path.basename(inner_path) or 'source.fcpxml'
+        fcpxml_copy_path = os.path.join(project_dir, fcpxml_copy_name)
+        if os.path.abspath(inner_path) != os.path.abspath(fcpxml_copy_path):
+            shutil.copy2(inner_path, fcpxml_copy_path)
 
     if parsed.is_multi_source:
         # Compose the sequence's dialogue into one timeline-space WAV so the
@@ -537,14 +584,17 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     else:
         audio_path = parsed.audio_file_path
 
+    fcpxml_source = {
+        **parsed.to_metadata_dict(),
+        'original_fcpxml_path': inner_path,
+        'stored_fcpxml_path': fcpxml_copy_path,
+        'timeline_audio_rendered': parsed.is_multi_source,
+    }
+    if event_import_info is not None:
+        fcpxml_source['event_import'] = event_import_info
     return {
         'audio_path': audio_path,
-        'fcpxml_source': {
-            **parsed.to_metadata_dict(),
-            'original_fcpxml_path': inner_path,
-            'stored_fcpxml_path': fcpxml_copy_path,
-            'timeline_audio_rendered': parsed.is_multi_source,
-        },
+        'fcpxml_source': fcpxml_source,
     }
 
 
@@ -1180,6 +1230,7 @@ def create_project_from_path(
     output_language='match',
     audio_channel='all',
     project_id=None,
+    event_clip_index=None,
 ):
     """Create a new project from a file already on disk. Returns project_id.
 
@@ -1206,6 +1257,9 @@ def create_project_from_path(
       project_id: if provided, use this id instead of generating one.
         Lets ``/upload`` create the project dir and save bytes into it
         before the meta is written.
+      event_clip_index: which importable clip to take from an event-level
+        FCPXML export (browser export, no scratch sequence). ``None`` means
+        the first; ignored for sequence-shaped FCPXML and media files.
     """
     source_path = os.path.expanduser(source_path)
 
@@ -1224,7 +1278,8 @@ def create_project_from_path(
     fcpxml_meta = None
     if is_fcpxml:
         try:
-            ingest = _ingest_fcpxml(source_path, project_dir)
+            ingest = _ingest_fcpxml(
+                source_path, project_dir, event_clip_index=event_clip_index)
         except ValueError:
             shutil.rmtree(project_dir, ignore_errors=True)
             raise
@@ -1288,6 +1343,15 @@ def create_project():
     if not os.path.exists(expanded):
         return jsonify({'error': f'File not found: {expanded}'}), 400
 
+    # Event-level FCPXML imports pick one clip out of the export; absent or
+    # non-integer means "the first" (and is ignored for every other input).
+    event_clip_index = data.get('event_clip_index')
+    if event_clip_index is not None:
+        try:
+            event_clip_index = int(event_clip_index)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'event_clip_index must be an integer'}), 400
+
     try:
         project_id = create_project_from_path(
             expanded,
@@ -1299,6 +1363,7 @@ def create_project():
             language=data.get('language', 'en').strip(),
             output_language=data.get('output_language', 'match').strip(),
             audio_channel=data.get('audio_channel', 'all'),
+            event_clip_index=event_clip_index,
         )
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
@@ -1313,6 +1378,51 @@ def create_project():
     if parse_warnings:
         payload['warnings'] = list(parse_warnings)
     return jsonify(payload)
+
+
+@app.route('/fcpxml/inspect', methods=['POST'])
+def fcpxml_inspect():
+    """Pre-flight for FCPXML drops: list the importable event-level clips.
+
+    Returns ``{'clips': [...], 'skipped_other_clips': N}``. An empty
+    ``clips`` list means "not an event-level import — create the project
+    normally": either the file is sequence-shaped (the standard path), or it
+    is unreadable, in which case ``/create`` is the single place that
+    surfaces the real error message. Content problems therefore never 400
+    here — only path-level ones do.
+    """
+    data = request.json or {}
+    source_path = (data.get('source_path') or '').strip()
+    if not source_path:
+        return jsonify({'error': 'No file path provided'}), 400
+    expanded = os.path.expanduser(source_path)
+    if not os.path.exists(expanded):
+        return jsonify({'error': f'File not found: {expanded}'}), 400
+    if not _is_fcpxml_input(expanded):
+        return jsonify({'error': 'Not an FCPXML file'}), 400
+
+    try:
+        inner_path = _resolve_fcpxml_path(expanded)
+        with open(inner_path, 'rb') as f:
+            raw_bytes = f.read()
+        clips, skipped = enumerate_event_clips(raw_bytes)
+    except (OSError, ValueError):
+        clips, skipped = [], 0
+
+    return jsonify({
+        'clips': [
+            {
+                'index': c.index,
+                'kind': c.kind,
+                'name': c.name,
+                'duration_seconds': c.duration_seconds,
+                'angle_count': c.angle_count,
+                'event_name': c.event_name,
+            }
+            for c in clips
+        ],
+        'skipped_other_clips': skipped,
+    })
 
 
 @app.route('/upload', methods=['POST'])

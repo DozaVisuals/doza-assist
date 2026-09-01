@@ -2,6 +2,8 @@
 
 <a href="https://www.producthunt.com/products/doza-assist?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-doza-assist" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1133645&theme=light" alt="Doza Assist - Open-source local AI that learns how you edit video | Product Hunt" width="250" height="54" /></a>
 
+[![Discord](https://img.shields.io/badge/Discord-join_the_community-5865F2?logo=discord&logoColor=white)](https://discord.gg/TTM3hWXM8)
+
 ### Find the story inside your footage, not just the clips.
 
 > *Doza Assist Core is free and open source. [Doza Assist](https://doza.ai) — the commercial Mac app — adds multi-interview and press-ready workflow features for documentary and series work.*
@@ -342,6 +344,14 @@ doza-assist/
 ├── projects/            # User data (gitignored)
 └── exports/             # FCPXML exports (gitignored)
 ```
+
+---
+
+## Community
+
+Join the [Doza Assist Discord](https://discord.gg/TTM3hWXM8) — editors comparing workflows, sharing My Style profiles, and getting help directly from the developer. It's the fastest place to ask a question, show what you're cutting, or talk through a feature idea before opening an issue.
+
+Bugs and feature requests are still tracked in [GitHub Issues](https://github.com/DozaVisuals/doza-assist/issues); the Discord is where the conversation happens.
 
 ---
 

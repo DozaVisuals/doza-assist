@@ -338,9 +338,25 @@ function _setUndoButtonEnabled(enabled) {
     btn.classList.toggle('btn-undo', enabled);
 }
 
+// Keys beyond {start,end,color,text} that must survive load → save round
+// trips. Studio syncs collaborator selects into labeled_sections with who
+// made them (author, author_uid), a stable sync id (so a re-sync never
+// duplicates), when, and their note. Ordinary clips carry none of these, so
+// the persisted shape is unchanged for OSS / Pro.
+const SECTION_EXTRA_KEYS = ['origin', 'author', 'author_uid', 'sync_id', 'created_at', 'comment', 'source'];
+function pickSectionExtras(sec) {
+    const out = {};
+    if (!sec) return out;
+    for (const k of SECTION_EXTRA_KEYS) {
+        if (sec[k] !== undefined && sec[k] !== null && sec[k] !== '') out[k] = sec[k];
+    }
+    return out;
+}
+
 async function _doSaveLabels() {
     const sections = labelSections.map(s => ({
-        start: s.start, end: s.end, color: s.color, text: s.text
+        start: s.start, end: s.end, color: s.color, text: s.text,
+        ...pickSectionExtras(s),
     }));
     const body = { color_labels: colorLabels, labeled_sections: sections };
     // Clips-tab ordering mode ('time' | 'manual') is owned by the host
@@ -434,6 +450,10 @@ function transcriptInit(opts) {
             end: sec.end,
             color: sec.color,
             text: sec.text || '',
+            // Attribution fields (Studio collaborator selects synced into the
+            // Clip Library) ride along untouched. Absent on ordinary clips —
+            // pickSectionExtras() only copies keys that exist.
+            ...pickSectionExtras(sec),
         });
     });
 

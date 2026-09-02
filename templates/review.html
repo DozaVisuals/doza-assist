@@ -78,19 +78,23 @@
     </div>
 
     {% if project.transcript.truncated_for_trial %}
-    {# Trial-truncation notice — mirrors the transcript-tab banner in project.html.
-       Renders ONLY on the FxFactory trial path (transcript.truncated_for_trial=True);
-       the direct channel never sets that field, so this never shows. #}
-    {# TODO: swap activate_url for the real FxFactory product URL once available. #}
-    {% set activate_url = "https://doza.ai/pro" %}
+    {# Trial-truncation notice — mirrors the transcript-tab banner in project.html
+       (see comments there). This page is client-facing, so the licensed variant
+       is purely informational — no purchase CTA, no app-menu instructions. #}
     {% set trial_mins = (project.transcript.trial_max_seconds or 120) // 60 %}
+    {% if doza_trial_active %}
     <div class="my-style-banner my-style-banner-warn">
-        <strong>Trial limit:</strong> only the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} of this file {{ 'were' if trial_mins != 1 else 'was' }} transcribed.
+        <strong>Free trial:</strong> only the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} of this file {{ 'were' if trial_mins != 1 else 'was' }} transcribed.
         <div style="margin-top: 6px;">
-            Activate Doza Assist Pro to transcribe full-length files.
-            <a href="{{ activate_url }}" target="_blank" rel="noopener" style="margin-left: 6px; font-weight: 600; color: var(--accent);">Activate Pro</a>
+            Get the full version to transcribe complete interviews — one-time purchase, no subscription.
+            <a href="{{ doza_buy_url }}" target="_blank" rel="noopener" style="margin-left: 6px; font-weight: 600; color: var(--accent);">Get Full Access</a>
         </div>
     </div>
+    {% else %}
+    <div class="my-style-banner my-style-banner-warn">
+        <strong>Partial transcript:</strong> only the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} of this file {{ 'were' if trial_mins != 1 else 'was' }} transcribed.
+    </div>
+    {% endif %}
     {% endif %}
 
     <div id="transcript">

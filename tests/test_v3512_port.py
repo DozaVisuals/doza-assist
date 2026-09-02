@@ -66,7 +66,7 @@ class TestProgressDispatch:
 
         monkeypatch.setattr(transcribe_module, '_transcribe_parakeet', _fake_parakeet)
         monkeypatch.setattr(transcribe_module, 'extract_audio',
-                            lambda f, project_dir=None: str(tmp_path / 'a.wav'))
+                            lambda f, project_dir=None, **kw: str(tmp_path / 'a.wav'))
         result = transcribe_module.transcribe_file(
             str(tmp_path / 'src.mov'), project_dir=str(tmp_path),
             language='en', progress_cb=events.append,

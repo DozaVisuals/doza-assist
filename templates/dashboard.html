@@ -20,6 +20,12 @@
         <span class="app-version" title="Doza Assist version">v{{ app_version }}</span>
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
+        {% if doza_trial_active %}
+        {# Free-trial pill: the dashboard is the first screen, so the cap and
+           the way out are stated up front. Hidden once the wrapper respawns
+           the backend without DOZA_TRIAL (license activated). #}
+        <a href="{{ doza_buy_url }}" target="_blank" rel="noopener" class="header-trial-pill" title="Transcripts are capped at 2 minutes per file during the free trial — buy a license to unlock full-length transcripts">Free trial · 2-min transcripts — <strong>Buy full version</strong></a>
+        {% endif %}
         <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="openAIModelModal()" title="AI model settings">AI Model</button>
@@ -90,8 +96,10 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
         <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
             Drag a file here, paste a path, or click Browse. Your file stays in place -- nothing gets copied.
             <br>Supported media: WAV, MP3, MP4, MOV, AAC, M4A, FLAC, AIF, AIFF, MXF, MKV, AVI, TS/M2TS.
-            <br>Or drop an <strong>FCPXML</strong> (or <code>.fcpxmld</code> bundle) from Final Cut — {{ brand }} will
-            read the multicam or sync-clip container and transcribe the active audio angle automatically.
+            <br>Or drop an <strong>FCPXML</strong> (or <code>.fcpxmld</code> bundle) from Final Cut — a timeline, or
+            multicam clips selected right in the browser (File &rsaquo; Export XML — no timeline needed). {{ brand }}
+            transcribes the active audio angle automatically, and an export holding several multicam clips becomes
+            one project per clip.
         </p>
 
         <!-- Drag overlay -->
@@ -221,6 +229,24 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                         </p>
                     </div>
                 </div>
+                <!-- Audio Channel: shown only when the source has 2+ audio
+                     tracks (camera mic on one, lav on another). Populated by
+                     populateAudioChannels() after a file is chosen. -->
+                <div class="form-group" id="audioChannelGroup" style="display:none;">
+                    <label class="form-label">Audio Channel</label>
+                    <select class="form-input" id="audioChannel">
+                        <option value="all" selected>All channels (default)</option>
+                    </select>
+                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
+                        This file has multiple audio tracks. Pick one (e.g. the lav mic) or keep <strong>All</strong> to mix every track.
+                    </p>
+                </div>
+                <!-- Always-visible expectation-setter: the picker above is
+                     hidden for single-track sources, so this explains why it
+                     may not appear (a stereo file is ONE track, not two). -->
+                <p id="audioChannelHint" style="font-size: 0.72rem; color: var(--text-muted); margin: -0.5rem 0 0.25rem 0;">
+                    An audio-track picker appears here only when your file has 2 or more separate audio tracks (e.g. camera mic + lav). A single stereo track counts as one track.
+                </p>
                 <div class="form-group">
                     <label class="form-label">Output Language</label>
                     <select class="form-input" id="outputLanguage">
@@ -242,6 +268,22 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                     <div class="progress-fill" id="uploadProgressFill" style="width: 0%"></div>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Event-export clip chooser: an FCPXML exported straight from the FCP
+         browser (no timeline) can hold several multicam clips. One project is
+         created per checked clip; each project is named after its clip. -->
+    <div class="modal-overlay" id="eventClipModal">
+        <div class="modal" style="max-width: 560px;">
+            <h2>Multicam clips found</h2>
+            <p id="eventClipIntro" style="font-size: 0.85rem; color: var(--text-secondary); margin: 0.25rem 0 1rem;"></p>
+            <div id="eventClipList" style="max-height: 45vh; overflow-y: auto; display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem;"></div>
+            <p id="eventClipSkipNote" style="display:none; font-size: 0.75rem; color: var(--text-muted); margin: 0 0 0.75rem;"></p>
+            <div class="btn-group" style="justify-content: flex-end;">
+                <button class="btn" onclick="closeEventClipModal()">Cancel</button>
+                <button class="btn btn-primary" id="eventClipImportBtn" onclick="importCheckedEventClips()">Import</button>
+            </div>
         </div>
     </div>
 
@@ -331,6 +373,38 @@ function selectFilePath() {
     document.getElementById('projectName').value = filename.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ');
     document.getElementById('createBtn').textContent = 'Create Project';
     document.getElementById('uploadModal').classList.add('active');
+    populateAudioChannels(path);
+}
+
+// Probe the source for multiple audio tracks and, when there are 2+, show
+// the Audio Channel picker (camera mic vs. lav). Single-track / probe
+// failure → only "All channels" (group hidden), i.e. unchanged behaviour.
+async function populateAudioChannels(path) {
+    const group = document.getElementById('audioChannelGroup');
+    const sel = document.getElementById('audioChannel');
+    if (!group || !sel) return;
+    // Reset to the safe default while we probe.
+    sel.innerHTML = '<option value="all" selected>All channels (default)</option>';
+    group.style.display = 'none';
+    let count = 1;
+    try {
+        const res = await fetch('/probe-audio-tracks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+        const data = await res.json().catch(() => ({}));
+        count = (data && Number(data.count)) || 1;
+    } catch (e) { count = 1; }
+    if (count > 1) {
+        for (let i = 0; i < count; i++) {
+            const opt = document.createElement('option');
+            opt.value = String(i);            // 0-based ffmpeg track index
+            opt.textContent = 'Channel ' + (i + 1);  // 1-based, user-facing
+            sel.appendChild(opt);
+        }
+        group.style.display = '';
+    }
 }
 
 // ── Drag and Drop (finds file path, never uploads) ──
@@ -457,6 +531,29 @@ async function createFromPath() {
     btn.disabled = true;
     btn.textContent = 'Creating...';
 
+    // An FCPXML exported straight from the FCP browser (no timeline) can hold
+    // several multicam clips. Pre-flight it: more than one importable clip
+    // opens the chooser (one project per checked clip); zero or one falls
+    // through to the normal create, so sequence-shaped files and error
+    // messages behave exactly as before.
+    if (/\.fcpxmld?\/?$/i.test(selectedFilePath)) {
+        let insp = null;
+        try {
+            const r = await fetch('/fcpxml/inspect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_path: selectedFilePath }),
+            });
+            if (r.ok) insp = await r.json();
+        } catch (err) { /* inspection is best-effort; /create surfaces errors */ }
+        if (insp && insp.clips && insp.clips.length > 1) {
+            btn.disabled = false;
+            btn.textContent = 'Create Project';
+            showEventClipChooser(insp);
+            return;
+        }
+    }
+
     try {
         const chosenLanguage = document.getElementById('language').value || 'en';
         rememberDefaultLanguage(chosenLanguage);  // sticky last-used default
@@ -472,6 +569,7 @@ async function createFromPath() {
                 num_speakers: parseInt(document.getElementById('numSpeakers').value) || 2,
                 language: chosenLanguage,
                 output_language: (document.getElementById('outputLanguage') && document.getElementById('outputLanguage').value) || 'match',
+                audio_channel: (document.getElementById('audioChannel') && document.getElementById('audioChannel').value) || 'all',
             }),
         });
         const data = await res.json();
@@ -486,6 +584,123 @@ async function createFromPath() {
         alert('Error: ' + err.message);
         btn.disabled = false;
         btn.textContent = 'Create Project';
+    }
+}
+
+// ── Event-export clip chooser ──
+// Populated from /fcpxml/inspect when a browser-export FCPXML holds more
+// than one multicam clip. One /create per checked clip; the server names
+// each project after its clip (project_name is deliberately left empty).
+
+function formatClipDuration(seconds) {
+    const s = Math.round(seconds || 0);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm';
+    if (m > 0) return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
+    return s + 's';
+}
+
+function showEventClipChooser(insp) {
+    document.getElementById('uploadModal').classList.remove('active');
+    const list = document.getElementById('eventClipList');
+    list.innerHTML = '';
+    insp.clips.forEach((c) => {
+        const row = document.createElement('label');
+        row.style.cssText = 'display:flex;align-items:center;gap:0.6rem;padding:0.55rem 0.7rem;border:1px solid var(--border, rgba(128,128,128,0.25));border-radius:6px;cursor:pointer;';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.dataset.clipIndex = String(c.index);
+        cb.addEventListener('change', updateEventClipImportBtn);
+        const name = document.createElement('span');
+        name.textContent = c.name || ('Multicam clip ' + (c.index + 1));
+        name.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        const meta = document.createElement('span');
+        meta.textContent = formatClipDuration(c.duration_seconds) + ' · ' + c.angle_count + (c.angle_count === 1 ? ' angle' : ' angles');
+        meta.style.cssText = 'font-size:0.75rem;color:var(--text-muted);white-space:nowrap;';
+        row.appendChild(cb); row.appendChild(name); row.appendChild(meta);
+        list.appendChild(row);
+    });
+    const evName = insp.clips[0].event_name;
+    document.getElementById('eventClipIntro').textContent =
+        'This export' + (evName ? ' of "' + evName + '"' : '') + ' contains ' +
+        insp.clips.length + ' multicam clips. Each checked clip becomes its own project, named after the clip.';
+    const skipNote = document.getElementById('eventClipSkipNote');
+    if (insp.skipped_other_clips > 0) {
+        skipNote.textContent = insp.skipped_other_clips + ' non-multicam clip(s) in the export were skipped — only multicam clips import directly from an event for now.';
+        skipNote.style.display = 'block';
+    } else {
+        skipNote.style.display = 'none';
+    }
+    updateEventClipImportBtn();
+    document.getElementById('eventClipModal').classList.add('active');
+}
+
+function checkedEventClipIndexes() {
+    return Array.from(document.querySelectorAll('#eventClipList input[type=checkbox]:checked'))
+        .map((cb) => parseInt(cb.dataset.clipIndex, 10));
+}
+
+function updateEventClipImportBtn() {
+    const n = checkedEventClipIndexes().length;
+    const btn = document.getElementById('eventClipImportBtn');
+    btn.disabled = n === 0;
+    btn.textContent = n === 0 ? 'Import' : (n === 1 ? 'Import 1 Project' : 'Import ' + n + ' Projects');
+}
+
+function closeEventClipModal() {
+    document.getElementById('eventClipModal').classList.remove('active');
+}
+
+async function importCheckedEventClips() {
+    const indexes = checkedEventClipIndexes();
+    if (!indexes.length || !selectedFilePath) return;
+    const btn = document.getElementById('eventClipImportBtn');
+    btn.disabled = true;
+
+    const chosenLanguage = document.getElementById('language').value || 'en';
+    rememberDefaultLanguage(chosenLanguage);
+    const shared = {
+        source_path: selectedFilePath,
+        // project_name intentionally omitted — the server names each
+        // project after its clip.
+        client_name: document.getElementById('clientName').value,
+        interviewer_name: document.getElementById('interviewerName').value || 'Interviewer',
+        subject_name: document.getElementById('subjectName').value || 'Subject',
+        num_speakers: parseInt(document.getElementById('numSpeakers').value) || 2,
+        language: chosenLanguage,
+        output_language: (document.getElementById('outputLanguage') && document.getElementById('outputLanguage').value) || 'match',
+        audio_channel: 'all',
+    };
+
+    const created = [];
+    const failed = [];
+    for (let i = 0; i < indexes.length; i++) {
+        btn.textContent = 'Importing ' + (i + 1) + ' of ' + indexes.length + '…';
+        try {
+            const res = await fetch('/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(Object.assign({}, shared, { event_clip_index: indexes[i] })),
+            });
+            const data = await res.json();
+            if (res.ok && data.project_id) created.push(data.project_id);
+            else failed.push('clip ' + (indexes[i] + 1) + ': ' + (data.error || 'unknown error'));
+        } catch (err) {
+            failed.push('clip ' + (indexes[i] + 1) + ': ' + err.message);
+        }
+    }
+
+    if (failed.length) {
+        alert('Imported ' + created.length + ' of ' + indexes.length + ' clips.\n\nFailed:\n' + failed.join('\n'));
+    }
+    if (created.length === 1 && !failed.length) {
+        window.location.href = '/project/' + created[0];
+    } else if (created.length) {
+        window.location.href = '/';
+    } else {
+        btn.disabled = false;
+        updateEventClipImportBtn();
     }
 }
 

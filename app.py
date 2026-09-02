@@ -30,6 +30,9 @@ from doza_assist.fcpxml import (
     parse_fcpxml, ParseError, Select, WriterError,
     write_selects_as_new_project, write_markers_on_timeline,
 )
+from doza_assist.fcpxml.event_import import (
+    enumerate_event_clips, synthesize_wrapper,
+)
 from doza_assist.fcpxml.timeline_audio import (
     render_timeline_audio, TimelineAudioError,
 )
@@ -86,8 +89,15 @@ app = Flask(__name__)
 # for `python3 app.py` dev runs. Must never default to a path inside a signed
 # .app bundle — those are read-only and os.makedirs below would EPERM.
 _data_dir = os.environ.get('DOZA_DATA_DIR') or os.path.dirname(__file__)
-app.config['PROJECTS_DIR'] = os.path.join(_data_dir, 'projects')
-app.config['EXPORTS_DIR'] = os.path.join(_data_dir, 'exports')
+# Projects and exports are user documents, not runtime state. The Electron
+# wrapper points these at ~/Documents/Doza Assist (visible, backed up,
+# iCloud-syncable) while DOZA_DATA_DIR stays on Application Support for
+# models, caches, logs, and config. Unset (OSS, dev runs, older wrappers)
+# falls back to the legacy layout under the data dir.
+app.config['PROJECTS_DIR'] = (os.environ.get('DOZA_PROJECTS_DIR')
+                              or os.path.join(_data_dir, 'projects'))
+app.config['EXPORTS_DIR'] = (os.environ.get('DOZA_EXPORTS_DIR')
+                             or os.path.join(_data_dir, 'exports'))
 
 # Small file drag-and-drop limit (500MB)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 * 1024  # 32 GB — My Style imports multiple large masters
@@ -327,28 +337,34 @@ def inject_brand():
 
 
 @app.context_processor
-def inject_trial_state():
-    """Expose the live trial state to templates.
-
-    The FxFactory wrapper sets ``DOZA_TRIAL=1`` in this process's
-    environment at spawn time while the product is unlicensed; once the
-    user purchases (and the wrapper respawns the backend), the variable
-    is absent. Templates use this to distinguish "you are in the trial"
-    (show the purchase CTA) from "this project was transcribed during
-    the trial" (show a re-transcribe hint instead — the stored
-    ``transcript.truncated_for_trial`` flag outlives the trial itself).
-    The direct channel and OSS installs never set DOZA_TRIAL, so this is
-    always False there.
-    """
-    return {'doza_trial_active': os.environ.get('DOZA_TRIAL') == '1'}
-
-
-@app.context_processor
 def inject_languages():
     """Canonical language list for every template dropdown (dashboard create
     modal, project Retranscribe + Output Language). Single source:
     doza_assist.output_language.LANGUAGES — list of (code, name), 'en' first."""
     return {'languages': OUTPUT_LANGUAGES}
+
+
+@app.context_processor
+def inject_trial_state():
+    """Expose the live trial state (and where to buy) to templates.
+
+    The Electron wrapper sets ``DOZA_TRIAL=1`` in this process's environment
+    at spawn time while the install is unlicensed (direct channel: no
+    activated key; FxFactory channel: no FxFactory purchase). Once the user
+    licenses the app the wrapper respawns the backend without it. Templates
+    use this to distinguish "you are in the trial" (show the purchase CTA)
+    from "this project was transcribed during the trial" (show a
+    re-transcribe hint instead — the stored ``transcript.truncated_for_trial``
+    flag outlives the trial itself).
+
+    ``doza_buy_url`` is the channel's purchase page: the wrapper passes
+    ``DOZA_BUY_URL`` (FxFactory builds point at the FxFactory product page);
+    the default is the direct-download store.
+    """
+    return {
+        'doza_trial_active': os.environ.get('DOZA_TRIAL') == '1',
+        'doza_buy_url': os.environ.get('DOZA_BUY_URL') or 'https://doza.ai/buy',
+    }
 
 
 def allowed_file(filename):
@@ -359,6 +375,16 @@ def _valid_output_language(value):
     """Clamp an output_language input to 'match' or a canonical code."""
     value = (value or 'match').strip().lower()
     return value if (value == 'match' or language_name(value)) else 'match'
+
+
+def _valid_audio_channel(value):
+    """Clamp an audio_channel input to 'all' or a 0-based track index string.
+
+    Mirrors transcribe.normalize_audio_channel: None → that None maps back to
+    the stored sentinel 'all'; a valid index is stored as its string form."""
+    from transcribe import normalize_audio_channel
+    n = normalize_audio_channel(value)
+    return 'all' if n is None else str(n)
 
 
 def _resolve_fcpxml_path(source_path: str) -> str:
@@ -381,7 +407,7 @@ def _is_fcpxml_input(path: str) -> bool:
     return lower.endswith('.fcpxml') or lower.endswith('.fcpxmld')
 
 
-def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
+def _ingest_fcpxml(fcpxml_path: str, project_dir: str, event_clip_index=None) -> dict:
     """Parse an FCPXML, verify its audio source(s) are on disk, and return a
     dict of fields to merge into the project's meta.json.
 
@@ -391,15 +417,50 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     the project directory and used as ``audio_path`` — transcription then
     produces timestamps aligned to the sequence timeline.
 
+    Event/browser exports (no ``<project>``/``<sequence>``; multicam clips
+    sitting at event level) are imported by synthesizing a one-clip scratch
+    sequence around the clip at ``event_clip_index`` (default: the first) —
+    the wrapper becomes the stored FCPXML, so exports re-parse a normal
+    sequence-shaped document. See ``doza_assist/fcpxml/event_import.py``.
+
     Raises :class:`ValueError` with an editor-friendly message if any audio
     source cannot be located — typically because the edit drive is not mounted.
     """
     inner_path = _resolve_fcpxml_path(fcpxml_path)
 
+    event_import_info = None
+    wrapper_path = None
     try:
         parsed = parse_fcpxml(inner_path)
     except ParseError as e:
-        raise ValueError(f'Could not read FCPXML: {e}') from e
+        # Not sequence-shaped? Try the event-level import path before giving
+        # up. enumerate_event_clips returns [] for anything that is NOT an
+        # event-only export — including documents that DO have a sequence but
+        # failed to parse for another reason — so every existing failure mode
+        # re-raises its original message unchanged.
+        try:
+            with open(inner_path, 'rb') as f:
+                raw_bytes = f.read()
+            event_clips, _skipped = enumerate_event_clips(raw_bytes)
+        except OSError:
+            event_clips = []
+        if not event_clips:
+            raise ValueError(f'Could not read FCPXML: {e}') from e
+        idx = 0 if event_clip_index is None else int(event_clip_index)
+        try:
+            wrapper_bytes, event_import_info = synthesize_wrapper(raw_bytes, idx)
+        except ParseError as e2:
+            raise ValueError(f'Could not import event clip: {e2}') from e2
+        os.makedirs(project_dir, exist_ok=True)
+        wrapper_path = os.path.join(project_dir, 'event-import.fcpxml')
+        with open(wrapper_path, 'wb') as f:
+            f.write(wrapper_bytes)
+        try:
+            parsed = parse_fcpxml(wrapper_path)
+        except ParseError as e2:
+            raise ValueError(f'Could not read FCPXML event clip: {e2}') from e2
+        event_import_info['source_file'] = os.path.basename(
+            fcpxml_path.rstrip('/')) or 'event export'
 
     # Check every referenced source, not just the representative one — a
     # multi-source spine can reference several drives. Muted segments are
@@ -496,10 +557,19 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     # module can round-trip selects back out without needing the user to still
     # have the source file accessible.
     os.makedirs(project_dir, exist_ok=True)
-    fcpxml_copy_name = os.path.basename(inner_path) or 'source.fcpxml'
-    fcpxml_copy_path = os.path.join(project_dir, fcpxml_copy_name)
-    if os.path.abspath(inner_path) != os.path.abspath(fcpxml_copy_path):
-        shutil.copy2(inner_path, fcpxml_copy_path)
+    if wrapper_path is not None:
+        # Event import: the synthesized wrapper IS the stored FCPXML (exports
+        # re-parse it, so it must be the sequence-shaped one). Keep the raw
+        # event export alongside for provenance/debugging.
+        fcpxml_copy_path = wrapper_path
+        provenance_path = os.path.join(project_dir, 'original-event-export.fcpxml')
+        if os.path.abspath(inner_path) != os.path.abspath(provenance_path):
+            shutil.copy2(inner_path, provenance_path)
+    else:
+        fcpxml_copy_name = os.path.basename(inner_path) or 'source.fcpxml'
+        fcpxml_copy_path = os.path.join(project_dir, fcpxml_copy_name)
+        if os.path.abspath(inner_path) != os.path.abspath(fcpxml_copy_path):
+            shutil.copy2(inner_path, fcpxml_copy_path)
 
     if parsed.is_multi_source:
         # Compose the sequence's dialogue into one timeline-space WAV so the
@@ -514,14 +584,17 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str) -> dict:
     else:
         audio_path = parsed.audio_file_path
 
+    fcpxml_source = {
+        **parsed.to_metadata_dict(),
+        'original_fcpxml_path': inner_path,
+        'stored_fcpxml_path': fcpxml_copy_path,
+        'timeline_audio_rendered': parsed.is_multi_source,
+    }
+    if event_import_info is not None:
+        fcpxml_source['event_import'] = event_import_info
     return {
         'audio_path': audio_path,
-        'fcpxml_source': {
-            **parsed.to_metadata_dict(),
-            'original_fcpxml_path': inner_path,
-            'stored_fcpxml_path': fcpxml_copy_path,
-            'timeline_audio_rendered': parsed.is_multi_source,
-        },
+        'fcpxml_source': fcpxml_source,
     }
 
 
@@ -1155,7 +1228,9 @@ def create_project_from_path(
     num_speakers=2,
     language='en',
     output_language='match',
+    audio_channel='all',
     project_id=None,
+    event_clip_index=None,
 ):
     """Create a new project from a file already on disk. Returns project_id.
 
@@ -1182,6 +1257,9 @@ def create_project_from_path(
       project_id: if provided, use this id instead of generating one.
         Lets ``/upload`` create the project dir and save bytes into it
         before the meta is written.
+      event_clip_index: which importable clip to take from an event-level
+        FCPXML export (browser export, no scratch sequence). ``None`` means
+        the first; ignored for sequence-shaped FCPXML and media files.
     """
     source_path = os.path.expanduser(source_path)
 
@@ -1200,7 +1278,8 @@ def create_project_from_path(
     fcpxml_meta = None
     if is_fcpxml:
         try:
-            ingest = _ingest_fcpxml(source_path, project_dir)
+            ingest = _ingest_fcpxml(
+                source_path, project_dir, event_clip_index=event_clip_index)
         except ValueError:
             shutil.rmtree(project_dir, ignore_errors=True)
             raise
@@ -1227,6 +1306,9 @@ def create_project_from_path(
         # AI prose language: 'match' (follow the interview language)
         # or an explicit code from doza_assist.output_language.LANGUAGES.
         'output_language': _valid_output_language(output_language),
+        # Which source audio track feeds the transcript: 'all' (mix/default)
+        # or a 0-based track index as a string. Picker for camera-mic-vs-lav.
+        'audio_channel': _valid_audio_channel(audio_channel),
         'filename': os.path.basename(media_source_path),
         'source_path': media_source_path,
         'filepath': media_source_path,
@@ -1261,6 +1343,15 @@ def create_project():
     if not os.path.exists(expanded):
         return jsonify({'error': f'File not found: {expanded}'}), 400
 
+    # Event-level FCPXML imports pick one clip out of the export; absent or
+    # non-integer means "the first" (and is ignored for every other input).
+    event_clip_index = data.get('event_clip_index')
+    if event_clip_index is not None:
+        try:
+            event_clip_index = int(event_clip_index)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'event_clip_index must be an integer'}), 400
+
     try:
         project_id = create_project_from_path(
             expanded,
@@ -1271,6 +1362,8 @@ def create_project():
             num_speakers=int(data.get('num_speakers', 2)),
             language=data.get('language', 'en').strip(),
             output_language=data.get('output_language', 'match').strip(),
+            audio_channel=data.get('audio_channel', 'all'),
+            event_clip_index=event_clip_index,
         )
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
@@ -1285,6 +1378,51 @@ def create_project():
     if parse_warnings:
         payload['warnings'] = list(parse_warnings)
     return jsonify(payload)
+
+
+@app.route('/fcpxml/inspect', methods=['POST'])
+def fcpxml_inspect():
+    """Pre-flight for FCPXML drops: list the importable event-level clips.
+
+    Returns ``{'clips': [...], 'skipped_other_clips': N}``. An empty
+    ``clips`` list means "not an event-level import — create the project
+    normally": either the file is sequence-shaped (the standard path), or it
+    is unreadable, in which case ``/create`` is the single place that
+    surfaces the real error message. Content problems therefore never 400
+    here — only path-level ones do.
+    """
+    data = request.json or {}
+    source_path = (data.get('source_path') or '').strip()
+    if not source_path:
+        return jsonify({'error': 'No file path provided'}), 400
+    expanded = os.path.expanduser(source_path)
+    if not os.path.exists(expanded):
+        return jsonify({'error': f'File not found: {expanded}'}), 400
+    if not _is_fcpxml_input(expanded):
+        return jsonify({'error': 'Not an FCPXML file'}), 400
+
+    try:
+        inner_path = _resolve_fcpxml_path(expanded)
+        with open(inner_path, 'rb') as f:
+            raw_bytes = f.read()
+        clips, skipped = enumerate_event_clips(raw_bytes)
+    except (OSError, ValueError):
+        clips, skipped = [], 0
+
+    return jsonify({
+        'clips': [
+            {
+                'index': c.index,
+                'kind': c.kind,
+                'name': c.name,
+                'duration_seconds': c.duration_seconds,
+                'angle_count': c.angle_count,
+                'event_name': c.event_name,
+            }
+            for c in clips
+        ],
+        'skipped_other_clips': skipped,
+    })
 
 
 @app.route('/upload', methods=['POST'])
@@ -1303,6 +1441,7 @@ def upload():
     subject_name = request.form.get('subject_name', 'Subject').strip()
     language = request.form.get('language', 'en').strip()
     output_language = request.form.get('output_language', 'match').strip()
+    audio_channel = request.form.get('audio_channel', 'all').strip()
 
     if not project_name:
         project_name = file.filename.rsplit('.', 1)[0]
@@ -1339,6 +1478,7 @@ def upload():
             subject_name=subject_name,
             language=language,
             output_language=output_language,
+            audio_channel=audio_channel,
             project_id=project_id,
         )
     except ValueError as e:
@@ -1348,6 +1488,26 @@ def upload():
         return jsonify({'error': str(e)}), 400
 
     return jsonify({'project_id': project_id, 'status': 'uploaded'})
+
+
+@app.route('/probe-audio-tracks', methods=['POST'])
+def probe_audio_tracks():
+    """Number of audio tracks in a source file, for the channel picker.
+
+    Body: ``{"path": "/abs/path"}``. Returns ``{"count": N}`` — the count
+    extraction will see (program containers like MPEG-TS collapse to 1).
+    Fails open to ``{"count": 1}`` so the picker never blocks creation; the
+    UI shows only "All channels" when count <= 1."""
+    data = request.json or {}
+    path = (data.get('path') or '').strip()
+    path = os.path.expanduser(path)
+    if not path or not os.path.isfile(path):
+        return jsonify({'count': 1})
+    try:
+        from transcribe import count_audio_streams
+        return jsonify({'count': count_audio_streams(path)})
+    except Exception:
+        return jsonify({'count': 1})
 
 
 @app.route('/find-file', methods=['POST'])
@@ -1360,21 +1520,25 @@ def find_file():
     if not filename:
         return jsonify({'error': 'No filename provided'}), 400
 
-    # Home folders FIRST, /Volumes last: mounted network shares (newsroom
-    # NAS volumes) can take minutes to walk, and the browser fetch dies long
-    # before that ("Failed to fetch"). Most dropped files live in the home
-    # dirs; finding one there ends the search before /Volumes is touched.
+    # /Volumes FIRST: broadcast/newsroom masters (incl. .mxf) live on mounted
+    # NAS shares, not in home dirs. 1.0.17 (1cc6504) moved /Volumes last under
+    # a 15s cap, which cut the NAS walk off before it reached those masters —
+    # the .mxf-not-found regression. Search /Volumes first again so they
+    # resolve, then home dirs. Early-exit on first match (below) keeps the
+    # common case fast — as soon as the file is found on the NAS we stop.
+    # (Most drops never reach this route at all: the dashboard uses the
+    # Electron real path first; this is the browser / null-path fallback.)
     home = str(Path.home())
-    search_roots = []
+    search_roots = ['/Volumes']
     for d in ['Desktop', 'Documents', 'Movies', 'Downloads', 'Music']:
         p = os.path.join(home, d)
         if os.path.exists(p):
             search_roots.append(p)
-    search_roots.append('/Volumes')
 
-    # Hard wall-clock budget so a huge/slow volume returns a usable answer
-    # instead of hanging the request indefinitely.
-    deadline = time.monotonic() + 15.0
+    # Generous wall-clock ceiling so a slow NAS walk is not cut off before it
+    # finds the file (the 15s cap was the regression), while still bounding a
+    # pathological/never-ending mount rather than hanging the request forever.
+    deadline = time.monotonic() + 120.0
 
     matches = []
     seen = set()
@@ -1386,8 +1550,8 @@ def find_file():
     is_bundle = filename.lower().endswith(('.fcpxmld', '.fcpbundle'))
 
     for root_dir in search_roots:
-        # A match found in an earlier (home) root is the answer — never pay
-        # the /Volumes walk on top of it.
+        # A match found in an earlier root is the answer — stop before walking
+        # the rest (e.g. don't crawl home dirs once /Volumes matched).
         if matches or time.monotonic() > deadline:
             break
         try:
@@ -1774,9 +1938,10 @@ def project_view(project_id):
         # never leak into meta.json. `start_tc: None` is persisted on a
         # failed/absent probe so we don't re-probe every view; a missing
         # source skips persisting so the probe retries when the drive
-        # remounts. Gated on the same tmcd/BWF rules as exports, so the
-        # display always matches what FCP will say.
-        if 'start_tc' not in p:
+        # remounts. Gated on the same tmcd/MXF/BWF rules as exports, so the
+        # display always matches what FCP will say. `start_tc_v` versions the
+        # probe so a bump (e.g. MXF TC support) re-reads a stale cache once.
+        if 'start_tc' not in p or p.get('start_tc_v') != _START_TC_PROBE_V:
             src = p.get('source_path', p.get('filepath', ''))
             if src and os.path.exists(src):
                 tc_fps = get_video_framerate(src)
@@ -1784,7 +1949,9 @@ def project_view(project_id):
                 p['start_tc'] = ({'frames': tc['frames'], 'fps': tc_fps,
                                   'drop': tc['drop'], 'raw': tc['raw']}
                                  if tc else None)
-                update_project(p['id'], {'start_tc': p['start_tc']})
+                p['start_tc_v'] = _START_TC_PROBE_V
+                update_project(p['id'], {'start_tc': p['start_tc'],
+                                         'start_tc_v': _START_TC_PROBE_V})
         projects_meta.append({
             'id': p['id'],
             'name': p.get('name', 'Untitled'),
@@ -1930,6 +2097,13 @@ def serve_media_audio(project_id):
 
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
 
+    # Track audition (player dropdown): ?track=<index|all> plays that specific
+    # source track on demand, independent of the transcribed track — so the
+    # editor can hear each mic without a destructive re-transcribe.
+    track_param = request.args.get('track')
+    if track_param is not None and track_param.strip() != '':
+        return _serve_audio_track(project, project_dir, track_param.strip())
+
     def _send_audio(path):
         # conditional=True enables HTTP Range (206) responses — this route
         # is now the automatic fallback player for browser-undecodable
@@ -1966,9 +2140,17 @@ def serve_media_audio(project_id):
     # through and re-extracts.
     audio_wav = os.path.join(project_dir, 'audio.wav')
     if os.path.exists(audio_wav):
-        from transcribe import _cached_audio_valid
+        from transcribe import _cached_audio_valid, normalize_audio_channel
+        # Validate against the project's CURRENT track selection, not just the
+        # recipe/source. Omitting the channel made this check pass for a
+        # cached all-mix WAV (sidecar channel=None) even when the project had
+        # since selected a single track — so playback served the mix while the
+        # transcript was a single track. Passing the channel makes a stale
+        # mismatched WAV fail validation and fall through to a re-extract of
+        # the selected track below (self-heals that exact state).
+        channel = normalize_audio_channel(project.get('audio_channel'))
         if not (source_path and os.path.exists(source_path)) or \
-                _cached_audio_valid(audio_wav, source_path):
+                _cached_audio_valid(audio_wav, source_path, channel):
             return _send_audio(audio_wav)
 
     # Trial artifact: the capped WAV a trial-mode transcription produced.
@@ -1987,12 +2169,237 @@ def serve_media_audio(project_id):
     if source_path and os.path.exists(source_path):
         from transcribe import extract_audio
         try:
-            wav_path = extract_audio(source_path, project_dir=project_dir)
+            # Same channel selection the transcript used, so playback is the
+            # exact track the timestamps were built from.
+            wav_path = extract_audio(
+                source_path, project_dir=project_dir,
+                audio_channel=project.get('audio_channel', 'all'))
             return _send_audio(wav_path)
         except Exception:
             pass
 
     return jsonify({'error': 'Audio not available'}), 404
+
+
+def _serve_audio_track(project, project_dir, track):
+    """Serve ONE source audio track on demand, for the player's track-audition
+    dropdown — independent of the project's transcribed track.
+
+    Each selection is extracted into its own cache subdir so auditioning a
+    track never clobbers the transcribed ``audio.wav`` the timestamps were
+    built from. extract_audio's recipe/channel/source validation does the
+    caching and self-heal. ``track`` is a 0-based index string or ``'all'``.
+    """
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if not source_path or not os.path.exists(source_path):
+        return jsonify({'error': 'Source file not found'}), 404
+    from transcribe import extract_audio, normalize_audio_channel
+    norm = normalize_audio_channel(track)
+    tag = 'all' if norm is None else str(norm)
+    sub = os.path.join(project_dir, f'_audition_{tag}')
+    os.makedirs(sub, exist_ok=True)
+    try:
+        wav = extract_audio(source_path, project_dir=sub, audio_channel=track)
+    except Exception as e:
+        app.logger.warning('audition extract failed (track=%s): %s', track, e)
+        return jsonify({'error': 'Could not extract that track'}), 500
+    resp = send_file(wav, mimetype='audio/wav', conditional=True)
+    resp.headers['Accept-Ranges'] = 'bytes'
+    resp.headers['Cache-Control'] = 'private, no-cache'
+    return resp
+
+
+# ── Video preview proxy ─────────────────────────────────────────────────────
+# Browser-undecodable masters (MXF AVC-Intra 10-bit 4:2:2, ProRes, DNxHD,
+# HEVC, MPEG-2) get an on-demand H.264 8-bit mp4 proxy via the bundled
+# ffmpeg's hardware encoder (h264_videotoolbox, LGPL), so the project page
+# shows real video instead of the audio-only placeholder. Cached per project;
+# EXPORTS ALWAYS USE THE ORIGINAL FILE — the proxy is preview-only.
+
+_proxy_jobs = {}
+_proxy_jobs_lock = threading.Lock()
+# Recipe 2: proxy is frame-aligned with the source (fps passthrough + carried
+# timecode). Bumped so proxies built by recipe 1 are rebuilt with alignment.
+_PROXY_RECIPE = 2
+
+# Bumped when the start-timecode probe logic changes so a stale cached value
+# (persisted by an older probe) is re-read once instead of sticking forever.
+# v2: MXF embedded TC is now honored (format/stream `timecode` tag, no tmcd
+# stream) — projects probed by v1 cached start_tc=None for such masters.
+_START_TC_PROBE_V = 2
+
+
+def _probe_source_timecode(source_path):
+    """The source's start timecode (verbatim — drop-frame ';' preserved), or
+    None. Looked up in the video stream tag, then the container/format tag,
+    then any stream tag (covers MXF's separate tmcd/timecode track). The proxy
+    is scrubbed against but the export cuts the ORIGINAL, so the proxy must
+    carry the same TC origin or cut points land on the wrong frames."""
+    from exporters.media_probe import _find_ffprobe
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    for sel, entry in (
+        (['-select_streams', 'v:0'], 'stream_tags=timecode'),
+        ([], 'format_tags=timecode'),
+        ([], 'stream_tags=timecode'),
+    ):
+        try:
+            out = subprocess.run(
+                [ffprobe, '-v', 'error', *sel, '-show_entries', entry,
+                 '-of', 'default=noprint_wrappers=1:nokey=1', source_path],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+        except Exception:
+            continue
+        for line in out.splitlines():
+            line = line.strip()
+            if line and line != 'N/A':
+                return line
+    return None
+
+
+def _proxy_path(project_dir):
+    return os.path.join(project_dir, 'preview_proxy.mp4')
+
+
+def _proxy_meta_path(project_dir):
+    return _proxy_path(project_dir) + '.meta.json'
+
+
+def _proxy_cache_valid(project_dir, source_path):
+    """True iff a cached proxy exists for the CURRENT source (size+mtime) and
+    recipe. A replaced/edited source or a recipe bump rebuilds."""
+    from doza_assist.jsonio import load_json
+    p = _proxy_path(project_dir)
+    if not os.path.exists(p) or os.path.getsize(p) <= 1024:
+        return False
+    meta = load_json(_proxy_meta_path(project_dir))
+    if not isinstance(meta, dict) or meta.get('recipe') != _PROXY_RECIPE:
+        return False
+    try:
+        st = os.stat(source_path)
+    except OSError:
+        return False
+    return (meta.get('source_size') == st.st_size
+            and meta.get('source_mtime') == int(st.st_mtime))
+
+
+def _build_preview_proxy(project_id, source_path, project_dir, audio_channel):
+    """Transcode the source to a Chromium-playable 720p H.264 8-bit mp4.
+
+    VIDEO-ONLY (``-an``): the picture is the only thing the proxy carries.
+    The audio the user hears is the extracted WAV (the transcribed track, or
+    whatever the player's track dropdown auditions), played from the audio
+    element in sync with this muted video. Baking audio into the proxy was
+    wrong — it pinned playback to one track, so changing the track left the
+    sound stuck. Video → h264_videotoolbox (hardware, 8-bit 4:2:0, ≤1280px).
+    """
+    from transcribe import _find_ffmpeg
+    from doza_assist.jsonio import atomic_write_json
+
+    def _set(phase, **extra):
+        with _proxy_jobs_lock:
+            _proxy_jobs[project_id] = {'phase': phase, **extra}
+
+    try:
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            _set('error', error='ffmpeg not available')
+            return
+        out = _proxy_path(project_dir)
+        tmp = f'{out}.part-{os.getpid()}-{threading.get_ident()}.mp4'
+        # FRAME-ALIGNMENT GUARANTEE (cuts scrubbed on the proxy export against
+        # the ORIGINAL): -fps_mode passthrough emits exactly one output frame
+        # per input frame at the same timestamps, so frame count + rate match
+        # even for VFR sources; the source's start timecode is carried over
+        # explicitly (covers MXF's tmcd track, and preserves drop-frame), and
+        # -map_metadata 0 carries the rest (e.g. rotation). Verified by
+        # check_frame_alignment.sh.
+        tc = _probe_source_timecode(source_path)
+        cmd = [
+            ffmpeg, '-nostdin', '-y', '-i', source_path,
+            '-map', '0:v:0', '-an',
+            '-fps_mode', 'passthrough',
+            '-vf', "scale='min(1280,iw)':-2:flags=bicubic,format=yuv420p",
+            '-c:v', 'h264_videotoolbox', '-b:v', '5M',
+            '-map_metadata', '0',
+        ]
+        if tc:
+            cmd += ['-timecode', tc]
+        cmd += ['-movflags', '+faststart', tmp]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not os.path.exists(tmp):
+            app.logger.warning('[proxy] ffmpeg rc=%s stderr: %s',
+                               result.returncode, (result.stderr or '')[-1500:])
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            _set('error', error='Transcode failed')
+            return
+        os.replace(tmp, out)
+        try:
+            st = os.stat(source_path)
+            atomic_write_json(_proxy_meta_path(project_dir), {
+                'recipe': _PROXY_RECIPE,
+                'source_size': st.st_size,
+                'source_mtime': int(st.st_mtime),
+            })
+        except OSError:
+            pass
+        _set('done')
+    except Exception as e:
+        app.logger.warning('[proxy] build error: %s', e)
+        _set('error', error=str(e))
+
+
+@app.route('/project/<project_id>/media/proxy')
+def serve_media_proxy(project_id):
+    """Serve the preview proxy; build it on demand if missing.
+
+    200 + mp4 when ready; 202 {status:'building'} while transcoding;
+    503 {status:'error'} if the transcode failed (player falls back to the
+    audio-only placeholder)."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    source_path = project.get('source_path', project.get('filepath', ''))
+    if not source_path or not os.path.exists(source_path):
+        return jsonify({'error': 'Source file not found'}), 404
+
+    if _proxy_cache_valid(project_dir, source_path):
+        resp = send_file(_proxy_path(project_dir), mimetype='video/mp4',
+                         conditional=True)
+        resp.headers['Accept-Ranges'] = 'bytes'
+        resp.headers['Cache-Control'] = 'private, no-cache'
+        return resp
+
+    with _proxy_jobs_lock:
+        job = _proxy_jobs.get(project_id)
+        running = job and job.get('phase') == 'building'
+        if not running:
+            _proxy_jobs[project_id] = {'phase': 'building'}
+            threading.Thread(
+                target=_build_preview_proxy,
+                args=(project_id, source_path, project_dir,
+                      project.get('audio_channel', 'all')),
+                daemon=True,
+            ).start()
+    return jsonify({'status': 'building'}), 202
+
+
+@app.route('/project/<project_id>/media/proxy/status')
+def media_proxy_status(project_id):
+    project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
+    project = get_project(project_id)
+    source_path = (project or {}).get('source_path', (project or {}).get('filepath', ''))
+    if source_path and os.path.exists(source_path) and _proxy_cache_valid(project_dir, source_path):
+        return jsonify({'phase': 'done'})
+    with _proxy_jobs_lock:
+        job = _proxy_jobs.get(project_id) or {'phase': 'idle'}
+    return jsonify(job)
 
 
 # ── Optional non-English (Whisper) engine, installed on demand ─────────────
@@ -2178,6 +2585,11 @@ def project_audio_duration(project_id):
 
 _transcribe_jobs: dict = {}
 _transcribe_jobs_lock = threading.Lock()
+# Snapshot of a project's working transcript taken when /retranscribe clears
+# it, so an empty-channel re-run can be ROLLED BACK instead of locking the
+# user out of the project. Keyed by project_id; guarded by the lock above.
+# Consumed (popped) by the worker on no-speech-restore or on success.
+_retranscribe_backups: dict = {}
 
 # Process-global "only one transcription at a time" gate. Transcription
 # engines share a single in-process model singleton (Parakeet/WhisperX/
@@ -2268,7 +2680,7 @@ def _release_transcribe_caches_if_budgeted():
 
 
 def _run_transcribe_job(project_id, source_path, num_speakers, language,
-                       interviewer_name, subject_name):
+                       interviewer_name, subject_name, audio_channel=None):
     """Background worker that runs transcribe_file under a per-project
     progress writer. Final state (done / error) lands in
     transcribe_status.json so the frontend can stop polling."""
@@ -2300,6 +2712,7 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
                     num_speakers=num_speakers,
                     language=language,
                     progress_cb=progress_cb,
+                    audio_channel=audio_channel,
                 )
             finally:
                 _release_transcribe_caches_if_budgeted()
@@ -2344,10 +2757,48 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
                 pass
 
         if unusable:
-            # Studio/gemma27b has no retranscribe-backup rollback (that
-            # machinery isn't on this branch), so an unusable result is a plain
-            # error — same as the original zero-segment path, just now also
-            # catching a degenerate hallucination or a measurably silent track.
+            # Roll back if this empty run was a RETRANSCRIBE: restore the prior
+            # working transcript (snapshotted by /retranscribe) so the user
+            # isn't stranded on a dead error screen with their good transcript
+            # destroyed. A fresh first transcribe has no backup -> real error.
+            with _transcribe_jobs_lock:
+                backup = _retranscribe_backups.pop(project_id, None)
+            if backup and backup.get('transcript'):
+                try:
+                    ch_n = int(audio_channel)
+                except (TypeError, ValueError):
+                    ch_n = None
+                where = f"Track {ch_n + 1}" if ch_n is not None else "that track"
+                notice = (f"{where} had no usable speech — kept your previous transcript. "
+                          "Pick a different track and retry.")
+                restore = {
+                    'transcript': backup['transcript'],
+                    'analysis': backup.get('analysis'),
+                    'client_selects': backup.get('client_selects') or [],
+                    'social_clips': backup.get('social_clips') or [],
+                    'audio_channel': backup.get('audio_channel'),
+                    'status': 'transcribed',
+                }
+                if backup.get('detected_language'):
+                    restore['detected_language'] = backup['detected_language']
+                if backup.get('speaker_names'):
+                    restore['speaker_names'] = backup['speaker_names']
+                if backup.get('diarization'):
+                    restore['diarization'] = backup['diarization']
+                update_project(project_id, restore, remove=['error'])
+                ok_payload = {
+                    "started_at": _transcribe_jobs.get(project_id, {}).get("started_at"),
+                    "updated_at": datetime.now().isoformat(),
+                    "phase": "done",      # frontend reloads into the restored transcript
+                    "pct": 100,
+                    "message": notice,
+                    "notice": notice,     # flashed as a toast across the reload
+                    "restored": True,
+                }
+                with _transcribe_jobs_lock:
+                    _transcribe_jobs[project_id] = ok_payload
+                _write_transcribe_status(project_id, ok_payload)
+                return
             err_text = ('No usable speech was found — the selected audio track '
                         'appears silent. This is common with camera proxy clips '
                         'whose mic is only on the full-resolution master. Check '
@@ -2366,6 +2817,10 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
                 _transcribe_jobs[project_id] = err_payload
             _write_transcribe_status(project_id, err_payload)
             return
+
+        # New transcript is good — discard the rollback snapshot.
+        with _transcribe_jobs_lock:
+            _retranscribe_backups.pop(project_id, None)
 
         # Persist only the keys this job owns, re-reading current state under
         # the project lock — so chat history / labels / a rename saved while
@@ -2477,6 +2932,11 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             pass
     finally:
         _transcribe_run_lock.release()
+        # The rollback snapshot must never outlive the job. The restore/success
+        # branches already consume it; this also drops it on the engine-error
+        # path so a later genuinely-empty run can't restore a stale transcript.
+        with _transcribe_jobs_lock:
+            _retranscribe_backups.pop(project_id, None)
 
 
 @app.route('/project/<project_id>/transcribe', methods=['POST'])
@@ -2539,10 +2999,12 @@ def transcribe(project_id):
     language = project.get('language', 'en')
     interviewer_name = project.get('interviewer_name', 'Interviewer')
     subject_name = project.get('subject_name', 'Subject')
+    audio_channel = project.get('audio_channel', 'all')
 
     thread = threading.Thread(
         target=_run_transcribe_job,
-        args=(project_id, source_path, num_speakers, language, interviewer_name, subject_name),
+        args=(project_id, source_path, num_speakers, language, interviewer_name,
+              subject_name, audio_channel),
         daemon=True,
     )
     thread.start()
@@ -3807,12 +4269,15 @@ def export_fcpxml(project_id):
     # EDL even if the project was originally configured for FCP).
     force_platform = nle if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES) else None
 
-    # Server-side round-trip gate: the UI shows the same warning, but raw
-    # HTTP callers (and any future view without the PROJECT binding) used to
-    # bypass it and hand Resolve/Premiere a flat timeline over the
-    # app-internal timeline_audio.wav.
-    if (deliver_to == 'nle' and nle in NLE_DISPLAY_NAMES and nle != 'fcp'
-            and _round_trip_fcp_only(project)):
+    # Server-side round-trip gate: the UI never offers the flat export for
+    # round-trip projects, but raw HTTP callers used to reach it — and a
+    # flat export of a round-trip project references only the audio
+    # angle's file (or the app-internal timeline WAV), so the output is
+    # broken for EVERY delivery target, not just scripted non-FCP imports
+    # (2026-08-31: the same defect class shipped visibly through the
+    # collection exporter). Single-source asset-clip imports stay exempt
+    # inside _round_trip_fcp_only.
+    if _round_trip_fcp_only(project):
         return jsonify({'error': ROUND_TRIP_FCP_ONLY_ERROR}), 400
 
     export_warnings: list[str] = []
@@ -3967,7 +4432,17 @@ def _mpegts_media_warning(project: dict, nle: str | None = None) -> str | None:
 # users who install to ~/Applications, Setapp, external volumes, or
 # year-versioned Adobe directories).
 _NLE_BUNDLE_IDS = {
-    'fcp':      ('com.apple.FinalCut',),
+    # Final Cut ships under more than one bundle id: the one-time-purchase
+    # app (com.apple.FinalCut), the trial (com.apple.FinalCutTrial), and —
+    # since Jan 2026 — the Apple Creator Studio subscription copy, a
+    # SEPARATE app that installs alongside the purchase SKU (Apple support:
+    # "Both the one-time-purchase apps and the Apple Creator Studio
+    # subscription apps can be installed on the same Mac"). The exact id
+    # comes first so a full install always wins; the glob then catches
+    # every other Final Cut SKU — mdfind treats '*' inside a quoted
+    # comparison as a glob — so a subscription-only editor still gets
+    # "Send to Final Cut Pro" instead of "not installed".
+    'fcp':      ('com.apple.FinalCut', 'com.apple.FinalCut*'),
     'premiere': ('com.adobe.PremierePro',),
     # Free and Studio variants of Resolve register different bundle IDs.
     'resolve':  ('com.blackmagic-design.DaVinciResolveStudio',
@@ -3977,7 +4452,8 @@ _NLE_BUNDLE_IDS = {
 # Hardcoded fallback paths for the (rare) case where Spotlight is
 # disabled on the volume the NLE lives on, or mdfind isn't on PATH.
 _NLE_FALLBACK_PATHS = {
-    'fcp': ('/Applications/Final Cut Pro.app',),
+    'fcp': ('/Applications/Final Cut Pro.app',
+            '/Applications/Final Cut Pro Trial.app',),
     'resolve': ('/Applications/DaVinci Resolve/DaVinci Resolve.app',
                 '/Applications/DaVinci Resolve Studio/DaVinci Resolve Studio.app'),
     'premiere': (
@@ -4010,14 +4486,50 @@ def _mdfind_app_by_bundle_id(bundle_id: str) -> list[str]:
     return [line for line in out.strip().splitlines() if line and os.path.isdir(line)]
 
 
+def _app_short_version(app_path: str) -> tuple:
+    """CFBundleShortVersionString of an .app as a comparable int tuple.
+
+    e.g. "21.0.1" -> (21, 0, 1). Returns () when unreadable, so an
+    unknown-version copy sorts AFTER any known one within its tier (a
+    discoverable v21 always beats a sibling we can't read). Runs out of
+    process; cheap.
+    """
+    plist = os.path.join(app_path, 'Contents', 'Info.plist')
+    if not os.path.isfile(plist):
+        return ()
+    try:
+        out = subprocess.check_output(
+            ['defaults', 'read', plist, 'CFBundleShortVersionString'],
+            text=True, timeout=2, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ()
+    parts = []
+    for tok in out.split('.'):
+        digits = ''
+        for ch in tok:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
 def _rank_app_paths(paths: list[str]) -> list[str]:
     """Order discovered .app paths most-preferred first.
 
-    Heuristic: a copy under /Applications beats one under ~/Applications,
-    which beats anything else (Setapp subdirs, external volumes). Users
-    who keep multiple copies typically want the system-wide one driven.
+    Primary key — install location: a copy under /Applications beats one
+    under ~/Applications, which beats anything else (Setapp subdirs,
+    external volumes). Tiebreak — version: the NEWEST install wins within a
+    tier, so a user with both Resolve 20 and 21 in /Applications gets 21
+    driven on a COLD launch (v20-not-v21 bug). When a Resolve is already
+    running we attach to it and never call this (see _find_nle_app_path /
+    resolve_import.running_app_path) — so this governs cold launch only.
     """
-    def rank(p: str) -> int:
+    def location_rank(p: str) -> int:
         if p.startswith('/Applications/'):
             return 0
         if '/Applications/' in p and 'Setapp' not in p:
@@ -4025,7 +4537,13 @@ def _rank_app_paths(paths: list[str]) -> list[str]:
         if 'Setapp' in p:
             return 3
         return 2
-    return sorted(paths, key=rank)
+
+    def sort_key(p: str):
+        v = _app_short_version(p)
+        # location asc; known-version before unknown; newest version first.
+        return (location_rank(p), 0 if v else 1, tuple(-n for n in v))
+
+    return sorted(paths, key=sort_key)
 
 
 def _find_nle_app_path(nle: str):
@@ -4037,6 +4555,21 @@ def _find_nle_app_path(nle: str):
     export. Falls back to a known-path list if Spotlight returns nothing.
     Result is cached per process — these paths don't move at runtime.
     """
+    # CONNECT-BEFORE-LAUNCH (Resolve): if a Resolve is already running, drive
+    # THAT instance and short-circuit version selection entirely — no mdfind,
+    # no version-rank, no relaunch. The user's project is open in the running
+    # copy (even an older v20 when v21 is "preferred"); attaching to it is
+    # correct, relaunching a second version alongside it is a regression.
+    # Not cached: running state changes at runtime.
+    if nle == 'resolve':
+        try:
+            from exporters import resolve_import
+            running = resolve_import.running_app_path()
+        except Exception:
+            running = None
+        if running:
+            return running
+
     if nle in _nle_path_cache:
         return _nle_path_cache[nle]
 
@@ -4213,6 +4746,7 @@ def _hand_file_to_resolve(file_path: str, *,
         source_media_path=source_media_path or None,
         project_name=project_name or 'Doza Assist Import',
         timeline_name=timeline_name or os.path.splitext(os.path.basename(file_path))[0],
+        app_path=app_path,
     )
 
     if result.ok:
@@ -4995,7 +5529,31 @@ def retranscribe(project_id):
 
     data = request.get_json() or {}
     language = data.get('language', project.get('language', 'en')).strip()
+    # Snapshot the working transcript + its audio-track choice BEFORE we change
+    # anything, so an empty-channel re-run (e.g. user picks a silent scratch
+    # track) can be rolled back instead of stranding the project on a dead
+    # error screen. In-memory only (no meta.json bloat); the worker pops it on
+    # restore/success.
+    if project.get('transcript'):
+        with _transcribe_jobs_lock:
+            _retranscribe_backups[project_id] = {
+                'transcript': project.get('transcript'),
+                'analysis': project.get('analysis'),
+                'client_selects': project.get('client_selects') or [],
+                'social_clips': project.get('social_clips') or [],
+                'detected_language': project.get('detected_language'),
+                'audio_channel': project.get('audio_channel'),  # the channel that worked
+                # Diarized/Pro projects: keep the speaker map + diarization so a
+                # rollback doesn't silently lose the editor's speaker names.
+                'speaker_names': project.get('speaker_names'),
+                'diarization': project.get('diarization'),
+            }
+
     project['language'] = language
+    # Allow changing the source audio track on retranscribe (camera-mic vs
+    # lav). A change invalidates the cached WAV via the recipe sidecar.
+    if 'audio_channel' in data:
+        project['audio_channel'] = _valid_audio_channel(data.get('audio_channel'))
 
     # Clear existing transcript/analysis
     project['transcript'] = None
@@ -5527,6 +6085,13 @@ def story_export(project_id):
     data = request.json or {}
     if not data.get('clips'):
         return jsonify({'error': 'No clips in sequence'}), 400
+
+    # Same round-trip gate as /export/fcpxml: a flat story export of a
+    # round-trip project references only the audio angle's file — broken
+    # output for every target. The UI sends round-trip story builds
+    # through /export/fcpxml-multicam (sources=['story_build']) instead.
+    if _round_trip_fcp_only(project):
+        return jsonify({'error': ROUND_TRIP_FCP_ONLY_ERROR}), 400
 
     deliver_to = str(data.get('deliver_to') or '').strip().lower()
     nle = str(data.get('nle') or '').strip().lower()
@@ -6250,9 +6815,16 @@ def my_style_import():
                     audio_path = extract_audio(tmp_path, project_dir=tmp_dir)
                     file_duration_hint = None
 
-                # Transcribe (same path for both source types)
+                # Transcribe (same path for both source types — raw media and
+                # the FCPXML-rendered WAV converge here). language='auto' so a
+                # non-English finished cut auto-detects onto WhisperX instead of
+                # being forced through English-only Parakeet (the default 'en'),
+                # which garbled non-English sources and poisoned the profile.
+                # Matches the project-creation flow, where 'auto' triggers
+                # detection.
                 yield json.dumps({'file': fname, 'status': 'processing', 'step': 'transcribing'}) + '\n'
-                transcript = transcribe_file(audio_path, project_dir=tmp_dir)
+                transcript = transcribe_file(audio_path, project_dir=tmp_dir,
+                                             language='auto')
 
                 # Analyze
                 yield json.dumps({'file': fname, 'status': 'processing', 'step': 'analyzing'}) + '\n'

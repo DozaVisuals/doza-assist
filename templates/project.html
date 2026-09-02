@@ -213,6 +213,23 @@
        project header. The auto-start script is gated on status == 'uploaded'
        so we don't fire startTranscription() again for projects already
        transcribing in the background. #}
+    <script>
+    // One-shot flash set in sessionStorage before a reload (e.g. the
+    // retranscribe rollback notice: "Track N had no audio — kept your previous
+    // transcript"). Surfaced once on the page we land on. Always rendered so it
+    // works regardless of transcript/error state after the reload.
+    window.addEventListener('DOMContentLoaded', function () {
+        try {
+            var f = sessionStorage.getItem('dozaFlash');
+            if (f) {
+                sessionStorage.removeItem('dozaFlash');
+                if (typeof showToast === 'function') showToast(f);
+                else alert(f);
+            }
+        } catch (e) {}
+    });
+    </script>
+
     {% if not project.transcript %}
     <!-- Auto-transcription state -->
     <div class="card">
@@ -305,7 +322,15 @@
                     }
                     if (phase === 'done' || state.transcribed) {
                         if (fill) fill.style.width = '100%';
-                        if (statusText) statusText.textContent = 'Done!';
+                        // A retranscribe that found no speech rolls back to the
+                        // prior transcript and ships a notice — stash it so it
+                        // surfaces as a toast on the (restored) page after reload.
+                        if (state.notice) {
+                            try { sessionStorage.setItem('dozaFlash', state.notice); } catch (e) {}
+                            if (statusText) statusText.textContent = state.notice;
+                        } else if (statusText) {
+                            statusText.textContent = 'Done!';
+                        }
                         if (typeof reloadAndKeepTab === 'function') {
                             setTimeout(() => reloadAndKeepTab('transcript'), 800);
                         } else {
@@ -414,6 +439,7 @@
                 </div>
                 <span class="player-time" id="playerDuration">00:00</span>
                 <button class="player-speed-btn" id="speedBtn" onclick="cycleSpeed()" title="Playback speed">1x</button>
+                <select class="player-speed-btn" id="trackSelect" onchange="onTrackAudition()" style="display:none; max-width:160px; padding:0 4px;" title="Audio track to play"></select>
                 {% if is_video %}
                 <button class="player-speed-btn" id="audioOnlyBtn" onclick="toggleAudioOnly()" title="Audio-only mode (lighter playback for heavy footage)">🔊</button>
                 {% if projects_meta | selectattr('start_tc') | list %}
@@ -550,19 +576,38 @@
     <!-- Transcript Tab -->
     <div class="tab-content active" id="tab-transcript">
                 {% if project.transcript.truncated_for_trial %}
-                {# Trial-truncation notice. Renders ONLY on the FxFactory trial path,
-                   where core/transcribe.py sets transcript.truncated_for_trial=True.
-                   The direct channel never sets that field, so this never shows. #}
-                {# TODO: swap activate_url for the real FxFactory product URL once available. #}
-                {% set activate_url = "https://doza.ai/pro" %}
+                {# Trial-truncation notice. transcript.truncated_for_trial is baked
+                   into the stored transcript by core/transcribe.py on the trial
+                   path (the wrapper sets DOZA_TRIAL while the install is
+                   unlicensed). doza_trial_active (context processor in app.py)
+                   reflects the LIVE state: once the user has licensed the app and
+                   the backend restarted, we stop selling and point at Retranscribe
+                   instead — the stored transcript stays a trial-length excerpt
+                   until they re-run it. doza_buy_url is the channel's store. #}
                 {% set trial_mins = (project.transcript.trial_max_seconds or 120) // 60 %}
-                <div class="my-style-banner my-style-banner-warn">
-                    <strong>Trial limit:</strong> only the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} of this file {{ 'were' if trial_mins != 1 else 'was' }} transcribed.
+                {% if doza_trial_active %}
+                <div class="my-style-banner my-style-banner-warn" id="trialBanner">
+                    <strong>Free trial:</strong> only the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} of this file {{ 'were' if trial_mins != 1 else 'was' }} transcribed.
                     <div style="margin-top: 6px;">
-                        Activate Doza Assist to transcribe full-length files.
-                        <a href="{{ activate_url }}" target="_blank" rel="noopener" style="margin-left: 6px; font-weight: 600; color: var(--accent);">Activate</a>
+                        Everything here — speakers, story analysis, clips, exports — runs on the complete interview once unlocked. One-time purchase, no subscription.
+                        <a href="{{ doza_buy_url }}" target="_blank" rel="noopener" style="margin-left: 6px; font-weight: 600; color: var(--accent);">Get Full Access</a>
+                    </div>
+                    <div style="margin-top: 6px; color: var(--text-secondary);">
+                        Already purchased? Enter your license key (Doza Assist menu ▸ Manage License…) and a <strong>Transcribe Again</strong> button will appear here.
                     </div>
                 </div>
+                {% else %}
+                {# Licensed, but the stored transcript is still a trial-length
+                   excerpt: prominent message + a Transcribe Again button that opens
+                   the existing retranscribe modal (keeps the language choice and the
+                   non-English Whisper-install guard). #}
+                <div class="my-style-banner my-style-banner-warn">
+                    <strong>Trial-length transcript:</strong> the previous transcription was limited to the first {{ trial_mins }} minute{{ 's' if trial_mins != 1 else '' }} because Doza Assist was running in trial mode. Transcribe again now to get the complete interview.
+                    <div style="margin-top: 8px;">
+                        <button class="btn btn-sm btn-purple" onclick="showRetranscribe()">Transcribe Again</button>
+                    </div>
+                </div>
+                {% endif %}
                 {% endif %}
                 {# Speaker-separation honesty banner: shown when the project
                    was configured multi-speaker, the transcript carries a
@@ -1127,12 +1172,11 @@
             <li>Switch to <strong>DaVinci Resolve</strong>.</li>
             <li>Open <strong>File → Import → Timeline…</strong> (or press <kbd>⇧⌘I</kbd>).</li>
             <li>Pick the highlighted <strong>.fcpxml</strong> file in Finder.</li>
-            <li>Accept the defaults in Resolve's import dialog.</li>
-            <li>If Resolve asks <em>"The clip was not found"</em>, click <strong>No</strong> — the timeline still imports.</li>
-            <li>Close any warning log. Your timeline + media + audio are in the Media Pool.</li>
+            <li>Leave <strong>"Automatically import source clips into media pool"</strong> checked and click <strong>OK</strong>.</li>
+            <li>The timeline imports and your source media links automatically — clips come in online with per-clip audio.</li>
         </ol>
         <p id="resolveSetupFreeWhy" style="display:none; font-size:0.85rem; line-height:1.5; color:var(--text-muted); margin:0.5rem 0 0.75rem;">
-            Heads-up: Resolve's import flow may show a "clip not found" prompt and a list of warnings, but the timeline imports correctly anyway — it's matching on the absolute source-media path in the FCPXML. Dragging the file into the Media Pool doesn't work because Resolve treats it as a media file rather than a timeline; File → Import → Timeline is the supported route.
+            Doza Assist writes the source media's real path and its embedded start timecode into the FCPXML, so Resolve relinks the clips to your footage automatically on import. Dragging the .fcpxml into the Media Pool doesn't work — Resolve treats it as a media file rather than a timeline; File → Import → Timeline is the supported route. (If a clip ever shows offline because the media moved, right-click it → Relink and point at the source file.)
         </p>
         <p id="resolveSetupTrailer" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
             Your export is already in Finder — drop it into Resolve's Media Pool if you'd rather skip auto-import this time.
@@ -1680,24 +1724,263 @@ videoEl.src = "/project/{{ project.id }}/media";
 videoEl.addEventListener('error', () => {
     const err = videoEl.error;
     if (!err) return;
-    // MEDIA_ERR_DECODE (3) / MEDIA_ERR_SRC_NOT_SUPPORTED (4): Chromium
-    // can't demux or decode this container/codec — MXF always, many
-    // 10-bit 4:2:2 camera MP4s. The viewer used to sit black with a dead
-    // progress bar and no message. Fall back to the extracted audio
-    // (waveform view) automatically and say so.
+    // MEDIA_ERR_DECODE (3) / MEDIA_ERR_SRC_NOT_SUPPORTED (4): Chromium can't
+    // demux or decode this container/codec — MXF/AVC-Intra always, many
+    // 10-bit 4:2:2 camera MP4s. Try an on-demand H.264 8-bit preview PROXY
+    // first; only if the proxy itself can't be built/decoded do we fall back
+    // to the audio-only waveform.
     if (err.code !== 3 && err.code !== 4) return;
+    if (audioOnlyMode) return;
+    if (videoEl.dataset.proxyActive === '1') { _fallbackToAudioOnly(); return; }
+    if (videoEl.dataset.proxyTried === '1') { _fallbackToAudioOnly(); return; }
+    _tryPreviewProxy();
+});
+
+function _fallbackToAudioOnly() {
     if (audioOnlyMode) return;
     if (enterAudioOnly()) {
         const note = document.getElementById('videoUnplayableNote');
-        if (note) note.style.display = '';
+        if (note) {
+            note.textContent = "This camera format can't be previewed as video — playing audio only. Exports always use the original file.";
+            note.style.display = '';
+        }
         showToast("This camera format can't be previewed as video — playing audio only");
     }
-});
+}
+
+// True once the video-only preview proxy is the picture source; audio then
+// comes from the audio element (track-selectable), synced to this muted video.
+let videoProxyMode = false;
+// True while we're auto-showing the waveform (audio-only) ONLY because the
+// proxy isn't built yet — distinct from the editor pressing 🔊. Lets us
+// promote the picture automatically the moment the background transcode lands.
+let proxyAutoAudio = false;
+function _bindProxyAVSync() {
+    if (audioEl._proxySyncBound) return;
+    audioEl._proxySyncBound = true;
+    // These six handlers stay bound for the page's life (anonymous — can't be
+    // removed), so they MUST no-op unless videoEl is actually showing the
+    // PROXIED project's picture. In a multi-project (collection) view, after
+    // jumping to another project they'd otherwise drive the stale proxy
+    // <video> off the new project's audio. Live only when audio AND picture
+    // are both on PROJECT_ID (always true in the single-project view).
+    const live = () => videoProxyMode
+        && currentAudioProject === PROJECT_ID
+        && currentVideoProject === PROJECT_ID;
+    audioEl.addEventListener('play', () => { if (!live()) return; try { videoEl.currentTime = audioEl.currentTime; } catch (e) {} videoEl.play().catch(() => {}); });
+    audioEl.addEventListener('pause', () => { if (!live()) return; try { videoEl.pause(); } catch (e) {} });
+    audioEl.addEventListener('seeking', () => { if (!live()) return; try { videoEl.currentTime = audioEl.currentTime; } catch (e) {} });
+    audioEl.addEventListener('ratechange', () => { if (!live()) return; try { videoEl.playbackRate = audioEl.playbackRate; } catch (e) {} });
+    audioEl.addEventListener('ended', () => { if (!live()) return; try { videoEl.pause(); } catch (e) {} });
+    // Drift correction during playback.
+    audioEl.addEventListener('timeupdate', () => {
+        if (!live()) return;
+        try { if (Math.abs(videoEl.currentTime - audioEl.currentTime) > 0.25) videoEl.currentTime = audioEl.currentTime; } catch (e) {}
+    });
+}
+
+function _tryPreviewProxy() {
+    videoEl.dataset.proxyTried = '1';
+    // Don't make the editor wait on the transcode. The picture for a camera
+    // master (MXF/AVC-Intra) can take a while to build, but the extracted
+    // audio is already on disk — so drop to the waveform and start audio
+    // IMMEDIATELY, build the proxy in the BACKGROUND, and promote the picture
+    // automatically the moment it's ready. (Previously a blocking spinner sat
+    // over a dead video element, so the editor couldn't listen meanwhile.)
+    proxyAutoAudio = enterAudioOnly();   // true once audio is playable + visible
+    const note = document.getElementById('videoUnplayableNote');
+    if (note) {
+        note.textContent = proxyAutoAudio
+            ? 'Playing audio now — building the video preview in the background…'
+            : 'Preparing a preview for this camera format…';
+        note.style.display = '';
+    }
+    // No audio element to fall back to (rare) — keep a visible affordance so
+    // the box isn't a silent black rectangle while the transcode runs.
+    if (!proxyAutoAudio) {
+        showBusy('Preparing video preview — this can take a moment for camera masters…');
+    }
+    // HEAD kicks the on-demand transcode without downloading the mp4.
+    fetch(`/project/${PROJECT_ID}/media/proxy`, { method: 'HEAD' }).catch(() => {});
+    let tries = 0;
+    const poll = () => {
+        fetch(`/project/${PROJECT_ID}/media/proxy/status`)
+            .then(r => r.json())
+            .then(s => {
+                if (s.phase === 'done') {
+                    if (!proxyAutoAudio) hideBusy();
+                    videoEl.dataset.proxyActive = '1';
+                    _activateVideoProxy();
+                } else if (s.phase === 'error') {
+                    _onProxyUnavailable();
+                } else if (tries++ < 160) {
+                    setTimeout(poll, 1500);
+                } else {
+                    _onProxyUnavailable();
+                }
+            })
+            .catch(() => { _onProxyUnavailable(); });
+    };
+    setTimeout(poll, 800);
+}
+
+function _onProxyUnavailable() {
+    // Transcode failed or timed out. If we already dropped to the audio
+    // waveform (the common path) audio keeps playing — just settle the note.
+    // Only if we never made it to audio do we run the hard fallback.
+    const note = document.getElementById('videoUnplayableNote');
+    if (!proxyAutoAudio) { hideBusy(); _fallbackToAudioOnly(); return; }
+    proxyAutoAudio = false;
+    if (note) {
+        note.textContent = "Couldn't build a video preview for this camera format — playing audio only. Exports always use the original file.";
+        note.style.display = '';
+    }
+}
+
+// Swap the freshly-built proxy in as the picture source and, unless the editor
+// has since chosen to stay on audio, switch the visual back on automatically.
+// The proxy is video-only: it shows the (muted) picture while SOUND comes from
+// the audio element (transcribed track by default, or whatever the Track
+// dropdown auditions), kept in sync — so changing tracks changes what you hear
+// while the picture keeps playing.
+function _activateVideoProxy() {
+    const wasPlaying = audio && !audio.paused;
+    const t = audio ? audio.currentTime : 0;
+    videoProxyMode = true;
+    currentVideoProject = PROJECT_ID;   // videoEl now holds PROJECT_ID's proxy
+    videoEl.muted = true;
+    videoEl.src = `/project/${PROJECT_ID}/media/proxy`;
+    videoEl.load();
+    if (audioEl) {
+        if (!audioEl.src || audioEl.src.indexOf('/media/audio') === -1) {
+            audioEl.src = `/project/${PROJECT_ID}/media/audio`;
+        }
+        audio = audioEl;
+        currentPlayerIsVideo = false;
+        _bindProxyAVSync();
+        if (typeof bindPlayerEvents === 'function') bindPlayerEvents();
+    }
+    const note = document.getElementById('videoUnplayableNote');
+    if (note) note.style.display = 'none';
+    // Promote the picture: we were auto-showing the waveform only because the
+    // proxy wasn't ready. (If audioEl is absent we were never in audio-only.)
+    if (proxyAutoAudio || !audioEl) {
+        audioOnlyMode = false;
+        setPlayerView('video');
+        const btn = document.getElementById('audioOnlyBtn');
+        if (btn) { btn.style.background = ''; btn.style.color = ''; btn.title = 'Audio-only mode (lighter playback for heavy footage)'; }
+    }
+    proxyAutoAudio = false;
+    // Restore position + resume on the audio element (the sound + sync driver).
+    if (audioEl) {
+        audioEl.addEventListener('loadedmetadata', function _r() {
+            try { audioEl.currentTime = t; } catch (e) {}
+            audioEl.removeEventListener('loadedmetadata', _r);
+            if (wasPlaying) audioEl.play().catch(() => {});
+        });
+        audioEl.load();
+    }
+    showToast('Video preview ready');
+}
 {% else %}
 // Audio-only project: kick the waveform on so the player box isn't a
 // blank black rectangle while the editor scrubs through interview audio.
 setPlayerView('waveform');
 {% endif %}
+
+// ── Audio-track audition dropdown (player control bar) ──
+// Multi-track sources (separate mics on discrete tracks) get a Track selector
+// in the player so the editor can HEAR each track instantly — no destructive
+// re-transcribe just to check a mic. The transcribed track is marked;
+// auditioning a different track surfaces a one-click "Transcribe this track".
+const TRANSCRIBED_CHANNEL = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.audio_channel != null)
+    ? String(PROJECT.audio_channel) : 'all';
+
+async function initTrackDropdown() {
+    const sel = document.getElementById('trackSelect');
+    if (!sel) return;
+    const path = (typeof PROJECT !== 'undefined' && PROJECT && (PROJECT.source_path || PROJECT.filepath)) || '';
+    if (!path) return;
+    let count = 1;
+    try {
+        const res = await fetch('/probe-audio-tracks', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }) });
+        const d = await res.json().catch(() => ({}));
+        count = (d && Number(d.count)) || 1;
+    } catch (e) { count = 1; }
+    if (count <= 1) return;  // single track: no dropdown
+    let html = '';
+    for (let i = 0; i < count; i++) {
+        const tx = String(i) === TRANSCRIBED_CHANNEL ? ' • transcript' : '';
+        html += `<option value="${i}"${String(i) === TRANSCRIBED_CHANNEL ? ' selected' : ''}>` +
+                `Track ${i + 1}${i === 0 ? ' (primary)' : ''}${tx}</option>`;
+    }
+    const allTx = TRANSCRIBED_CHANNEL === 'all' ? ' • transcript' : '';
+    html += `<option value="all"${TRANSCRIBED_CHANNEL === 'all' ? ' selected' : ''}>All tracks (mixed)${allTx}</option>`;
+    sel.innerHTML = html;
+    sel.style.display = '';
+}
+
+function onTrackAudition() {
+    const sel = document.getElementById('trackSelect');
+    if (!sel || !audioEl) return;
+    const track = sel.value;
+    // Capture playback state BEFORE any mode switch (enterAudioOnly pauses),
+    // so the new track keeps playing instead of stalling.
+    const wasPlaying = audio && !audio.paused;
+    const at = audio ? audio.currentTime : 0;
+    if (videoProxyMode) {
+        // Video proxy is showing: keep the picture, just swap the audio
+        // source — the A/V sync keeps them aligned.
+        audioEl.src = `/project/${PROJECT_ID}/media/audio?track=${encodeURIComponent(track)}`;
+        audio = audioEl;
+        audioEl.load();
+    } else {
+        // No video: audition via the audio element (drops to waveform).
+        if (typeof enterAudioOnly === 'function' && !audioOnlyMode) enterAudioOnly();
+        audioEl.src = `/project/${PROJECT_ID}/media/audio?track=${encodeURIComponent(track)}`;
+        audio = audioEl;
+        audioEl.load();
+    }
+    const resume = () => {
+        try { audioEl.currentTime = at; } catch (e) {}
+        if (wasPlaying) audioEl.play().catch(() => {});
+        audioEl.removeEventListener('loadedmetadata', resume);
+    };
+    audioEl.addEventListener('loadedmetadata', resume);
+    _updateTrackAuditionBanner(track);
+}
+
+function _updateTrackAuditionBanner(track) {
+    let b = document.getElementById('trackAuditionBanner');
+    if (!b) {
+        b = document.createElement('div');
+        b.id = 'trackAuditionBanner';
+        b.style.cssText = 'display:none; margin:0.4rem 0 0; padding:0.5rem 0.75rem; border-radius:8px; font-size:0.78rem; line-height:1.45; background:color-mix(in srgb, var(--accent) 8%, transparent); border:1px solid color-mix(in srgb, var(--accent) 25%, transparent);';
+        const col = document.getElementById('playerCol');
+        if (col) col.appendChild(b);
+    }
+    if (track === TRANSCRIBED_CHANNEL) { b.style.display = 'none'; return; }
+    const label = track === 'all' ? 'all tracks (mixed)' : ('Track ' + (parseInt(track, 10) + 1));
+    b.innerHTML = `You're hearing <b>${label}</b>, but the transcript was built from a different track. ` +
+        `<button class="btn btn-sm" style="margin-left:6px; padding:3px 8px; font-size:0.75rem;" onclick="transcribeAuditionTrack('${track}')">Transcribe this track</button>`;
+    b.style.display = '';
+}
+
+function transcribeAuditionTrack(track) {
+    const lang = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.language) || 'auto';
+    fetch(`/project/${PROJECT_ID}/retranscribe`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ language: lang, audio_channel: track }) })
+        .then(r => {
+            if (r.ok) { showToast('Retranscribing on the selected track…'); setTimeout(() => reloadAndKeepTab('transcript'), 2000); }
+            else { showToast('Could not start retranscription', true); }
+        })
+        .catch(err => showToast('Error: ' + err.message, true));
+}
+
+window.addEventListener('DOMContentLoaded', initTrackDropdown);
 
 // ── Extension bridges ──
 // Expose player and Story Builder hooks for Pro extension tabs (Story
@@ -1860,6 +2143,17 @@ function enterAudioOnly() {
 
 function exitAudioOnly() {
     if (!audioOnlyMode) return;
+    // Proxy mode: the picture is a video-only proxy and the SOUND lives on the
+    // audio element. "Exit audio-only" here means reveal the proxy picture
+    // again while KEEPING the audio element as the (synced) sound source —
+    // binding playback to the muted, audio-less proxy video would play silent.
+    if (videoProxyMode && audioEl) {
+        audioOnlyMode = false;
+        setPlayerView('video');
+        const btn = document.getElementById('audioOnlyBtn');
+        if (btn) { btn.style.background = ''; btn.style.color = ''; btn.title = 'Audio-only mode (lighter playback for heavy footage)'; }
+        return;
+    }
     // Chromium can't decode this source at all (that's why the auto-
     // fallback engaged). Exiting would bind playback to a permanently
     // errored video element — black box, note gone, and since the src
@@ -1937,6 +2231,17 @@ function jumpTo(seconds, projectId) {
     // Switch media source if needed (multi-project)
     if (projectId && projectId !== currentAudioProject) {
         audio.pause();
+
+        // Leaving the proxied (PROJECT_ID) project: neutralize proxy state so
+        // the muted picture + A/V-sync don't bleed onto another project — a
+        // native video would otherwise play muted, and an audio-only project
+        // would drive the stale proxy <video>. Self-restores if we jump back
+        // (PROJECT_ID's master re-errors and rebuilds the proxy).
+        if (projectId !== PROJECT_ID && videoProxyMode) {
+            videoProxyMode = false;
+            videoEl.muted = false;
+            delete videoEl.dataset.proxyActive;
+        }
 
         // Check if this project is video or audio and switch player if needed
         const meta = PROJECTS_META.find(p => p.id === projectId);
@@ -5014,7 +5319,7 @@ async function _exportFCPXMLRoundTrip(opts, summary) {
     );
     _rtShowExportBusy(delivery);
     try {
-        const res = await fetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
+        const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -5717,6 +6022,13 @@ function showRetranscribe() {
                 <label class="form-label">Language</label>
                 <select class="form-input" id="retranscribeLang" onchange="updateWhisperBanner()">${options}</select>
             </div>
+            <div class="form-group" id="retranscribeAudioGroup" style="display:none;">
+                <label class="form-label">Audio track</label>
+                <select class="form-input" id="retranscribeAudioChannel"></select>
+                <p style="font-size:0.72rem; color:var(--text-muted); margin:0.35rem 0 0; line-height:1.4;">
+                    This source has more than one separate audio track (e.g. separate mics on discrete tracks). Transcribe a single track for the cleanest per-voice result; mixing all tracks together is also available.
+                </p>
+            </div>
             <div id="whisperBanner" style="display:none; padding: 0.75rem; margin: 0.5rem 0 0; background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 8px; font-size: 0.85rem; line-height: 1.4;"></div>
             <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
                 <button class="btn btn-sm" onclick="document.getElementById('retranscribeOverlay').remove()">Cancel</button>
@@ -5725,6 +6037,11 @@ function showRetranscribe() {
         </div>`;
     document.body.appendChild(overlay);
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+    // Surface the audio-track picker for multi-track sources (separate mics
+    // on discrete tracks) so the user can re-run on a single track here —
+    // the picker only existed at project creation before.
+    populateRetranscribeTracks();
 
     // Fetch engine availability so the banner can render before any selection.
     fetch('/api/transcription-engines')
@@ -5832,17 +6149,68 @@ async function runWhisperInstall(container, onDone) {
     }, 2000);
 }
 
+// Probe the project's source and, when it has more than one separate audio
+// track, show a picker in the Retranscribe modal. DEFAULT is the single
+// PRIMARY track (track 1), never "all tracks (mixed)": separate mono tracks
+// are discrete mics, and mixing them down corrupts per-voice separation and
+// degrades the transcript for exactly the broadcast workflow this serves. An
+// explicit prior per-track choice on the project is honored; "All tracks
+// (mixed)" stays available but is never the default.
+async function populateRetranscribeTracks() {
+    const group = document.getElementById('retranscribeAudioGroup');
+    const sel = document.getElementById('retranscribeAudioChannel');
+    if (!group || !sel) return;
+    const path = (typeof PROJECT !== 'undefined' && PROJECT &&
+                  (PROJECT.source_path || PROJECT.filepath)) || '';
+    if (!path) return;
+    let count = 1;
+    try {
+        const res = await fetch('/probe-audio-tracks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+        const data = await res.json().catch(() => ({}));
+        count = (data && Number(data.count)) || 1;
+    } catch (e) { count = 1; }
+    if (count <= 1) { group.style.display = 'none'; return; }
+
+    // Honor an explicit prior per-track choice; otherwise default to the
+    // single primary track ('0'). Never default to 'all' (mixed).
+    const cur = (typeof PROJECT !== 'undefined' && PROJECT &&
+                 PROJECT.audio_channel != null) ? String(PROJECT.audio_channel) : 'all';
+    const explicitIdx = (/^\d+$/.test(cur) && Number(cur) < count) ? cur : null;
+    const defaultVal = explicitIdx !== null ? explicitIdx : '0';
+
+    let html = '';
+    for (let i = 0; i < count; i++) {
+        html += `<option value="${i}"${String(i) === defaultVal ? ' selected' : ''}>` +
+                `Track ${i + 1}${i === 0 ? ' (primary)' : ''}</option>`;
+    }
+    html += `<option value="all"${defaultVal === 'all' ? ' selected' : ''}>All tracks (mixed)</option>`;
+    sel.innerHTML = html;
+    group.style.display = '';
+}
+
 async function doRetranscribe() {
     const lang = document.getElementById('retranscribeLang').value;
+    // Include the chosen audio track only when the multi-track picker is
+    // actually shown — single-track sources keep the existing behavior.
+    const audioGroup = document.getElementById('retranscribeAudioGroup');
+    const audioSel = document.getElementById('retranscribeAudioChannel');
+    const audioChannel = (audioGroup && audioGroup.style.display !== 'none' && audioSel)
+        ? audioSel.value : null;
     // One shot: the POST clears project state server-side, so a double-click
     // would just queue a redundant destructive call during the 3s reload wait.
     const confirmBtn = document.getElementById('retranscribeBtn');
     if (confirmBtn) confirmBtn.disabled = true;
     try {
+        const body = { language: lang };
+        if (audioChannel !== null) body.audio_channel = audioChannel;
         const res = await fetch(`/project/${PROJECT_ID}/retranscribe`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ language: lang })
+            body: JSON.stringify(body)
         });
         if (res.ok) {
             showToast('Retranscribing with ' + document.getElementById('retranscribeLang').selectedOptions[0].text + '...');

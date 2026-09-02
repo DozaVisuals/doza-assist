@@ -9,13 +9,20 @@
         </div>
     </div>
     <div style="display: flex; align-items: center; gap: 0.5rem;">
-        <span class="status-badge status-{{ p.status }}">
+        {% set _trial_len = p.transcript and p.transcript.truncated_for_trial %}
+        <span class="status-badge status-{{ 'trial' if (_trial_len and p.status == 'transcribed') else p.status }}">
             {% if p.status == 'uploaded' %}Ready to transcribe
             {% elif p.status == 'transcribing' %}Transcribing...
-            {% elif p.status == 'transcribed' %}Transcribed
+            {% elif p.status == 'transcribed' %}{{ 'Trial-length' if _trial_len else 'Transcribed' }}
             {% elif p.status == 'error' %}Error
             {% endif %}
         </span>
+        {% if _trial_len and p.status == 'transcribed' and not doza_trial_active %}
+        {# Licensed, but this transcript is a trial-length excerpt. Same
+           one-click path as the project-page banner — lands on the project
+           so the progress card takes over. #}
+        <button class="btn btn-sm btn-purple" onclick="event.preventDefault(); retranscribeProject('{{ p.id }}', this);" title="The trial transcribed only the first minutes — re-run to get the complete interview">Transcribe Again</button>
+        {% endif %}
         <button class="btn btn-sm project-action-btn" onclick="event.preventDefault(); renameProject('{{ p.id }}', this);" title="Rename project">Rename</button>
         {% if p.transcript %}
         <button class="btn btn-sm project-action-btn" onclick="event.preventDefault(); clearProject('{{ p.id }}', this);" title="Clear transcript, keep file">Clear</button>

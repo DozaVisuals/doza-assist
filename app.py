@@ -337,6 +337,35 @@ def inject_brand():
 
 
 @app.context_processor
+def inject_entitlement():
+    """Tier + feature flags for templates (Studio gating).
+
+    The Electron wrapper resolves the install's entitlement (trial / pro /
+    studio_active / studio_lapsed) against its feature registry and hands
+    the RESULT down as ``DOZA_TIER`` + ``DOZA_FEATURES`` (comma-separated
+    names that are ON). Templates only ever ask ``feature_on('name')``; they
+    never re-derive tiers. OSS installs and older wrappers set neither, so
+    ``doza_tier`` is ``'core'`` and every ``feature_on()`` is False — nothing
+    Studio-only renders. ``doza_upgrade_url`` is the wrapper's checkout link
+    for the Upgrade-to-Studio call to action.
+    """
+    tier = (os.environ.get('DOZA_TIER') or 'core').strip()
+    raw = os.environ.get('DOZA_FEATURES') or ''
+    feats = frozenset(f.strip() for f in raw.split(',') if f.strip())
+
+    def feature_on(name):
+        return name in feats
+
+    return {
+        'doza_tier': tier,
+        'doza_features': feats,
+        'feature_on': feature_on,
+        'doza_studio_readonly': os.environ.get('DOZA_STUDIO_READONLY') == '1',
+        'doza_upgrade_url': os.environ.get('DOZA_UPGRADE_URL') or 'https://doza.ai/buy?plan=studio',
+    }
+
+
+@app.context_processor
 def inject_languages():
     """Canonical language list for every template dropdown (dashboard create
     modal, project Retranscribe + Output Language). Single source:

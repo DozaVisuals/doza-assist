@@ -343,7 +343,7 @@ function _setUndoButtonEnabled(enabled) {
 // made them (author, author_uid), a stable sync id (so a re-sync never
 // duplicates), when, and their note. Ordinary clips carry none of these, so
 // the persisted shape is unchanged for OSS / Pro.
-const SECTION_EXTRA_KEYS = ['origin', 'author', 'author_uid', 'sync_id', 'created_at', 'comment', 'source'];
+const SECTION_EXTRA_KEYS = ['origin', 'author', 'author_uid', 'sync_id', 'created_at', 'comment', 'source', 'thread'];
 function pickSectionExtras(sec) {
     const out = {};
     if (!sec) return out;

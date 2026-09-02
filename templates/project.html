@@ -125,6 +125,9 @@
                 <button class="gear-menu-item" onclick="closeGearMenu(); showRetranscribe();">Retranscribe</button>
                 {% endif %}
                 <button class="gear-menu-item" onclick="closeGearMenu(); showOutputLanguage();">Output Language</button>
+                {% if feature_on('studio.settings') %}
+                <button class="gear-menu-item" id="studioSettingsItem" data-studio="settings" type="button">Studio settings</button>
+                {% endif %}
                 <button class="gear-menu-item" onclick="closeGearMenu(); toggleTheme();">
                     <span class="gear-theme-label-dark">Light theme</span>
                     <span class="gear-theme-label-light">Dark theme</span>
@@ -652,12 +655,14 @@
                         <span id="clipsSelectedCount" style="font-size: 0.8rem; color: var(--accent); display: none;"></span>
                     </div>
                     <div class="btn-group">
+                        {% if not feature_on('clips.collaborators') %}
                         <div id="clipsFilter" title="Filter clips by source">
                             <button data-filter="all" class="active" onclick="setClipsFilter('all')">All</button>
                             <button data-filter="mine" onclick="setClipsFilter('mine')">Mine</button>
                             <button data-filter="client" onclick="setClipsFilter('client')">Collab</button>
                         </div>
                         <button class="btn btn-sm btn-primary" id="clipsAcceptAllBtn" onclick="acceptAllPending()" style="display:none;">Accept all</button>
+                        {% endif %}
                         <div class="view-toggle">
                             <button class="view-toggle-btn" data-view="grid" onclick="setClipsView('grid')" title="Grid view">
                                 <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
@@ -673,6 +678,11 @@
                         <button class="btn btn-sm" onclick="exportClips()">Export</button>
                     </div>
                 </div>
+                {% if feature_on('clips.collaborators') %}
+                {# Studio: People chips (Me · each collaborator · Agreed) + sort. Painted by
+                   pro/share/static/studio-clips.js; empty until a collaborator has selects. #}
+                <div id="studioPeopleRow" data-studio="people" style="display:none;"></div>
+                {% endif %}
                 <div class="clips-grid" id="clipsPendingGrid"></div>
                 <div class="clips-grid" id="clipsGrid">
                     <div class="empty-state" id="clipsEmpty">
@@ -1100,6 +1110,16 @@
                 </button>
             {% endif %}
             </div>
+
+            {% if feature_on('export.stringout') %}
+            <div class="card" id="studioStringoutCard" data-studio="stringout">
+                <div class="card-title" style="margin-bottom: 0.35rem;">Selects Stringout</div>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.9rem;">
+                    One timeline of every collaborator's selects, each marked with who chose it and why. Saved to your Exports folder and revealed in Finder.
+                </p>
+                <button class="btn btn-primary" id="studioStringoutBtn" type="button" style="width:100%;">Export Stringout…</button>
+            </div>
+            {% endif %}
 
             <div class="card">
                 <div class="card-title" style="margin-bottom: 0.35rem;">Documents</div>
@@ -4002,6 +4022,12 @@ function renderClipsTab() {
             <div class="clip-card-excerpt">${escapeHtml(clipText)}</div>
         </div>`;
     }).join('');
+    {% if feature_on('clips.collaborators') %}
+    // Studio: author pills, People filter, sort, Agreed cards (studio-clips.js).
+    if (typeof window.studioDecorateClips === 'function') {
+        try { window.studioDecorateClips(grid); } catch (e) { console.error('[studio] decorate failed', e); }
+    }
+    {% endif %}
 }
 
 function setClipsView(mode) {

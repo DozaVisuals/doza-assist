@@ -68,3 +68,54 @@ def test_dashboard_renders_without_studio_markers_by_default(monkeypatch, tmp_pa
     html = app_module.app.test_client().get(page).get_data(as_text=True)
     assert 'data-studio' not in html
     assert 'studio-panel' not in html
+
+
+def _seed_project(tmp_path, pid='s1'):
+    import json
+    pdir = tmp_path / 'projects' / pid
+    pdir.mkdir(parents=True, exist_ok=True)
+    json.dump({'id': pid, 'name': pid, 'status': 'transcribed', 'source_path': f'/nonexistent/{pid}.mp4',
+               'filename': f'{pid}.mp4', 'created_at': '2026-09-01T12:00:00',
+               'transcript': {'language': 'en', 'segments': [
+                   {'start': 0.0, 'end': 2.0, 'text': 'hello there', 'speaker': 'SPEAKER_00',
+                    'start_formatted': '00:00:00.000', 'end_formatted': '00:00:02.000', 'words': []}]}},
+              open(pdir / 'meta.json', 'w'))
+
+
+def _project_html(monkeypatch, tmp_path, **env):
+    for k in ('DOZA_TIER', 'DOZA_FEATURES'):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    app_module.app.config['PROJECTS_DIR'] = str(tmp_path / 'projects')
+    os.makedirs(app_module.app.config['PROJECTS_DIR'], exist_ok=True)
+    app_module.app.config['TESTING'] = True
+    _seed_project(tmp_path)
+    return app_module.app.test_client().get('/project/s1').get_data(as_text=True)
+
+
+def test_project_page_has_no_studio_markers_for_pro_or_oss(monkeypatch, tmp_path):
+    html = _project_html(monkeypatch, tmp_path)
+    assert 'data-studio' not in html
+    assert 'studioDecorateClips' not in html
+    assert 'Selects Stringout' not in html
+    assert 'Studio settings' not in html
+    # the legacy Collab filter still renders for Pro
+    assert 'data-filter="client"' in html
+    html = _project_html(monkeypatch, tmp_path, DOZA_TIER='pro', DOZA_FEATURES='upgrade.cta')
+    assert 'data-studio' not in html
+
+
+def test_project_page_renders_studio_hooks_when_features_on(monkeypatch, tmp_path):
+    html = _project_html(monkeypatch, tmp_path, DOZA_TIER='studio_active',
+                         DOZA_FEATURES='clips.collaborators,export.stringout,studio.settings')
+    assert 'id="studioPeopleRow"' in html and 'studioDecorateClips' in html
+    assert 'id="studioStringoutBtn"' in html
+    assert 'id="studioSettingsItem"' in html
+    assert 'data-filter="client"' not in html
+
+
+def test_lapsed_keeps_library_and_stringout_hooks(monkeypatch, tmp_path):
+    html = _project_html(monkeypatch, tmp_path, DOZA_TIER='studio_lapsed',
+                         DOZA_FEATURES='clips.collaborators,export.stringout,studio.settings,studio.panel')
+    assert 'id="studioPeopleRow"' in html and 'id="studioStringoutBtn"' in html

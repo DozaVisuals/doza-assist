@@ -486,6 +486,21 @@ def get_media_duration(path: str) -> float | None:
 _TIMECODE_RE = re.compile(r"^(\d+):(\d+):(\d+)([:;.,])(\d+)$")
 
 
+def is_drop_frame_rate(framerate: float) -> bool:
+    """True only for the fractional NTSC rates that HAVE a drop-frame count
+    (29.97, 59.94, 119.88). Integer rates, 23.976 and 25 never drop frames,
+    so a ';' separator in their timecode tag is a mislabelled camera, not
+    drop-frame timecode."""
+    try:
+        fr = float(framerate)
+    except (TypeError, ValueError):
+        return False
+    nominal = int(round(fr))
+    if nominal <= 0 or nominal % 30 != 0:
+        return False
+    return abs(fr - nominal) > 1e-3
+
+
 def timecode_to_frames(tc: str, framerate: float) -> int | None:
     """Convert an SMPTE timecode string ("HH:MM:SS:FF", or ";"/"." for
     drop-frame) to a whole-frame count on the framerate's grid. Returns None if
@@ -620,7 +635,11 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
                 if frames is None:
                     continue
                 m = _TIMECODE_RE.match(tc.strip())
-                is_drop = bool(m) and m.group(4) in (";", ".", ",")
+                # The separator says "drop-frame" but only a fractional NTSC
+                # timebase can carry it; a ';' tag on 24/25/30 fps media is
+                # not DF (see is_drop_frame_rate and the FCPXML writer gate).
+                is_drop = (bool(m) and m.group(4) in (";", ".", ",")
+                           and is_drop_frame_rate(framerate))
                 if frames > 0:
                     # First NONZERO wins: dual-tag media (a zero container
                     # tag plus the real camera TC on the tmcd stream, or

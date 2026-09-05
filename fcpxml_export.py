@@ -96,6 +96,26 @@ def get_frame_duration(framerate=23.976):
     return frames_to_fcpxml_time(1, framerate)
 
 
+def _effective_tc_format(tc_format, framerate=23.976):
+    """Clamp a requested clip tcFormat to what the emitted <format> can carry.
+
+    Drop-frame timecode only exists on the fractional NTSC timebases whose
+    frame duration is 1001 over a multiple of 30000 (29.97, 59.94, 119.88).
+    The DF flag arrives from the source media's timecode tag, while the
+    format the clip references is built from the EXPORT framerate; when the
+    two disagree (a 29.97 DF camera file exported on a 24 fps grid, or a
+    24p file whose tag happens to use ';') FCP rejects every asset-clip with
+    "Encountered an unexpected value (tcFormat=DF)". The attribute is
+    DTD-legal either way, so this has to be enforced here, not by the DTD.
+    """
+    if tc_format != "DF":
+        return "NDF"
+    timebase, frame_dur = _timebase(framerate)
+    if frame_dur == 1001 and timebase % 30000 == 0:
+        return "DF"
+    return "NDF"
+
+
 def _ascii_safe(text):
     """Fold user text (clip titles, filenames) to ASCII for warning strings.
 
@@ -378,6 +398,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     reject every clip with "Invalid edit with no respective media."
     """
     frame_dur = get_frame_duration(framerate)
+    tc_format = _effective_tc_format(tc_format, framerate)
     safe_name = _escape_xml(project_name)
     uid = f"doza-{uuid.uuid4().hex[:8]}"
 
@@ -560,6 +581,7 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
         return _generate_markers_only(markers, f"{project_name} - {story_title}", framerate, width, height)
 
     frame_dur = get_frame_duration(framerate)
+    tc_format = _effective_tc_format(tc_format, framerate)
     safe_name = _escape_xml(project_name)
     safe_title = _escape_xml(story_title)
     uid = f"doza-story-{uuid.uuid4().hex[:8]}"

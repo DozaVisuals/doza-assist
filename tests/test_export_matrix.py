@@ -7,6 +7,7 @@ shared text-style defs across pruned captions, Mode B marker DTD ordering,
 and Resolve sources missing a format resource."""
 
 import os
+import re
 import sys
 import textwrap
 import xml.dom.minidom as minidom
@@ -30,6 +31,10 @@ HOSTILE = [
     {'start': 25, 'end': 30, 'text': '"' * 16, 'note': '', 'category': 'M'},
 ]
 RATES = [23.976, 25.0, 29.97, 48.0, 50.0, 59.94, 119.88]
+# Only the fractional NTSC timebases (1001 over a multiple of 30000) can carry
+# drop-frame timecode. Everything else must come out NDF even when the media
+# probe reported DF, or FCP rejects every asset-clip on import.
+DF_CAPABLE = {29.97, 59.94, 119.88}
 
 
 def _touch(tmp_path, name):
@@ -48,6 +53,57 @@ class TestFCPXMLMatrix:
             start_tc_frames=int(5.5 * 3600 * round(rate)), tc_format="DF")
         minidom.parseString(xml)
         assert "tcFormat" in xml
+        clips = re.findall(r'<asset-clip [^>]*>', xml)
+        if mode == "cuts":
+            assert clips, "cuts mode must place spine clips"
+        if rate in DF_CAPABLE and mode == "cuts":
+            assert all('tcFormat="DF"' in c for c in clips), clips
+        else:
+            # Non-NTSC grid (or no spine clips at all): DF must never appear.
+            assert 'tcFormat="DF"' not in xml
+
+    @pytest.mark.parametrize("rate", RATES)
+    def test_connected_clip_branch_gates_df(self, rate, monkeypatch, tmp_path):
+        """The dialogue-channel <clip> form carries tcFormat too; the gate
+        must cover it exactly like the compact <asset-clip> form."""
+        from exporters import media_probe as mp
+        monkeypatch.setattr(mp, "has_video_stream", lambda p: True)
+        monkeypatch.setattr(mp, "get_audio_layout", lambda p: (4, 4))
+        monkeypatch.setattr(mp, "get_audio_sample_rate", lambda p: 48000)
+        monkeypatch.setattr(mp, "detect_dialogue_channels", lambda p, *a, **k: [1])
+        xml = generate_fcpxml(
+            HOSTILE, framerate=rate, mode="cuts",
+            source_path=_touch(tmp_path, "four-mono.mxf"), media_duration=60.0,
+            start_tc_frames=int(3600 * round(rate)), tc_format="DF")
+        minidom.parseString(xml)
+        clips = re.findall(r'<clip [^>]*>', xml)
+        assert clips, "connected-clip form expected with a detected dialogue channel"
+        assert '<asset-clip ' not in xml
+        if rate in DF_CAPABLE:
+            assert all('tcFormat="DF"' in c for c in clips), clips
+        else:
+            assert 'tcFormat="DF"' not in xml
+
+    @pytest.mark.parametrize("rate", RATES)
+    def test_story_generator_gates_df(self, rate, tmp_path):
+        xml = generate_story_fcpxml(
+            HOSTILE, project_name="P", story_title="S", framerate=rate,
+            source_path=_touch(tmp_path, "x.mov"), media_duration=60.0,
+            start_tc_frames=int(3600 * round(rate)), tc_format="DF")
+        minidom.parseString(xml)
+        clips = re.findall(r'<asset-clip [^>]*>', xml)
+        assert clips
+        if rate in DF_CAPABLE:
+            assert all('tcFormat="DF"' in c for c in clips), clips
+        else:
+            assert 'tcFormat="DF"' not in xml
+
+    def test_ndf_request_stays_ndf_on_ntsc(self, tmp_path):
+        xml = generate_fcpxml(
+            HOSTILE, framerate=29.97, mode="cuts",
+            source_path=_touch(tmp_path, "x.mov"), media_duration=60.0,
+            tc_format="NDF")
+        assert 'tcFormat="DF"' not in xml
 
     @pytest.mark.parametrize("rate", [23.976, 29.97, 50.0])
     def test_story_generator(self, rate, tmp_path):

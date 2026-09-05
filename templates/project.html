@@ -193,10 +193,26 @@
                             queued: 'Starting…',
                             extract_audio: 'Extracting audio…',
                             load_model: 'Loading the transcription engine…',
+                            load_audio: 'Reading audio…',
                             transcribing: 'Transcribing…',
                         };
                         statusText.textContent = state.label || PHASE_LABELS[phase]
                             || (phase.charAt(0).toUpperCase() + phase.slice(1).replace(/_/g, ' ')) + '…';
+                    }
+                    // Engine fallback: Parakeet could not run this file and the
+                    // job moved to Whisper. Say so, once, instead of letting the
+                    // bar silently drop back to 5% and crawl.
+                    const FALLBACK_NOTE = state.fallback_from
+                        ? 'Fast engine unavailable on this file, using the slower Whisper engine (this can take several times the media length).'
+                        : '';
+                    if (timeText && phase === 'load_audio') {
+                        const totalMin = state.audio_sec ? Math.max(1, Math.round(state.audio_sec / 60)) : 0;
+                        const parts = [];
+                        if (totalMin) parts.push(`${totalMin} min of audio`);
+                        if (FALLBACK_NOTE) parts.push(FALLBACK_NOTE);
+                        timeText.textContent = parts.join(' · ');
+                    } else if (timeText && phase === 'load_model' && FALLBACK_NOTE) {
+                        timeText.textContent = FALLBACK_NOTE;
                     }
                     if (fill && pct !== null) {
                         fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
@@ -229,6 +245,9 @@
                                 label = (label ? label + ' · ' : '') +
                                     'No progress for a while — the engine may be working through a hard section, or stalled.';
                             }
+                        }
+                        if (FALLBACK_NOTE) {
+                            label = (label ? label + ' · ' : '') + FALLBACK_NOTE;
                         }
                         timeText.textContent = label;
                     }
@@ -487,6 +506,14 @@
 
     <!-- Transcript Tab -->
     <div class="tab-content active" id="tab-transcript">
+                {% if project.engine_fallback_from %}
+                {# Written by the transcribe job when Parakeet could not run this
+                   file and Whisper produced the transcript instead. #}
+                <div class="my-style-banner" id="engineFallbackNote">
+                    Transcribed with the Whisper engine: the fast engine could not process this file.
+                    Transcribe Again retries the fast engine.
+                </div>
+                {% endif %}
                 {% if project.transcript.truncated_for_trial %}
                 {# Trial-truncation notice. transcript.truncated_for_trial is baked
                    into the stored transcript by core/transcribe.py on the trial

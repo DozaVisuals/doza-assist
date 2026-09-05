@@ -2621,16 +2621,32 @@ def _make_transcribe_progress_writer(project_id):
     likely means a hung model load).
     """
     started_at = datetime.now().isoformat()
+    # Engine memory across events: transcribe.py announces the engine on each
+    # load_model event and says nothing else when Parakeet dies and Whisper
+    # takes over. Remembering the previous engine lets the UI tell the user
+    # WHY a fast job turned into a slow one. Events without an engine (the
+    # memory-gate "queued" event) must not erase what we know.
+    engine_seen = {"current": None, "fallback_from": None, "audio_sec": None}
 
     def writer(event):
+        engine = event.get("engine") or None
+        if engine:
+            prev = engine_seen["current"]
+            if (prev and prev != engine and str(prev).startswith("parakeet")
+                    and str(engine).startswith("whisper")):
+                engine_seen["fallback_from"] = prev
+            engine_seen["current"] = engine
+        if event.get("audio_sec"):
+            engine_seen["audio_sec"] = event.get("audio_sec")
         snapshot = {
             "started_at": started_at,
             "updated_at": datetime.now().isoformat(),
             "phase": event.get("phase", "transcribing"),
             "pct": int(event.get("pct", 0)),
-            "engine": event.get("engine"),
+            "engine": engine or engine_seen["current"],
             "slow_mode": bool(event.get("slow_mode")),
-            "audio_sec": event.get("audio_sec"),
+            "audio_sec": event.get("audio_sec") or engine_seen["audio_sec"],
+            "fallback_from": engine_seen["fallback_from"],
         }
         with _transcribe_jobs_lock:
             _transcribe_jobs[project_id] = snapshot
@@ -2821,10 +2837,19 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
         # detected_language: meta-level copy of the engine's detected (or
         # echoed) language code, so the output-language resolver reads meta
         # only and never digs into the transcript blob.
+        # transcript_engine / engine_fallback_from: which engine produced
+        # this transcript and whether it was a fallback from Parakeet, so
+        # the page can say so after reload (the status file is gone by then).
+        _job_snapshot = _transcribe_jobs.get(project_id, {}) or {}
+        _meta_update = {
+            'transcript': result, 'status': 'transcribed',
+            'detected_language': (result.get('language') or 'en'),
+            'transcript_engine': result.get('engine') or _job_snapshot.get('engine'),
+            'engine_fallback_from': _job_snapshot.get('fallback_from'),
+        }
         project = update_project(
             project_id,
-            {'transcript': result, 'status': 'transcribed',
-             'detected_language': (result.get('language') or 'en')},
+            _meta_update,
             remove=['error'],
         ) or {}
         log_activity(project_id, 'transcribed',
@@ -2895,6 +2920,7 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             "phase": "done",
             "pct": 100,
             "engine": _transcribe_jobs.get(project_id, {}).get("engine"),
+            "fallback_from": _transcribe_jobs.get(project_id, {}).get("fallback_from"),
             "segments": seg_count,
         }
         with _transcribe_jobs_lock:

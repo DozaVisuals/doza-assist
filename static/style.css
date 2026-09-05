@@ -4768,3 +4768,17 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     border-radius: 50%;
     flex-shrink: 0;
 }
+
+/* ── Tab purpose lines (1.0.47) ──
+   One sentence under the tab bar that says what the active tab is for.
+   Sits at the top of every .tab-content (project page) and every
+   .collection-state (Collection page). Pulls up into the tab bar's
+   bottom margin so it reads as the bar's caption, not as content. */
+
+.tab-purpose {
+    margin: -0.6rem 0 1rem 0.25rem;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    max-width: 68ch;
+}

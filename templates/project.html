@@ -506,6 +506,7 @@
 
     <!-- Transcript Tab -->
     <div class="tab-content active" id="tab-transcript">
+                <p class="tab-purpose">Check speakers and text before anything else. Everything downstream trusts this.</p>
                 {% if project.engine_fallback_from %}
                 {# Written by the transcribe job when Parakeet could not run this
                    file and Whisper produced the transcript instead. #}
@@ -584,6 +585,7 @@
 
     <!-- Clips Tab -->
     <div class="tab-content" id="tab-clips">
+                <p class="tab-purpose">Everything you have pulled, from any tab. Review here before export.</p>
                 <div class="clips-header">
                     <div style="display: flex; align-items: center; gap: 0.75rem;">
                         <span class="card-title">Clip Library</span>
@@ -616,6 +618,7 @@
 
     <!-- Analysis Tab -->
     <div class="tab-content" id="tab-analysis">
+        <p class="tab-purpose">Run this once per project. It finds the beats, soundbites, and social clips everything else builds on.</p>
         {% if project.analysis %}
 
         {% if project.analysis.get('analysis_warnings') %}
@@ -781,6 +784,7 @@
 
     <!-- Chat Tab -->
     <div class="tab-content" id="tab-chat">
+                <p class="tab-purpose">Ask questions about the footage. Pull any answer into Clips.</p>
                 <div class="card chat-card">
                     <div class="chat-messages" id="chatMessages">
                         <div class="chat-welcome">
@@ -821,6 +825,7 @@
     <!-- Story Builder Tab -->
     {% if not is_shared %}
     <div class="tab-content" id="tab-story">
+        <p class="tab-purpose">Arrange moments into a sequence. This is where the rough cut takes shape.</p>
         <div id="storyBuilderContent">
             <!-- Hidden elements for JS compatibility -->
             <span id="storyClipCount" style="display:none;"></span>
@@ -879,6 +884,7 @@
 
     <!-- Export Tab -->
     <div class="tab-content" id="tab-export">
+        <p class="tab-purpose">Send your selects to Final Cut, Premiere, or Resolve. One export covers everything you check here.</p>
         <div class="deliver-toggle" id="deliverToggle">
             <span class="deliver-toggle-label">Deliver to</span>
             <div class="deliver-toggle-options" role="radiogroup" aria-label="Delivery method">

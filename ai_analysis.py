@@ -2219,7 +2219,7 @@ def _enforce_clip_count(text, target, candidates=None, transcript=None,
             continue
         taken.append((s, e, cand_group))
         have += 1
-        start_tc, end_tc = _seconds_to_tc(s), _seconds_to_tc(e)
+        start_tc, end_tc = _seconds_to_tc_frac(s), _seconds_to_tc_frac(e)
         attrs = [f'start={start_tc}', f'end={end_tc}']
         if cand_group:
             # Exact source attribution for multi-project pools: the
@@ -2995,7 +2995,7 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
             # Lone surviving marker still over the named cap: shrink its
             # end so the deliverable honors the user's literal ceiling.
             m, s, _e = markers[0]
-            new_end = _seconds_to_tc(s + hard_cap)
+            new_end = _seconds_to_tc_frac(s + hard_cap)
             capped = re.sub(r'end=[\d:.]+', f'end={new_end}',
                             m.group(0), count=1)
             text = text[:m.start()] + capped + text[m.end():]
@@ -3048,7 +3048,7 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
             continue
         taken.append((s, e, cand_group))
         total += dur
-        start_tc, end_tc = _seconds_to_tc(s), _seconds_to_tc(e)
+        start_tc, end_tc = _seconds_to_tc_frac(s), _seconds_to_tc_frac(e)
         attrs = [f'start={start_tc}', f'end={end_tc}']
         if cand_group:
             # Exact source attribution — see _enforce_clip_count.
@@ -3634,8 +3634,8 @@ def _deterministic_clip_markers(matched_paragraphs, target_count):
         title = ' '.join(words).rstrip('.,!?;:')[:40] or 'transcript moment'
         # Sanitize title for marker form (no quotes, no brackets)
         title = title.replace('"', "'").replace('[', '(').replace(']', ')')
-        start_tc = _seconds_to_tc(start_sec)
-        end_tc = _seconds_to_tc(end_sec)
+        start_tc = _seconds_to_tc_frac(start_sec)
+        end_tc = _seconds_to_tc_frac(end_sec)
         lines.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}"]')
     return '\n'.join(lines)
 
@@ -4040,7 +4040,7 @@ def _validate_clip_timecodes(clips, segments, *, text_key=None,
         if _anchored(start_sec):
             nc = dict(c)
             if _tc_to_seconds(c.get('end')) > t_end + grace_seconds:
-                nc['end'] = _seconds_to_tc(t_end)
+                nc['end'] = _seconds_to_tc_frac(t_end)
                 clamped += 1
                 print(f"[analysis-validate] {kind} end clamped "
                       f"{c.get('end')}->{nc['end']} (start={raw_start})",
@@ -4053,8 +4053,8 @@ def _validate_clip_timecodes(clips, segments, *, text_key=None,
         anchor = _text_anchor(c.get(text_key)) if text_key else None
         if anchor:
             nc = dict(c)
-            nc['start'] = _seconds_to_tc(anchor[0])
-            nc['end'] = _seconds_to_tc(anchor[1])
+            nc['start'] = _seconds_to_tc_frac(anchor[0])
+            nc['end'] = _seconds_to_tc_frac(anchor[1])
             repaired += 1
             print(f"[analysis-validate] {kind} repaired start "
                   f"{raw_start}->{nc['start']} (verbatim-text match)",
@@ -4920,7 +4920,7 @@ def _build_chat_analysis_index(analysis) -> str:
 
     def _tc(val) -> str:
         if isinstance(val, (int, float)):
-            return _seconds_to_tc(val)
+            return _seconds_to_tc_frac(val)
         return str(val or "").strip()
 
     def _short(text, limit=140) -> str:
@@ -5985,8 +5985,8 @@ def _format_clip_cards_from_candidates(candidates):
                 "answer that. Try rephrasing, or ask about a specific topic or theme.")
 
     def _card(cand, start_sec, end_sec):
-        start_tc = _seconds_to_tc(start_sec)
-        end_tc = _seconds_to_tc(end_sec)
+        start_tc = _seconds_to_tc_frac(start_sec)
+        end_tc = _seconds_to_tc_frac(end_sec)
         raw_title = (cand.get('title') or 'Moment').strip()
         # Strip matching wrapping quotes the model sometimes includes
         # (e.g. "Moment"), then neutralize any remaining internal "/[]
@@ -6162,8 +6162,8 @@ def _rerank_candidates_globally(candidates, message, top_k=5):
     for i, c in indexed:
         title = (c.get('title') or 'Moment').strip().replace('\n', ' ')
         why = (c.get('why') or '').strip().replace('\n', ' ')
-        start = _seconds_to_tc(c.get('start_sec', 0))
-        end = _seconds_to_tc(c.get('end_sec', 0))
+        start = _seconds_to_tc_frac(c.get('start_sec', 0))
+        end = _seconds_to_tc_frac(c.get('end_sec', 0))
         menu_lines.append(f"  [{i}] [{start}-{end}] {title} :: {why}")
     menu = '\n'.join(menu_lines)
 
@@ -6833,11 +6833,40 @@ def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_nam
 
 
 def _seconds_to_tc(sec) -> str:
+    """Whole-second HH:MM:SS. For labels and ranges only; clip EDGES use
+    _seconds_to_tc_frac so the model never sees a floored start or end."""
     try:
         sec = int(sec)
     except (TypeError, ValueError):
         return "00:00:00"
     return f"{sec//3600:02d}:{(sec%3600)//60:02d}:{sec%60:02d}"
+
+
+def _seconds_to_tc_frac(sec) -> str:
+    """HH:MM:SS with up to three decimals, trailing zeros trimmed.
+
+    Every timecode the model copies used to be floored to a whole second on
+    both edges, so each clip could open up to a second early (on the tail
+    of the previous sentence) and close up to a second early (clipping the
+    last word). Every parser downstream already accepts fractional seconds
+    (_tc_to_seconds, the marker regexes, the frontend tcToSec / parseTc,
+    app.py _to_seconds).
+    """
+    try:
+        value = float(sec)
+    except (TypeError, ValueError):
+        return "00:00:00"
+    if value < 0 or value != value:  # negative or NaN
+        return "00:00:00"
+    whole = int(value)
+    frac = round(value - whole, 3)
+    if frac >= 1.0:
+        whole += 1
+        frac = 0.0
+    base = f"{whole//3600:02d}:{(whole%3600)//60:02d}:{whole%60:02d}"
+    if frac <= 0:
+        return base
+    return base + f"{frac:.3f}"[1:].rstrip('0')
 
 
 # Tail chunks shorter than this fold into the previous chunk instead of
@@ -6913,9 +6942,9 @@ def _format_segments_for_ai(segments, speaker_names=None) -> str:
     """
     lines = []
     for seg in segments:
-        start_tc = seg.get('start_formatted', _seconds_to_tc(seg.get('start', 0)))[:8]
+        start_tc = _seconds_to_tc_frac(seg.get('start', 0))
         end_s = seg.get('end', seg.get('start', 0))
-        end_tc = _seconds_to_tc(end_s)
+        end_tc = _seconds_to_tc_frac(end_s)
         raw_speaker = seg.get('speaker', 'Speaker')
         speaker = _display_speaker(raw_speaker, speaker_names)
         text = seg.get('text', '')
@@ -7862,9 +7891,9 @@ def _format_transcript_for_ai(transcript, speaker_names=None):
     # Format all segments with start AND end times so AI can set accurate clip boundaries
     all_lines = []
     for seg in segments:
-        start_tc = seg['start_formatted'][:8]
+        start_tc = _seconds_to_tc_frac(seg.get('start', 0))
         end_s = seg.get('end', seg.get('start', 0))
-        end_tc = f"{int(end_s)//3600:02d}:{(int(end_s)%3600)//60:02d}:{int(end_s)%60:02d}"
+        end_tc = _seconds_to_tc_frac(end_s)
         raw_speaker = seg.get('speaker', 'Speaker')
         speaker = _display_speaker(raw_speaker, speaker_names)
         text = seg['text']
@@ -7918,8 +7947,8 @@ def _format_paragraphs_as_lines(paragraphs):
     for p in paragraphs:
         start = p.get('start', 0)
         end = p.get('end', start)
-        start_tc = _seconds_to_tc(start)
-        end_tc = _seconds_to_tc(end)
+        start_tc = _seconds_to_tc_frac(start)
+        end_tc = _seconds_to_tc_frac(end)
         speaker = p.get('speaker', 'Speaker')
         text = (p.get('text') or '').strip()
         lines.append(f"[{start_tc}-{end_tc}] {speaker}: {text}")
@@ -9044,7 +9073,7 @@ def _enforce_duration_budget(clips, target_seconds, segment_vectors=None):
             if new_span >= span:
                 break
             start = _tc_to_seconds(c.get('start_time'))
-            c['end_time'] = _seconds_to_tc(start + new_span)
+            c['end_time'] = _seconds_to_tc_frac(start + new_span)
             total = sum(_clip_span_seconds(cl) for cl in clips)
             changed = True
 

@@ -274,6 +274,9 @@ function updateSelectCount() {
     const exportCountEl = document.getElementById('exportCatLabelsCount');
     if (exportCountEl) exportCountEl.textContent = labelSections.length;
     if (typeof _refreshExportButtonState === 'function') _refreshExportButtonState();
+    // The project page's workflow strip reads labelSections for its Clips
+    // step; hosts without the strip (Pro Collections) skip this.
+    if (typeof refreshWorkflowStrip === 'function') refreshWorkflowStrip();
 }
 
 // ── Undo (multi-step history) ──

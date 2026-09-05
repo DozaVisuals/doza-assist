@@ -4811,3 +4811,147 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 .export-empty-hint > span {
     flex: 1 1 260px;
 }
+
+/* ── Workflow strip (1.0.47) ──
+   One thin row above the tab bar: Transcript, Analyze, Shape, Clips,
+   Export. Tab-bar typography; stays under 40 px. */
+
+.workflow-strip {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 32px;
+    max-height: 40px;
+    margin: -0.75rem 0 0.75rem 0;
+    padding: 0.25rem 0.5rem 0.25rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow-x: auto;
+}
+
+.workflow-strip-label {
+    flex: 0 0 auto;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.workflow-steps {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex: 1 1 auto;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.workflow-step {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+}
+
+/* Connector between steps. */
+.workflow-step + .workflow-step::before {
+    content: '';
+    display: inline-block;
+    width: 16px;
+    height: 1px;
+    margin: 0 0.4rem;
+    background: var(--border-light);
+}
+
+.workflow-step button,
+.workflow-step-name {
+    padding: 0.15rem 0.35rem;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    color: inherit;
+    font-family: var(--font);
+    font-size: inherit;
+    font-weight: 500;
+    line-height: 1.3;
+    cursor: pointer;
+}
+.workflow-step-name { cursor: default; }
+
+.workflow-step button:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover, var(--bg-input));
+}
+
+/* Step states. */
+.workflow-step.is-done > button::before,
+.workflow-step.is-done > .workflow-step-name::before {
+    content: '\2713';
+    margin-right: 0.3rem;
+    color: var(--green);
+}
+.workflow-step.is-current > button,
+.workflow-step.is-current > .workflow-step-name {
+    color: var(--accent);
+    font-weight: 600;
+}
+.workflow-step.is-current > button::before,
+.workflow-step.is-current > .workflow-step-name::before {
+    content: '\25CF';
+    margin-right: 0.3rem;
+    font-size: 0.6em;
+    vertical-align: 0.1em;
+}
+.workflow-step.is-future > button,
+.workflow-step.is-future > .workflow-step-name,
+.workflow-step.is-future .workflow-step-sub button {
+    color: var(--text-muted);
+}
+
+/* Shape has three sub-tabs; slashes separate whichever ones are present
+   (the Story Brief button hides when that tab is absent). */
+.workflow-step-sub {
+    display: inline-flex;
+    align-items: center;
+}
+.workflow-step-sub button {
+    font-weight: 400;
+    padding: 0.15rem 0.3rem;
+}
+.workflow-step-sub button + button::before {
+    content: '/';
+    margin-right: 0.45rem;
+    color: var(--text-muted);
+}
+
+.workflow-strip-dismiss {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 0 0.3rem;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 1.05rem;
+    line-height: 1;
+    cursor: pointer;
+}
+.workflow-strip-dismiss:hover { color: var(--text-primary); }
+
+/* Header link that restores a dismissed strip. */
+.workflow-show-link {
+    padding: 0.3rem 0.4rem;
+    border: none;
+    background: none;
+    color: var(--text-secondary);
+    font-family: var(--font);
+    font-size: 0.78rem;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+.workflow-show-link:hover { color: var(--accent); }

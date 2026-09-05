@@ -105,6 +105,11 @@
             {% endif %}
         </div>
         <div class="btn-group">
+            {% if project.transcript and not is_shared %}
+            {# Restores the workflow strip after the editor dismissed it
+               (localStorage). Hidden while the strip is visible. #}
+            <button type="button" class="workflow-show-link" id="workflowShowLink" onclick="showWorkflowStrip()" style="display:none;">Show workflow</button>
+            {% endif %}
             {% if project.status == 'transcribed' %}
             {# Fresh analysis -> subdued "Re-run" (clicking asks + forces a
                real run); stale/absent -> primary one-click CTA. Keeps the
@@ -297,6 +302,32 @@
     {% endif %}
 
     {% if project.transcript %}
+    {% if not is_shared %}
+    {# Workflow strip: Transcript, Analyze, Shape, Clips, Export. State comes
+       from data already on the page (refreshWorkflowStrip): done when the
+       step has output, current for the first step without output, future
+       otherwise. Dismissable; "Show workflow" in the header brings it back. #}
+    <div class="workflow-strip" id="workflowStrip" role="navigation" aria-label="Workflow"
+         data-has-analysis="{{ 'true' if project.analysis else 'false' }}"
+         data-has-chat="{{ 'true' if project.chat_history else 'false' }}">
+        <span class="workflow-strip-label">Workflow</span>
+        <ol class="workflow-steps">
+            <li class="workflow-step" data-step="transcript"><button type="button" onclick="switchTab('transcript')" title="Check speakers and text">Transcript</button></li>
+            <li class="workflow-step" data-step="analyze"><button type="button" onclick="switchTab('analysis')" title="Run AI Analysis once per project">Analyze</button></li>
+            <li class="workflow-step" data-step="shape">
+                <span class="workflow-step-name">Shape</span>
+                <span class="workflow-step-sub">
+                    <button type="button" onclick="switchTab('chat')" title="Ask questions, pull answers into Clips">Chat</button>
+                    <button type="button" data-requires-tab="brief" onclick="switchTab('brief')" title="A producer's read on how to cut">Story Brief</button>
+                    <button type="button" onclick="switchTab('story')" title="Arrange moments into a sequence">Story Builder</button>
+                </span>
+            </li>
+            <li class="workflow-step" data-step="clips"><button type="button" onclick="switchTab('clips')" title="Review everything you pulled">Clips</button></li>
+            <li class="workflow-step" data-step="export"><button type="button" onclick="switchTab('export')" title="Send selects to your editor">Export</button></li>
+        </ol>
+        <button type="button" class="workflow-strip-dismiss" onclick="dismissWorkflowStrip()" title="Hide the workflow strip" aria-label="Hide the workflow strip">&times;</button>
+    </div>
+    {% endif %}
     <!-- Tabs -->
     <div class="tabs">
         {% if is_shared %}
@@ -1399,9 +1430,130 @@ function _syncTabLinks() {
 }
 window.addEventListener('DOMContentLoaded', _syncTabLinks);
 
+// ── Workflow strip ──
+//
+// Five steps above the tab bar. Done/current/future is derived from data
+// already on the page each time refreshWorkflowStrip() runs:
+//   transcript  the strip only renders once a transcript exists
+//   analyze     project.analysis (data-has-analysis) or PROJECT.analysis
+//   shape       saved chat history, a Story Builder build, or a mounted
+//               Story Brief (extensions call window.dozaWorkflow.markDone)
+//   clips       labelSections has at least one clip
+//   export      an export or document download completed on this Mac
+//               (remembered per project in localStorage: core keeps no
+//               export record on disk)
+// Dismissal is remembered per browser; "Show workflow" in the header
+// brings the strip back.
+const WORKFLOW_DISMISS_KEY = 'doza-workflow-dismissed';
+const WORKFLOW_EXPORT_KEY = 'doza-workflow-exported-' + PROJECT_ID;
+const WORKFLOW_ORDER = ['transcript', 'analyze', 'shape', 'clips', 'export'];
+let _workflowShapeDone = false;
+
+function _workflowStepsDone() {
+    const strip = document.getElementById('workflowStrip');
+    if (!strip) return null;
+    const proj = (typeof PROJECT !== 'undefined' && PROJECT) ? PROJECT : null;
+    const hasAnalysis = strip.dataset.hasAnalysis === 'true' || !!(proj && proj.analysis);
+    // chatHistory and storyBuilds are top-level `let`s declared further
+    // down this script; the first refresh runs while the script is still
+    // executing (renderClipsTab at load), so read them under try/catch
+    // rather than typeof, which does not protect against the TDZ.
+    let hasChat = strip.dataset.hasChat === 'true';
+    try {
+        hasChat = hasChat || (Array.isArray(chatHistory) && chatHistory.some(m => m && m.role === 'assistant'));
+    } catch (_) { /* not declared yet */ }
+    let hasBuilds = false;
+    try {
+        hasBuilds = Array.isArray(storyBuilds) && storyBuilds.length > 0;
+    } catch (_) { /* not declared yet */ }
+    let hasClips = false;
+    try {
+        hasClips = Array.isArray(labelSections) && labelSections.length > 0;
+    } catch (_) { /* transcript.js not loaded */ }
+    let exported = false;
+    try { exported = localStorage.getItem(WORKFLOW_EXPORT_KEY) === '1'; } catch (_) {}
+    return {
+        transcript: true,
+        analyze: hasAnalysis,
+        shape: hasChat || hasBuilds || _workflowShapeDone,
+        clips: hasClips,
+        export: exported,
+    };
+}
+
+function refreshWorkflowStrip() {
+    const strip = document.getElementById('workflowStrip');
+    if (!strip) return;
+    const done = _workflowStepsDone();
+    let currentSet = false;
+    WORKFLOW_ORDER.forEach(step => {
+        const li = strip.querySelector(`[data-step="${step}"]`);
+        if (!li) return;
+        li.classList.remove('is-done', 'is-current', 'is-future');
+        if (done[step]) {
+            li.classList.add('is-done');
+        } else if (!currentSet) {
+            li.classList.add('is-current');
+            currentSet = true;
+        } else {
+            li.classList.add('is-future');
+        }
+    });
+}
+
+function markWorkflowStep(step) {
+    if (step === 'shape') _workflowShapeDone = true;
+    if (step === 'export') {
+        try { localStorage.setItem(WORKFLOW_EXPORT_KEY, '1'); } catch (_) {}
+    }
+    refreshWorkflowStrip();
+}
+
+function _applyWorkflowVisibility(dismissed) {
+    const strip = document.getElementById('workflowStrip');
+    const link = document.getElementById('workflowShowLink');
+    if (strip) strip.style.display = dismissed ? 'none' : '';
+    if (link) link.style.display = dismissed ? '' : 'none';
+}
+
+function dismissWorkflowStrip() {
+    try { localStorage.setItem(WORKFLOW_DISMISS_KEY, '1'); } catch (_) {}
+    _applyWorkflowVisibility(true);
+}
+
+function showWorkflowStrip() {
+    try { localStorage.removeItem(WORKFLOW_DISMISS_KEY); } catch (_) {}
+    _applyWorkflowVisibility(false);
+    refreshWorkflowStrip();
+}
+
+// Extensions (the Story Brief tab) report progress through this handle.
+window.dozaWorkflow = { refresh: refreshWorkflowStrip, markDone: markWorkflowStep };
+
+window.addEventListener('DOMContentLoaded', () => {
+    if (!document.getElementById('workflowStrip')) return;
+    let dismissed = false;
+    try { dismissed = localStorage.getItem(WORKFLOW_DISMISS_KEY) === '1'; } catch (_) {}
+    _applyWorkflowVisibility(dismissed);
+    refreshWorkflowStrip();
+    // Story Builder builds live in their own file and load lazily with the
+    // tab; one cheap local fetch settles the Shape step on page load when
+    // the chat history alone does not.
+    const done = _workflowStepsDone();
+    if (done && !done.shape) {
+        fetch(`/project/${PROJECT_ID}/story/builds`)
+            .then(r => (r.ok ? r.json() : null))
+            .then(data => {
+                if (data && Array.isArray(data.builds) && data.builds.length) markWorkflowStep('shape');
+            })
+            .catch(() => {});
+    }
+});
+
 // ── Tab Switching ──
 function switchTab(tab) {
     _syncTabLinks();
+    refreshWorkflowStrip();
     // Null-guarded: callers may run on page variants where a tab's content
     // div doesn't render (e.g. no transcript yet) — a throw here would
     // abort the caller mid-flight (review-caught in runAnalysis).
@@ -3401,6 +3553,7 @@ if (typeof registerTimeUpdateHandler === 'function') {
 }
 
 function appendChatMessage(role, content, isHtml = false) {
+    if (role === 'assistant') refreshWorkflowStrip();
     const container = document.getElementById('chatMessages');
     const msg = document.createElement('div');
     msg.className = `chat-msg chat-msg-${role}`;
@@ -3858,6 +4011,7 @@ function clipsEmptyHtml() {
 }
 
 function renderClipsTab() {
+    refreshWorkflowStrip();
     const grid = document.getElementById('clipsGrid');
     if (!grid) return;
     const total = document.getElementById('clipsTotal');
@@ -5950,6 +6104,9 @@ function formatExportToast(data, summary) {
 // warning style and persists longer than a plain success toast.
 function showExportOutcome(successMsg, data) {
     data = data || {};
+    // Every successful export or document download on this page reports
+    // through here: the Export step of the workflow strip is done.
+    markWorkflowStep('export');
     const warnings = [];
     // Resolve was reachable but the scripted import failed operationally
     // (no_project / import_failed / import_empty / import_timeout /
@@ -6437,6 +6594,7 @@ async function deleteCurrentStoryBuild() {
 }
 
 function renderStoryList() {
+    refreshWorkflowStrip();
     const list = document.getElementById('storySidebarList');
     const empty = document.getElementById('storySidebarEmpty');
     if (!list) return;

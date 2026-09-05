@@ -678,7 +678,7 @@
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ sb.start }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}',this)">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" title="Add to Clips" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -715,7 +715,7 @@
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ beat.start }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ beat.start }}'), parseTc('{{ beat.end }}'), '{{ beat.label | replace("'", "") }}',this)">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" title="Add to Clips" onclick="addClipFromChat(parseTc('{{ beat.start }}'), parseTc('{{ beat.end }}'), '{{ beat.label | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -753,7 +753,7 @@
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ clip.start }} – {{ clip.end }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ clip.start }}'), parseTc('{{ clip.end }}'), '{{ clip.title | replace("'", "") }}',this)">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" title="Add to Clips" onclick="addClipFromChat(parseTc('{{ clip.start }}'), parseTc('{{ clip.end }}'), '{{ clip.title | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -1038,10 +1038,10 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">Export Mode</label>
-                        <select class="form-input" id="exportMode">
-                            <option value="cuts" selected>Pre-cut Timeline</option>
-                            <option value="both">Cuts + Markers</option>
-                            <option value="markers">Markers Only</option>
+                        <select class="form-input" id="exportMode" title="Pre-cut Timeline places each select on the timeline as its own clip. Markers Only puts the whole source on the timeline with a marker at each select. Cuts + Markers does both.">
+                            <option value="cuts" selected title="Each select becomes its own clip on the timeline">Pre-cut Timeline</option>
+                            <option value="both" title="Pre-cut clips plus a marker at each select">Cuts + Markers</option>
+                            <option value="markers" title="The whole source on the timeline with a marker at each select">Markers Only</option>
                         </select>
                     </div>
                 </div>
@@ -3488,7 +3488,7 @@ function renderChatReply(text) {
                 ? `<div class="cc-note">${note.trim()}</div>`
                 : '';
 
-            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtDisplayTC(start)}–${fmtDisplayTC(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
+            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtDisplayTC(start)}–${fmtDisplayTC(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" title="Add to Clips" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
             const idx = CARD_STASH.length;
             CARD_STASH.push(cardHtml);
             return `\uE000CCCARD${idx}\uE001`;
@@ -3567,7 +3567,7 @@ function renderChatReply(text) {
         (match) => {
             const secs = tcToSec(match);
             const end = secs + 15;
-            return `<span class="chat-tc-group"><span class="chat-tc-link" onclick="jumpTo(${secs})">${match}</span><button class="chat-tc-add" onclick="addClipFromChat(${secs},${end},'Clip at ${match}',this)" title="Add as clip">+</button></span>`;
+            return `<span class="chat-tc-group"><span class="chat-tc-link" onclick="jumpTo(${secs})">${match}</span><button class="chat-tc-add" onclick="addClipFromChat(${secs},${end},'Clip at ${match}',this)" title="Add to Clips">+</button></span>`;
         }
     );
 

@@ -578,6 +578,15 @@ body {
     .page-two-col {
         grid-template-columns: 1fr;
     }
+    /* Single column: the player column stacks above the content and must
+       flow with the page. Left sticky, it pinned a viewport-tall box over
+       the content column (Collection Summary / Speaker Map / Coverage Gaps
+       painted on top of Strongest moments and the arc cards). */
+    .player-col {
+        position: static;
+        max-height: none;
+        overflow-y: visible;
+    }
 }
 
 .player-col {

@@ -4337,7 +4337,8 @@ saveLabels = function() {
 };
 
 // ── Transcription ──
-async function startTranscription() {
+async function startTranscription(opts) {
+    opts = opts || {};
     if (document.getElementById('transcribeProgress')) {
         document.getElementById('transcribeProgress').style.display = 'block';
     }
@@ -4368,10 +4369,48 @@ async function startTranscription() {
     }, 1000);
 
     try {
-        const res = await fetch(`/project/${PROJECT_ID}/transcribe`, { method: 'POST' });
+        const res = await fetch(`/project/${PROJECT_ID}/transcribe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm_long_media: !!opts.confirmLongMedia }),
+        });
         clearInterval(progressInterval);
         const data = await res.json();
-        if (data.status === 'transcribed') {
+        if (data.needs_long_media_confirm) {
+            // Import guardrail: the file is very long, or the FCPXML's
+            // sources add up to far more than its timeline. Nothing has
+            // started; show the warning and let the user continue anyway.
+            fill.style.width = '0%';
+            statusText.textContent = 'Check before transcribing';
+            timeText.textContent = '';
+            const banner = document.getElementById('transcribeWhisperBanner');
+            const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+            if (banner) {
+                banner.style.display = 'block';
+                banner.innerHTML = warnings.map(w =>
+                    `<div style="color: var(--text-secondary); margin-bottom: 0.6rem;">${escapeHtml(w.message || '')}</div>`
+                ).join('') + `
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn btn-sm btn-purple" id="longMediaContinueBtn">Continue anyway</button>
+                        <button class="btn btn-sm" id="longMediaCancelBtn">Not now</button>
+                    </div>`;
+                const cont = document.getElementById('longMediaContinueBtn');
+                if (cont) cont.onclick = () => {
+                    banner.style.display = 'none';
+                    statusText.textContent = 'Transcribing...';
+                    startTranscription({ confirmLongMedia: true });
+                };
+                const cancel = document.getElementById('longMediaCancelBtn');
+                if (cancel) cancel.onclick = () => {
+                    banner.style.display = 'none';
+                    statusText.textContent = 'Transcription not started';
+                    const retry = document.getElementById('transcribeRetry');
+                    if (retry) retry.style.display = 'block';
+                };
+            } else {
+                showToast(data.error || 'Check the media length before transcribing.', true);
+            }
+        } else if (data.status === 'transcribed') {
             fill.style.width = '100%';
             statusText.textContent = 'Done!';
             timeText.textContent = `Completed in ${elapsed}s`;

@@ -23,6 +23,7 @@ from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
 from exporters.media_probe import (
     get_video_resolution, get_video_framerate, get_video_start_timecode_frames,
     get_video_start_timecode_info, get_video_start_timecode, get_media_duration,
+    summed_media_duration,
     get_media_container_format,
 )
 from fcpxml_export import VIDEO_EXTS
@@ -590,6 +591,21 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str, event_clip_index=None) ->
         'stored_fcpxml_path': fcpxml_copy_path,
         'timeline_audio_rendered': parsed.is_multi_source,
     }
+    # Import guardrail input: how much source audio the sequence references
+    # versus how long the timeline is. Unsynced raw camera + recorder files
+    # sum to far more than the timeline (see _long_media_guard). Probing is
+    # best effort and never blocks the import.
+    try:
+        source_paths = [parsed.audio_file_path]
+        for seg in parsed.spine_segments:
+            if seg.audio_source is not None:
+                source_paths.append(seg.audio_source.path)
+            for part in (seg.audio_parts or []):
+                source_paths.append(part.path)
+        fcpxml_source['source_audio_duration_seconds'] = summed_media_duration(source_paths)
+    except Exception as e:
+        print(f"[fcpxml] source duration probe skipped: {e}", flush=True)
+        fcpxml_source['source_audio_duration_seconds'] = None
     if event_import_info is not None:
         fcpxml_source['event_import'] = event_import_info
     return {
@@ -2957,6 +2973,92 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             _retranscribe_backups.pop(project_id, None)
 
 
+LONG_MEDIA_HOURS_ENGLISH = 8
+LONG_MEDIA_HOURS_OTHER = 4
+UNSYNCED_SOURCE_RATIO = 2.0
+
+
+def _hours_label(seconds: float) -> str:
+    total_min = int(round(float(seconds) / 60.0))
+    hours, minutes = divmod(total_min, 60)
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes} min"
+
+
+def _long_media_guard(project: dict, source_path: str, language: str) -> dict | None:
+    """Warnings to show BEFORE a transcription starts, or None to proceed.
+
+    Two checks, both advisory (the caller re-posts with confirm_long_media
+    to continue):
+
+    1. Single-project length. English runs on Parakeet and tolerates about
+       8 hours in one piece; every other language (Auto-detect included)
+       runs on plain Whisper, which holds the whole file in memory, so the
+       guideline is 4 hours. Splitting into shorter projects and working
+       across them with a Collection is the recommended shape.
+    2. FCPXML imports whose referenced source media adds up to more than
+       twice the timeline duration. That is the fingerprint of raw camera
+       files and a separate recorder file that were never synced in the
+       NLE. Doza Assist inherits sync from the editor and does not create
+       it, so the warning says to sync there first.
+    """
+    warnings = []
+    duration = None
+    try:
+        duration = get_media_duration(source_path)
+    except Exception:
+        duration = None
+    is_english = (language or 'en') == 'en'
+    limit_hours = LONG_MEDIA_HOURS_ENGLISH if is_english else LONG_MEDIA_HOURS_OTHER
+    if duration and duration > limit_hours * 3600:
+        engine_note = ('English transcription' if is_english
+                       else 'transcription in languages other than English (Auto-detect included)')
+        warnings.append({
+            'kind': 'long_media',
+            'duration_seconds': round(float(duration), 1),
+            'threshold_hours': limit_hours,
+            'message': (
+                f"This project's audio runs {_hours_label(duration)}, longer than the "
+                f"{limit_hours}-hour guideline for {engine_note}. Very long single files "
+                f"are slow and can run out of memory. Recommended: split the recording "
+                f"into shorter projects and use a Collection to work across them."
+            ),
+        })
+    src = project.get('fcpxml_source') or {}
+    try:
+        timeline = float(src.get('timeline_duration_seconds') or 0)
+        summed = float(src.get('source_audio_duration_seconds') or 0)
+    except (TypeError, ValueError):
+        timeline, summed = 0.0, 0.0
+    if timeline > 0 and summed > UNSYNCED_SOURCE_RATIO * timeline:
+        warnings.append({
+            'kind': 'unsynced_sources',
+            'timeline_seconds': round(timeline, 1),
+            'source_audio_seconds': round(summed, 1),
+            'message': (
+                f"The source media behind this FCPXML adds up to {_hours_label(summed)}, more "
+                f"than twice the {_hours_label(timeline)} timeline. Doza Assist inherits sync "
+                f"from your editor and does not create it: raw camera files and separate "
+                f"recorder files need to be synced in the NLE first (a multicam or synced "
+                f"clip), then exported. If this timeline is already synced, continue anyway."
+            ),
+        })
+    if not warnings:
+        return None
+    return {
+        'needs_long_media_confirm': True,
+        'warnings': warnings,
+        'duration_seconds': round(float(duration), 1) if duration else None,
+        # Plain-text summary for callers that only render an error string
+        # (the import queue): tell them where the Continue control lives.
+        'error': ' '.join(w['message'] for w in warnings)
+                 + ' Open the project and choose Continue anyway to transcribe it as is.',
+    }
+
+
 @app.route('/project/<project_id>/transcribe', methods=['POST'])
 def transcribe(project_id):
     """Kick off a background transcription job. Returns immediately
@@ -2969,6 +3071,15 @@ def transcribe(project_id):
     source_path = project.get('source_path', project.get('filepath', ''))
     if not source_path or not os.path.exists(source_path):
         return jsonify({'error': 'Source file not found. It may have been moved or deleted.'}), 404
+
+    # Import guardrail: very long single files and unsynced FCPXML sources
+    # get a warning with Continue anyway before any work starts. The
+    # frontend re-posts with confirm_long_media once the user has read it.
+    body = request.get_json(silent=True) or {}
+    if not body.get('confirm_long_media'):
+        guard = _long_media_guard(project, source_path, project.get('language', 'en'))
+        if guard:
+            return jsonify(guard), 409
 
     # Guard non-English requests when only Parakeet (English-only) is installed.
     requested_language = project.get('language', 'en')

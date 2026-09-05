@@ -482,6 +482,29 @@ def get_media_duration(path: str) -> float | None:
     return None
 
 
+def summed_media_duration(paths) -> float | None:
+    """Total duration in seconds of the DISTINCT existing files in ``paths``.
+
+    Used by the import guardrail to compare an FCPXML's source media against
+    its timeline: raw camera files plus a separate recorder file that were
+    never synced in the NLE add up to far more audio than the timeline
+    holds. Returns None when nothing could be probed; files that fail to
+    probe are skipped rather than counted as zero.
+    """
+    seen = set()
+    total = 0.0
+    probed = False
+    for path in paths or ():
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        duration = get_media_duration(path)
+        if duration:
+            total += float(duration)
+            probed = True
+    return total if probed else None
+
+
 # Separator before FF: ':' = non-drop; ';' (and the rarer '.'/',') = drop.
 _TIMECODE_RE = re.compile(r"^(\d+):(\d+):(\d+)([:;.,])(\d+)$")
 

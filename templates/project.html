@@ -3714,9 +3714,9 @@ function addAllAnalysisClips() {
         updateSelectCount();
         saveLabels();
         renderClipsTab();
-        showToast(`Added ${count} clips`);
+        showToast(`Added ${count} clip${count === 1 ? '' : 's'} to the Clips tab`);
     } else {
-        showToast('All clips already added');
+        showToast('All of these are already in the Clips tab');
     }
 }
 
@@ -3748,11 +3748,11 @@ function addAllChatClips(btn) {
         saveLabels();
         renderClipsTab();
         renderStoryClipLibrary();
-        showToast(`Pulled ${count} clips`);
+        showToast(`Pulled ${count} clip${count === 1 ? '' : 's'} to the Clips tab`);
     } else {
-        showToast('All clips already added');
+        showToast('All of these are already in the Clips tab');
     }
-    btn.innerHTML = '✓ Pulled';
+    btn.innerHTML = count > 0 ? '✓ Pulled to Clips' : '✓ Already in Clips';
     btn.disabled = true;
     btn.classList.add('clip-added');
 }

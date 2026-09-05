@@ -4513,13 +4513,16 @@ def _app_short_version(app_path: str) -> tuple:
 def _rank_app_paths(paths: list[str]) -> list[str]:
     """Order discovered .app paths most-preferred first.
 
-    Primary key — install location: a copy under /Applications beats one
-    under ~/Applications, which beats anything else (Setapp subdirs,
-    external volumes). Tiebreak — version: the NEWEST install wins within a
-    tier, so a user with both Resolve 20 and 21 in /Applications gets 21
-    driven on a COLD launch (v20-not-v21 bug). When a Resolve is already
-    running we attach to it and never call this (see _find_nle_app_path /
-    resolve_import.running_app_path) — so this governs cold launch only.
+    Primary key: version. The NEWEST install wins, and a copy whose version
+    can be read beats one that cannot. A stale FCP 11 left in /Applications
+    must never be chosen over the FCP 12 the editor actually uses (Jean
+    Thome, 2026-09-02: the handoff launched 11.0.1, which cannot read the
+    1.14 FCPXML the round-trip writer preserves from a 12.x source), and a
+    user with Resolve 20 and 21 gets 21 on a cold launch. Tiebreak: install
+    location. /Applications beats ~/Applications, which beats anything else
+    (Setapp subdirs, external volumes). When a Resolve is already running we
+    attach to it and never call this (see _find_nle_app_path and
+    resolve_import.running_app_path), so this governs cold launch only.
     """
     def location_rank(p: str) -> int:
         if p.startswith('/Applications/'):
@@ -4532,8 +4535,8 @@ def _rank_app_paths(paths: list[str]) -> list[str]:
 
     def sort_key(p: str):
         v = _app_short_version(p)
-        # location asc; known-version before unknown; newest version first.
-        return (location_rank(p), 0 if v else 1, tuple(-n for n in v))
+        # known-version before unknown; newest version first; then location.
+        return (0 if v else 1, tuple(-n for n in v), location_rank(p))
 
     return sorted(paths, key=sort_key)
 
@@ -4566,11 +4569,18 @@ def _find_nle_app_path(nle: str):
         return _nle_path_cache[nle]
 
     found: str | None = None
+    # Query EVERY bundle id for this NLE and rank the merged hits once. A
+    # Mac can hold the purchase SKU (com.apple.FinalCut) and the Creator
+    # Studio subscription copy (matched only by the glob) side by side;
+    # stopping at the first id with hits made the subscription copy
+    # invisible whenever an old purchase copy was still installed.
+    hits: list[str] = []
     for bundle_id in _NLE_BUNDLE_IDS.get(nle, ()):
-        hits = _mdfind_app_by_bundle_id(bundle_id)
-        if hits:
-            found = _rank_app_paths(hits)[0]
-            break
+        for hit in _mdfind_app_by_bundle_id(bundle_id):
+            if hit not in hits:
+                hits.append(hit)
+    if hits:
+        found = _rank_app_paths(hits)[0]
 
     if found is None:
         for candidate in _NLE_FALLBACK_PATHS.get(nle, ()):
@@ -4685,15 +4695,11 @@ def _hand_file_to_nle(file_path: str, nle: str, *,
                 project_name=project_name,
                 timeline_name=timeline_name,
             )
-        # FCP: prefer launching by bundle ID so Launch Services resolves
-        # the install location (works even if the user has FCP outside
-        # /Applications, or has multiple copies). Falls back to -a <path>
-        # if the bundle ID isn't mapped (shouldn't happen for fcp).
-        bundle_id = _nle_bundle_id(nle)
-        if bundle_id:
-            ok, err = _run_open(['-b', bundle_id, file_path])
-        else:
-            ok, err = _run_open(['-a', app_path, file_path])
+        # Launch the copy WE ranked (newest version, then location). Opening
+        # by bundle id let Launch Services pick its own default, which on a
+        # Mac with a stale FCP 11 beside the Creator Studio FCP 12 opened
+        # the old copy and failed on the 1.14 FCPXML (Jean Thome, 2026-09).
+        ok, err = _run_open(['-a', app_path, file_path])
         if not ok:
             # The cached path can go stale (app trashed/moved since the
             # first lookup) — drop it so the next attempt re-runs mdfind.

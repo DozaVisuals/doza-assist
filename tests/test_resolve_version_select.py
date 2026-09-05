@@ -3,9 +3,9 @@
 Covers the 1.0.19 Resolve fixes (tester: "Test Again launches Resolve 20 not
 21" + "still slow and hangs / folds back to one-time setup"):
 
-  - _rank_app_paths picks the NEWEST install within a location tier, so a
-    user with both Resolve 20 and 21 in /Applications gets 21 on a cold
-    launch (location still dominates version).
+  - _rank_app_paths picks the NEWEST install (version first, install
+    location as the tiebreak), so a user with both Resolve 20 and 21 gets 21
+    on a cold launch wherever the copies live.
   - CONNECT-BEFORE-LAUNCH: when a Resolve is already running, the resolve
     app-path resolver attaches to THAT instance and never version-ranks or
     relaunches; import_timeline never launches a second copy.
@@ -45,12 +45,18 @@ class TestRankAppPathsVersion:
         # Pass v20 first to prove ordering is by version, not input order.
         assert app_module._rank_app_paths([v20, v21])[0] == v21
 
-    def test_location_tier_dominates_version(self, monkeypatch):
+    def test_version_dominates_location_tier(self, monkeypatch):
         sys_v20 = '/Applications/DaVinci Resolve/DaVinci Resolve.app'
         home_v21 = str(Path.home() / 'Applications/DaVinci Resolve/DaVinci Resolve.app')
         self._versions(monkeypatch, {sys_v20: (20, 0), home_v21: (21, 0)})
-        # /Applications beats ~/Applications even though the home copy is newer.
-        assert app_module._rank_app_paths([home_v21, sys_v20])[0] == sys_v20
+        # The newer home copy wins; a stale /Applications copy must not shadow it.
+        assert app_module._rank_app_paths([home_v21, sys_v20])[0] == home_v21
+
+    def test_location_breaks_a_version_tie(self, monkeypatch):
+        sys_copy = '/Applications/DaVinci Resolve/DaVinci Resolve.app'
+        home_copy = str(Path.home() / 'Applications/DaVinci Resolve/DaVinci Resolve.app')
+        self._versions(monkeypatch, {sys_copy: (21, 0), home_copy: (21, 0)})
+        assert app_module._rank_app_paths([home_copy, sys_copy])[0] == sys_copy
 
     def test_unknown_version_sorts_after_known(self, monkeypatch):
         known = '/Applications/DaVinci Resolve/DaVinci Resolve.app'

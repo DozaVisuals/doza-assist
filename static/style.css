@@ -4782,3 +4782,32 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     color: var(--text-secondary);
     max-width: 68ch;
 }
+
+/* ── Empty states that point forward (1.0.47) ── */
+
+.empty-state-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: center;
+    margin-top: 0.9rem;
+}
+
+/* Export tab with nothing selectable beyond the transcript: name the two
+   places selects come from instead of a row of disabled checkboxes. */
+.export-empty-hint {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0 0 1rem 0;
+    padding: 0.7rem 0.9rem;
+    border: 1px dashed var(--border-light);
+    border-radius: var(--radius);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+.export-empty-hint > span {
+    flex: 1 1 260px;
+}

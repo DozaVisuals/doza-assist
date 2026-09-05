@@ -56,7 +56,7 @@
 
 {% if not is_shared %}{% include '_ai_model_modal.html' %}{% endif %}
 
-<div class="container-wide" data-project-id="{{ project.id }}" data-project-status="{{ project.status }}">
+<div class="container-wide" data-project-id="{{ project.id }}" data-project-status="{{ project.status }}" data-analysis-present="{{ 'true' if project.analysis else 'false' }}">
     <div class="page-title-area">
         <div>
             <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
@@ -450,7 +450,7 @@
         <div class="left-section story-only-section" id="storyClipLibrarySidebar" style="display:none;">
             <div class="card-title" style="margin-bottom: 0.5rem;">Your Clips</div>
             <div class="story-clip-library-empty" id="storyClipEmpty">
-                <p>Clips from Transcript or Chat appear here.</p>
+                <p>Clips you pull from any tab appear here. Add one to the current story with + Story.</p>
             </div>
             <div class="story-clip-library-list" id="storyClipList"></div>
         </div>
@@ -610,8 +610,12 @@
                 </div>
                 <div class="clips-grid" id="clipsGrid">
                     <div class="empty-state" id="clipsEmpty">
-                        <h3>No clips yet</h3>
-                        <p>Highlight sections in the Transcript tab or ask the AI in Chat to discover clips.</p>
+                        <h3>Nothing pulled yet</h3>
+                        <p>Use + on any moment in AI Analysis, Chat, or Story Brief, or paint a color label over words in the Transcript.</p>
+                        <div class="empty-state-actions">
+                            <button class="btn btn-sm" type="button" onclick="switchTab('analysis')">Go to AI Analysis</button>
+                            <button class="btn btn-sm" type="button" onclick="switchTab('chat')">Go to Chat</button>
+                        </div>
                     </div>
                 </div>
     </div>
@@ -763,7 +767,7 @@
         <div class="card">
             <div class="empty-state" id="preAnalysis">
                 <h3>Run AI Analysis</h3>
-                <p>Analyze the transcript for story structure and social media clip opportunities.</p>
+                <p>Analyze the transcript for story structure and social media clip opportunities. Chat, Story Brief, and the Export tab's AI categories all build on this.</p>
                 <button class="btn btn-purple" style="margin-top: 1rem;" id="runAnalysisBtn" onclick="runAnalysis()">
                     <span class="btn-label">Run Analysis</span>
                 </button>
@@ -854,7 +858,10 @@
 
             <!-- Empty state -->
             <div class="story-empty" id="storyEmpty">
-                <div class="story-empty-text">Describe a story and the AI will build your first cut</div>
+                <div class="story-empty-text">Send an arc from Story Brief, or describe the story you want above.</div>
+                <div class="empty-state-actions">
+                    <button class="btn btn-sm" type="button" data-requires-tab="brief" onclick="switchTab('brief')">Go to Story Brief</button>
+                </div>
             </div>
 
             <!-- Loading state -->
@@ -885,6 +892,11 @@
     <!-- Export Tab -->
     <div class="tab-content" id="tab-export">
         <p class="tab-purpose">Send your selects to Final Cut, Premiere, or Resolve. One export covers everything you check here.</p>
+        <div class="export-empty-hint" id="exportEmptyHint" style="display:none;">
+            <span>No selects to export yet. Pull moments into Clips, or build a sequence in Story Builder and export it from there.</span>
+            <button class="btn btn-sm" type="button" onclick="switchTab('clips')">Go to Clips</button>
+            <button class="btn btn-sm" type="button" onclick="switchTab('story')">Go to Story Builder</button>
+        </div>
         <div class="deliver-toggle" id="deliverToggle">
             <span class="deliver-toggle-label">Deliver to</span>
             <div class="deliver-toggle-options" role="radiogroup" aria-label="Delivery method">
@@ -1376,8 +1388,20 @@ function reloadAndKeepTab(tabName) {
     location.reload();
 }
 
+// Buttons that jump to a tab another extension provides (the Story Brief
+// tab is injected by the Pro extension): hide them when that tab is absent
+// so an empty state never offers a dead link.
+function _syncTabLinks() {
+    document.querySelectorAll('[data-requires-tab]').forEach(el => {
+        const name = el.getAttribute('data-requires-tab');
+        el.style.display = document.getElementById('tab-' + name) ? '' : 'none';
+    });
+}
+window.addEventListener('DOMContentLoaded', _syncTabLinks);
+
 // ── Tab Switching ──
 function switchTab(tab) {
+    _syncTabLinks();
     // Null-guarded: callers may run on page variants where a tab's content
     // div doesn't render (e.g. no transcript yet) — a throw here would
     // abort the caller mid-flight (review-caught in runAnalysis).
@@ -3816,6 +3840,23 @@ function addClipFromChat(start, end, title, btn) {
 // ── Clips Tab ──
 let clipPlaying = null;
 
+// Same markup as the #clipsEmpty node in the template: the grid's first
+// non-empty render wipes that node, so the empty state is re-created from
+// here when the last clip is removed. Keep the two in sync. (A function,
+// not a const, so early callers of renderClipsTab never hit a TDZ error.)
+function clipsEmptyHtml() {
+    return `
+            <div class="empty-state" id="clipsEmpty">
+                <h3>Nothing pulled yet</h3>
+                <p>Use + on any moment in AI Analysis, Chat, or Story Brief, or paint a color label over words in the Transcript.</p>
+                <div class="empty-state-actions">
+                    <button class="btn btn-sm" type="button" onclick="switchTab('analysis')">Go to AI Analysis</button>
+                    <button class="btn btn-sm" type="button" onclick="switchTab('chat')">Go to Chat</button>
+                </div>
+            </div>
+        `;
+}
+
 function renderClipsTab() {
     const grid = document.getElementById('clipsGrid');
     if (!grid) return;
@@ -3842,12 +3883,7 @@ function renderClipsTab() {
         // any caller (e.g. saveLabels → clearAllLabels) and stranding their
         // post-save state changes (like the new Undo-button enable).
         grid.className = 'clips-grid';
-        grid.innerHTML = `
-            <div class="empty-state" id="clipsEmpty">
-                <h3>No clips yet</h3>
-                <p>Highlight sections in the Transcript tab or ask the AI in Chat to discover clips.</p>
-            </div>
-        `;
+        grid.innerHTML = clipsEmptyHtml();
         return;
     }
 
@@ -5094,6 +5130,13 @@ function _refreshExportCounts() {
             checkbox.disabled = count === 0;
             if (count === 0) checkbox.checked = false;
         }
+    }
+    // Nothing selectable beyond the transcript: point at the two places
+    // selects come from instead of showing a row of disabled boxes.
+    const emptyHint = document.getElementById('exportEmptyHint');
+    if (emptyHint) {
+        const selectable = clipCount + socialCount + storyCount + soundbiteCount;
+        emptyHint.style.display = selectable === 0 ? '' : 'none';
     }
     _refreshRtExportButtonState();
 }

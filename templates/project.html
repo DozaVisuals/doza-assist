@@ -1319,7 +1319,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 // Hide tab content for tabs not shared, activate first visible tab
 if (IS_SHARED && Object.keys(SHARED_TABS).length > 0) {
-    const allTabNames = ['transcript', 'clips', 'analysis', 'chat', 'story', 'export'];
+    const allTabNames = ['transcript', 'clips', 'analysis', 'chat', 'brief', 'story', 'export'];
     let firstVisible = null;
     allTabNames.forEach(name => {
         if (SHARED_TABS[name] === false) {
@@ -1357,7 +1357,8 @@ function closeGearMenu() {
     document.getElementById('gearMenu').classList.remove('open');
 }
 
-const KNOWN_TABS = ['transcript', 'clips', 'analysis', 'chat', 'story', 'export'];
+// 'brief' is the Story Brief tab the Pro extension injects after Chat.
+const KNOWN_TABS = ['transcript', 'clips', 'analysis', 'chat', 'brief', 'story', 'export'];
 
 // Reload the page after an action while preserving which tab the user was on.
 // Without this, location.reload() always lands the user back on the transcript

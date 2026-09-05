@@ -1928,7 +1928,7 @@ window.addEventListener('DOMContentLoaded', initTrackDropdown);
  * set to videoEl or audioEl based on the project's media type.
  */
 window.dozaProjectPlay = function (startSec, endSec) {
-    if (!audio) return;
+    if (!audio) return null;
     try {
         audio.currentTime = startSec;
         audio.play();
@@ -1945,6 +1945,9 @@ window.dozaProjectPlay = function (startSec, endSec) {
         };
         setTimeout(_checkPause, 250);
     }
+    // Hand the element back so extensions can reflect playing state
+    // (the Story Brief lights the beat's play button until pause/end).
+    return audio;
 };
 
 /**
@@ -1976,13 +1979,11 @@ window.addClipsToStoryBuilder = async function (payload) {
         var title = arcTitle;
         if (payload.segments.length > 1) title += ' · pt ' + (i + 1);
         if (speaker) title += ' (' + speaker + ')';
-        // Editorial note: per-segment note if available, otherwise a
-        // truncated transcript excerpt so each clip has unique context
+        // Editorial note: only a per-segment note. The arc-level note is
+        // stored once as build.reasoning (rendered above the cards) instead
+        // of being copied onto every card, and the transcript excerpt has
+        // its own disclosure on the card, so it is not duplicated here.
         var note = s.editorial_note || s.why_it_lands || '';
-        if (!note && quote) {
-            note = quote.length > 160 ? quote.substring(0, 157) + '…' : quote;
-        }
-        if (!note) note = arcNote;
         return {
             id: i,
             start_time: s.timecode_start || '00:00:00',

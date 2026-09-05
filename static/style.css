@@ -4955,3 +4955,43 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     cursor: pointer;
 }
 .workflow-show-link:hover { color: var(--accent); }
+
+/* ── Toast action + clip reveal (1.0.47) ── */
+
+.toast .toast-action {
+    margin-left: 0.9rem;
+    padding: 0.25rem 0.7rem;
+    border: 1px solid var(--border-light);
+    border-radius: 999px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-family: var(--font);
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.toast .toast-action:hover {
+    background: var(--accent);
+    color: #fff;
+}
+
+/* Clips that just landed from a View action (dozaRevealClips). */
+.clip-card.clip-just-added,
+.clip-row.clip-just-added {
+    box-shadow: 0 0 0 2px var(--accent);
+    transition: box-shadow 0.6s ease;
+}
+
+/* Speaker chip on a clip that carries one (Story Brief adds). */
+.clip-speaker {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    white-space: nowrap;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}

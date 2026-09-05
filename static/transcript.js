@@ -342,9 +342,13 @@ function _setUndoButtonEnabled(enabled) {
 }
 
 async function _doSaveLabels() {
-    const sections = labelSections.map(s => ({
-        start: s.start, end: s.end, color: s.color, text: s.text
-    }));
+    // speaker is optional: the Story Brief "+" carries the moment's speaker
+    // (1.0.47); brush-painted and AI Analysis clips have none and omit it.
+    const sections = labelSections.map(s => {
+        const out = { start: s.start, end: s.end, color: s.color, text: s.text };
+        if (s.speaker) out.speaker = s.speaker;
+        return out;
+    });
     const body = { color_labels: colorLabels, labeled_sections: sections };
     // Clips-tab ordering mode ('time' | 'manual') is owned by the host
     // page (top-level `let clipOrderMode` in project.html — shared via
@@ -431,13 +435,15 @@ function transcriptInit(opts) {
     const saved = opts.labeledSections || [];
     saved.forEach(sec => {
         const id = ++sectionIdCounter;
-        labelSections.push({
+        const entry = {
             id,
             start: sec.start,
             end: sec.end,
             color: sec.color,
             text: sec.text || '',
-        });
+        };
+        if (sec.speaker) entry.speaker = sec.speaker;
+        labelSections.push(entry);
     });
 
     // Restore swatch label inputs (DOM owned by the page template).

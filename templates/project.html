@@ -2205,6 +2205,67 @@ function _tcToSec(tc) {
     return (parseInt(parts[0],10)||0)*3600 + (parseInt(parts[1],10)||0)*60 + (parseInt(parts[2],10)||0);
 }
 
+/**
+ * Add one moment to the project's Clip Library through the same path the
+ * AI Analysis "+ Clip" and Chat "Pull Clips" buttons use: push onto
+ * labelSections, repaint, save via POST /project/<id>/labels, refresh the
+ * Clips tab and the Story Builder's clip sidebar. Called by the Story
+ * Brief tab's per-moment "+" (1.0.47).
+ *
+ * clip: { start, end (seconds), title, speaker, color?, project_id? }
+ * Returns { status: 'added' | 'duplicate' | 'invalid', id } where id is the
+ * labelSections id of the new or matching clip. A duplicate is a clip on
+ * the same project with the same start and end (within half a second).
+ */
+window.dozaAddClipToLibrary = function (clip) {
+    if (!clip) return { status: 'invalid', id: null };
+    const start = Number(clip.start);
+    let end = Number(clip.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return { status: 'invalid', id: null };
+    if (end <= start) end = start + 0.5;
+    const pid = clip.project_id || null;
+    const existing = labelSections.find(s =>
+        Math.abs(s.start - start) < 0.5 && Math.abs(s.end - end) < 0.5
+        && (!pid || !s.project_id || s.project_id === pid));
+    if (existing) return { status: 'duplicate', id: existing.id };
+    const id = ++sectionIdCounter;
+    const entry = {
+        id,
+        start,
+        end,
+        color: clip.color || 'green',
+        text: String(clip.title || 'Clip').slice(0, 200),
+    };
+    if (clip.speaker) entry.speaker = String(clip.speaker).slice(0, 120);
+    if (pid) entry.project_id = pid;
+    labelSections.push(entry);
+    renderAllHighlights();
+    updateSelectCount();
+    saveLabels();
+    renderClipsTab();
+    if (typeof renderStoryClipLibrary === 'function') renderStoryClipLibrary();
+    return { status: 'added', id };
+};
+
+/**
+ * Open the Clips tab and flash the given clips (labelSections ids), the
+ * way the Collection page's View action does.
+ */
+window.dozaRevealClips = function (ids) {
+    const wanted = (ids || []).filter(v => v !== null && v !== undefined);
+    if (typeof switchTab === 'function') switchTab('clips');
+    if (!wanted.length) return;
+    const grid = document.getElementById('clipsGrid');
+    if (!grid) return;
+    const nodes = wanted
+        .map(id => grid.querySelector(`[data-clip-id="${id}"]`))
+        .filter(Boolean);
+    if (!nodes.length) return;
+    nodes[0].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    nodes.forEach(n => n.classList.add('clip-just-added'));
+    setTimeout(() => nodes.forEach(n => n.classList.remove('clip-just-added')), 1800);
+};
+
 // Detect manual scrolling to pause auto-scroll
 if (transcriptContainer) {
     transcriptContainer.addEventListener('scroll', () => {
@@ -4064,6 +4125,7 @@ function renderClipsTab() {
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
                 <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
+                ${clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : ''}
                 <span class="clip-row-tc">${fmtDisplayTC(clip.start, clip.project_id)} – ${fmtDisplayTC(clip.end, clip.project_id)}</span>
                 <span class="clip-row-dur">${formatDuration(duration)}</span>
                 <button class="clip-row-play" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})">
@@ -4088,6 +4150,7 @@ function renderClipsTab() {
             </div>
             <div class="clip-card-meta">
                 <span class="clip-card-dot" style="background: var(--${colorVar});"></span>
+                ${clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : ''}
                 <span class="clip-card-tc">${fmtDisplayTC(clip.start, clip.project_id)} – ${fmtDisplayTC(clip.end, clip.project_id)}</span>
                 <button class="cc-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}')" title="Add to Story Builder" style="font-size:11px;padding:2px 8px;">+ Story</button>
                 <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
@@ -6007,6 +6070,38 @@ function showToast(msg, isError = false, durationMs = 5000) {
     }, durationMs);
 }
 
+// Toast with one action button ("View"). Same single #toast node as
+// showToast, so the two never stack; the action fires on click within
+// durationMs and the toast hides itself either way.
+function showToastWithAction(msg, actionLabel, onAction, durationMs = 5000) {
+    const toast = document.getElementById('toast');
+    if (!toast) return;
+    toast.textContent = '';
+    toast.classList.remove('error');
+    const text = document.createElement('span');
+    text.textContent = msg;
+    toast.appendChild(text);
+    if (actionLabel) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'toast-action';
+        btn.textContent = actionLabel;
+        btn.addEventListener('click', () => {
+            _clearToastHideTimer();
+            toast.classList.remove('show');
+            try { if (typeof onAction === 'function') onAction(); } catch (e) { console.error(e); }
+        });
+        toast.appendChild(btn);
+    }
+    toast.classList.add('show');
+    _clearToastHideTimer();
+    _toastHideTimer = setTimeout(() => {
+        _toastHideTimer = null;
+        toast.classList.remove('show');
+    }, durationMs);
+}
+window.showToastWithAction = showToastWithAction;
+
 // Persistent "working" toast for the Send-to-NLE handoff. The Resolve
 // scripting import can take 30s+ (launching Resolve, conforming media);
 // without visible feedback the silent wait reads as a frozen/beachballed
@@ -6697,9 +6792,9 @@ function addAllStoryClips() {
         updateSelectCount();
         saveLabels();
         renderClipsTab();
-        showToast(`Added ${count} clips to library`);
+        showToast(`Added ${count} clip${count === 1 ? '' : 's'} to the Clips tab`);
     } else {
-        showToast('All clips already in library');
+        showToast('All of these are already in the Clips tab');
     }
 }
 

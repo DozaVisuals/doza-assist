@@ -1147,6 +1147,8 @@
      same global lexical environment as the inline code that follows
      and references labelSections / colorLabels / saveLabels / etc.) -->
 <script src="/static/transcript.js"></script>
+<!-- Clip library display helpers (title, first line, titles merge; 1.0.47) -->
+<script src="/static/clip_text.js"></script>
 
 <script>
 // ── Theme Toggle ──
@@ -2106,6 +2108,69 @@ window.dozaAddClipToLibrary = function (clip) {
 };
 
 /**
+ * Give untitled clips a real title (1.0.47). Called after every labels save
+ * (transcript.js) and once at load. Sends the clips that still lack a title
+ * to POST /project/<id>/clips/titles, merges the titles it gets back, saves
+ * so the stored array carries them, and re-renders the library views.
+ * Clips the route could not title are left alone for this page load so a
+ * model that is down never causes a save loop.
+ */
+let _clipTitlesInFlight = false;
+let _clipTitlesQueued = false;
+window.dozaRequestClipTitles = async function () {
+    const helpers = window.dozaClipText;
+    if (!helpers) return;
+    if (_clipTitlesInFlight) { _clipTitlesQueued = true; return; }
+    const pending = labelSections.filter(helpers.needsTitle);
+    if (pending.length === 0) return;
+    _clipTitlesInFlight = true;
+    pending.forEach(s => { s._titling = true; });
+    renderClipsTab();
+    if (typeof renderStoryClipLibrary === 'function') renderStoryClipLibrary();
+    let changed = 0;
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/clips/titles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sections: pending.map(s => ({ start: s.start, end: s.end, text: s.text || '' })),
+            }),
+        });
+        const data = res.ok ? await res.json() : {};
+        (data.titles || []).forEach(item => {
+            if (item && item.title && helpers.applyTitle(labelSections, item)) changed++;
+        });
+        if (data.error) console.warn('[clip titles]', data.error);
+    } catch (e) {
+        console.warn('[clip titles] request failed', e);
+    } finally {
+        pending.forEach(s => {
+            delete s._titling;
+            if (!s.title) s._titleFailed = true;
+        });
+        _clipTitlesInFlight = false;
+    }
+    renderClipsTab();
+    if (typeof renderStoryClipLibrary === 'function') renderStoryClipLibrary();
+    if (changed > 0) saveLabels();
+    if (_clipTitlesQueued) {
+        _clipTitlesQueued = false;
+        window.dozaRequestClipTitles();
+    }
+};
+
+/**
+ * Title, first line and full transcript for one library clip.
+ */
+function clipDisplayParts(clip) {
+    const helpers = window.dozaClipText;
+    const transcript = window.dozaTranscriptForRange(clip.start, clip.end);
+    const title = helpers ? helpers.displayTitle(clip) : (clip.title || clip.text || 'Untitled clip');
+    const lead = helpers ? helpers.firstLine(transcript || clip.text) : (transcript || clip.text || '');
+    return { title, lead, transcript: transcript || (clip.text || '') };
+}
+
+/**
  * The words spoken between two times, read from the transcript's word
  * spans on this page. Used by the Story Brief's per-moment Transcript
  * disclosure (1.0.47). Returns '' when the range holds no words.
@@ -2612,7 +2677,13 @@ window.rebuildWordIndex = function rebuildWordIndex() {
     if (typeof transcriptInit === 'function') {
         transcriptInit({
             colorLabels:     colorLabels,
-            labeledSections: labelSections.map(s => ({ start: s.start, end: s.end, color: s.color, text: s.text })),
+            labeledSections: labelSections.map(s => {
+                const out = { start: s.start, end: s.end, color: s.color, text: s.text };
+                if (s.speaker) out.speaker = s.speaker;
+                if (s.title) out.title = s.title;
+                if (s.title_auto) out.title_auto = true;
+                return out;
+            }),
             segmentVectors:  segmentVectors,
             preserveBrush:   true,
         });
@@ -2737,6 +2808,14 @@ transcriptInit({
 // saveLabels() POST (transcript.js reads this binding via typeof).
 let clipOrderMode = {{ (project.clip_order_mode or 'time')|tojson }};
 transcriptSearchInit(transcriptContainer);
+// Clips saved before 1.0.47 (or while the model was down) have no title
+// yet: ask for them once the page is up. The request is a no-op when every
+// clip already has one.
+window.addEventListener('load', () => {
+    setTimeout(() => {
+        if (typeof window.dozaRequestClipTitles === 'function') window.dozaRequestClipTitles();
+    }, 1500);
+});
 
 // ── Chat ──
 // Preloaded from meta.json on render so the conversation survives reloads
@@ -3884,7 +3963,7 @@ function addAllChatClips(btn) {
         const exists = labelSections.some(s => Math.abs(s.start - start) < 0.5);
         if (!exists) {
             const id = ++sectionIdCounter;
-            labelSections.push({ id, start, end, color: 'green', text: title });
+            labelSections.push({ id, start, end, color: 'green', text: title, title });
             count++;
         }
         // Mark individual + Clips buttons as added
@@ -3923,6 +4002,9 @@ function addClipFromChat(start, end, title, btn) {
     const color = 'green';
     const id = ++sectionIdCounter;
     const text = title;
+    // Chat headlines are real titles; AI Analysis soundbites pass a
+    // transcript fragment here, which the titles route recognizes and
+    // replaces with a generated title (1.0.47).
     labelSections.push({ id, start, end, color, text });
     renderAllHighlights();
     updateSelectCount();
@@ -4014,13 +4096,17 @@ function renderClipsTab() {
     grid.innerHTML = sorted.map(clip => {
         const duration = clip.end - clip.start;
         const colorVar = clip.color === 'blue' ? 'accent' : clip.color;
-        const safeTitle = escapeHtml(clip.text || 'Untitled clip');
-
-        // Get transcript excerpt
-        let clipText = '';
-        const words = allWords.filter(w => parseFloat(w.dataset.s) >= clip.start && parseFloat(w.dataset.s) < clip.end);
-        clipText = words.map(w => w.textContent).join('').trim();
-        if (clipText.length > 200) clipText = clipText.substring(0, 200) + '...';
+        // Title = the generated (or carried) title; the transcript's first
+        // line sits under it and the whole transcript is behind Show text
+        // (1.0.47). A clip still waiting on the titles route says so.
+        const parts = clipDisplayParts(clip);
+        const pending = !parts.title && clip._titling;
+        const safeTitle = escapeHtml(parts.title || (pending ? '' : 'Untitled clip'));
+        const titleHtml = pending
+            ? '<span class="clip-title-pending">Naming clip&hellip;</span>'
+            : safeTitle;
+        const safeLead = escapeHtml(parts.lead);
+        const clipText = parts.transcript;
 
         if (viewMode === 'list') {
             return `<div class="clip-row" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}"
@@ -4030,7 +4116,7 @@ function renderClipsTab() {
                 </span>
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
-                <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
+                <span class="clip-row-title" title="${safeLead}">${titleHtml}</span>
                 ${clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : ''}
                 <span class="clip-row-tc">${fmtDisplayTC(clip.start, clip.project_id)} – ${fmtDisplayTC(clip.end, clip.project_id)}</span>
                 <span class="clip-row-dur">${formatDuration(duration)}</span>
@@ -4038,8 +4124,12 @@ function renderClipsTab() {
                     <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg>
                     <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
                 </button>
+                <button class="clip-row-expand" onclick="event.stopPropagation(); this.closest('.clip-row').classList.toggle('expanded')" title="Show the clip's transcript">
+                    Text <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg>
+                </button>
                 <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
                 <button class="cc-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}')" title="Add to Story Builder" style="font-size:11px;padding:2px 6px;">+ Story</button>
+                <div class="clip-row-excerpt">${escapeHtml(clipText)}</div>
             </div>`;
         }
 
@@ -4051,9 +4141,10 @@ function renderClipsTab() {
                     <svg viewBox="0 0 10 16" fill="currentColor" width="8" height="13"><circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="3" cy="6" r="1.2"/><circle cx="7" cy="6" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="14" r="1.2"/><circle cx="7" cy="14" r="1.2"/></svg>
                 </span>
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
-                <span class="clip-card-title" title="${safeTitle}">${safeTitle}</span>
+                <span class="clip-card-title" title="${safeTitle}">${titleHtml}</span>
                 <span class="clip-card-duration">${formatDuration(duration)}</span>
             </div>
+            ${safeLead ? `<div class="clip-card-lead" title="${safeLead}">${safeLead}</div>` : ''}
             <div class="clip-card-meta">
                 <span class="clip-card-dot" style="background: var(--${colorVar});"></span>
                 ${clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : ''}
@@ -4070,9 +4161,9 @@ function renderClipsTab() {
                     <div class="clip-card-progress-fill" id="clipFill-${clip.id}"></div>
                 </div>
             </div>
-            <div class="clip-card-expand" onclick="this.parentElement.classList.toggle('expanded')">
+            <div class="clip-card-expand" onclick="this.parentElement.classList.toggle('expanded')" title="Show the clip's transcript">
                 <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg>
-                Show text
+                <span class="clip-expand-label">Show text</span>
             </div>
             <div class="clip-card-excerpt">${escapeHtml(clipText)}</div>
         </div>`;
@@ -6735,7 +6826,7 @@ function insertLibraryClipIntoStory(clipId, index) {
     const words = allWords.filter(w => parseFloat(w.dataset.s) >= clip.start && parseFloat(w.dataset.s) < clip.end);
     const entry = {
         order: 0,
-        title: clip.text || 'Clip',
+        title: clip.title || clip.text || 'Clip',
         start_time: fmtTime(clip.start),
         end_time: fmtTime(clip.end),
         transcript: words.map(w => w.textContent).join('').replace(/\s+/g, ' ').trim(),
@@ -6885,7 +6976,7 @@ function addAllStoryClips() {
         const exists = labelSections.some(s => Math.abs(s.start - start) < 0.5);
         if (!exists) {
             const id = ++sectionIdCounter;
-            labelSections.push({ id, start, end, color: 'purple', text: title });
+            labelSections.push({ id, start, end, color: 'purple', text: title, title });
             count++;
         }
     });
@@ -7456,10 +7547,13 @@ function renderStoryClipLibrary() {
     // short excerpt, draggable straight into the story sequence (1.0.47).
     list.innerHTML = sorted.map(clip => {
         const dur = Math.round(clip.end - clip.start);
-        const safeTitle = escapeHtml(clip.text || 'Untitled');
-        const words = allWords.filter(w => parseFloat(w.dataset.s) >= clip.start && parseFloat(w.dataset.s) < clip.end);
-        let excerpt = words.map(w => w.textContent).join('').replace(/\s+/g, ' ').trim();
-        if (excerpt.length > 180) excerpt = excerpt.substring(0, 180) + '...';
+        // Generated title, first transcript line, full transcript behind
+        // Show text (1.0.47), same as the Clips tab.
+        const parts = clipDisplayParts(clip);
+        const pending = !parts.title && clip._titling;
+        const safeTitle = escapeHtml(parts.title || (pending ? '' : 'Untitled'));
+        const titleHtml = pending ? '<span class="clip-title-pending">Naming clip&hellip;</span>' : safeTitle;
+        const excerpt = parts.lead;
         const speaker = clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : '';
         return `<div class="story-clip-item" draggable="true" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}"
                      ondragstart="storyLibDragStart(event)" ondragend="storyLibDragEnd(event)" title="Drag into the story, or use + Story">
@@ -7469,10 +7563,14 @@ function renderStoryClipLibrary() {
             <div class="story-clip-info">
                 <div class="story-clip-head">
                     <button class="story-clip-play" onclick="jumpTo(${clip.start})" title="Play">&#9654;</button>
-                    <span class="story-clip-title">${safeTitle}</span>
+                    <span class="story-clip-title">${titleHtml}</span>
                 </div>
                 <span class="story-clip-tc">${fmtDisplayTC(clip.start)} – ${fmtDisplayTC(clip.end)} &middot; ${dur}s ${speaker}</span>
-                ${excerpt ? `<div class="story-clip-excerpt">${escapeHtml(excerpt)}</div>` : ''}
+                ${excerpt ? `<div class="story-clip-excerpt" title="${escapeHtml(excerpt)}">${escapeHtml(excerpt)}</div>` : ''}
+                ${parts.transcript ? `<div class="story-clip-expand" onclick="event.stopPropagation(); this.closest('.story-clip-item').classList.toggle('expanded')" title="Show the clip's transcript">
+                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg> <span class="clip-expand-label">Show text</span>
+                </div>
+                <div class="story-clip-transcript">${escapeHtml(parts.transcript)}</div>` : ''}
             </div>
             <button class="cc-add story-clip-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}',this)" title="Add to the end of the current story">+ Story</button>
         </div>`;

@@ -281,7 +281,8 @@ def selects_rows(project: dict, categories: Iterable[str]) -> list[dict[str, Any
         color_labels = project.get('color_labels') or {}
         for sec in project.get('labeled_sections') or []:
             name = color_labels.get(sec.get('color', ''), sec.get('color', '')) or 'Clip'
-            add(name, name, sec.get('start', 0), sec.get('end', 0), sec.get('text'))
+            add(name, name, sec.get('start', 0), sec.get('end', 0),
+                sec.get('title') or sec.get('text'))
     if 'social' in wanted:
         for clip in analysis.get('social_clips') or []:
             add('Social Clip', clip.get('title'), clip.get('start', 0), clip.get('end', 0),

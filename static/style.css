@@ -4930,3 +4930,85 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     outline-color: var(--accent);
     background: var(--accent-dim);
 }
+
+/* Clip titles (1.0.47): generated title, first transcript line under it,
+   whole transcript behind Show text, on cards, rows and the Story Builder
+   sidebar. */
+.clip-title-pending {
+    color: var(--text-muted);
+    font-style: italic;
+    font-weight: 500;
+}
+.clip-card-lead {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    margin: -2px 0 6px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.clip-card.expanded .clip-card-lead { visibility: hidden; height: 0; margin: 0; }
+.clip-card.expanded .clip-card-excerpt {
+    max-height: 1200px;
+    overflow-y: auto;
+    white-space: pre-line;
+}
+.clip-card.expanded .clip-expand-label::after { content: ''; }
+.clip-row.expanded { flex-wrap: wrap; }
+.clip-row-expand {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.clip-row-expand:hover { color: var(--text-secondary); border-color: var(--border); }
+.clip-row.expanded .clip-row-expand .clip-expand-chevron { transform: rotate(180deg); }
+.clip-row-excerpt {
+    display: none;
+    flex-basis: 100%;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    padding: 4px 0 2px 26px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+.clip-row.expanded .clip-row-excerpt { display: block; }
+.story-clip-excerpt {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.story-clip-expand {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    width: fit-content;
+}
+.story-clip-expand:hover { color: var(--text-secondary); }
+.story-clip-item.expanded .story-clip-expand .clip-expand-chevron { transform: rotate(180deg); }
+.story-clip-transcript {
+    display: none;
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    max-height: 260px;
+    overflow-y: auto;
+}
+.story-clip-item.expanded .story-clip-transcript { display: block; }
+.story-clip-item.expanded .story-clip-excerpt { display: none; }

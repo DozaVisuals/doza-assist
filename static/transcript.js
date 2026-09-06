@@ -341,9 +341,13 @@ function _setUndoButtonEnabled(enabled) {
 async function _doSaveLabels() {
     // speaker is optional: the Story Brief "+" carries the moment's speaker
     // (1.0.47); brush-painted and AI Analysis clips have none and omit it.
+    // title / title_auto (1.0.47): the generated or carried display title;
+    // text stays what the add wrote (the transcript fragment for a brush).
     const sections = labelSections.map(s => {
         const out = { start: s.start, end: s.end, color: s.color, text: s.text };
         if (s.speaker) out.speaker = s.speaker;
+        if (s.title) out.title = s.title;
+        if (s.title_auto) out.title_auto = true;
         return out;
     });
     const body = { color_labels: colorLabels, labeled_sections: sections };
@@ -363,6 +367,12 @@ async function _doSaveLabels() {
         });
     } catch (err) {
         console.error('Failed to save labels:', err);
+        return;
+    }
+    // Clips saved without a title get one from the titles route (1.0.47).
+    // The project page defines the hook; hosts without it skip this.
+    if (typeof window.dozaRequestClipTitles === 'function') {
+        try { window.dozaRequestClipTitles(); } catch (e) { console.warn('clip titles', e); }
     }
 }
 
@@ -440,6 +450,8 @@ function transcriptInit(opts) {
             text: sec.text || '',
         };
         if (sec.speaker) entry.speaker = sec.speaker;
+        if (sec.title) entry.title = sec.title;
+        if (sec.title_auto) entry.title_auto = true;
         labelSections.push(entry);
     });
 

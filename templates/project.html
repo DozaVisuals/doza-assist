@@ -1513,9 +1513,100 @@ async function saveProjectDetails() {
     }
 }
 
-// "Relink media..." lands in the next change; until then the item says so.
-if (typeof window.openRelinkMedia !== 'function') {
-    window.openRelinkMedia = function () { showToast('Relink media is not available yet'); };
+// "Relink media...": point the project at a moved source file. Storage only:
+// the stored path changes, nothing re-runs and no export code is involved.
+// Electron offers its file dialog through window.dozaBatch; a browser build
+// falls back to typing the full path.
+function openRelinkMedia() {
+    let overlay = document.getElementById('relinkOverlay');
+    if (overlay) overlay.remove();
+    const current = PROJECT.source_path || PROJECT.filepath || '';
+    const canDialog = !!(window.dozaBatch && typeof window.dozaBatch.openFileDialog === 'function');
+    overlay = document.createElement('div');
+    overlay.id = 'relinkOverlay';
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 480px;">
+            <h2>Relink media</h2>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                Choose the moved or renamed source file. The transcript, analysis and clips stay as they are.
+            </p>
+            <div class="form-group">
+                <label class="form-label">Current file</label>
+                <div style="font-family: var(--mono); font-size: 0.75rem; color: var(--text-muted); word-break: break-all;">${escapeHtml(current || 'No path recorded')}</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">New file</label>
+                <div style="display:flex; gap:0.5rem; align-items:center;">
+                    <input type="text" class="form-input" id="relinkPath" placeholder="${canDialog ? 'Choose a file' : 'Full path to the file'}" ${canDialog ? 'readonly' : ''} style="flex:1;">
+                    ${canDialog ? '<button class="btn btn-sm" type="button" onclick="chooseRelinkFile()">Choose file...</button>' : ''}
+                </div>
+            </div>
+            <div id="relinkWarning" style="display:none; margin-top: 0.5rem; padding: 0.6rem 0.75rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-hover); font-size: 0.82rem; color: var(--text-primary);"></div>
+            <div id="relinkError" style="display:none; color: var(--red); font-size: 0.82rem; margin-top: 0.5rem;"></div>
+            <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
+                <button class="btn btn-sm" onclick="document.getElementById('relinkOverlay').remove()">Cancel</button>
+                <button class="btn btn-sm btn-primary" id="relinkBtn" onclick="submitRelink(false)">Relink</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    if (canDialog) chooseRelinkFile();
+    else { const inp = document.getElementById('relinkPath'); if (inp) inp.focus(); }
+}
+window.openRelinkMedia = openRelinkMedia;
+
+async function chooseRelinkFile() {
+    try {
+        const p = await window.dozaBatch.openFileDialog({ title: 'Choose the moved source file' });
+        const inp = document.getElementById('relinkPath');
+        if (p && inp) inp.value = p;
+    } catch (e) { /* cancelled */ }
+}
+
+async function submitRelink(force) {
+    const inp = document.getElementById('relinkPath');
+    const err = document.getElementById('relinkError');
+    const warn = document.getElementById('relinkWarning');
+    const btn = document.getElementById('relinkBtn');
+    const path = (inp && inp.value || '').trim();
+    if (!path) { if (err) { err.textContent = 'Choose a file first'; err.style.display = ''; } return; }
+    if (err) err.style.display = 'none';
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/relink-media`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_path: path, force: !!force }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 409 && data.warning) {
+            // Length differs by more than a second: say so and let the editor
+            // decide. Default focus stays on Cancel, the safe choice.
+            if (warn) {
+                warn.style.display = '';
+                warn.innerHTML = `<div style="margin-bottom:0.5rem;">This file is a different length than the original. Timecodes may not line up.</div>
+                    <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+                        <button class="btn btn-sm" id="relinkCancelBtn" onclick="document.getElementById('relinkOverlay').remove()">Cancel</button>
+                        <button class="btn btn-sm" onclick="submitRelink(true)">Relink anyway</button>
+                    </div>`;
+                const c = document.getElementById('relinkCancelBtn'); if (c) c.focus();
+            }
+            if (btn) { btn.disabled = false; btn.textContent = 'Relink'; }
+            return;
+        }
+        if (!res.ok) throw new Error(data.error || 'Could not relink the media');
+        Object.assign(PROJECT, { source_path: data.source_path, filepath: data.source_path, filename: data.filename });
+        const overlay = document.getElementById('relinkOverlay');
+        if (overlay) overlay.remove();
+        showToast('Media relinked');
+        // The file name, size and the missing-file notice are rendered with
+        // the page, so reload once to show the new source.
+        setTimeout(() => location.reload(), 600);
+    } catch (e) {
+        if (err) { err.textContent = e.message; err.style.display = ''; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Relink'; }
+    }
 }
 
 function toggleGearMenu(e) {

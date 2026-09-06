@@ -1387,6 +1387,85 @@ def _normalize_project_details(data, *, partial=False):
     return out
 
 
+# Relinking never re-runs anything: the stored path changes and the
+# transcript, analysis, clips and exports read the new file from then on.
+RELINK_DURATION_TOLERANCE_SECONDS = 1.0
+
+
+def _known_media_duration(project):
+    """The original media length, from the file when it still exists, else
+    from what transcription recorded. None when nothing is known."""
+    old_path = project.get('source_path') or project.get('filepath') or ''
+    if old_path and os.path.exists(old_path):
+        try:
+            d = get_media_duration(old_path)
+            if d:
+                return float(d)
+        except Exception:
+            pass
+    transcript = project.get('transcript') or {}
+    try:
+        d = transcript.get('duration')
+        return float(d) if d else None
+    except (TypeError, ValueError):
+        return None
+
+
+@app.route('/project/<project_id>/relink-media', methods=['POST'])
+def relink_media(project_id):
+    """Point a project at a moved or renamed source file (storage only).
+
+    Body: ``source_path`` (absolute or ~ path), ``force`` (bool). The file
+    must exist and carry a supported extension. When both the original and
+    the new duration are known and differ by more than a second, the reply is
+    409 with ``warning`` so the page can ask before continuing; ``force``
+    relinks anyway.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    body = request.json or {}
+    new_path = os.path.expanduser(str(body.get('source_path') or '').strip())
+    if not new_path:
+        return jsonify({'error': 'Choose a file first'}), 400
+    if not os.path.isfile(new_path):
+        return jsonify({'error': f'File not found: {new_path}'}), 400
+    if not allowed_file(new_path):
+        return jsonify({'error': 'That file type is not supported as project media'}), 400
+    new_path = os.path.abspath(new_path)
+
+    old_duration = _known_media_duration(project)
+    try:
+        new_duration = get_media_duration(new_path)
+    except Exception:
+        new_duration = None
+    mismatch = (old_duration is not None and new_duration
+                and abs(float(new_duration) - old_duration) > RELINK_DURATION_TOLERANCE_SECONDS)
+    if mismatch and not body.get('force'):
+        return jsonify({
+            'warning': True,
+            'message': 'This file is a different length than the original. Timecodes may not line up.',
+            'old_duration': old_duration,
+            'new_duration': float(new_duration),
+        }), 409
+
+    size = os.path.getsize(new_path)
+    old_path = project.get('source_path') or project.get('filepath') or ''
+    update_project(project_id, {
+        'source_path': new_path,
+        'filepath': new_path,
+        'filename': os.path.basename(new_path),
+        'file_size': size,
+        'file_size_formatted': format_file_size(size),
+    })
+    log_activity(project_id, 'media_relinked',
+                 f"Media relinked to {os.path.basename(new_path)}"
+                 + (' (different length, relinked anyway)' if mismatch else ''))
+    return jsonify({'status': 'relinked', 'source_path': new_path,
+                    'filename': os.path.basename(new_path), 'previous_path': old_path,
+                    'length_mismatch': bool(mismatch)})
+
+
 @app.route('/project/<project_id>/details', methods=['PATCH'])
 def update_project_details(project_id):
     """Edit name, client, interviewer, subject and speaker count after

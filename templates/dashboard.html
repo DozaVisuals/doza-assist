@@ -26,7 +26,7 @@
            the backend without DOZA_TRIAL (license activated). #}
         <a href="{{ doza_buy_url }}" target="_blank" rel="noopener" class="header-trial-pill" title="Transcripts are capped at 2 minutes per file during the free trial — buy a license to unlock full-length transcripts">Free trial · 2-min transcripts — <strong>Buy full version</strong></a>
         {% endif %}
-        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
+        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">Style: Off</span>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="openAIModelModal()" title="AI model settings">AI Model</button>
         {# Appearance is app wide (one localStorage key for every page), so it
@@ -68,10 +68,10 @@ async function refreshActivePill() {
         const pill = document.getElementById('headerActivePill');
         if (!pill) return;
         if (!data.count) {
-            pill.textContent = 'No active style';
+            pill.textContent = 'Style: Off';
             pill.classList.remove('is-on');
         } else {
-            pill.textContent = 'Active: ' + (data.names || []).join(', ');
+            pill.textContent = 'Style: ' + (data.names || []).join(', ');
             pill.classList.add('is-on');
         }
     } catch (e) { /* non-blocking */ }

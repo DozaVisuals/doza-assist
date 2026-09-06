@@ -20,7 +20,7 @@
         <span class="app-version" title="Doza Assist version">v{{ app_version }}</span>
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
-        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
+        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">Style: Off</span>
         <a href="/" class="btn btn-sm" style="text-decoration:none;">Projects</a>
         <a href="/my-style" class="btn btn-sm btn-accent" style="text-decoration:none;">My Style</a>
         <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
@@ -784,10 +784,10 @@ async function refreshActivePill() {
         const pill = document.getElementById('headerActivePill');
         if (!pill) return;
         if (data.count === 0) {
-            pill.textContent = 'No active style';
+            pill.textContent = 'Style: Off';
             pill.classList.remove('is-on');
         } else {
-            pill.textContent = 'Active: ' + (data.names || []).join(', ');
+            pill.textContent = 'Style: ' + (data.names || []).join(', ');
             pill.classList.add('is-on');
         }
     } catch (e) { /* non-blocking */ }

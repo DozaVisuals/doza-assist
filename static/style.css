@@ -4363,6 +4363,8 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
    =================================================================== */
 
 .header-active-pill {
+    /* Off is a normal state, not an error: the same muted gray as the rest
+       of the header. Red is reserved for actual errors. */
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -4370,33 +4372,20 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     line-height: 1;
     padding: 0.35rem 0.75rem;
     border-radius: 999px;
-    border: 1px solid rgba(239, 68, 68, 0.5);
-    background: rgba(239, 68, 68, 0.10);
-    color: #dc2626;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
     white-space: nowrap;
     max-width: 320px;
     overflow: hidden;
     text-overflow: ellipsis;
-    box-shadow: 0 0 6px rgba(239, 68, 68, 0.25);
-}
-[data-theme="dark"] .header-active-pill {
-    color: #f87171;
-    background: rgba(248, 113, 113, 0.12);
-    border-color: rgba(248, 113, 113, 0.4);
-    box-shadow: 0 0 8px rgba(248, 113, 113, 0.3);
 }
 .header-active-pill.is-on {
-    background: rgba(40, 180, 99, 0.12);
-    border-color: rgba(40, 180, 99, 0.5);
-    color: #1f8a4d;
+    /* A profile is shaping suggestions: the app accent. */
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
     font-weight: 600;
-    box-shadow: 0 0 6px rgba(40, 180, 99, 0.25);
-}
-[data-theme="dark"] .header-active-pill.is-on {
-    color: #4ade80;
-    background: rgba(74, 222, 128, 0.15);
-    border-color: rgba(74, 222, 128, 0.4);
-    box-shadow: 0 0 8px rgba(74, 222, 128, 0.3);
 }
 
 .my-style-multi-active {

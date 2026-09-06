@@ -403,8 +403,9 @@ class TestRoundTripManualOrder:
     def _stub_writer(self, monkeypatch, captured):
         monkeypatch.setattr(app_module, 'parse_fcpxml', lambda p: object())
 
-        def _writer(parsed, selects, preserve_order=False, skipped_out=None):
+        def _writer(parsed, selects, preserve_order=False, skipped_out=None, **names):
             captured['preserve_order'] = preserve_order
+            captured['names'] = names
             captured['starts'] = [s.start_seconds for s in selects]
             return b'<fcpxml version="1.14"/>'
 

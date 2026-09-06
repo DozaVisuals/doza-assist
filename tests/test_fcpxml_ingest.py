@@ -444,7 +444,7 @@ class TestRoundTripExportSurfacesParseWarnings:
         # stored file, not a stub.
         monkeypatch.setattr(
             app_module, "write_selects_as_new_project",
-            lambda parsed, selects, preserve_order=False, skipped_out=None:
+            lambda parsed, selects, preserve_order=False, skipped_out=None, **names:
                 b'<fcpxml version="1.14"/>')
 
         resp = client.post(
@@ -561,9 +561,12 @@ class TestFCPXMLMulticamExportRoute:
         )
         assert resp.status_code == 200, resp.data
         body = resp.data
-        # Output is FCPXML with a new Doza Selects project.
+        # Output is FCPXML with a new "{Project} – Selects 1" timeline (1.1
+        # naming); the editor's own event name is kept and "Doza" never
+        # appears in a timeline name.
         assert b"<fcpxml version=\"1.14\">" in body
-        assert b"Doza Selects" in body
+        assert "– Selects 1".encode("utf-8") in body
+        assert b"Doza Selects" not in body
         # Re-uses the multicam container (ref="r2") from the original resources.
         assert b'ref="r2"' in body
 
@@ -574,7 +577,8 @@ class TestFCPXMLMulticamExportRoute:
             json={"mode": "markers_timeline", "source": "client_selects"},
         )
         assert resp.status_code == 200, resp.data
-        assert b"Doza Notes" in resp.data
+        assert "– Markers 1".encode("utf-8") in resp.data
+        assert b"Doza Notes" not in resp.data
         assert b"<marker " in resp.data
 
     def test_rejects_when_project_has_no_fcpxml_source(self, client, tmp_path):

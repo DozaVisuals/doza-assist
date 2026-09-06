@@ -4510,26 +4510,56 @@ def generate_soundbite_titles(project_id):
 
 
 def _safe_filename(name: str, fallback: str = 'Export') -> str:
-    """Make a user/AI-supplied string safe to use as a single filename.
+    """Filesystem-safe single filename for user/AI-supplied text.
 
-    Story titles and project names are free text (user renames, AI output
-    like "24/7 — The Grind"); a '/' in one used to make ``open()`` treat
-    part of the name as a subdirectory and 500 the export. Replaces '/'
-    and ':' (the legacy HFS separator, which Finder displays as '/') with
-    '-', strips NULs and other control characters, collapses whitespace,
-    and returns ``fallback`` when nothing displayable survives. For
-    filenames only — never feed the result back into user-visible text.
+    Shared with the exporters through export_naming.safe_filename so the
+    timeline name and the file name are made safe by one rule.
     """
-    cleaned = []
-    for ch in str(name or ''):
-        if ch in '/:':
-            cleaned.append('-')
-        elif ord(ch) < 32 or ch == '\x7f':
-            cleaned.append(' ')
-        else:
-            cleaned.append(ch)
-    out = ' '.join(''.join(cleaned).split())
-    return out or fallback
+    from export_naming import safe_filename
+    return safe_filename(name, fallback)
+
+
+def _export_kind_for_mode(export_mode: str) -> str:
+    """Raw-media exports: 'markers' mode is a Markers timeline, else Selects."""
+    return 'markers' if (export_mode or 'cuts') == 'markers' else 'selects'
+
+
+def _plan_timeline_name(project, kind, story_title=None, override=None):
+    """(timeline name, counter key, n) for one export about to happen.
+
+    ``n`` is the number this export will carry; the caller bumps the stored
+    counter with :func:`_bump_export_count` once the file is written. An
+    override (the Export tab's Timeline name field) is counter-free: the
+    stored count is left alone.
+    """
+    from export_naming import next_count, story_kind, timeline_name
+    key = story_kind(story_title) if kind == 'story' else kind
+    n = next_count(project, key)
+    name = timeline_name(project, kind, n, story_title=story_title, override=override)
+    return name, key, (None if (override and str(override).strip()) else n)
+
+
+def _bump_export_count(project_id, key, n):
+    """Persist the export number just used (no-op for overrides)."""
+    if not n:
+        return
+    project = get_project(project_id)
+    if not project:
+        return
+    counts = dict(project.get('export_counts') or {})
+    counts[key] = max(int(counts.get(key, 0) or 0), int(n))
+    update_project(project_id, {'export_counts': counts})
+
+
+def _verbatim_for(project, start_s, end_s):
+    """Speaker-labelled verbatim transcript of a range, capped (export_notes)."""
+    try:
+        from export_notes import verbatim_for_range
+        return verbatim_for_range(
+            (project.get('transcript') or {}).get('segments') or [],
+            start_s, end_s, project.get('speaker_names') or {})
+    except Exception:
+        return ''
 
 
 def _resolve_export_framerate(body, detected_fps):
@@ -4655,6 +4685,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'color': 'green',
                 'category': 'Social Clip',
                 'speaker': _speaker_at_range(cs, ce),
+                'verbatim': _verbatim_for(project, cs, ce),
             })
 
     if 'story' in requested:
@@ -4676,6 +4707,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'color': 'purple',
                 'category': 'Story Beat',
                 'speaker': _speaker_at_range(start, end),
+                'verbatim': _verbatim_for(project, start, end),
             })
 
     if 'soundbites' in requested:
@@ -4698,6 +4730,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'color': 'orange',
                 'category': 'Soundbite',
                 'speaker': _speaker_at_range(start, end),
+                'verbatim': _verbatim_for(project, start, end),
             })
 
     if 'labels' in requested:
@@ -4733,6 +4766,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'color': sec.get('color', 'blue'),
                 'category': label_name,
                 'speaker': _speaker_at_range(ls, le),
+                'verbatim': _verbatim_for(project, ls, le),
             }
             if manual_clip_order:
                 marker['_order'] = len(markers)
@@ -4798,6 +4832,10 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
 
     exporter = get_exporter(platform)
+    # Timeline = "{Project} – Selects N" (or Markers N); event = project name.
+    from export_naming import event_name_for
+    kind = _export_kind_for_mode(export_mode)
+    tl_name, count_key, n = _plan_timeline_name(project, kind, override=body.get('timeline_name'))
     result = exporter.export_markers(
         markers,
         project_name=project['name'],
@@ -4812,8 +4850,30 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         total_clips=total_clips,
         start_tc_frames=start_tc_frames,
         tc_format=tc_format,
+        timeline_name=tl_name,
+        event_name=event_name_for(project),
     )
+    if project.get('id'):
+        _bump_export_count(project['id'], count_key, n)
     return result, exporter
+
+
+@app.route('/project/<project_id>/export/timeline-name', methods=['GET'])
+def export_timeline_name(project_id):
+    """The default timeline name the next export would use (for the Export
+    tab's Timeline name field). ``kind`` = selects | markers | story, plus
+    ``story_title`` for a story."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    kind = (request.args.get('kind') or 'selects').strip().lower()
+    if kind not in ('selects', 'markers', 'story'):
+        kind = 'selects'
+    name, key, n = _plan_timeline_name(project, kind, story_title=request.args.get('story_title') or None)
+    from export_naming import event_name_for, filename_for
+    return jsonify({'timeline_name': name, 'kind': kind, 'n': n,
+                    'event_name': event_name_for(project),
+                    'filename': filename_for(name)})
 
 
 @app.route('/project/<project_id>/export/fcpxml', methods=['POST'])
@@ -4883,7 +4943,7 @@ def export_fcpxml(project_id):
             result.file_path, nle,
             source_media_path=project.get('source_path') or project.get('filepath'),
             project_name=project.get('name') or '',
-            timeline_name=os.path.splitext(result.filename)[0],
+            timeline_name=getattr(result, 'timeline_name', '') or os.path.splitext(result.filename)[0],
         )
         if opened_in is None:
             return jsonify({'error': info.get('error', 'NLE delivery failed'),
@@ -5665,6 +5725,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                 note=(sec.get('title') or sec.get('text') or '')[:80],
                 kind=_kind_for_color(sec.get('color', '')),
                 speaker=_speaker_for_range(cs, ce),
+                verbatim=_verbatim_for(project, cs, ce),
             ))
 
     if 'social' in sources:
@@ -5679,6 +5740,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                 note=clip.get('platform', ''),
                 kind='strong',
                 speaker=_speaker_for_range(cs, ce),
+                verbatim=_verbatim_for(project, cs, ce),
             ))
 
     if 'story' in sources:
@@ -5694,6 +5756,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                 note=(beat.get('description') or '')[:120],
                 kind='strong',
                 speaker=_speaker_for_range(start, end),
+                verbatim=_verbatim_for(project, start, end),
             ))
 
     if 'soundbites' in sources:
@@ -5709,6 +5772,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                 note=(sb.get('why') or '')[:120],
                 kind='strong',
                 speaker=_speaker_for_range(start, end),
+                verbatim=_verbatim_for(project, start, end),
             ))
 
     if 'story_build' in sources:
@@ -5732,6 +5796,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                     note=(clip.get('editorial_note') or '')[:160],
                     kind='strong',
                     speaker=_speaker_for_range(cs, ce),
+                verbatim=_verbatim_for(project, cs, ce),
                 ))
 
     return selects
@@ -5802,35 +5867,39 @@ def _build_nle_multicam_export(project, body):
             'Pick a source with content, or add clip labels first.'
         )
 
+    # Timeline name: "{Project} – Selects N" / "– Markers N" / "– Story: title";
+    # the event keeps the editor's own name from the imported FCPXML.
+    story_title = (body.get('story_title') or '').strip() if (preserve_order and story_build_clips) else ''
+    if story_title:
+        tl_name, count_key, n = _plan_timeline_name(
+            project, 'story', story_title=story_title, override=body.get('timeline_name'))
+    else:
+        tl_name, count_key, n = _plan_timeline_name(
+            project, 'markers' if mode == 'markers_timeline' else 'selects',
+            override=body.get('timeline_name'))
+    event_title = (getattr(parsed, 'event_name', None) or '').strip() or 'Doza Assist'
+
     skipped_selects = []
     try:
         if mode == 'markers_timeline':
             output = write_markers_on_timeline(
-                parsed, selects, skipped_out=skipped_selects,
+                parsed, selects, project_name=tl_name, skipped_out=skipped_selects,
             )
-            suffix = 'Doza Notes'
         else:
             output = write_selects_as_new_project(
                 parsed, selects, preserve_order=preserve_order,
+                project_name=tl_name, event_name=event_title,
                 skipped_out=skipped_selects,
             )
-            suffix = 'Doza Selects'
     except WriterError as e:
         raise MulticamExportError(f'Export failed: {e}')
     skipped_labels = [
         (s.label or f'{s.start_seconds:.1f}s') for s in skipped_selects
     ]
 
-    # Story Builder exports get a more specific filename suffix.
-    if preserve_order and story_build_clips:
-        story_title = (body.get('story_title') or '').strip()
-        if story_title:
-            suffix = f"{story_title}"
-    # Sanitize the COMPOSED filename: story titles are user/AI free text
-    # ("24/7 — The Grind"), and only ``base`` used to get the '/' scrub, so
-    # a slash in the title made open() treat it as a subdirectory and 500.
-    base = (project.get('name') or 'Project').strip()
-    filename = _safe_filename(f"{base} - {suffix}", fallback='Doza Export') + '.fcpxml'
+    # File = timeline name + .fcpxml, made safe by the one shared rule.
+    from export_naming import filename_for
+    filename = filename_for(tl_name, '.fcpxml')
     exports_dir = app.config['EXPORTS_DIR']
     os.makedirs(exports_dir, exist_ok=True)
     out_path = os.path.join(exports_dir, filename)
@@ -5852,6 +5921,8 @@ def _build_nle_multicam_export(project, body):
             pass
         raise MulticamExportError(f'Could not write export file: {e}', status=500)
 
+    if project.get('id'):
+        _bump_export_count(project['id'], count_key, n)
     return out_path, filename, mode, skipped_labels, parse_warnings
 
 
@@ -6554,6 +6625,8 @@ def _build_nle_story_export(project, body, force_platform=None, warnings_out=Non
             'text': clip.get('title', 'Clip'),
             'note': clip.get('editorial_note', ''),
             '_order': clip.get('order', i),
+            'speaker': (clip.get('speaker') or '').strip(),
+            'verbatim': _verbatim_for(project, start, end),
         })
 
     source_path = project.get('source_path', project.get('filepath', ''))
@@ -6576,6 +6649,10 @@ def _build_nle_story_export(project, body, force_platform=None, warnings_out=Non
         platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
 
     exporter = get_exporter(platform)
+    # Timeline = "{Project} – Story: {title}" (N from the second export on).
+    from export_naming import event_name_for
+    tl_name, count_key, n = _plan_timeline_name(
+        project, 'story', story_title=story_title, override=body.get('timeline_name'))
     result = exporter.export_story(
         markers,
         project_name=project['name'],
@@ -6588,7 +6665,11 @@ def _build_nle_story_export(project, body, force_platform=None, warnings_out=Non
         exports_dir=app.config['EXPORTS_DIR'],
         start_tc_frames=start_tc_frames,
         tc_format=tc_format,
+        timeline_name=tl_name,
+        event_name=event_name_for(project),
     )
+    if project.get('id'):
+        _bump_export_count(project['id'], count_key, n)
     return result, exporter
 
 
@@ -6651,7 +6732,7 @@ def story_export(project_id):
             result.file_path, nle,
             source_media_path=project.get('source_path') or project.get('filepath'),
             project_name=project.get('name') or '',
-            timeline_name=os.path.splitext(result.filename)[0],
+            timeline_name=getattr(result, 'timeline_name', '') or os.path.splitext(result.filename)[0],
         )
         if opened_in is None:
             return jsonify({'error': info.get('error', 'NLE delivery failed'),

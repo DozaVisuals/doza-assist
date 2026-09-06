@@ -2593,8 +2593,7 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 /* Header buttons: a <button> defaults to line-height normal while an <a>
    inherits the page's, so "AI setup" rendered shorter than "My Style". */
 .app-header .btn { line-height: 1.6; }
-.theme-toggle-labeled { width: auto; height: 32px; padding: 0 0.6rem; gap: 0.4rem; border-radius: 999px; font-family: var(--font); }
-.theme-toggle-text { font-size: 0.78rem; color: var(--text-secondary); white-space: nowrap; font-family: var(--font); }
+.app-header .theme-toggle { width: 32px; height: 32px; }
 
 /* AI setup (dashboard): the optional key chooser under the local model. */
 .ai-setup-keys { margin-top: 1rem; }

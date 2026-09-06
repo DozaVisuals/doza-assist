@@ -653,7 +653,12 @@
         </div>
         <div class="analysis-list">
             {% for sb in project.analysis.strongest_soundbites %}
-            <div class="analysis-item" data-clip-start="{{ sb.start }}" data-clip-end="{{ sb.start }}">
+            {# Soundbites read like clips (1.0.47): a generated title, the first
+               line of the quote under it, the reason, and Show text for the
+               whole transcript of the range. Titles missing here are filled by
+               dozaRequestSoundbiteTitles after load. #}
+            <div class="analysis-item analysis-soundbite" data-clip-start="{{ sb.start }}" data-clip-end="{{ sb.end or sb.start }}" data-sb-index="{{ loop.index0 }}"
+                 data-sb-start="{{ sb.start }}" data-sb-end="{{ sb.end or '' }}" data-sb-title="{{ sb.title or '' }}">
                 <div style="flex:1; min-width:0;">
                     <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;">
                         <div class="analysis-item-left">
@@ -661,14 +666,24 @@
                                 <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
                                 <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
                             </button>
-                            <div>
-                                <div class="analysis-item-title" style="font-style: italic;">"{{ sb.text }}"</div>
-                                <div class="analysis-item-desc">{{ sb.why }}</div>
+                            <div style="min-width:0; flex:1;">
+                                {% if sb.title %}
+                                <div class="analysis-item-title">{{ sb.title }}</div>
+                                {% else %}
+                                <div class="analysis-item-title analysis-title-pending">Naming clip&hellip;</div>
+                                {% endif %}
+                                <div class="analysis-item-lead" data-sb-quote="{{ sb.text }}">{{ sb.text }}</div>
+                                {% if sb.why %}<div class="analysis-item-desc">{{ sb.why }}</div>{% endif %}
+                                <div class="analysis-item-expand" onclick="this.closest('.analysis-item').classList.toggle('expanded')" title="Show the clip's transcript">
+                                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg>
+                                    <span class="clip-expand-label">Show text</span>
+                                </div>
+                                <div class="analysis-item-transcript"></div>
                             </div>
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ sb.start }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" title="Add to Clips" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}',this)">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" title="Add to Clips" onclick="addSoundbiteClip(this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -2160,6 +2175,75 @@ window.dozaRequestClipTitles = async function () {
 };
 
 /**
+ * AI Analysis soundbites (1.0.47): the same title, first line and Show text
+ * as the clip library. Leads and transcripts come from the page's own
+ * transcript; titles missing from the saved analysis come from
+ * POST /project/<id>/analysis/soundbite-titles, which stores them so the
+ * next load renders them server side.
+ */
+function soundbiteRange(item) {
+    const start = parseTc(item.dataset.sbStart);
+    const rawEnd = item.dataset.sbEnd ? parseTc(item.dataset.sbEnd) : NaN;
+    const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : start + 15;
+    return { start, end };
+}
+
+function fillSoundbiteText() {
+    const helpers = window.dozaClipText;
+    document.querySelectorAll('.analysis-soundbite').forEach(item => {
+        const { start, end } = soundbiteRange(item);
+        const transcript = window.dozaTranscriptForRange(start, end);
+        const lead = item.querySelector('.analysis-item-lead');
+        const box = item.querySelector('.analysis-item-transcript');
+        const quote = lead ? (lead.dataset.sbQuote || lead.textContent) : '';
+        if (lead && helpers) lead.textContent = helpers.firstLine(transcript || quote);
+        if (box) box.textContent = transcript || quote;
+        const expand = item.querySelector('.analysis-item-expand');
+        if (expand && !(transcript || quote)) expand.style.display = 'none';
+    });
+}
+
+let _soundbiteTitlesRequested = false;
+window.dozaRequestSoundbiteTitles = async function () {
+    if (_soundbiteTitlesRequested) return;
+    const pending = document.querySelectorAll('.analysis-soundbite:not([data-sb-title]), .analysis-soundbite[data-sb-title=""]');
+    if (pending.length === 0) return;
+    _soundbiteTitlesRequested = true;
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/analysis/soundbite-titles`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const data = res.ok ? await res.json() : {};
+        (data.titles || []).forEach(t => {
+            if (!t || !t.title) return;
+            const item = document.querySelector(`.analysis-soundbite[data-sb-index="${t.index}"]`);
+            if (!item) return;
+            item.dataset.sbTitle = t.title;
+            const el = item.querySelector('.analysis-item-title');
+            if (el) { el.textContent = t.title; el.classList.remove('analysis-title-pending'); }
+        });
+        if (data.error) console.warn('[soundbite titles]', data.error);
+    } catch (e) {
+        console.warn('[soundbite titles] request failed', e);
+    }
+    // Anything still unnamed shows its quote rather than a stuck label.
+    document.querySelectorAll('.analysis-soundbite .analysis-title-pending').forEach(el => {
+        const lead = el.parentElement.querySelector('.analysis-item-lead');
+        el.textContent = lead ? (lead.dataset.sbQuote || lead.textContent) : 'Soundbite';
+        el.classList.remove('analysis-title-pending');
+    });
+};
+
+function addSoundbiteClip(btn) {
+    const item = btn.closest('.analysis-soundbite');
+    if (!item) return;
+    const { start, end } = soundbiteRange(item);
+    const lead = item.querySelector('.analysis-item-lead');
+    const title = item.dataset.sbTitle || (lead ? (lead.dataset.sbQuote || '').slice(0, 40) : 'Soundbite');
+    addClipFromChat(start, end, title, btn);
+}
+
+/**
  * Title, first line and full transcript for one library clip.
  */
 function clipDisplayParts(clip) {
@@ -2812,8 +2896,10 @@ transcriptSearchInit(transcriptContainer);
 // yet: ask for them once the page is up. The request is a no-op when every
 // clip already has one.
 window.addEventListener('load', () => {
+    try { fillSoundbiteText(); } catch (e) { console.warn('soundbite text', e); }
     setTimeout(() => {
         if (typeof window.dozaRequestClipTitles === 'function') window.dozaRequestClipTitles();
+        if (typeof window.dozaRequestSoundbiteTitles === 'function') window.dozaRequestSoundbiteTitles();
     }, 1500);
 });
 

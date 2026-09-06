@@ -5012,3 +5012,38 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 }
 .story-clip-item.expanded .story-clip-transcript { display: block; }
 .story-clip-item.expanded .story-clip-excerpt { display: none; }
+
+/* AI Analysis soundbites (1.0.47): title, first line, Show text. */
+.analysis-title-pending { color: var(--text-muted); font-style: italic; font-weight: 500; }
+.analysis-item-lead {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    margin-top: 0.15rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.analysis-item.expanded .analysis-item-lead { display: none; }
+.analysis-item-expand {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+}
+.analysis-item-expand:hover { color: var(--text-secondary); }
+.analysis-item.expanded .analysis-item-expand .clip-expand-chevron { transform: rotate(180deg); }
+.analysis-item-transcript {
+    display: none;
+    margin-top: 6px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-height: 320px;
+    overflow-y: auto;
+}
+.analysis-item.expanded .analysis-item-transcript { display: block; }

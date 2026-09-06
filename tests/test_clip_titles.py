@@ -307,6 +307,48 @@ def test_exports_prefer_the_title_in_the_note():
     assert [r['note'] for r in rows] == ['Listening First', 'plain']
 
 
+def test_soundbite_titles_route_titles_quotes_and_persists(client, monkeypatch):
+    seen = []
+
+    def fake_model(prompt, system):
+        seen.append(prompt)
+        n = prompt.count('Excerpt ')
+        return {'titles': {str(i): f'Soundbite Title {i}' for i in range(1, n + 1)}}
+
+    monkeypatch.setattr(app_module, '_clip_title_model_call', fake_model)
+    _make_project('s1', analysis={'strongest_soundbites': [
+        {'start': '00:00:00', 'end': '00:00:12', 'text': SENTENCE[:50], 'why': 'opens strong'},
+        {'start': '00:00:12', 'text': 'That is what changed everything for us.', 'why': 'turn'},
+        {'start': '00:00:12', 'end': '00:00:20', 'text': 'x', 'title': 'Already Named'},
+    ], 'story_beats': [{'label': 'Beat', 'start': '00:00:00'}]})
+    res = client.post('/project/s1/analysis/soundbite-titles', json={})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data['generated'] == 2 and data['failed'] == 0 and data['error'] is None
+    assert [t['index'] for t in data['titles']] == [0, 1]
+    assert data['titles'][0]['transcript'].startswith('And how do we help')
+    assert data['titles'][0]['lead'] == SENTENCE
+    assert len(seen) == 1
+    meta = _read_meta('s1')
+    sbs = meta['analysis']['strongest_soundbites']
+    assert sbs[0]['title'] == 'Soundbite Title 1' and sbs[0]['text'] == SENTENCE[:50]
+    assert sbs[1]['title'] == 'Soundbite Title 2'
+    assert sbs[2]['title'] == 'Already Named'
+    assert meta['analysis']['story_beats'] == [{'label': 'Beat', 'start': '00:00:00'}]
+    # second call: nothing left to do, no model call
+    data2 = client.post('/project/s1/analysis/soundbite-titles', json={}).get_json()
+    assert data2['titles'] == [] and len(seen) == 1
+
+
+def test_soundbite_titles_route_without_analysis_or_cross_origin(client, monkeypatch):
+    monkeypatch.setattr(app_module, '_clip_title_model_call', lambda p, s: {'titles': {}})
+    _make_project('s2')
+    assert client.post('/project/s2/analysis/soundbite-titles', json={}).get_json()['titles'] == []
+    assert client.post('/project/s2/analysis/soundbite-titles', json={},
+                       headers={'Origin': 'https://share.doza.ai'}).status_code == 403
+    assert client.post('/project/nope/analysis/soundbite-titles', json={}).status_code == 404
+
+
 # ── the page helpers under Node ─────────────────────────────────────────────
 
 def _node(script):

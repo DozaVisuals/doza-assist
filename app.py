@@ -1345,6 +1345,83 @@ def create_project_from_path(
     return project_id
 
 
+def _normalize_project_details(data, *, partial=False):
+    """Validate the editable project details the New Project form collects.
+
+    One set of rules for creation (``/create``, ``/upload``) and for the
+    later edit (``PATCH /project/<id>/details``), so the two never drift.
+    ``partial=True`` (the edit) only returns the keys present in ``data``;
+    creation fills the same defaults the form used to. Raises ValueError with
+    a user-facing message.
+    """
+    data = data or {}
+    out = {}
+
+    def _text(key, default, limit=200):
+        if key in data or not partial:
+            val = data.get(key, default)
+            val = ('' if val is None else str(val)).strip()
+            if len(val) > limit:
+                raise ValueError(f'{key.replace("_", " ").capitalize()} is too long (max {limit} characters)')
+            out[key] = val
+
+    if 'project_name' in data or 'name' in data or not partial:
+        raw = data.get('project_name', data.get('name', ''))
+        name = ('' if raw is None else str(raw)).strip()
+        if partial and not name:
+            raise ValueError('Name cannot be empty')
+        if len(name) > 200:
+            raise ValueError('Name is too long (max 200 characters)')
+        out['name'] = name or None
+    _text('client_name', '')
+    _text('interviewer_name', 'Interviewer', 120)
+    _text('subject_name', 'Subject', 120)
+    if 'num_speakers' in data or not partial:
+        try:
+            n = int(data.get('num_speakers', 2))
+        except (TypeError, ValueError):
+            raise ValueError('Number of speakers must be a whole number')
+        if n < 1 or n > 12:
+            raise ValueError('Number of speakers must be between 1 and 12')
+        out['num_speakers'] = n
+    return out
+
+
+@app.route('/project/<project_id>/details', methods=['PATCH'])
+def update_project_details(project_id):
+    """Edit name, client, interviewer, subject and speaker count after
+    creation. Storage only: no transcription, diarization or analysis runs.
+    Language is not editable here (Retranscribe owns it)."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    body = request.json or {}
+    try:
+        fields = _normalize_project_details(body, partial=True)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if not fields:
+        return jsonify({'error': 'Nothing to update'}), 400
+    updates = {}
+    changed = []
+    for key, value in fields.items():
+        if project.get(key) != value:
+            updates[key] = value
+            changed.append(key)
+    if updates:
+        update_project(project_id, updates)
+        if 'name' in updates:
+            log_activity(project_id, 'renamed',
+                         f"Renamed \"{project.get('name', 'Project')}\" to \"{updates['name']}\"")
+        others = [k for k in changed if k != 'name']
+        if others:
+            log_activity(project_id, 'details_edited',
+                         'Project details updated: ' + ', '.join(k.replace('_', ' ') for k in others))
+    fresh = get_project(project_id) or project
+    return jsonify({'status': 'saved', 'changed': changed, 'project': {
+        k: fresh.get(k) for k in ('name', 'client_name', 'interviewer_name', 'subject_name', 'num_speakers')}})
+
+
 @app.route('/create', methods=['POST'])
 def create_project():
     """Create a new project from a local file path."""
@@ -1369,13 +1446,14 @@ def create_project():
             return jsonify({'error': 'event_clip_index must be an integer'}), 400
 
     try:
+        details = _normalize_project_details(data)
         project_id = create_project_from_path(
             expanded,
-            project_name=data.get('project_name', '').strip() or None,
-            client_name=data.get('client_name', '').strip(),
-            interviewer_name=data.get('interviewer_name', 'Interviewer').strip(),
-            subject_name=data.get('subject_name', 'Subject').strip(),
-            num_speakers=int(data.get('num_speakers', 2)),
+            project_name=details['name'],
+            client_name=details['client_name'],
+            interviewer_name=details['interviewer_name'] or 'Interviewer',
+            subject_name=details['subject_name'] or 'Subject',
+            num_speakers=details['num_speakers'],
             language=data.get('language', 'en').strip(),
             output_language=data.get('output_language', 'match').strip(),
             audio_channel=data.get('audio_channel', 'all'),

@@ -1416,11 +1416,104 @@ async function dozaRefreshGearValues() {
 }
 window.dozaRefreshGearValues = dozaRefreshGearValues;
 
-// "Project details..." and "Relink media..." land in the next two changes;
-// until then the items say so instead of doing nothing.
-if (typeof window.openProjectDetails !== 'function') {
-    window.openProjectDetails = function () { showToast('Project details is not available yet'); };
+// "Project details...": edit name, client, interviewer, subject and speaker
+// count after creation. Same fields and rules as the New Project form (the
+// server validates both through one helper); language stays under
+// Retranscribe. Saving is storage only, nothing re-runs.
+function openProjectDetails() {
+    let overlay = document.getElementById('projectDetailsOverlay');
+    if (overlay) overlay.remove();
+    const esc = (v) => escapeHtml(v === null || v === undefined ? '' : String(v));
+    const n = parseInt(PROJECT.num_speakers, 10) || 2;
+    const speakerOptions = [1, 2, 3, 4].concat(n > 4 ? [n] : []).map(v =>
+        `<option value="${v}"${v === n ? ' selected' : ''}>${v}${v === 1 ? ' (Solo)' : (v === 2 ? ' (Interview)' : '')}</option>`
+    ).join('');
+    overlay = document.createElement('div');
+    overlay.id = 'projectDetailsOverlay';
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 460px;">
+            <h2>Project details</h2>
+            <div class="form-group">
+                <label class="form-label">Project Name</label>
+                <input type="text" class="form-input" id="editProjectName" value="${esc(PROJECT.name)}" placeholder="e.g. Pedro Reyes Artist Profile">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Client</label>
+                <input type="text" class="form-input" id="editClientName" value="${esc(PROJECT.client_name)}" placeholder="e.g. Fidelity Art Collection">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">Interviewer Name</label>
+                    <input type="text" class="form-input" id="editInterviewerName" value="${esc(PROJECT.interviewer_name)}" placeholder="Interviewer">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Subject Name</label>
+                    <input type="text" class="form-input" id="editSubjectName" value="${esc(PROJECT.subject_name)}" placeholder="e.g. Pedro Reyes">
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Number of Speakers</label>
+                <select class="form-input" id="editNumSpeakers">${speakerOptions}</select>
+                <p style="font-size:0.72rem; color:var(--text-muted); margin:0.35rem 0 0; line-height:1.4;">
+                    Changes the stored count only. Transcription and speaker detection do not re-run. Language is changed under Retranscribe.
+                </p>
+            </div>
+            <div id="projectDetailsError" style="display:none; color: var(--red); font-size: 0.82rem; margin-top: 0.5rem;"></div>
+            <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
+                <button class="btn btn-sm" onclick="document.getElementById('projectDetailsOverlay').remove()">Cancel</button>
+                <button class="btn btn-sm btn-primary" id="projectDetailsSaveBtn" onclick="saveProjectDetails()">Save</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    overlay.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); saveProjectDetails(); } });
+    const first = document.getElementById('editProjectName');
+    if (first) { first.focus(); first.select(); }
 }
+window.openProjectDetails = openProjectDetails;
+
+async function saveProjectDetails() {
+    const btn = document.getElementById('projectDetailsSaveBtn');
+    const err = document.getElementById('projectDetailsError');
+    const body = {
+        name: document.getElementById('editProjectName').value,
+        client_name: document.getElementById('editClientName').value,
+        interviewer_name: document.getElementById('editInterviewerName').value,
+        subject_name: document.getElementById('editSubjectName').value,
+        num_speakers: parseInt(document.getElementById('editNumSpeakers').value, 10) || 2,
+    };
+    if (!body.name.trim()) {
+        if (err) { err.textContent = 'Name cannot be empty'; err.style.display = ''; }
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/details`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Could not save project details');
+        const speakersChanged = (data.changed || []).includes('num_speakers');
+        Object.assign(PROJECT, data.project || {});
+        const title = document.querySelector('.page-title');
+        if (title && PROJECT.name) title.textContent = PROJECT.name;
+        document.title = (PROJECT.name || 'Project') + ' - Doza Assist';
+        const overlay = document.getElementById('projectDetailsOverlay');
+        if (overlay) overlay.remove();
+        showToast('Project details saved');
+        // The speaker seeding and the speaker banner are rendered with the
+        // page from the stored count, so a changed count reloads once.
+        if (speakersChanged) setTimeout(() => location.reload(), 600);
+    } catch (e) {
+        if (err) { err.textContent = e.message; err.style.display = ''; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
+}
+
+// "Relink media..." lands in the next change; until then the item says so.
 if (typeof window.openRelinkMedia !== 'function') {
     window.openRelinkMedia = function () { showToast('Relink media is not available yet'); };
 }

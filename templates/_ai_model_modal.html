@@ -328,19 +328,73 @@ function _renderProviderTabs(active) {
     });
 }
 
+// Dialog A (project) / Dialog C (collection): fires once, on the first move
+// from local to a cloud provider. Switching between Anthropic and OpenAI, or
+// back to local, never asks. Resolves true when the user chooses the cloud
+// provider; Escape, the overlay and Stay local all resolve false. The default
+// focused button is Stay local.
+function confirmLeaveLocal(name) {
+    return new Promise((resolve) => {
+        const company = name === 'anthropic' ? 'Anthropic' : 'OpenAI';
+        const subject = _aiModalMode === 'collection'
+            ? "This collection's transcripts, analysis, and chat"
+            : "This project's transcript, analysis, and chat";
+        const scope = _aiModalMode === 'collection' ? 'collection' : 'project';
+        const old = document.getElementById('aiLeaveLocalDialog');
+        if (old) old.remove();
+        const overlay = document.createElement('div');
+        overlay.id = 'aiLeaveLocalDialog';
+        overlay.className = 'modal-overlay active ai-confirm-overlay';
+        overlay.innerHTML = `
+            <div class="modal ai-confirm" role="alertdialog" aria-modal="true" aria-labelledby="aiLeaveLocalTitle" style="max-width: 460px;">
+                <h2 id="aiLeaveLocalTitle">Send transcript text to ${company}?</h2>
+                <p>${subject} will be sent to ${company}'s API using your own key. Your video and audio files stay on this Mac. Nothing goes to Doza.</p>
+                <p>If Style is on, your style profile is included in the request.</p>
+                <p>${company} bills you directly. Their terms and retention apply.</p>
+                <div class="ai-confirm-actions">
+                    <button type="button" class="btn btn-sm btn-primary" id="aiLeaveLocalStay">Stay local</button>
+                    <button type="button" class="btn btn-sm" id="aiLeaveLocalGo">Use ${company} for this ${scope}</button>
+                </div>
+            </div>`;
+        const done = (answer) => { overlay.remove(); resolve(answer); };
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) done(false); });
+        overlay.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); done(false); }
+        });
+        document.body.appendChild(overlay);
+        overlay.querySelector('#aiLeaveLocalStay').addEventListener('click', () => done(false));
+        overlay.querySelector('#aiLeaveLocalGo').addEventListener('click', () => done(true));
+        overlay.querySelector('#aiLeaveLocalStay').focus();
+    });
+}
+
 async function selectProvider(name) {
     if (name !== 'ollama' && name !== 'anthropic' && name !== 'openai') return;
     if (name === _activeProvider) return;
     const endpoint = _providerEndpoint();
     if (!endpoint) return;  // setup mode has no chooser
     const previous = _activeProvider;
+    let confirmed = false;
+    if (previous === 'ollama' && name !== 'ollama' && !_aiProviderConfirmed) {
+        _renderProviderTabs(name);
+        const go = await confirmLeaveLocal(name);
+        if (!go) {
+            // Stay local: the picker reverts and nothing is stored.
+            _activeProvider = 'ollama';
+            _renderProviderTabs('ollama');
+            return;
+        }
+        confirmed = true;
+    }
     _activeProvider = name;
     _renderProviderTabs(name);
     try {
+        const body = { provider: name };
+        if (confirmed) body.confirmed = true;
         const r = await fetch(endpoint, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ provider: name }),
+            body: JSON.stringify(body),
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(data.error || 'save failed');
@@ -723,6 +777,6 @@ async function _downloadAIVariant(tier, btn) {
 }
 
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeAIModelModal();
+    if (e.key === 'Escape' && !document.getElementById('aiLeaveLocalDialog')) closeAIModelModal();
 });
 </script>

@@ -5053,3 +5053,25 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     overflow-y: auto;
 }
 .analysis-item.expanded .analysis-item-transcript { display: block; }
+
+/* Leave-local confirmation (AI Model modal, project and collection). */
+.ai-confirm-overlay { z-index: 1200; }
+.ai-confirm p { color: var(--text-secondary); font-size: 0.88rem; line-height: 1.55; margin: 0 0 0.75rem; }
+.ai-confirm h2 { margin-bottom: 0.75rem; }
+.ai-confirm-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; flex-wrap: wrap; }
+
+/* Header chip while assistant access is on: muted, not red, not the accent. */
+.header-chip {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.78rem;
+    line-height: 1;
+    padding: 0.35rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    white-space: nowrap;
+    cursor: pointer;
+}
+.header-chip:hover { color: var(--text-secondary); border-color: var(--border-light); }

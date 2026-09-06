@@ -30,6 +30,7 @@ class ExportResult:
     format_name: str          # "FCPXML" | "Premiere XML" | "EDL"
     platform_name: str        # "Final Cut Pro" | "Premiere Pro" | "DaVinci Resolve"
     warnings: list = field(default_factory=list)
+    timeline_name: str = ""   # the NLE timeline/sequence name the file carries
 
 
 class BaseExporter(ABC):
@@ -54,6 +55,8 @@ class BaseExporter(ABC):
         export_mode: str = "cuts",
         total_clips: int = 0,
         start_tc_frames: int = 0,  # media's embedded start timecode, in frames
+        timeline_name: str | None = None,   # full timeline name ("{Project} – Selects N"); None = legacy suffix form
+        event_name: str | None = None,      # FCPXML event name; None = project_name
     ) -> ExportResult:
         """Export a flat list of marker/clip dicts."""
 
@@ -71,5 +74,7 @@ class BaseExporter(ABC):
         height: int,
         exports_dir: str,
         start_tc_frames: int = 0,  # media's embedded start timecode, in frames
+        timeline_name: str | None = None,   # full timeline name ("{Project} – Story: title"); None = legacy
+        event_name: str | None = None,
     ) -> ExportResult:
         """Export an assembled story builder sequence as a timeline."""

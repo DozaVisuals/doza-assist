@@ -444,6 +444,8 @@ class PremiereXMLExporter(BaseExporter):
         total_clips=0,
         start_tc_frames=0,
         tc_format="NDF",  # interface parity; this target renders its own TC convention  # accepted for interface parity; Premiere uses 0-based file in/out
+        timeline_name=None,
+        event_name=None,
     ) -> ExportResult:
         # One sequence track per routed source channel (multi-mono sources
         # bring the real dialogue track(s), mono sources a single track).
@@ -476,7 +478,7 @@ class PremiereXMLExporter(BaseExporter):
         else:
             ordered = sorted(valid, key=lambda m: float(m.get("start") or 0))
 
-        sequence_name = f"{project_name.strip()} - {suffix.strip()}"
+        sequence_name = timeline_name or f"{project_name.strip()} - {suffix.strip()}"
         root = _build_sequence(
             sequence_name=sequence_name,
             markers=ordered,
@@ -491,10 +493,14 @@ class PremiereXMLExporter(BaseExporter):
         )
         content = _prettify(root)
 
-        filename = (
-            f"{_sanitize_for_filename(project_name)} - {_sanitize_for_filename(suffix)}{self.file_extension}"
-            .replace("/", "-")
-        )
+        if timeline_name:
+            from export_naming import filename_for
+            filename = filename_for(timeline_name, self.file_extension)
+        else:
+            filename = (
+                f"{_sanitize_for_filename(project_name)} - {_sanitize_for_filename(suffix)}{self.file_extension}"
+                .replace("/", "-")
+            )
         file_path = os.path.join(exports_dir, filename)
         os.makedirs(exports_dir, exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
@@ -505,6 +511,7 @@ class PremiereXMLExporter(BaseExporter):
             filename=filename,
             format_name=self.format_name,
             platform_name=self.platform_name,
+            timeline_name=sequence_name,
             warnings=list(_PREMIERE_WARNINGS),
         )
 
@@ -522,6 +529,8 @@ class PremiereXMLExporter(BaseExporter):
         exports_dir,
         start_tc_frames=0,
         tc_format="NDF",  # interface parity; this target renders its own TC convention  # accepted for interface parity; Premiere uses 0-based file in/out
+        timeline_name=None,
+        event_name=None,
     ) -> ExportResult:
         # Same audio probe as export_markers — the story path used to skip it
         # and always built A1+A2, giving mono sources a phantom A2 clipitem.
@@ -531,7 +540,7 @@ class PremiereXMLExporter(BaseExporter):
             key=lambda m: m.get("_order", 0),
         )
 
-        sequence_name = f"{project_name.strip()} - {story_title.strip()}"
+        sequence_name = timeline_name or f"{project_name.strip()} - {story_title.strip()}"
         root = _build_sequence(
             sequence_name=sequence_name,
             markers=ordered,
@@ -545,10 +554,14 @@ class PremiereXMLExporter(BaseExporter):
         )
         content = _prettify(root)
 
-        filename = (
-            f"{_sanitize_for_filename(project_name)} - {_sanitize_for_filename(story_title)}{self.file_extension}"
-            .replace("/", "-")
-        )
+        if timeline_name:
+            from export_naming import filename_for
+            filename = filename_for(timeline_name, self.file_extension)
+        else:
+            filename = (
+                f"{_sanitize_for_filename(project_name)} - {_sanitize_for_filename(story_title)}{self.file_extension}"
+                .replace("/", "-")
+            )
         file_path = os.path.join(exports_dir, filename)
         os.makedirs(exports_dir, exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
@@ -559,5 +572,6 @@ class PremiereXMLExporter(BaseExporter):
             filename=filename,
             format_name=self.format_name,
             platform_name=self.platform_name,
+            timeline_name=sequence_name,
             warnings=list(_PREMIERE_WARNINGS),
         )

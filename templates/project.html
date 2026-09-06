@@ -31,17 +31,29 @@
             <button class="gear-btn" onclick="toggleGearMenu(event)" title="Settings" aria-label="Settings">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
+            {# Ordered by scope: this project's settings, then actions on its
+               media, then who else may read it, then the one destructive
+               action. Items ending in "..." open something; the others are
+               pickers or toggles and show their current stored value on the
+               right. Appearance lives on the Projects page (app wide). The
+               assistant extension inserts its item before #gearMenuDangerDivider. #}
             <div class="gear-menu" id="gearMenu">
-                <button class="gear-menu-item" onclick="closeGearMenu(); openAIModelModal();">AI Model</button>
-                {% if project.transcript %}
-                <button class="gear-menu-item" onclick="closeGearMenu(); showRetranscribe();">Retranscribe</button>
-                {% endif %}
-                <button class="gear-menu-item" onclick="closeGearMenu(); showOutputLanguage();">Output Language</button>
-                <button class="gear-menu-item" onclick="closeGearMenu(); toggleTheme();">
-                    <span class="gear-theme-label-dark">Light theme</span>
-                    <span class="gear-theme-label-light">Dark theme</span>
+                <button class="gear-menu-item" onclick="closeGearMenu(); openProjectDetails();">Project details...</button>
+                <button class="gear-menu-item" onclick="closeGearMenu(); showOutputLanguage();">
+                    <span>Output Language</span>
+                    <span class="gear-menu-value" id="gearOutputLanguageValue">{{ output_language_label }}</span>
+                </button>
+                <button class="gear-menu-item" onclick="closeGearMenu(); openAIModelModal();">
+                    <span>AI Model</span>
+                    <span class="gear-menu-value" id="gearAIModelValue">{{ ai_model_label }}</span>
                 </button>
                 <div class="gear-menu-divider"></div>
+                {% if project.transcript %}
+                <button class="gear-menu-item" onclick="closeGearMenu(); showRetranscribe();">Retranscribe...</button>
+                {% endif %}
+                <button class="gear-menu-item" onclick="closeGearMenu(); openRelinkMedia();">Relink media...</button>
+                <div class="gear-menu-divider"></div>
+                <div class="gear-menu-divider" id="gearMenuDangerDivider"></div>
                 <button class="gear-menu-item gear-menu-danger" onclick="closeGearMenu(); deleteProject();">Delete project</button>
             </div>
         </div>
@@ -1387,6 +1399,31 @@ document.addEventListener('click', (e) => {
         if (menu) menu.classList.remove('open');
     }
 });
+
+// Current values shown beside the gear menu's pickers. Re-read after the
+// AI Model modal or the Output Language panel saves, so the menu never shows
+// a default when the stored value differs.
+async function dozaRefreshGearValues() {
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/settings-summary`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const d = await res.json();
+        const ai = document.getElementById('gearAIModelValue');
+        const lang = document.getElementById('gearOutputLanguageValue');
+        if (ai && d.ai_model_label) ai.textContent = d.ai_model_label;
+        if (lang && d.output_language_label) lang.textContent = d.output_language_label;
+    } catch (e) { /* menu keeps the value rendered with the page */ }
+}
+window.dozaRefreshGearValues = dozaRefreshGearValues;
+
+// "Project details..." and "Relink media..." land in the next two changes;
+// until then the items say so instead of doing nothing.
+if (typeof window.openProjectDetails !== 'function') {
+    window.openProjectDetails = function () { showToast('Project details is not available yet'); };
+}
+if (typeof window.openRelinkMedia !== 'function') {
+    window.openRelinkMedia = function () { showToast('Relink media is not available yet'); };
+}
 
 function toggleGearMenu(e) {
     if (e) e.stopPropagation();
@@ -5964,6 +6001,7 @@ async function saveOutputLanguage() {
         if (!res.ok) throw new Error(data.error || 'Unknown error');
         PROJECT.output_language = data.output_language || value;
         showToast('Output language saved');
+        dozaRefreshGearValues();
         const notice = document.getElementById('outputLanguageNotice');
         if (data.reanalyze_hint && notice) {
             // Saved analysis was generated under a different language —

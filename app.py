@@ -1897,6 +1897,65 @@ def chat_prewarm(project_id):
     return jsonify({'ok': True})
 
 
+def _ai_model_label(project):
+    """Human label for the gear menu's AI Model value.
+
+    Local shows the Gemma variant by its plain name ("Gemma 4 4B (local)");
+    cloud shows the company. Never a model tag like gemma4:e4b. The provider
+    is the project's own ``ai_provider`` (missing means local).
+    """
+    provider = (project or {}).get('ai_provider') or 'ollama'
+    if provider == 'anthropic':
+        return 'Anthropic'
+    if provider == 'openai':
+        return 'OpenAI'
+    name = 'Gemma 4'
+    try:
+        from model_config import GEMMA4_VARIANTS, load_model_config
+        cfg = load_model_config() or {}
+        tier = cfg.get('tier')
+        variant = cfg.get('gemma4_variant')
+        desc = ''
+        if tier in GEMMA4_VARIANTS:
+            desc = GEMMA4_VARIANTS[tier][2]
+        else:
+            for _tag, _size, d in GEMMA4_VARIANTS.values():
+                if _tag == variant:
+                    desc = d
+                    break
+        if not desc:
+            desc = GEMMA4_VARIANTS['medium'][2]
+        name = desc.split('·')[0].split('(')[0].strip() or name
+    except Exception:
+        pass
+    return f'{name} (local)'
+
+
+def _output_language_label(project):
+    """Human label for the gear menu's Output Language value."""
+    from doza_assist.output_language import language_name
+    code = ((project or {}).get('output_language') or 'match').strip().lower()
+    if code in ('', 'match'):
+        return 'Match interview'
+    if code == 'auto':
+        return 'Auto'
+    return language_name(code) or code
+
+
+@app.route('/project/<project_id>/settings-summary', methods=['GET'])
+def project_settings_summary(project_id):
+    """The current values the project gear menu shows next to its items."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    return jsonify({
+        'ai_provider': project.get('ai_provider') or 'ollama',
+        'ai_model_label': _ai_model_label(project),
+        'output_language': project.get('output_language') or 'match',
+        'output_language_label': _output_language_label(project),
+    })
+
+
 @app.route('/project/<project_id>')
 def project_view(project_id):
     """View one or more projects. Accepts comma-separated IDs for multi-project workspace."""
@@ -2024,6 +2083,8 @@ def project_view(project_id):
 
     return render_template('project.html',
                            project=project,
+                           ai_model_label=_ai_model_label(project),
+                           output_language_label=_output_language_label(project),
                            projects=projects,
                            projects_meta=projects_meta,
                            all_projects=all_projects,

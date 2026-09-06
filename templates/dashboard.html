@@ -29,9 +29,13 @@
         <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         <button class="btn btn-sm" onclick="openAIModelModal()" title="AI model settings">AI Model</button>
-        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+        {# Appearance is app wide (one localStorage key for every page), so it
+           lives here rather than in a project's gear menu. The label shows the
+           current state; clicking switches it. #}
+        <button class="theme-toggle theme-toggle-labeled" onclick="toggleTheme()" title="Switch between dark and light appearance">
             <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
             <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+            <span class="theme-toggle-text">Appearance: <span id="appearanceState">Dark</span></span>
         </button>
     </div>
 </header>
@@ -39,16 +43,23 @@
 {% include '_ai_model_modal.html' %}
 
 <script>
+function _paintAppearanceState() {
+    const el = document.getElementById('appearanceState');
+    if (!el) return;
+    el.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? 'Light' : 'Dark';
+}
 function toggleTheme() {
     const current = document.documentElement.getAttribute('data-theme') || 'light';
     const next = current === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('doza-theme', next);
+    _paintAppearanceState();
 }
 (function() {
     const saved = localStorage.getItem('doza-theme');
     document.documentElement.setAttribute('data-theme', saved || 'dark');
 })();
+document.addEventListener('DOMContentLoaded', _paintAppearanceState);
 
 async function refreshActivePill() {
     try {

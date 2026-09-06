@@ -2576,6 +2576,23 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 .gear-menu-danger { color: var(--red); }
 .gear-menu-danger:hover { background: var(--red-dim); }
 
+/* Current value beside a gear menu picker (right aligned, muted). */
+.gear-menu { min-width: 260px; }
+.gear-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 1.25rem; }
+.gear-menu-value {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 150px;
+    text-align: right;
+}
+
+/* Projects page: labeled appearance switch (app wide). */
+.theme-toggle-labeled { width: auto; padding: 0 0.6rem; gap: 0.4rem; border-radius: 999px; }
+.theme-toggle-text { font-size: 0.78rem; color: var(--text-secondary); white-space: nowrap; }
+
 /* Theme-label: show the ACTION (what you'll switch to) in the menu. */
 .gear-theme-label-dark { display: none; }
 .gear-theme-label-light { display: inline; }

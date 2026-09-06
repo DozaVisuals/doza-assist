@@ -946,6 +946,13 @@
                         </label>
                     </div>
                 </div>
+                <div class="form-group export-stories" id="exportStories" style="margin-bottom: 1rem;">
+                    <label class="form-label">Story Builder sequences</label>
+                    <div class="export-categories" id="exportStoriesList">
+                        <span class="export-stories-note">No sequences yet. Build one in Story Builder and it appears here.</span>
+                    </div>
+                    <p class="export-stories-note">Each checked sequence exports as its own timeline, in story order, with the delivery chosen above.</p>
+                </div>
                 <div class="form-row" style="margin-bottom: 1rem;">
                     <div class="form-group">
                         <label class="form-label">Framerate</label>
@@ -1006,6 +1013,13 @@
                             <span>Full Transcript (<span id="exportCatTranscriptCount">{{ transcript_count }}</span>)</span>
                         </label>
                     </div>
+                </div>
+                <div class="form-group export-stories" id="exportStories" style="margin-bottom: 1rem;">
+                    <label class="form-label">Story Builder sequences</label>
+                    <div class="export-categories" id="exportStoriesList">
+                        <span class="export-stories-note">No sequences yet. Build one in Story Builder and it appears here.</span>
+                    </div>
+                    <p class="export-stories-note">Each checked sequence exports as its own timeline, in story order, with the settings below.</p>
                 </div>
                 <div class="form-row" style="margin-bottom: 1rem;">
                     <div class="form-group">
@@ -4966,9 +4980,15 @@ async function exportFCPXML(category) {
     const triggerBtn = _exportTriggerButton()
         || (category ? null : document.getElementById('exportFCPXMLBtn'));
     const types = category ? [category] : _collectExportCategories();
-    if (types.length === 0) {
-        showToast('Check at least one category to export.');
+    // Story Builder sequences checked on the Export tab export after the
+    // categories, one timeline each (see _exportCheckedStoryBuilds).
+    const storyPicks = category ? [] : _checkedStoryBuilds();
+    if (types.length === 0 && storyPicks.length === 0) {
+        showToast('Check at least one category or sequence to export.');
         return;
+    }
+    if (types.length === 0) {
+        return _exportCheckedStoryBuilds(storyPicks);
     }
     if (types.includes('labels') && labelSections.length === 0) {
         showToast('No clips to export. Uncheck "My Clips" or highlight some in the transcript first.');
@@ -5053,6 +5073,7 @@ async function exportFCPXML(category) {
     } finally {
         _endExport();
     }
+    if (storyPicks.length) await _exportCheckedStoryBuilds(storyPicks);
 }
 
 // Client twin of the server gate app.py _round_trip_fcp_only — keep the
@@ -5189,7 +5210,8 @@ function _collectRtSources() {
 function _refreshRtExportButtonState() {
     const btn = document.getElementById('rtExportBtn');
     if (!btn) return;
-    btn.disabled = _collectRtSources().length === 0;
+    btn.disabled = _collectRtSources().length === 0
+        && (typeof _checkedStoryBuilds !== 'function' || _checkedStoryBuilds().length === 0);
 }
 
 function _refreshExportCounts() {
@@ -5234,14 +5256,88 @@ function _refreshExportCounts() {
             if (count === 0) checkbox.checked = false;
         }
     }
+    // Story Builder sequences: list them once builds are known; fetch them
+    // once when the Story tab has not loaded them yet.
+    if (document.getElementById('exportStoriesList')) {
+        if (!_storyBuildsLoaded && typeof loadStoryBuilds === 'function') {
+            _storyBuildsLoaded = true;
+            loadStoryBuilds().then(_renderExportStories).catch(() => {});
+        } else {
+            _renderExportStories();
+        }
+    }
     // Nothing selectable beyond the transcript: point at the two places
     // selects come from instead of showing a row of disabled boxes.
     const emptyHint = document.getElementById('exportEmptyHint');
     if (emptyHint) {
         const selectable = clipCount + socialCount + storyCount + soundbiteCount;
-        emptyHint.style.display = selectable === 0 ? '' : 'none';
+        emptyHint.style.display = (selectable === 0 && _exportableStoryBuilds().length === 0) ? '' : 'none';
     }
     _refreshRtExportButtonState();
+}
+
+// ── Export tab: Story Builder sequences ──
+//
+// Every build with clips is listed under the categories with its own
+// checkbox. A checked sequence exports as its own timeline through the same
+// path the Story Builder tab's Export button uses (exportStoryBuild), so
+// round-trip projects keep their container and the Export tab's delivery
+// choice applies. Runs after the category export when both are checked.
+let _storyBuildsLoaded = false;   // set once /story/builds has been fetched
+
+function _exportableStoryBuilds() {
+    try {
+        return (Array.isArray(storyBuilds) ? storyBuilds : [])
+            .filter(b => b && Array.isArray(b.clips) && b.clips.length);
+    } catch (_) {
+        return [];  // storyBuilds not declared yet (early call)
+    }
+}
+
+function _renderExportStories() {
+    const list = document.getElementById('exportStoriesList');
+    if (!list) return;
+    const builds = _exportableStoryBuilds();
+    const checked = new Set(Array.from(list.querySelectorAll('.export-cat-story-build:checked'))
+        .map(el => String(el.dataset.buildId)));
+    if (!builds.length) {
+        list.innerHTML = '<span class="export-stories-note">No sequences yet. Build one in Story Builder and it appears here.</span>';
+        if (typeof _refreshRtExportButtonState === 'function') _refreshRtExportButtonState();
+        return;
+    }
+    list.innerHTML = builds.map(b => {
+        let secs = 0;
+        b.clips.forEach(c => {
+            const s = parseTc(c.start_time), e = parseTc(c.end_time);
+            if (e > s) secs += e - s;
+        });
+        const meta = `${b.clips.length} clip${b.clips.length === 1 ? '' : 's'}${secs ? ' · ' + formatDuration(secs) : ''}`;
+        const on = checked.has(String(b.id)) ? ' checked' : '';
+        return `<label class="export-category">
+            <input type="checkbox" class="export-cat-story-build" data-build-id="${escapeHtml(String(b.id))}"${on}>
+            <span>${escapeHtml(b.story_title || 'Untitled story')} <span class="export-story-meta">(${meta})</span></span>
+        </label>`;
+    }).join('');
+    list.querySelectorAll('.export-cat-story-build').forEach(el => {
+        el.addEventListener('change', () => {
+            if (typeof _refreshRtExportButtonState === 'function') _refreshRtExportButtonState();
+        });
+    });
+    if (typeof _refreshRtExportButtonState === 'function') _refreshRtExportButtonState();
+}
+
+function _checkedStoryBuilds() {
+    const ids = Array.from(document.querySelectorAll('#exportStoriesList .export-cat-story-build:checked'))
+        .map(el => String(el.dataset.buildId));
+    if (!ids.length) return [];
+    return _exportableStoryBuilds().filter(b => ids.includes(String(b.id)));
+}
+
+// One timeline per checked sequence, in list order.
+async function _exportCheckedStoryBuilds(builds) {
+    for (const build of builds) {
+        await exportStoryBuild(build, null);
+    }
 }
 
 // Round-trip is FCP-only by construction, so the delivery toggle picks
@@ -5250,9 +5346,15 @@ function _refreshExportCounts() {
 async function exportFCPXMLMulticam() {
     const triggerBtn = _exportTriggerButton() || document.getElementById('rtExportBtn');
     const sources = _collectRtSources();
-    if (sources.length === 0) {
-        showToast('Check at least one category to export.');
+    // Checked Story Builder sequences export after the categories, one
+    // timeline each, through the round-trip story path.
+    const storyPicks = _checkedStoryBuilds();
+    if (sources.length === 0 && storyPicks.length === 0) {
+        showToast('Check at least one category or sequence to export.');
         return;
+    }
+    if (sources.length === 0) {
+        return _exportCheckedStoryBuilds(storyPicks);
     }
     const modeBtn = document.querySelector('#rtOutputMode .export-mode-btn.is-active');
     const mode = modeBtn ? modeBtn.getAttribute('data-mode') : 'selects_project';
@@ -5311,6 +5413,7 @@ async function exportFCPXMLMulticam() {
     } finally {
         _endExport();
     }
+    if (storyPicks.length) await _exportCheckedStoryBuilds(storyPicks);
 }
 
 // ── Documents (Word / PDF / Excel) ──
@@ -6308,6 +6411,7 @@ async function loadStoryBuilds() {
         const res = await fetch(`/project/${PROJECT_ID}/story/builds`);
         const data = await res.json();
         storyBuilds = data.builds || [];
+        _storyBuildsLoaded = true;
         updateStoryBuildSelect();
         renderStoryList();
         if (storyBuilds.length > 0) {
@@ -6572,6 +6676,8 @@ async function deleteCurrentStoryBuild() {
 }
 
 function renderStoryList() {
+    // The Export tab lists the same builds; keep it current.
+    if (typeof _renderExportStories === 'function') _renderExportStories();
     const list = document.getElementById('storySidebarList');
     const empty = document.getElementById('storySidebarEmpty');
     if (!list) return;
@@ -6683,6 +6789,17 @@ function addAllStoryClips() {
 async function exportStoryFCPXML() {
     const triggerBtn = _exportTriggerButton();  // capture before any await
     const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build || !build.clips || build.clips.length === 0) {
+        showToast('No clips to export');
+        return;
+    }
+    return exportStoryBuild(build, triggerBtn);
+}
+
+// Export one Story Builder sequence as its own timeline. Used by the Story
+// Builder tab's Export button (current build) and by the Export tab's
+// "Story Builder sequences" checkboxes (any build).
+async function exportStoryBuild(build, triggerBtn) {
     if (!build || !build.clips || build.clips.length === 0) {
         showToast('No clips to export');
         return;

@@ -4851,3 +4851,17 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     overflow: hidden;
     text-overflow: ellipsis;
 }
+
+/* ── Export tab: Story Builder sequences (1.0.47) ── */
+
+.export-stories-note {
+    display: block;
+    margin: 0.35rem 0 0;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+.export-story-meta {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}

@@ -2086,6 +2086,56 @@ window.dozaAddClipToLibrary = function (clip) {
 };
 
 /**
+ * The words spoken between two times, read from the transcript's word
+ * spans on this page. Used by the Story Brief's per-moment Transcript
+ * disclosure (1.0.47). Returns '' when the range holds no words.
+ */
+window.dozaTranscriptForRange = function (startSec, endSec) {
+    const s = Number(startSec), e = Number(endSec);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return '';
+    if (typeof allWords === 'undefined' || !allWords || !allWords.length) return '';
+    const words = allWords.filter(w => {
+        const ws = parseFloat(w.dataset.s);
+        return ws >= s && ws < e;
+    });
+    return words.map(w => w.textContent).join('').replace(/\s+/g, ' ').trim();
+};
+
+/**
+ * The speaker who talks most in a time range, resolved through the
+ * project's speaker names, read from the transcript segments this page was
+ * rendered with. Lets a Story Brief built before speaker detection show
+ * the right name (1.0.47). Returns '' when the range has no segments.
+ */
+window.dozaResolveSpeaker = function (startSec, endSec) {
+    const s = Number(startSec), e = Number(endSec);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return '';
+    const proj = (typeof PROJECT !== 'undefined' && PROJECT) ? PROJECT : null;
+    const segs = (proj && proj.transcript && Array.isArray(proj.transcript.segments))
+        ? proj.transcript.segments : [];
+    if (!segs.length) return '';
+    const names = (proj && proj.speaker_names && typeof proj.speaker_names === 'object') ? proj.speaker_names : {};
+    const talk = new Map();
+    for (const seg of segs) {
+        const ss = Number(seg.start), se = Number(seg.end);
+        if (!Number.isFinite(ss)) continue;
+        const segEnd = Number.isFinite(se) && se > ss ? se : ss + 0.01;
+        if (segEnd <= s) continue;
+        if (ss >= e) break;
+        const overlap = Math.min(segEnd, e) - Math.max(ss, s);
+        if (overlap <= 0) continue;
+        const label = String(seg.speaker || '').trim();
+        if (!label) continue;
+        talk.set(label, (talk.get(label) || 0) + overlap);
+    }
+    if (!talk.size) return '';
+    let best = '', bestDur = -1;
+    talk.forEach((dur, label) => { if (dur > bestDur) { bestDur = dur; best = label; } });
+    const mapped = names[best];
+    return (typeof mapped === 'string' && mapped.trim()) ? mapped.trim() : best;
+};
+
+/**
  * Open the Clips tab and flash the given clips (labelSections ids), the
  * way the Collection page's View action does.
  */

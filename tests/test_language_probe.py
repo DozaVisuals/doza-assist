@@ -40,7 +40,7 @@ def test_read_wav_float32_mono_and_stereo(tmp_path):
 def test_probe_reports_confident_language_only(tmp_path):
     wav = _wav(tmp_path / 'audio.wav')
     out = lp.probe_language(wav, None, lambda head: ('en', 0.97))
-    assert out == {'language': 'en', 'probability': 0.97, 'error': None, 'method': 'whisper-lid'}
+    assert (out['language'], out['probability'], out['error'], out['method']) == ('en', 0.97, None, 'whisper-lid')
     out = lp.probe_language(wav, None, lambda head: ('no', 0.88))
     assert out['language'] == 'no'
     out = lp.probe_language(wav, None, lambda head: ('de', 0.31))   # not confident: no verdict
@@ -56,19 +56,71 @@ def test_probe_reports_confident_language_only(tmp_path):
     assert out['error'] == 'no audio to probe'
 
 
-def test_probe_trims_a_head_and_removes_it(tmp_path, monkeypatch):
+def test_probe_trims_from_first_speech_and_removes_the_head(tmp_path, monkeypatch):
     wav = _wav(tmp_path / 'audio.wav')
     made = []
+    got = {}
 
-    def fake_trim(audio_path, ffmpeg, seconds=lp.PROBE_SECONDS):
-        p = tmp_path / 'head.wav'
-        p.write_bytes(b'x')
-        made.append(str(p))
-        return str(p)
+    def fake_trim(audio_path, ffmpeg, seconds=lp.PROBE_SECONDS, offset=0.0):
+        got['offset'] = offset
+        p = _wav(tmp_path / 'head.wav', 1.0)
+        made.append(p)
+        return p
     monkeypatch.setattr(lp, 'trim_head', fake_trim)
+    monkeypatch.setattr(lp, 'first_speech_offset', lambda a, f=None, search_seconds=600: 42.5)
     seen = []
     out = lp.probe_language(wav, '/usr/bin/true', lambda head: seen.append(head) or ('en', 0.9))
-    assert out['language'] == 'en' and seen == made and not os.path.exists(made[0])
+    assert out['language'] == 'en' and out['offset'] == 42.5 and got['offset'] == 42.5
+    assert seen == made and not os.path.exists(made[0])
+
+
+def test_silent_openings_give_no_verdict(tmp_path, monkeypatch):
+    wav = _wav(tmp_path / 'audio.wav')
+    # the whole searched span is silent: nothing to listen to
+    monkeypatch.setattr(lp, 'first_speech_offset', lambda a, f=None, search_seconds=600: -1.0)
+    called = []
+    out = lp.probe_language(wav, '/usr/bin/true', lambda head: called.append(1) or ('en', 0.99))
+    assert out['language'] is None and 'no speech' in out['error'] and called == []
+    # a window that is digitally silent is too quiet to judge
+    monkeypatch.setattr(lp, 'first_speech_offset', lambda a, f=None, search_seconds=600: 0.0)
+    silent = tmp_path / 'silent.wav'
+    with wave.open(str(silent), 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0' * 32000)
+    monkeypatch.setattr(lp, 'trim_head', lambda a, f, seconds=30, offset=0.0: str(silent))
+    out = lp.probe_language(wav, '/usr/bin/true', lambda head: called.append(1) or ('en', 0.99))
+    assert out['language'] is None and 'too quiet' in out['error'] and called == []
+    assert out['peak_dbfs'] is None
+
+
+def _wav_with_pattern(path, pattern, rate=16000):
+    """pattern: list of (seconds, amplitude) stretches."""
+    with wave.open(str(path), 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+        for seconds, amp in pattern:
+            w.writeframes(struct.pack('<h', amp) * int(seconds * rate))
+    return str(path)
+
+
+def test_first_speech_offset_in_pure_python(tmp_path):
+    # opens on sound
+    assert lp.first_speech_offset(_wav_with_pattern(tmp_path / 'a.wav', [(3, 3000)])) == 0.0
+    # 8 s of silence, a 0.3 s click, then talking: the click is not a run
+    off = lp.first_speech_offset(_wav_with_pattern(tmp_path / 'b.wav', [(8, 0), (0.3, 3000), (2, 0), (5, 3000)]))
+    assert 10.0 <= off <= 10.5
+    # room tone under the threshold counts as silence
+    off = lp.first_speech_offset(_wav_with_pattern(tmp_path / 'c.wav', [(5, 200), (5, 4000)]))
+    assert 4.8 <= off <= 5.2
+    # nothing but silence in the searched span
+    assert lp.first_speech_offset(_wav_with_pattern(tmp_path / 'd.wav', [(20, 0)])) == -1.0
+    # a searched span shorter than the leading silence
+    assert lp.first_speech_offset(_wav_with_pattern(tmp_path / 'e.wav', [(20, 0), (5, 4000)]), search_seconds=10) == -1.0
+    # unreadable file: fall back to the top
+    (tmp_path / 'x.wav').write_bytes(b'not a wav')
+    assert lp.first_speech_offset(str(tmp_path / 'x.wav')) == 0.0
+
+
+def test_peak_dbfs(tmp_path):
+    assert lp.peak_dbfs(_wav(tmp_path / 'tone.wav', 0.2)) == pytest.approx(20 * __import__('math').log10(1000 / 32768), abs=0.01)
 
 
 def test_load_lid_model_prefers_cached_then_smallest(monkeypatch):

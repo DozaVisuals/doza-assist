@@ -429,7 +429,7 @@
 
         <!-- Summary (from AI analysis) -->
         {% if project.analysis and project.analysis.summary %}
-        <div class="left-section sidebar-block sidebar-story">
+        <div class="left-section sidebar-block sidebar-story" id="sidebarSummary">
             <div class="card-title">Summary</div>
             {% if project.analysis.suggested_title %}
             <div class="sidebar-story-title">{{ project.analysis.suggested_title }}</div>
@@ -847,8 +847,8 @@
             </div>
 
             <!-- Empty state -->
-            <div class="story-empty" id="storyEmpty">
-                <div class="story-empty-text">Send an arc from Story Brief, or describe the story you want above.</div>
+            <div class="story-empty" id="storyEmpty" ondragover="storySeqDragOver(event)" ondragleave="storySeqDragLeave(event)" ondrop="storySeqDrop(event)">
+                <div class="story-empty-text">Send an arc from Story Brief, drag a clip in from the left, or describe the story you want above.</div>
                 <div class="empty-state-actions">
                     <button class="btn btn-sm" type="button" data-requires-tab="brief" onclick="switchTab('brief')">Go to Story Brief</button>
                 </div>
@@ -873,7 +873,7 @@
             </div>
 
             <!-- Sequence container (vertical timeline) -->
-            <div class="story-sequence" id="storySequence" style="display:none;">
+            <div class="story-sequence" id="storySequence" style="display:none;" ondragover="storySeqDragOver(event)" ondragleave="storySeqDragLeave(event)" ondrop="storySeqDrop(event)">
             </div>
         </div>
     </div>
@@ -1446,6 +1446,12 @@ function switchTab(tab) {
     const speakerSec = document.getElementById('speakerSection');
     if (speakerSec) {
         speakerSec.style.display = (tab === 'story') ? 'none' : '';
+    }
+    // Story Builder: the left column is for stories and clips; the analysis
+    // summary comes back on every other tab.
+    const summaryBlock = document.getElementById('sidebarSummary');
+    if (summaryBlock) {
+        summaryBlock.style.display = (tab === 'story') ? 'none' : '';
     }
 
     // Load story builds when switching to story tab
@@ -6593,7 +6599,7 @@ function storyDragStart(e) {
 
 function storyDragOver(e) {
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
+    e.dataTransfer.dropEffect = (storyLibDragClipId !== null) ? 'copy' : 'move';
 }
 
 function storyDragEnter(e) {
@@ -6610,6 +6616,20 @@ function storyDragLeave(e) {
 function storyDrop(e) {
     e.preventDefault();
     const card = e.target.closest('.story-card');
+    // A clip dragged in from the sidebar library lands before or after the
+    // card it was dropped on (by cursor position), not as a reorder.
+    if (storyLibDragClipId !== null) {
+        e.stopPropagation();
+        if (card) card.classList.remove('story-drag-over');
+        let index = card ? parseInt(card.dataset.idx, 10) : 0;
+        if (card) {
+            const r = card.getBoundingClientRect();
+            if (e.clientY > r.top + r.height / 2) index += 1;
+        }
+        insertLibraryClipIntoStory(storyLibDragClipId, index);
+        storyLibDragClipId = null;
+        return;
+    }
     if (!card || !storyDragItem || card === storyDragItem) return;
     card.classList.remove('story-drag-over');
 
@@ -6634,6 +6654,100 @@ function storyDragEnd(e) {
     e.currentTarget.classList.remove('story-dragging');
     document.querySelectorAll('.story-drag-over').forEach(el => el.classList.remove('story-drag-over'));
     storyDragItem = null;
+}
+
+// ── Drag clips from the sidebar library into the story (1.0.47) ──
+//
+// A library card (renderStoryClipLibrary) is draggable; the sequence, its
+// cards and the empty state accept the drop. Dropping on a card inserts
+// before or after it by cursor position, dropping in the gaps or on the
+// empty state appends, and a project with no story yet gets one started
+// from the dropped clip.
+let storyLibDragClipId = null;
+
+function storyLibDragStart(e) {
+    const item = e.currentTarget;
+    storyLibDragClipId = parseInt(item.dataset.clipId, 10);
+    item.classList.add('story-clip-dragging');
+    e.dataTransfer.effectAllowed = 'copy';
+    try {
+        e.dataTransfer.setData('application/x-doza-clip', String(storyLibDragClipId));
+        e.dataTransfer.setData('text/plain', String(storyLibDragClipId));
+    } catch (_) { /* older WebKit */ }
+    ['storySequence', 'storyEmpty'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('story-drop-target');
+    });
+}
+
+function storyLibDragEnd(e) {
+    e.currentTarget.classList.remove('story-clip-dragging');
+    storyLibDragClipId = null;
+    document.querySelectorAll('.story-drop-target').forEach(el => el.classList.remove('story-drop-target', 'story-drop-over'));
+    document.querySelectorAll('.story-drag-over').forEach(el => el.classList.remove('story-drag-over'));
+}
+
+function storySeqDragOver(e) {
+    if (storyLibDragClipId === null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    e.currentTarget.classList.add('story-drop-over');
+}
+
+function storySeqDragLeave(e) {
+    e.currentTarget.classList.remove('story-drop-over');
+}
+
+function storySeqDrop(e) {
+    if (storyLibDragClipId === null) return;
+    e.preventDefault();
+    e.currentTarget.classList.remove('story-drop-over');
+    // Before the first card whose middle is below the cursor, else at the end.
+    const cards = Array.from(document.querySelectorAll('#storySequence .story-card'));
+    let index = cards.length;
+    for (let i = 0; i < cards.length; i++) {
+        const r = cards[i].getBoundingClientRect();
+        if (e.clientY < r.top + r.height / 2) { index = i; break; }
+    }
+    insertLibraryClipIntoStory(storyLibDragClipId, index);
+    storyLibDragClipId = null;
+}
+
+function insertLibraryClipIntoStory(clipId, index) {
+    const clip = labelSections.find(s => s.id === clipId);
+    if (!clip) return;
+    let build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build) {
+        // No story yet: start one from this clip. PUT on the builds route
+        // upserts, so the new id persists on the first save.
+        build = {
+            id: 'manual_' + Date.now(),
+            story_title: 'New story',
+            reasoning: '',
+            clips: [],
+            created_at: new Date().toISOString(),
+        };
+        storyBuilds.push(build);
+        currentBuildId = build.id;
+        updateStoryBuildSelect();
+        renderStoryList();
+    }
+    const words = allWords.filter(w => parseFloat(w.dataset.s) >= clip.start && parseFloat(w.dataset.s) < clip.end);
+    const entry = {
+        order: 0,
+        title: clip.text || 'Clip',
+        start_time: fmtTime(clip.start),
+        end_time: fmtTime(clip.end),
+        transcript: words.map(w => w.textContent).join('').replace(/\s+/g, ' ').trim(),
+        editorial_note: 'Added from the clip library',
+    };
+    if (clip.speaker) entry.speaker = clip.speaker;
+    const at = Math.max(0, Math.min(index, build.clips.length));
+    build.clips.splice(at, 0, entry);
+    build.clips.forEach((c, i) => c.order = i + 1);
+    renderStorySequence(build);
+    saveStoryBuild(build);
+    showToast(`Added "${entry.title}" to the story`);
 }
 
 function removeStoryClip(idx) {
@@ -7338,16 +7452,29 @@ function renderStoryClipLibrary() {
     }
     empty.style.display = 'none';
 
+    // Fuller cards than the old one-line rows: title, speaker, range and a
+    // short excerpt, draggable straight into the story sequence (1.0.47).
     list.innerHTML = sorted.map(clip => {
         const dur = Math.round(clip.end - clip.start);
         const safeTitle = escapeHtml(clip.text || 'Untitled');
-        return `<div class="story-clip-item" data-start="${clip.start}" data-end="${clip.end}">
-            <button class="story-clip-play" onclick="jumpTo(${clip.start})">&#9654;</button>
+        const words = allWords.filter(w => parseFloat(w.dataset.s) >= clip.start && parseFloat(w.dataset.s) < clip.end);
+        let excerpt = words.map(w => w.textContent).join('').replace(/\s+/g, ' ').trim();
+        if (excerpt.length > 180) excerpt = excerpt.substring(0, 180) + '...';
+        const speaker = clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : '';
+        return `<div class="story-clip-item" draggable="true" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}"
+                     ondragstart="storyLibDragStart(event)" ondragend="storyLibDragEnd(event)" title="Drag into the story, or use + Story">
+            <span class="story-clip-grip" aria-hidden="true">
+                <svg viewBox="0 0 10 16" fill="currentColor" width="8" height="13"><circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="3" cy="6" r="1.2"/><circle cx="7" cy="6" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="14" r="1.2"/><circle cx="7" cy="14" r="1.2"/></svg>
+            </span>
             <div class="story-clip-info">
-                <span class="story-clip-title">${safeTitle}</span>
-                <span class="story-clip-tc">${fmtDisplayTC(clip.start)} – ${fmtDisplayTC(clip.end)} &middot; ${dur}s</span>
+                <div class="story-clip-head">
+                    <button class="story-clip-play" onclick="jumpTo(${clip.start})" title="Play">&#9654;</button>
+                    <span class="story-clip-title">${safeTitle}</span>
+                </div>
+                <span class="story-clip-tc">${fmtDisplayTC(clip.start)} – ${fmtDisplayTC(clip.end)} &middot; ${dur}s ${speaker}</span>
+                ${excerpt ? `<div class="story-clip-excerpt">${escapeHtml(excerpt)}</div>` : ''}
             </div>
-            <button class="cc-add story-clip-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}',this)">+ Story</button>
+            <button class="cc-add story-clip-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}',this)" title="Add to the end of the current story">+ Story</button>
         </div>`;
     }).join('');
 }

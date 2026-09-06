@@ -4865,3 +4865,68 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     font-size: 0.78rem;
     color: var(--text-muted);
 }
+
+/* ── Story Builder sidebar: draggable clip cards (1.0.47) ── */
+
+.story-clip-library-list {
+    max-height: none;
+    overflow: visible;
+    gap: 6px;
+}
+.story-clip-item {
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    cursor: grab;
+}
+.story-clip-item:active { cursor: grabbing; }
+.story-clip-item.story-clip-dragging { opacity: 0.45; }
+.story-clip-grip {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    padding-top: 3px;
+    color: var(--text-muted);
+}
+.story-clip-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+.story-clip-title {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.3;
+}
+.story-clip-tc {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.story-clip-excerpt {
+    margin-top: 3px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* Drop targets while a library clip is being dragged. */
+.story-empty.story-drop-target,
+.story-sequence.story-drop-target {
+    outline: 1px dashed var(--border-light);
+    outline-offset: 4px;
+    border-radius: var(--radius);
+}
+.story-empty.story-drop-over,
+.story-sequence.story-drop-over {
+    outline-color: var(--accent);
+    background: var(--accent-dim);
+}

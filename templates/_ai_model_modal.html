@@ -26,8 +26,17 @@
             <button class="ai-modal-close" onclick="closeAIModelModal()" aria-label="Close">×</button>
         </div>
 
-        <div class="ai-provider-section">
+        <div class="ai-provider-section" id="aiProviderSection">
             <p class="ai-provider-desc" id="aiModalCollectionNote" style="display:none;"></p>
+            {# AI setup (dashboard) only: keys sit under the local model, and
+               a provider is picked to reveal its key field. #}
+            <div class="ai-setup-keys" id="aiSetupKeys" style="display:none;">
+                <p class="ai-provider-desc">API keys are optional and saved once for the whole app. A key alone changes nothing: each project chooses where its AI runs from its own AI Model menu.</p>
+                <div class="ai-provider-tabs" role="group" aria-label="API key provider">
+                    <button type="button" class="ai-provider-tab" data-setup-key="anthropic" onclick="setupChooseKey('anthropic')">Anthropic (Claude)</button>
+                    <button type="button" class="ai-provider-tab" data-setup-key="openai" onclick="setupChooseKey('openai')">OpenAI (ChatGPT)</button>
+                </div>
+            </div>
             <div class="ai-provider-tabs" id="aiProviderTabs" role="radiogroup" aria-label="AI provider">
                 <button type="button" class="ai-provider-tab" data-provider="ollama"    onclick="selectProvider('ollama')"    role="radio">
                     Local (Ollama)
@@ -145,15 +154,44 @@ function _providerEndpoint() {
     return null;
 }
 
+// Setup mode chosen key pane ('' = none shown yet).
+let _aiSetupKey = '';
+
+function _orderSections(localFirst) {
+    // AI setup lists the local model first and the keys under it; the
+    // project and collection choosers keep the provider tabs on top.
+    const provider = document.getElementById('aiProviderSection');
+    const local = document.getElementById('aiOllamaSection');
+    if (!provider || !local || !provider.parentNode) return;
+    const parent = provider.parentNode;
+    if (localFirst && local.nextElementSibling !== provider) parent.insertBefore(local, provider);
+    if (!localFirst && provider.nextElementSibling !== local) parent.insertBefore(provider, local);
+}
+
+function setupChooseKey(name) {
+    _aiSetupKey = (name === _aiSetupKey) ? '' : name;
+    document.querySelectorAll('[data-setup-key]').forEach(b => {
+        b.classList.toggle('is-active', b.getAttribute('data-setup-key') === _aiSetupKey);
+    });
+    const a = document.getElementById('aiProviderPaneAnthropic');
+    const o = document.getElementById('aiProviderPaneOpenai');
+    if (a) a.style.display = _aiSetupKey === 'anthropic' ? '' : 'none';
+    if (o) o.style.display = _aiSetupKey === 'openai' ? '' : 'none';
+}
+
 function _applyModalMode() {
     const title = document.getElementById('aiModalTitle');
     const sub = document.getElementById('aiModalSubtitle');
     const tabs = document.getElementById('aiProviderTabs');
     const note = document.getElementById('aiModalCollectionNote');
+    const setupKeys = document.getElementById('aiSetupKeys');
     if (note) note.style.display = 'none';
+    if (setupKeys) setupKeys.style.display = _aiModalMode === 'setup' ? '' : 'none';
+    _orderSections(_aiModalMode === 'setup');
     if (_aiModalMode === 'setup') {
+        _aiSetupKey = '';
         if (title) title.textContent = 'AI setup';
-        if (sub) sub.textContent = 'API keys and the local model. Where AI runs is chosen per project, from each project\'s AI Model menu.';
+        if (sub) sub.textContent = 'The local model on this Mac, and optional API keys. Where AI runs is chosen per project, from each project\'s AI Model menu.';
         if (tabs) tabs.style.display = 'none';
     } else if (_aiModalMode === 'collection') {
         if (title) title.textContent = 'AI Model for this collection';
@@ -307,12 +345,16 @@ function _renderProviderTabs(active) {
     const o = document.getElementById('aiProviderPaneOpenai');
     const localSection = document.getElementById('aiOllamaSection');
     if (_aiModalMode === 'setup') {
-        // Dashboard: no chooser. Both key panes and the local model size,
-        // nothing marked "Currently active" because nothing is chosen here.
+        // Dashboard: no chooser. The local model first; a key pane appears
+        // only once its provider is picked below. Nothing is marked
+        // "Currently active" because nothing is chosen here.
         if (lo) lo.style.display = 'none';
-        if (a) a.style.display = '';
-        if (o) o.style.display = '';
+        if (a) a.style.display = _aiSetupKey === 'anthropic' ? '' : 'none';
+        if (o) o.style.display = _aiSetupKey === 'openai' ? '' : 'none';
         if (localSection) localSection.style.display = '';
+        document.querySelectorAll('[data-setup-key]').forEach(b => {
+            b.classList.toggle('is-active', b.getAttribute('data-setup-key') === _aiSetupKey);
+        });
         document.querySelectorAll('.ai-provider-active-banner').forEach(b => { b.style.display = 'none'; });
         return;
     }

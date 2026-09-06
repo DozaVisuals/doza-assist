@@ -2590,8 +2590,15 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 }
 
 /* Projects page: labeled appearance switch (app wide). */
-.theme-toggle-labeled { width: auto; padding: 0 0.6rem; gap: 0.4rem; border-radius: 999px; }
-.theme-toggle-text { font-size: 0.78rem; color: var(--text-secondary); white-space: nowrap; }
+/* Header buttons: a <button> defaults to line-height normal while an <a>
+   inherits the page's, so "AI setup" rendered shorter than "My Style". */
+.app-header .btn { line-height: 1.6; }
+.theme-toggle-labeled { width: auto; height: 32px; padding: 0 0.6rem; gap: 0.4rem; border-radius: 999px; font-family: var(--font); }
+.theme-toggle-text { font-size: 0.78rem; color: var(--text-secondary); white-space: nowrap; font-family: var(--font); }
+
+/* AI setup (dashboard): the optional key chooser under the local model. */
+.ai-setup-keys { margin-top: 1rem; }
+.ai-setup-keys .ai-provider-tabs { margin-bottom: 0.75rem; }
 
 /* Theme-label: show the ACTION (what you'll switch to) in the menu. */
 .gear-theme-label-dark { display: none; }

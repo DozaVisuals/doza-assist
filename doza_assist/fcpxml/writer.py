@@ -71,6 +71,10 @@ class Select:
     note: str = ""
     kind: str = "standard"        # 'strong' | 'standard' | 'question'
     speaker: str = ""
+    # Verbatim transcript of the select's range, speaker-labelled per turn
+    # (export_notes.verbatim_for_range). Goes under the short note in the
+    # clip's <note>, never in a marker's note attribute.
+    verbatim: str = ""
 
     @property
     def duration_seconds(self) -> float:
@@ -392,8 +396,55 @@ def _iter_selects(
 
 
 def _format_suffix(original: Optional[str], suffix: str) -> str:
-    base = (original or "Doza Project").strip()
+    base = (original or "Interview").strip()
     return f"{base} - {suffix}"
+
+
+PROVENANCE_KEYWORD = "Doza Assist"
+
+# Children that must follow the marker items in every clip content model
+# (asset-clip, sync-clip, mc-clip, ref-clip, clip): a keyword goes before
+# the first of these, after everything anchored.
+_AFTER_MARKER_TAGS = (
+    "audio-channel-source", "audio-role-source", "sync-source",
+    "filter-video", "filter-video-mask", "filter-audio", "metadata",
+)
+
+
+def _clip_note_text(select: Select) -> str:
+    """Line 1: short note plus " — Speaker"; blank line; verbatim transcript."""
+    note_text = scrub_xml_text(select.note)
+    speaker = scrub_xml_text(select.speaker)
+    verbatim = scrub_xml_text(getattr(select, "verbatim", "") or "")
+    try:
+        from export_notes import compose_clip_note
+        return compose_clip_note(note_text, speaker, verbatim)
+    except Exception:
+        if speaker:
+            note_text = f"{note_text} — {speaker}" if note_text else speaker
+        return f"{note_text}\n\n{verbatim}" if (note_text and verbatim) else (note_text or verbatim)
+
+
+def _add_provenance_keyword(clip_el: etree._Element) -> None:
+    """One ``<keyword value="Doza Assist">`` spanning the clip, placed after
+    the anchored items and before audio-channel-source / filters, the same
+    ordering the DTD requires of every marker item. Never duplicated."""
+    for kw in clip_el.findall("keyword"):
+        if kw.get("value") == PROVENANCE_KEYWORD:
+            return
+    kw = etree.Element("keyword")
+    kw.set("start", clip_el.get("start") or "0s")
+    kw.set("duration", clip_el.get("duration") or "0s")
+    kw.set("value", PROVENANCE_KEYWORD)
+    insert_at = None
+    for idx, child in enumerate(clip_el):
+        if child.tag in _AFTER_MARKER_TAGS:
+            insert_at = idx
+            break
+    if insert_at is None:
+        clip_el.append(kw)
+    else:
+        clip_el.insert(insert_at, kw)
 
 
 def _snap_clip_times(
@@ -476,10 +527,7 @@ def _build_mc_clip_node(
     # Violating this order makes FCP silently drop the mc-source overrides
     # and fall back to the multicam's default angle — which manifests as
     # "audio but no video" on import.
-    note_text = scrub_xml_text(select.note)
-    speaker = scrub_xml_text(select.speaker)
-    if speaker:
-        note_text = f"{note_text} — {speaker}" if note_text else speaker
+    note_text = _clip_note_text(select)
     if note_text:
         note = etree.SubElement(mc, "note")
         note.text = note_text
@@ -496,6 +544,9 @@ def _build_mc_clip_node(
         sub.set("angleID", segment.audio_source.active_audio_angle_id)
         sub.set("srcEnable", "audio")
 
+    # Provenance keyword: after mc-source (a marker item comes after the
+    # sources and anchored items in the mc-clip content model).
+    _add_provenance_keyword(mc)
     return mc
 
 
@@ -691,11 +742,8 @@ def _build_copied_clip_node(
     # ids FCP rejects with "DTD validation failed. ID ts1 already defined".
     _uniquify_text_style_defs(new_clip, f"_s{copy_seq}")
 
-    note_text = scrub_xml_text(select.note)
-    speaker = scrub_xml_text(select.speaker)
-    if speaker:
-        note_text = f"{note_text} — {speaker}" if note_text else speaker
-    _set_clip_note(new_clip, note_text)
+    _set_clip_note(new_clip, _clip_note_text(select))
+    _add_provenance_keyword(new_clip)
 
     return new_clip
 
@@ -820,8 +868,10 @@ def write_selects_as_new_project(
             )
         raise WriterError("no selects provided")
 
-    project_title = project_name or _format_suffix(parsed.project_name, "Doza Selects")
-    event_title = event_name or (parsed.event_name or "Doza Selects")
+    # Callers (app.py) pass the "{Project} – Selects N" name; the fallback
+    # keeps a name without "Doza" in it. The event is the editor's own.
+    project_title = project_name or _format_suffix(parsed.project_name, "Selects")
+    event_title = event_name or (parsed.event_name or "Doza Assist")
     zero_len_count = len(skipped)   # zero-length drops from _iter_selects above
     spine_el, total_duration = _build_selects_spine(parsed, selects, skipped=skipped)
     if skipped_out is not None:
@@ -925,7 +975,8 @@ def write_markers_on_timeline(
     parsed: ParsedFCPXML,
     selects: Iterable[Select],
     *,
-    project_name_suffix: str = "Doza Notes",
+    project_name_suffix: str = "Markers",
+    project_name: Optional[str] = None,
     skipped_out: Optional[List[Select]] = None,
 ) -> bytes:
     """Mode B — copy the original structure and inject markers at each select.
@@ -955,8 +1006,11 @@ def write_markers_on_timeline(
     # Rename the project so the marker-annotated copy is obviously distinct
     # from the original when both appear in the FCP event browser.
     project_el = library.find(".//project")
-    if project_el is not None and project_name_suffix:
-        original = project_el.get("name") or "Doza Project"
+    if project_el is not None and project_name:
+        # The caller's full timeline name ("{Project} – Markers N").
+        project_el.set("name", project_name)
+    elif project_el is not None and project_name_suffix:
+        original = project_el.get("name") or "Interview"
         project_el.set("name", _format_suffix(original, project_name_suffix))
 
     spine = library.find(".//sequence/spine")

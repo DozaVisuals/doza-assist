@@ -235,7 +235,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                             {% endfor %}
                         </select>
                         <p id="languageHint" style="display:none; font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
-                            <span id="languageHintAuto" style="display:none;">Auto-detect checks the first minute: English goes through the fast engine, other languages through Whisper. For English, choosing English is fastest. </span>
+                            <span id="languageHintAuto" style="display:none;">Auto-detect uses the Whisper engine to identify the language from the first 30 seconds (installed once). English then goes through the fast engine, other languages through Whisper. For English, choosing English is fastest. </span>
                             Non-English uses the Whisper engine. If it isn't installed yet, you'll be prompted to add it (~200&nbsp;MB, one time) when transcription starts.
                         </p>
                     </div>

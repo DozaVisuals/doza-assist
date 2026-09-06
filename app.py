@@ -2994,23 +2994,37 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
     progress_cb = _make_transcribe_progress_writer(project_id)
 
     def _resolve_auto_language(lang):
-        """Auto-detect: if the first 45 s sound English, route the whole file
-        through Parakeet by transcribing as 'en'. Anything else (or any
-        failure) keeps 'auto', which is Whisper's own detection as before."""
+        """Auto-detect: identify the language of the first 30 s with Whisper.
+        English routes the whole file through Parakeet ('en'); another
+        language is handed to Whisper explicitly; no verdict, or Whisper not
+        installed, keeps 'auto' (the old behavior, install prompt included).
+        """
         if lang != 'auto':
             return lang
         try:
             import language_probe
-            from transcribe import _find_ffmpeg, _transcribe_parakeet, extract_audio
+            from transcribe import _find_ffmpeg, extract_audio
+            if not language_probe.whisper_available():
+                print(f"[language probe] {project_id}: Whisper not installed, keeping auto", flush=True)
+                update_project(project_id, {'language_probe': {'language': None, 'probability': 0.0,
+                                                               'error': 'whisper not installed',
+                                                               'method': 'whisper-lid'}})
+                return 'auto'
             progress_cb({"phase": "detect_language", "pct": 2})
             wav = extract_audio(source_path, project_dir=project_dir, audio_channel=audio_channel)
+            try:
+                from transcribe import _whisper_cache as _lid_cache
+            except Exception:
+                _lid_cache = None
             outcome = language_probe.probe_language(
-                wav, _find_ffmpeg(), lambda head: _transcribe_parakeet(head, None, progress_cb=None))
+                wav, _find_ffmpeg(),
+                lambda head: language_probe.whisper_identify(head, _lid_cache))
             print(f"[language probe] {project_id}: {outcome}", flush=True)
             update_project(project_id, {'language_probe': outcome})
-            if outcome.get('language') == 'en':
-                update_project(project_id, {'detected_language': 'en'})
-                return 'en'
+            code = outcome.get('language')
+            if code:
+                update_project(project_id, {'detected_language': code})
+                return code
         except Exception as e:
             print(f"[language probe] {project_id} skipped: {e}", flush=True)
         return 'auto'

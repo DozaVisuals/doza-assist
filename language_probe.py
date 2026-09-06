@@ -4,138 +4,128 @@ Only ``language == 'en'`` takes the fast Parakeet path; Auto-detect used to
 go straight to Whisper, so an editor who picked Auto-detect once (the picker
 was sticky) pushed every English interview through the slow engine.
 
-The probe: transcribe the first PROBE_SECONDS of the extracted audio with
-Parakeet and score how English the words are (share of tokens found in a
-list of common English words). English speech scores well above the
-threshold; another language pushed through an English-only model comes out
-as near-gibberish and scores far below it. English routes the whole file to
-Parakeet; anything else, or any failure, keeps Auto-detect and Whisper
-exactly as before. transcribe.py is not touched: the job in app.py calls
-this before it picks the engine.
+The probe asks Whisper's language identification about the first 30 seconds
+of the extracted audio. English routes the whole file to Parakeet; another
+language is passed to Whisper explicitly (better than letting it guess per
+window); no verdict, or Whisper not installed, keeps Auto-detect exactly as
+before, including the install prompt.
+
+A first version scored Parakeet's own output for "Englishness". That was
+wrong: Parakeet is an English-only model and turns Norwegian or German speech
+into fluent, invented English sentences, so the score passed. Only a real
+language identifier can make this call. transcribe.py is not touched: the
+job in app.py calls this before it picks the engine.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
-import re
 import subprocess
 import tempfile
+import wave
 from typing import Callable
 
-PROBE_SECONDS = 45
-MIN_TOKENS = 12
-ENGLISH_THRESHOLD = 0.5
+PROBE_SECONDS = 30
+MIN_PROBABILITY = 0.5
 
-# About 550 of the most common spoken English words (function words, common
-# verbs, everyday nouns). Real conversational English lands 60 to 80 percent
-# of its tokens here; other languages decoded by an English-only model
-# land far lower.
-COMMON_ENGLISH_WORDS = frozenset("""
-the be to of and a in that have i it for not on with he as you do at this but
-his by from they we say her she or an will my one all would there their what so
-up out if about who get which go me when make can like time no just him know
-take people into year your good some could them see other than then now look
-only come its over think also back after use two how our work first well way
-even new want because any these give day most us is are was were been has had
-did does doing am being very really thing things something anything nothing
-much many more little big great long little own same right left still also
-never always often sometimes again already yet ever every each both few lot
-lots kind sort part place case point week month hour minute morning night
-today tomorrow yesterday early late here where why yeah yes okay ok oh well
-maybe actually basically probably definitely exactly obviously honestly
-question answer problem issue idea story example reason person man woman
-child family friend mother father company business job money school home
-house city country world life hand eye head heart face side end start
-started starting stop stopped keep kept let put said says tell told talk
-talked talking ask asked need needed help helped try tried find found call
-called feel felt seem seemed leave left mean meant might must should shall
-show showed hear heard play played run ran move moved live lived believe
-believed hold held bring brought happen happened write wrote provide provided
-sit sat stand stood lose lost pay paid meet met include included continue
-set learn learned change changed lead led understand understood watch follow
-followed create created speak spoke read allow allowed add added spend spent
-grow grew open opened walk walked win won offer offered remember love
-consider appear buy bought wait waited serve die send sent expect build built
-stay fall cut reach kill remain suggest raise pass sell require report decide
-pull return explain hope develop carry break receive agree support hit
-produce eat cover catch draw choose cause listen realize wonder finish
-everything everyone everybody anyone anybody someone somebody nobody nothing
-another others whatever whenever wherever whether while during before after
-through between among against without within along across around behind
-under above below near far down off away together apart instead rather
-quite pretty almost enough too either neither nor although though unless
-until since because whereas however therefore anyway besides meanwhile
-different important able available possible interesting difficult easy hard
-happy sure clear real true simple small large young old high low next last
-best better bad worse worst free full whole general public local national
-we've we're we'll i'm i've i'll i'd you're you've you'll they're they've
-he's she's it's that's there's what's who's here's let's don't doesn't didn't
-isn't aren't wasn't weren't can't couldn't won't wouldn't shouldn't haven't
-hasn't hadn't
-""".split())
-
-_TOKEN = re.compile(r"[a-z']+")
+# Smallest Whisper models first: identification only needs a rough listen,
+# and 'base' loads in a second or two. Anything the machine already cached
+# for transcription works as a fallback.
+LID_MODEL_PREFERENCE = ('base', 'small', 'medium', 'turbo', 'large-v3')
 
 
-def english_score(text: str) -> tuple[float, int]:
-    """(share of tokens that are common English words, token count)."""
-    tokens = [t.strip("'") for t in _TOKEN.findall((text or '').lower())]
-    tokens = [t for t in tokens if t]
-    if not tokens:
-        return 0.0, 0
-    hits = sum(1 for t in tokens if t in COMMON_ENGLISH_WORDS)
-    return hits / len(tokens), len(tokens)
-
-
-def looks_english(text: str, threshold: float = ENGLISH_THRESHOLD,
-                  min_tokens: int = MIN_TOKENS) -> bool:
-    """True when the text reads as English with enough words to judge."""
-    score, n = english_score(text)
-    return n >= min_tokens and score >= threshold
-
-
-def transcript_text(result) -> str:
-    """Join the segment texts of a transcribe result."""
-    if not isinstance(result, dict):
-        return ''
-    segs = result.get('segments') or []
-    return ' '.join((s.get('text') or '').strip() for s in segs if isinstance(s, dict)).strip()
+def whisper_available() -> bool:
+    try:
+        return importlib.util.find_spec('whisper') is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def trim_head(audio_path: str, ffmpeg: str, seconds: int = PROBE_SECONDS) -> str:
-    """The first ``seconds`` of a WAV as a new temp file (caller removes)."""
+    """The first ``seconds`` of the audio as a 16 kHz mono WAV temp file
+    (caller removes it)."""
     fd, out = tempfile.mkstemp(prefix='doza_langprobe_', suffix='.wav')
     os.close(fd)
     subprocess.run(
         [ffmpeg, '-y', '-v', 'error', '-i', audio_path, '-t', str(seconds),
-         '-ac', '1', '-ar', '16000', out],
+         '-ac', '1', '-ar', '16000', '-acodec', 'pcm_s16le', out],
         check=True, capture_output=True, timeout=120)
     return out
 
 
+def _read_wav_float32(path: str):
+    """16 kHz mono PCM16 WAV to float32 in [-1, 1] (Whisper's input), read
+    with the standard library: the bundled ffmpeg is not on PATH, so
+    whisper.load_audio cannot be used here."""
+    import numpy as np
+    with wave.open(path, 'rb') as w:
+        frames = w.readframes(w.getnframes())
+        width = w.getsampwidth()
+        channels = w.getnchannels()
+    if width != 2:
+        raise ValueError(f'expected 16-bit PCM, got {width * 8}-bit')
+    audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    return audio
+
+
+def _load_lid_model(cache: dict | None = None):
+    """The smallest Whisper model that loads. ``cache`` (transcribe's own
+    model cache when available) is reused and filled so the model is not
+    loaded twice in one process."""
+    import whisper
+    cache = cache if cache is not None else {}
+    for name in LID_MODEL_PREFERENCE:
+        if name in cache:
+            return cache[name]
+    last = None
+    for name in LID_MODEL_PREFERENCE:
+        try:
+            model = whisper.load_model(name)
+            cache[name] = model
+            return model
+        except Exception as exc:  # missing download, out of memory, bad file
+            last = exc
+            continue
+    raise RuntimeError(f'no Whisper model could be loaded for language identification: {last}')
+
+
+def whisper_identify(head_wav: str, cache: dict | None = None) -> tuple[str, float]:
+    """(language code, probability) for the head clip via Whisper LID."""
+    import whisper
+    model = _load_lid_model(cache)
+    audio = whisper.pad_or_trim(_read_wav_float32(head_wav))
+    mel = whisper.log_mel_spectrogram(audio, n_mels=model.dims.n_mels).to(model.device)
+    _, probs = model.detect_language(mel)
+    if isinstance(probs, list):
+        probs = probs[0]
+    code = max(probs, key=probs.get)
+    return str(code), float(probs[code])
+
+
 def probe_language(audio_path: str, ffmpeg: str | None,
-                   transcribe_head: Callable[[str], object],
-                   seconds: int = PROBE_SECONDS) -> dict:
-    """Run the probe. Returns {'language': 'en' | None, 'score', 'tokens',
-    'error'}; ``language`` is None whenever the probe cannot decide, which
-    the caller treats as "keep Auto-detect, use Whisper"."""
-    out: dict = {'language': None, 'score': 0.0, 'tokens': 0, 'error': None}
+                   identify: Callable[[str], tuple[str, float]],
+                   seconds: int = PROBE_SECONDS,
+                   min_probability: float = MIN_PROBABILITY) -> dict:
+    """Run the probe. Returns {'language': code | None, 'probability',
+    'error'}; ``language`` is None whenever nothing confident came back,
+    which the caller treats as "keep Auto-detect"."""
+    out: dict = {'language': None, 'probability': 0.0, 'error': None, 'method': 'whisper-lid'}
     if not audio_path or not os.path.exists(audio_path):
         out['error'] = 'no audio to probe'
         return out
     tmp = None
     try:
+        head = audio_path
         if ffmpeg:
             tmp = trim_head(audio_path, ffmpeg, seconds)
             head = tmp
-        else:
-            head = audio_path
-        result = transcribe_head(head)
-        text = transcript_text(result)
-        score, n = english_score(text)
-        out['score'] = round(score, 3)
-        out['tokens'] = n
-        if n >= MIN_TOKENS and score >= ENGLISH_THRESHOLD:
-            out['language'] = 'en'
+        code, prob = identify(head)
+        out['probability'] = round(float(prob), 3)
+        code = (code or '').strip().lower()
+        if code and prob >= min_probability:
+            out['language'] = code
     except Exception as exc:  # any failure keeps Auto-detect
         out['error'] = str(exc) or exc.__class__.__name__
     finally:

@@ -235,6 +235,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                             {% endfor %}
                         </select>
                         <p id="languageHint" style="display:none; font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
+                            <span id="languageHintAuto" style="display:none;">Auto-detect checks the first minute: English goes through the fast engine, other languages through Whisper. For English, choosing English is fastest. </span>
                             Non-English uses the Whisper engine. If it isn't installed yet, you'll be prompted to add it (~200&nbsp;MB, one time) when transcription starts.
                         </p>
                     </div>
@@ -1310,8 +1311,10 @@ function updateLanguageHint() {
     const sel = document.getElementById('language');
     const hint = document.getElementById('languageHint');
     if (!sel || !hint) return;
-    // 'auto' included: auto-detect runs through Whisper as well.
+    // 'auto' included: it may still need Whisper for a non-English file.
     hint.style.display = (sel.value !== 'en') ? 'block' : 'none';
+    const autoLine = document.getElementById('languageHintAuto');
+    if (autoLine) autoLine.style.display = sel.value === 'auto' ? 'inline' : 'none';
 }
 
 // Sticky last-used transcription language (shared key with the Pro import
@@ -1326,7 +1329,10 @@ function getDefaultLanguage() {
     return [...sel.options].some(o => o.value === v && !o.disabled) ? v : 'en';
 }
 function rememberDefaultLanguage(v) {
-    if (v) try { localStorage.setItem(DOZA_LANG_KEY, v); } catch (e) {}
+    // Explicit languages stick; Auto-detect does not, so one Auto-detect
+    // project never turns every later English project into a Whisper run.
+    if (!v || v === 'auto') return;
+    try { localStorage.setItem(DOZA_LANG_KEY, v); } catch (e) {}
 }
 (function applyStickyLanguage() {
     const sel = document.getElementById('language');

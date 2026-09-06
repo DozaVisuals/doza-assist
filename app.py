@@ -2993,6 +2993,28 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     progress_cb = _make_transcribe_progress_writer(project_id)
 
+    def _resolve_auto_language(lang):
+        """Auto-detect: if the first 45 s sound English, route the whole file
+        through Parakeet by transcribing as 'en'. Anything else (or any
+        failure) keeps 'auto', which is Whisper's own detection as before."""
+        if lang != 'auto':
+            return lang
+        try:
+            import language_probe
+            from transcribe import _find_ffmpeg, _transcribe_parakeet, extract_audio
+            progress_cb({"phase": "detect_language", "pct": 2})
+            wav = extract_audio(source_path, project_dir=project_dir, audio_channel=audio_channel)
+            outcome = language_probe.probe_language(
+                wav, _find_ffmpeg(), lambda head: _transcribe_parakeet(head, None, progress_cb=None))
+            print(f"[language probe] {project_id}: {outcome}", flush=True)
+            update_project(project_id, {'language_probe': outcome})
+            if outcome.get('language') == 'en':
+                update_project(project_id, {'detected_language': 'en'})
+                return 'en'
+        except Exception as e:
+            print(f"[language probe] {project_id} skipped: {e}", flush=True)
+        return 'auto'
+
     # Serialize against any other in-flight transcription. If the gate is
     # already held (another clip is transcribing — e.g. a folder import
     # fired several jobs at once), park here at phase="queued" so the
@@ -3007,6 +3029,8 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
                 on_wait=lambda holder: progress_cb(
                     {"phase": "queued", "pct": 0})):
             try:
+                # English always takes Parakeet, even under Auto-detect.
+                language = _resolve_auto_language(language)
                 result = transcribe_file(
                     source_path,
                     project_dir=project_dir,

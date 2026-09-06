@@ -16,7 +16,7 @@ import re as _re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
-from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, Response, stream_with_context, g
 from werkzeug.utils import secure_filename
 
 from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
@@ -1322,6 +1322,10 @@ def create_project_from_path(
         # AI prose language: 'match' (follow the interview language)
         # or an explicit code from doza_assist.output_language.LANGUAGES.
         'output_language': _valid_output_language(output_language),
+        # Rule 1: every new project starts on the local model. Nothing copies
+        # another project's provider or an app-wide setting into this field;
+        # only the project's own AI Model picker changes it later.
+        'ai_provider': 'ollama',
         # Which source audio track feeds the transcript: 'all' (mix/default)
         # or a 0-based track index as a string. Picker for camera-mic-vs-lav.
         'audio_channel': _valid_audio_channel(audio_channel),
@@ -2097,6 +2101,65 @@ def _output_language_label(project):
     if code == 'auto':
         return 'Auto'
     return language_name(code) or code
+
+
+# Request-scoped provider. Every route that names a project in its URL
+# (``/project/<project_id>/...`` in core, the quote sheet, story brief and
+# speaker naming routes in the extensions) runs with that project's own
+# provider; anything else runs local. Background workers set it themselves
+# at job start (see _run_analysis_worker) because a thread starts empty.
+@app.before_request
+def _set_request_provider():
+    from ai_providers import provider_for_project, set_active_provider_name
+    pid = (request.view_args or {}).get('project_id')
+    meta = get_project(pid) if pid else None
+    g._doza_provider_token = set_active_provider_name(provider_for_project(meta))
+
+
+@app.teardown_request
+def _reset_request_provider(_exc=None):
+    from ai_providers import clear_active_provider_name
+    g.pop('_doza_provider_token', None)
+    clear_active_provider_name()
+
+
+@app.route('/project/<project_id>/ai-provider', methods=['GET', 'PUT'])
+def project_ai_provider(project_id):
+    """Read or set where this one project's AI runs.
+
+    PUT body: ``provider`` (ollama | anthropic | openai) and, when leaving
+    local for the first time, ``confirmed`` true after the user accepted the
+    confirmation dialog. ``ai_provider_confirmed`` is stored once per project
+    so the dialog does not repeat. Cloud choices need a saved key.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    from ai_providers import has_api_key, normalize_provider_name, provider_for_project
+
+    def _view(meta):
+        return {
+            'provider': provider_for_project(meta),
+            'confirmed': bool(meta.get('ai_provider_confirmed')),
+            'has_anthropic_key': has_api_key('anthropic'),
+            'has_openai_key': has_api_key('openai'),
+            'ai_model_label': _ai_model_label(meta),
+        }
+
+    if request.method == 'GET':
+        return jsonify(_view(project))
+    body = request.json or {}
+    raw = (body.get('provider') or '').strip().lower()
+    name = normalize_provider_name(raw)
+    if name != raw:
+        return jsonify({'error': 'Unknown provider'}), 400
+    if name != 'ollama' and not has_api_key(name):
+        return jsonify({'error': f'Save an API key for {"Anthropic" if name == "anthropic" else "OpenAI"} first'}), 400
+    updates = {'ai_provider': name}
+    if body.get('confirmed'):
+        updates['ai_provider_confirmed'] = True
+    update_project(project_id, updates)
+    return jsonify(_view(get_project(project_id) or {**project, **updates}))
 
 
 @app.route('/project/<project_id>/settings-summary', methods=['GET'])
@@ -3584,6 +3647,11 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         project = get_project(project_id)
         if not project or not project.get('transcript'):
             return
+        # Rule 1, off the request thread: this worker runs the project's own
+        # provider (meta ai_provider, local when unset) for the analysis and
+        # the speaker naming that follows it. Nothing app-wide is consulted.
+        from ai_providers import set_active_provider_name, provider_for_project
+        set_active_provider_name(provider_for_project(project))
         from ai_analysis import analyze_transcript, generate_segment_vectors, expected_vector_chunks
 
         existing_vectors = load_segment_vectors(project_id)
@@ -4169,8 +4237,14 @@ def chat_stream(project_id):
         }
         single_pid = None
 
+    from ai_providers import current_provider_name as _cur_provider
+    _stream_provider = _cur_provider()
+
     def _generate():
-        from ai_providers import ProviderError
+        from ai_providers import ProviderError, set_active_provider_name
+        # The response streams after the request hook's context is torn
+        # down; keep this project's provider for the whole generation.
+        set_active_provider_name(_stream_provider)
         final_reply = ''
         # Emit a synthetic heartbeat as the very first SSE frame so the
         # browser knows the connection is alive before the model produces

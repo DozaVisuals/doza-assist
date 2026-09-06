@@ -1009,6 +1009,13 @@
                         </div>
                     </div>
                 </div>
+                {# Timeline name (1.1): prefilled with the name the next export
+                   would get ("{Project} – Selects N"); an edited value is sent as
+                   timeline_name and used as is, with no counter. #}
+                <div class="form-group export-timeline-name" style="margin-bottom: 1rem;">
+                    <label class="form-label" for="rtTimelineName">Timeline name</label>
+                    <input type="text" class="form-input" id="rtTimelineName" data-default="" placeholder="Loading…" autocomplete="off" spellcheck="false" title="The name the timeline gets in Final Cut Pro and the file. Leave as is for the automatic name and number.">
+                </div>
                 <button class="btn btn-primary" id="rtExportBtn" data-export-label-key="rt-export" onclick="exportFCPXMLMulticam()" style="width:100%;">
                     Export to Final Cut Pro
                 </button>
@@ -1074,6 +1081,11 @@
                             <option value="markers" title="The whole source on the timeline with a marker at each select">Markers Only</option>
                         </select>
                     </div>
+                </div>
+                {# Timeline name (1.1): see the round-trip panel's twin. #}
+                <div class="form-group export-timeline-name" style="margin-bottom: 1rem;">
+                    <label class="form-label" for="exportTimelineName">Timeline name</label>
+                    <input type="text" class="form-input" id="exportTimelineName" data-default="" placeholder="Loading…" autocomplete="off" spellcheck="false" title="The name the timeline gets in your editor and the file. Leave as is for the automatic name and number.">
                 </div>
                 <button class="btn btn-primary" id="exportFCPXMLBtn" onclick="exportFCPXML()" data-export-label-key="unified" style="width:100%;">
                     Export to FCPX
@@ -5376,6 +5388,48 @@ const _CATEGORY_TO_RT_SOURCE = {
     labels: 'client_selects',
 };
 
+// ── Timeline name field (1.1) ─────────────────────────────────────────────
+// The field shows the automatic name the next export would get. Only an
+// EDITED value is sent as timeline_name (used as is, counter-free); an
+// untouched field lets the server number the export. Refreshed after each
+// export so the number advances, and whenever the mode changes.
+function _timelineNameInput(rt) {
+    return document.getElementById(rt ? 'rtTimelineName' : 'exportTimelineName');
+}
+function _timelineKind(rt) {
+    if (rt) {
+        const b = document.querySelector('#rtOutputMode .export-mode-btn.is-active');
+        return (b && b.getAttribute('data-mode') === 'markers_timeline') ? 'markers' : 'selects';
+    }
+    const sel = document.getElementById('exportMode');
+    return (sel && sel.value === 'markers') ? 'markers' : 'selects';
+}
+async function refreshTimelineName(rt) {
+    const input = _timelineNameInput(rt);
+    if (!input) return;
+    const edited = input.value.trim() && input.value.trim() !== input.dataset.default;
+    try {
+        const r = await fetch(`/project/${PROJECT_ID}/export/timeline-name?kind=${_timelineKind(rt)}`, { cache: 'no-store' });
+        if (!r.ok) return;
+        const d = await r.json();
+        input.dataset.default = d.timeline_name || '';
+        input.placeholder = d.timeline_name || 'Timeline name';
+        if (!edited) input.value = d.timeline_name || '';
+    } catch (e) { /* keep whatever is shown */ }
+}
+function timelineNameOverride(rt) {
+    const input = _timelineNameInput(rt);
+    if (!input) return '';
+    const v = input.value.trim();
+    return (v && v !== input.dataset.default) ? v : '';
+}
+window.addEventListener('load', () => {
+    refreshTimelineName(false);
+    refreshTimelineName(true);
+    const sel = document.getElementById('exportMode');
+    if (sel) sel.addEventListener('change', () => refreshTimelineName(false));
+});
+
 async function exportFCPXML(category) {
     // ``category`` is passed by the analysis-section buttons (story/social/
     // soundbites/labels) to export just one bucket; the Export tab calls
@@ -5443,6 +5497,8 @@ async function exportFCPXML(category) {
             total_clips: labelSections.length,
             deliver_to: delivery, nle,
         };
+        const tlOverride = timelineNameOverride(false);
+        if (tlOverride) exportBody.timeline_name = tlOverride;
         // No #framerate select on this page (FCPXML imports render the
         // round-trip panel instead): omit the key so the backend probes the
         // media / parsed sequence rate rather than trusting a hardcoded UI
@@ -5468,6 +5524,7 @@ async function exportFCPXML(category) {
                 showToast((data && data.error) || 'Export failed', true);
                 return;
             }
+            refreshTimelineName(false);
             showExportOutcome(_directExportSuccessMsg(data, 'Sent'), data);
             if (data.delivery === 'nle') maybeShowResolveSetup(data, runExport);
         } catch (err) {
@@ -5556,6 +5613,11 @@ async function _exportFCPXMLRoundTrip(opts, summary) {
           nle: typeof EDITING_PLATFORM !== 'undefined' ? EDITING_PLATFORM : 'fcp' },
         opts || {},
     );
+    // The Timeline name field applies to Selects / Markers exports; a story
+    // export is named after its title.
+    const isStory = Array.isArray(body.sources) && body.sources.includes('story_build');
+    const rtOverride = isStory ? '' : timelineNameOverride(true);
+    if (rtOverride) body.timeline_name = rtOverride;
     _rtShowExportBusy(delivery);
     try {
         const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
@@ -5569,6 +5631,7 @@ async function _exportFCPXMLRoundTrip(opts, summary) {
             showToast((data && data.error) || 'Export failed', true);
             return { ok: false, data };
         }
+        refreshTimelineName(true);
         // Delivery now follows the Edit-in platform (server: nle body
         // field) — describe what actually happened; any Resolve/Premiere
         // import hint arrives via data.hint through showExportOutcome.
@@ -5593,6 +5656,8 @@ async function _exportFCPXMLRoundTrip(opts, summary) {
 function setRtMode(btn) {
     btn.closest('.export-mode-segmented').querySelectorAll('.export-mode-btn').forEach(b => b.classList.remove('is-active'));
     btn.classList.add('is-active');
+    // Markers and New Project are numbered separately.
+    if (typeof refreshTimelineName === 'function') refreshTimelineName(true);
 }
 
 function _collectRtSources() {

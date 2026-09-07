@@ -1775,7 +1775,7 @@ body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !imp
 .chat-welcome h3 {
     font-size: 1.2rem;
     color: var(--text-primary);
-    margin: 0 0 14px 0;
+    margin: 0 0 22px 0;
     font-weight: 600;
 }
 
@@ -2038,7 +2038,7 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 .story-clip-tc { font-family: var(--mono); font-size: 10px; color: var(--text-secondary); }
 .story-clip-add { flex-shrink: 0; font-size: 11px !important; padding: 2px 6px !important; }
 
-.story-rail { padding: 8px 12px 6px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; background: var(--bg-card); }
+.story-rail { padding: 6px 1.25rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; background: var(--bg-secondary); }
 .story-rail-row { display: flex; align-items: center; gap: 8px; }
 .story-rail-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; min-width: 52px; }
 .story-rail-making { flex: 1; font: inherit; font-size: 13px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-primary); }
@@ -3515,47 +3515,48 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 
 /* My Style toggle pill (for chat & story builder) */
 .my-style-pill {
+    /* Same chip as the header's "Style: Off": outlined, muted when off,
+       accent when a profile is shaping suggestions. One line. */
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 14px;
-    border-radius: 14px;
-    font-weight: 600;
+    gap: 6px;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 500;
     cursor: pointer;
-    transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.1s ease;
-    border: none;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
     user-select: none;
     line-height: 1;
-    /* OFF state — muted red */
-    background: #c23b3b;
-    color: #fff;
-    box-shadow: 0 1px 3px rgba(194, 59, 59, 0.35);
+    white-space: nowrap;
 }
 
 .my-style-pill:hover {
-    transform: translateY(-1px);
-    filter: brightness(1.06);
+    color: var(--text-primary);
+    border-color: var(--accent);
 }
 
 .my-style-pill.active {
-    /* ON state — bright green */
-    background: #16a34a;
-    box-shadow: 0 1px 3px rgba(22, 163, 74, 0.45);
-    color: #fff;
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    font-weight: 600;
 }
 
 .my-style-pill-dot {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.95);
+    background: currentColor;
     flex-shrink: 0;
-    box-shadow: 0 0 6px rgba(255, 255, 255, 0.6);
+    opacity: 0.7;
 }
 
 .my-style-pill.active .my-style-pill-dot {
-    background: #ffffff;
-    animation: myStylePillPulse 1.8s ease-in-out infinite;
+    opacity: 1;
 }
 
 @keyframes myStylePillPulse {
@@ -3564,29 +3565,29 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 }
 
 .my-style-pill-text {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .my-style-pill-label {
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: 0.8rem;
+    font-weight: inherit;
+    letter-spacing: 0;
+    text-transform: none;
 }
 
 .my-style-pill-profile {
-    font-size: 0.65rem;
+    font-size: 0.8rem;
     font-weight: 500;
-    opacity: 0.85;
-    letter-spacing: 0.01em;
+    opacity: 0.75;
     max-width: 140px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+.my-style-pill-profile:empty { display: none; }
 
 /* ========================================================================
    Editorial DNA v2.1 — dashboard, profile selector, evolution
@@ -3896,14 +3897,23 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 }
 
 .project-style-selector select {
-    background: var(--bg-secondary);
-    color: var(--text-primary);
+    background: transparent;
+    color: var(--text-muted);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 3px 8px;
-    font-size: 12px;
+    border-radius: 999px;
+    padding: 0.35rem 1.6rem 0.35rem 0.75rem;
+    font-size: 0.8rem;
+    line-height: 1;
     font-family: inherit;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12' fill='none' stroke='%238e8e9a' stroke-width='1.6'><path d='M3 4.5l3 3 3-3'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
 }
+.project-style-selector select:hover { color: var(--text-primary); border-color: var(--accent); }
+.project-style-selector select:focus { outline: none; border-color: var(--accent); }
 
 /* ── AI Model settings modal ─────────────────────────────────────────── */
 

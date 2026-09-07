@@ -821,16 +821,9 @@
                             <p class="chat-welcome-hint">or just ask me anything about this interview</p>
                         </div>
                     </div>
-                    <div class="story-rail" id="storyRail">
-                        <div class="story-rail-row">
-                            <span class="story-rail-label">Making</span>
-                            <input class="story-rail-making" id="storyMaking" type="text" maxlength="300"
-                                   placeholder="Tell me what you're making — a 4-minute recruiting film, a 60-second teaser…"
-                                   onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
-                                   onchange="saveStoryMaking(this.value)">
-                        </div>
+                    <div class="story-rail" id="storyRail" style="display:none;">
                         <div class="story-rail-row story-rail-meta">
-                            <span id="storyKept" class="story-rail-chip" onclick="switchTab('clips')" title="Open the Clips tab"></span>
+                            <span id="storyMakingLine" class="story-rail-chip" style="display:none;" title="What you told me you're making — click to forget it"></span>
                             <span id="storyPassed" class="story-rail-chip" onclick="toggleStoryPassed()" title="Moments you passed on"></span>
                         </div>
                         <div class="story-rail-passed" id="storyPassedList" style="display:none;"></div>
@@ -844,8 +837,7 @@
                             </span>
                         </button>
                         <span class="project-style-selector" id="chatProfileSelectorWrap" style="display:none;">
-                            style:
-                            <select id="chatProfileSelector" onchange="onSessionProfileChange(this.value)"></select>
+                            <select id="chatProfileSelector" onchange="onSessionProfileChange(this.value)" title="Which My Style profile shapes this chat"></select>
                         </span>
                         <textarea class="chat-input" id="chatInput" rows="1" placeholder="What story are you looking for?  (Shift+Enter for new line)"
                                   oninput="autoGrowChatInput(this)"
@@ -3260,48 +3252,30 @@ function _chatState() {
 // have `fillIn: true` and the `prompt` field is the STEM (with trailing
 // space) that gets dropped into the input field.
 function _promptsForState(state, myStyleOn) {
+    // Five prompts, story first. When the editor has pulled clips, the last
+    // one or two speak to those clips; before that, all five hunt for story.
+    const story = {
+        story:    { label: "What's the story here?", prompt: "Read the full transcript and tell me what story is actually being told. What's the through-line, what's the surprise, and what's the strongest narrative thread? Be specific, not generic. Respond conversationally." },
+        turns:    { label: 'Where does this interview turn?', prompt: 'Find the inflection points in this interview. Moments where the conversation shifts emotionally, the subject opens up, the energy changes, or new ground gets broken. Return each turn as a [CLIP:] marker with a note on what shifts.' },
+        bites:    { label: 'Pull the strongest soundbites', prompt: 'Identify the 8-10 strongest standalone soundbites in this transcript. Strong means quotable, self-contained, and emotionally or narratively distinctive. Return as [CLIP:] markers with a one-line note explaining why each one lands.' },
+        themes:   { label: 'What are the major themes?', prompt: 'Identify the 4-6 major themes running through this interview. For each theme, note 2-3 transcript moments that anchor it and what makes them strong examples. Return moments as [CLIP:] markers and discuss the themes conversationally.' },
+        avoiding: { label: "What's the subject avoiding?", prompt: "Read the full transcript. Where does the subject deflect, change topics, or skim past something that seemed important? These avoidance moments often signal what the real story is. Return as [CLIP:] markers with a note on what's being avoided." },
+    };
+    const clips = {
+        missing: myStyleOn
+            ? { label: 'What am I missing?', prompt: 'Based on the transcript, my selected clips, and my storytelling foundation, what strong moments have I not pulled yet? Prioritize moments that match my editorial patterns. Return suggestions as [CLIP:] markers.' }
+            : { label: 'What am I missing?', prompt: 'Based on the transcript and my selected clips, what strong moments have I not pulled yet? Consider thematic gaps, emotional range, and narrative completeness. Return suggestions as [CLIP:] markers.' },
+        order: myStyleOn
+            ? { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a sequence that matches my storytelling foundation. Return as an ordered list with [CLIP:] markers and note where this sequence follows or breaks from my typical story structure.' }
+            : { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a narrative sequence. Return as an ordered list with [CLIP:] markers and a one-line rationale for the sequence.' },
+    };
     if (state === 'A') {
-        return [
-            { label: "What's the story here?", prompt: "Read the full transcript and tell me what story is actually being told. What's the through-line, what's the surprise, and what's the strongest narrative thread? Be specific, not generic. Respond conversationally." },
-            { label: 'Pull the strongest soundbites', prompt: 'Identify the 8-10 strongest standalone soundbites in this transcript. Strong means quotable, self-contained, and emotionally or narratively distinctive. Return as [CLIP:] markers with a one-line note explaining why each one lands.' },
-            { label: 'What are the major themes?', prompt: 'Identify the 4-6 major themes running through this interview. For each theme, note 2-3 transcript moments that anchor it and what makes them strong examples. Return moments as [CLIP:] markers and discuss the themes conversationally.' },
-            { label: 'Where does this interview turn?', prompt: 'Find the inflection points in this interview. Moments where the conversation shifts emotionally, the subject opens up, the energy changes, or new ground gets broken. Return each turn as a [CLIP:] marker with a note on what shifts.' },
-            { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
-        ];
+        return [story.story, story.turns, story.bites, story.themes, story.avoiding];
     }
     if (state === 'B') {
-        if (myStyleOn) {
-            return [
-                { label: 'What am I missing?', prompt: 'Based on the transcript, my selected clips, and my storytelling foundation, what strong moments have I not pulled yet? Prioritize moments that match my editorial patterns. Return suggestions as [CLIP:] markers.' },
-                { label: 'What story am I building?', prompt: 'Based on my selected clips and my storytelling foundation, what narrative am I assembling? Does the arc match how I typically structure pieces? Where does it diverge from my usual patterns? Respond conversationally.' },
-                { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
-                { label: "What's the subject avoiding?", prompt: "Read the full transcript. Where does the subject deflect, change topics, or skim past something that seemed important? These avoidance moments often signal what the real story is. Return as [CLIP:] markers with a note on what's being avoided." },
-            ];
-        }
-        return [
-            { label: 'What am I missing?', prompt: 'Based on the transcript and my selected clips, what strong moments have I not pulled yet? Consider thematic gaps, emotional range, and narrative completeness. Return suggestions as [CLIP:] markers.' },
-            { label: 'What story am I building?', prompt: 'Based on my selected clips, what narrative am I assembling? Describe the story arc taking shape, any missing pieces, and where the emotional turn point sits. Respond conversationally.' },
-            { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
-            { label: "What's the subject avoiding?", prompt: "Read the full transcript. Where does the subject deflect, change topics, or skim past something that seemed important? These avoidance moments often signal what the real story is. Return as [CLIP:] markers with a note on what's being avoided." },
-        ];
+        return [story.story, story.turns, story.bites, story.themes, clips.missing];
     }
-    // State C
-    if (myStyleOn) {
-        return [
-            { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a sequence that matches my storytelling foundation. Return as an ordered list with [CLIP:] markers and note where this sequence follows or breaks from my typical story structure.' },
-            { label: 'Do any of my selects overlap?', prompt: 'Look at my selected clips in the context of my storytelling foundation. Which ones cover the same ground? Based on how I typically build stories, which is strongest and which could I cut?' },
-            { label: 'Where does my cut sag?', prompt: 'Looking at my selected clips in order, where does the pacing or energy drop? Identify any sections that feel redundant, too long, or low-momentum based on my storytelling foundation.' },
-            { label: 'Connect the threads', prompt: 'Find moments in my selected clips and the surrounding transcript that connect to or echo each other thematically. Bookend pairs, motifs that recur, ideas that pay off later. Return as paired [CLIP:] markers with a note on the connection.' },
-            { label: 'What am I missing?', prompt: 'Based on the transcript, my selected clips, and my storytelling foundation, what strong moments have I not pulled yet? Prioritize moments that match my editorial patterns. Return suggestions as [CLIP:] markers.' },
-        ];
-    }
-    return [
-        { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a narrative sequence. Return as an ordered list with [CLIP:] markers and a one-line rationale for the sequence.' },
-        { label: 'Do any of my selects overlap?', prompt: 'Look at my selected clips. Which ones cover the same ground? Which is strongest and which could I cut?' },
-        { label: 'Where does my cut sag?', prompt: 'Looking at my selected clips in order, where does the pacing or energy drop? Identify any sections that feel redundant, too long, or low-momentum.' },
-        { label: 'Connect the threads', prompt: 'Find moments in my selected clips and the surrounding transcript that connect to or echo each other thematically. Bookend pairs, motifs that recur, ideas that pay off later. Return as paired [CLIP:] markers with a note on the connection.' },
-        { label: 'What am I missing?', prompt: 'Based on the transcript and my selected clips, what strong moments have I not pulled yet? Consider thematic gaps, emotional range, and narrative completeness. Return suggestions as [CLIP:] markers.' },
-    ];
+    return [story.story, story.turns, story.bites, clips.missing, clips.order];
 }
 
 function _welcomeHeaderForState(state) {
@@ -3385,12 +3359,12 @@ function _welcomeHtml() {
     // First prompt is the primary "start here" pick — same size, filled
     // accent treatment so it reads as a suggestion without being pushy.
     const buttons = prompts.map((p, i) => _renderPromptButton(p, i === 0)).join('\n                ');
-    const brief = _openingBriefHtml();
+    // Clean and empty on purpose: a title, five prompts, and the input.
+    // The analysis brief and the clip count stay out of the way (the
+    // analysis is still loaded behind the answers).
     return `
         <div class="chat-welcome" data-chat-state="${state}">
             <h3 class="chat-welcome-title">${header.title}</h3>
-            <p class="chat-welcome-subtitle">${header.subtitle}</p>
-            ${brief}
             <div class="chat-suggestions">
                 ${buttons}
             </div>
@@ -3445,11 +3419,9 @@ async function sendChat() {
     chatHistory.push({ role: 'user', content: message });
     updateChatClearBtn();
 
-    // Detect story-building intent
-    if (isStoryRequest(message)) {
-        await buildStoryFromChat(message);
-        return;
-    }
+    // Story-building asks used to detour into the Story Builder endpoint
+    // from here; they now go through chat like everything else (the reply
+    // carries the cards and a "Build as Story" button).
 
     // Show typing indicator
     const typing = appendChatMessage('assistant', '<span class="chat-typing"><span></span><span></span><span></span></span>', true);
@@ -4043,16 +4015,20 @@ function isPassedSpan(start, end) {
 function renderStoryRail() {
     const rail = document.getElementById('storyRail');
     if (!rail) return;
-    const making = document.getElementById('storyMaking');
-    if (making && document.activeElement !== making) making.value = storySoFar.making || '';
-    const kept = (typeof _clipCount === 'function') ? _clipCount() : 0;
-    const keptEl = document.getElementById('storyKept');
-    if (keptEl) keptEl.textContent = kept === 1 ? '1 clip kept' : `${kept} clips kept`;
-    const passedEl = document.getElementById('storyPassed');
+    const making = (storySoFar.making || '').trim();
     const n = storySoFar.passed.length;
+    // Hidden unless there is something worth a line; the chat stays a chat.
+    rail.style.display = (making || n > 0) ? '' : 'none';
+    const makingEl = document.getElementById('storyMakingLine');
+    if (makingEl) {
+        makingEl.style.display = making ? '' : 'none';
+        makingEl.textContent = making ? `Making: ${making}  ✕` : '';
+        makingEl.onclick = () => saveStoryMaking('');
+    }
+    const passedEl = document.getElementById('storyPassed');
     if (passedEl) {
-        passedEl.textContent = n === 0 ? 'Nothing passed on' : (n === 1 ? '1 passed on' : `${n} passed on`);
-        passedEl.classList.toggle('story-rail-chip-empty', n === 0);
+        passedEl.style.display = n > 0 ? '' : 'none';
+        passedEl.textContent = n === 1 ? '1 moment passed on' : `${n} moments passed on`;
     }
     const list = document.getElementById('storyPassedList');
     if (list) {

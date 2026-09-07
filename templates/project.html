@@ -839,7 +839,7 @@
                         <span class="project-style-selector" id="chatProfileSelectorWrap" style="display:none;">
                             <select id="chatProfileSelector" onchange="onSessionProfileChange(this.value)" title="Which My Style profile shapes this chat"></select>
                         </span>
-                        <textarea class="chat-input" id="chatInput" rows="1" placeholder="What story are you looking for?  (Shift+Enter for new line)"
+                        <textarea class="chat-input" id="chatInput" rows="1" placeholder="Ask about this interview…"
                                   oninput="autoGrowChatInput(this)"
                                   onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }"></textarea>
                         <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
@@ -3198,6 +3198,8 @@ function autoGrowChatInput(el) {
     el.style.height = 'auto';
     const max = 220; // px — about 10 lines
     el.style.height = Math.min(el.scrollHeight, max) + 'px';
+    // One row hides its scrollbar; only a box taller than the cap scrolls.
+    el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
 }
 
 function sendSuggestion(btn) {
@@ -3585,7 +3587,7 @@ async function streamChatReply({ message, typing, progressTimer }) {
         // Cards materialize as soon as their marker closes: everything up
         // to the last complete "]" renders through the real renderer, the
         // unfinished tail is masked as before.
-        let text = stripFollowupsLine(streamedText);
+        let text = liveClean(streamedText);
         let head = text;
         let tail = '';
         const openIdx = text.lastIndexOf('[');
@@ -3993,6 +3995,17 @@ function appendChatMessage(role, content, isHtml = false) {
 // (live paint runs on raw tokens, before the server strips it).
 function stripFollowupsLine(text) {
     return String(text || '').replace(/^[ \t]*\**[ \t]*FOLLOW[\s-]*UPS?[ \t]*\**[ \t]*:.*$/gim, '').replace(/\s+$/, '');
+}
+
+// Live paint runs on raw model text before the server's cleaners: mirror
+// the cheap ones here so nothing odd flashes mid-stream (LaTeX arrows,
+// thinking tags, markdown rules) and then vanishes at `done`.
+function liveClean(text) {
+    return stripFollowupsLine(text)
+        .replace(/<\s*think(?:ing)?\s*>[\s\S]*?(<\s*\/\s*think(?:ing)?\s*>|$)/gi, '')
+        .replace(/\$?\\(?:rightarrow|Rightarrow|to)\$?/g, '→')
+        .replace(/^#{1,4}\s*/gm, '')
+        .replace(/^---+\s*$/gm, '');
 }
 
 // ── Story So Far ─────────────────────────────────────────────────────────

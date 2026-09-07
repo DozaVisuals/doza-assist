@@ -1057,6 +1057,7 @@ def _build_chat_messages(message, history, project_name, segments,
         _story_tail = _story_so_far_tail(story_so_far)
         if _story_tail:
             final_content = f'{final_content}\n\n{_story_tail}'
+        final_content = final_content + _BREVITY_TAIL
         if followups_hint:
             final_content = final_content + _FOLLOWUPS_HINT
         messages.append({'role': 'user', 'content': final_content})
@@ -1069,6 +1070,8 @@ def _build_chat_messages(message, history, project_name, segments,
         _story_tail = _story_so_far_tail(story_so_far)
         if _story_tail:
             final_content = f'{final_content}\n\n{_story_tail}'
+        if message != 'ok':  # the prewarm probe keeps the prefix minimal
+            final_content = final_content + _BREVITY_TAIL
         if followups_hint:
             final_content = final_content + _FOLLOWUPS_HINT
         messages.append({'role': 'user', 'content': final_content})
@@ -1253,6 +1256,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     cleaned = _validate_clip_markers_in_text(
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
+    cleaned = _ensure_clip_titles(cleaned, segments)
     # Skip clip salvage when the editor's question is conversational
     # (themes, story, craft, chitchat, or explicit "no clips"). Forcing
     # markers into a discussion answer breaks the orientation contract.
@@ -1645,6 +1649,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     cleaned = _validate_clip_markers_in_text(
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
+    cleaned = _ensure_clip_titles(cleaned, segments)
     # Salvage pass mirrors the non-streaming path. Adds latency only when
     # the model's first attempt produced zero markers — most calls return
     # immediately. Streamed clients see a brief pause after the prose
@@ -6569,6 +6574,7 @@ def _finish_synthesis_reply(raw_text, segments, skip_title_anchor=False):
     cleaned = _validate_clip_markers_in_text(
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
+    cleaned = _ensure_clip_titles(cleaned, segments)
     # Deliberately skip _salvage_clips_if_missing — this path is only
     # reached on conversational queries.
     return cleaned
@@ -7036,6 +7042,15 @@ def _detect_story_making(message):
     return ''
 
 
+_BREVITY_TAIL = (
+    '\n\nKEEP IT SHORT: answer like a sharp editor talking, not an essay. '
+    'Plain paragraphs, no headings, no bold labels, no numbered sections, '
+    'no LaTeX or symbols (write "then", not \\rightarrow). About 120 words '
+    'of prose at most, plus the [CLIP:] markers — more only when I asked '
+    'for a list of many clips. Every marker needs a specific title of a '
+    'few words that names the moment (never "Clip" or "Moment").'
+)
+
 _FOLLOWUPS_HINT = (
     '\n\nAfter your answer, add exactly one final line in this form and '
     'nothing after it:\nFOLLOW-UPS: <question> | <question> | <question>\n'
@@ -7325,28 +7340,10 @@ def _chat_long_retrieve(transcript, message, phrases, words, theme_phrases,
 
 
 def _describe_reading(excerpts, limit=3):
-    """Progress line naming who and when is being read: ``Reading Dana
-    Whitfield 01:27–01:33, Miles Okafor 02:14–02:16 …``"""
-    seen = []
-    # Strongest evidence first, not earliest on the timeline.
-    ordered = sorted(excerpts or [], key=lambda p: -float(p.get('_prio', 0) or 0))
-    for p in ordered:
-        spk = (p.get('speaker') or 'Speaker').strip()
-        if any(spk == s for s, _ in seen):
-            continue
-        try:
-            a = _seconds_to_tc(p.get('start', 0))
-            b = _seconds_to_tc(p.get('end', 0))
-            if a.startswith('00:') and b.startswith('00:'):
-                a, b = a[3:], b[3:]
-        except Exception:
-            a = b = ''
-        seen.append((spk, f'{spk} {a}–{b}' if a else spk))
-        if len(seen) >= limit:
-            break
-    if not seen:
-        return 'Reading the interview…'
-    return 'Reading ' + ', '.join(label for _, label in seen) + '…'
+    """Progress line while retrieval runs. Kept to one quiet word: the
+    speaker-and-timecode roll call it used to print read as noise in the
+    chat (Chris, 2026-09-07)."""
+    return 'Reading…'
 
 
 def _cloud_full_transcript_ok(transcript) -> bool:
@@ -7376,6 +7373,68 @@ def _build_long_chat_context(project_name, segments, analysis, labeled_sections,
         speaker_names=speaker_names, segment_vectors=segment_vectors,
         include_selections=False,
     )
+
+
+_GENERIC_CLIP_TITLES = frozenset({'clip', 'moment', 'untitled', 'highlight', 'soundbite', 'excerpt', ''})
+_TITLE_FILLERS = frozenset({'um', 'uh', 'like', 'you', 'know', 'so', 'and', 'but', 'yeah', 'okay', 'ok', 'well', 'i', 'mean'})
+
+
+def _title_from_transcript(segments, start_sec, end_sec, max_words=7):
+    """A short title from the first meaningful words spoken in the span."""
+    words = []
+    for seg in segments or []:
+        try:
+            a = float(seg.get('start', 0) or 0)
+            b = float(seg.get('end', a) or a)
+        except (TypeError, ValueError):
+            continue
+        if b < start_sec or a > end_sec:
+            continue
+        for w in re.findall(r"[A-Za-z0-9'’-]+", seg.get('text') or ''):
+            if not words and w.lower().strip("'’") in _TITLE_FILLERS:
+                continue
+            words.append(w)
+            if len(words) >= max_words:
+                break
+        if len(words) >= max_words:
+            break
+    if not words:
+        return ''
+    title = ' '.join(words).strip(" ,.;:-'’")
+    return (title[0].upper() + title[1:]) if title else ''
+
+
+def _ensure_clip_titles(text, segments):
+    """Give every ``[CLIP:]`` marker whose title is missing or generic
+    ("Clip", "Moment") a title drawn from the transcript words in its span,
+    so a card never reads just "Clip"."""
+    if not text or '[CLIP' not in text:
+        return text
+
+    def _fix(m):
+        marker = m.group(0)
+        tm = re.search(r'title="([^"]*)"', marker)
+        current = (tm.group(1).strip() if tm else '')
+        if current.lower() not in _GENERIC_CLIP_TITLES and not re.fullmatch(r'(?i)clip\s*\d*', current):
+            return marker
+        sm = re.search(r'start=([\d:.]+)', marker)
+        em = re.search(r'end=([\d:.]+)', marker)
+        if not (sm and em):
+            return marker
+        try:
+            a = float(_tc_to_seconds(sm.group(1)))
+            b = float(_tc_to_seconds(em.group(1)))
+        except Exception:
+            return marker
+        new_title = _title_from_transcript(segments, a, max(a, b))
+        if not new_title:
+            return marker
+        new_title = _marker_attr_value(new_title)
+        if tm:
+            return marker[:tm.start(1)] + new_title + marker[tm.end(1):]
+        return marker[:-1].rstrip() + f' title="{new_title}"]'
+
+    return _CLIP_MARKER_RE.sub(_fix, text)
 
 
 def _drop_passed_markers(text, story_so_far):
@@ -7458,6 +7517,7 @@ def _long_chat_finish(raw, prep, transcript, message, history, segment_vectors,
     cleaned = _validate_clip_markers_in_text(
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
+    cleaned = _ensure_clip_titles(cleaned, segments)
     conversational = prep['conversational']
     if not conversational or (_is_content_lookup_query(message) and cleaned.strip()):
         source = _format_paragraphs_as_lines(excerpts) if excerpts else prep['context']
@@ -7524,7 +7584,7 @@ def _chat_long_unified_stream(transcript, message, history, project_name, analys
     """Streaming long-interview answer. Yields ``('progress', label)`` while
     retrieving (naming who and when is being read), then the shared token
     stream, an optional ``('followups', [..])`` and the final ``('done', text)``."""
-    yield ('progress', 'Reading the interview map…')
+    yield ('progress', 'Reading…')
     try:
         prep = _long_chat_prepare(
             transcript, message, history, project_name, analysis, profile_id,
@@ -7536,8 +7596,6 @@ def _chat_long_unified_stream(transcript, message, history, project_name, analys
         print(f"[chat-stream] long-path prep failed: {e}", flush=True)
         yield ('done', '')
         return
-    if prep['excerpts']:
-        yield ('progress', _describe_reading(prep['excerpts']))
     raw = ''
     try:
         for _ev, _payload in _stream_chat_events(

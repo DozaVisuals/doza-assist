@@ -1869,17 +1869,22 @@ body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !imp
 .chat-input-area {
     display: flex;
     gap: 0.5rem;
-    padding: 1rem 1.25rem;
+    padding: 0.85rem 1.25rem;
     border-top: 1px solid var(--border);
     background: var(--bg-secondary);
     align-items: flex-end;
 }
+/* the chips sit on the input's centre line while it is one row tall */
+.chat-input-area .my-style-pill,
+.chat-input-area .project-style-selector { margin-bottom: 6px; }
+.chat-input.chat-input-grown { overflow-y: auto; }
 
 .chat-input {
     flex: 1;
-    padding: 0.65rem 1rem;
+    padding: 0.6rem 1rem;
     border: 1px solid var(--border);
     border-radius: 20px;
+    overflow: hidden;
     background: var(--bg-input);
     color: var(--text-primary);
     font-family: var(--font);

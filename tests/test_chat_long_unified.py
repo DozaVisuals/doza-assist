@@ -241,7 +241,7 @@ def test_unified_stream_answers_with_prose_and_cards(monkeypatch):
     chips = [e for e in events if e[0] == 'followups'][0][1]
     assert len(chips) == 3
     prog = [e[1] for e in events if e[0] == 'progress']
-    assert any(p.startswith('Reading ') for p in prog)
+    assert any(p.startswith('Reading') for p in prog)
     assert "couldn't find moments" not in done
 
 
@@ -324,3 +324,34 @@ def test_prewarm_builds_long_prefix(monkeypatch):
     joined = '\n'.join(m['content'] for m in seen['messages'])
     assert 'INTERVIEW MAP' in joined
     assert 'FOLLOW-UPS' not in joined
+
+
+# ── polish (2026-09-07): short progress, brevity contract, derived titles ──
+
+def test_progress_is_just_reading():
+    assert A._describe_reading([{'speaker': 'Dana', 'start': 1, 'end': 2}]) == 'Reading…'
+    assert A._describe_reading([]) == 'Reading…'
+
+
+def test_brevity_contract_rides_every_real_turn():
+    segs = _long_transcript(minutes=1)['segments']
+    for reminder in (True, False):
+        _s, msgs = A._build_chat_messages('what is this about?', [], 'P', segs, 'T', '', '', None,
+                                          include_final_reminder=reminder)
+        assert 'KEEP IT SHORT' in msgs[-1]['content']
+    _s, msgs = A._build_chat_messages('ok', [], 'P', segs, 'T', '', '', None, include_final_reminder=False)
+    assert 'KEEP IT SHORT' not in msgs[-1]['content']  # prewarm probe stays minimal
+
+
+def test_untitled_markers_get_a_title_from_the_transcript():
+    segs = [{'start': 0.0, 'end': 6.0, 'text': 'Um, so the fire started in the barn before anyone woke.', 'speaker': 'A'},
+            {'start': 6.0, 'end': 12.0, 'text': 'We lost the whole crop that year.', 'speaker': 'A'}]
+    text = ('Here:\n[CLIP: start=00:00:00 end=00:00:06 title="Clip"]\n'
+            '[CLIP: start=00:00:06 end=00:00:12 title="A real title" note="x"]\n'
+            '[CLIP: start=00:00:01 end=00:00:05]')
+    out = A._ensure_clip_titles(text, segs)
+    assert 'title="Clip"' not in out
+    assert 'title="The fire started in the barn before"' in out
+    assert 'title="A real title"' in out
+    assert out.count('title=') == 3
+    assert A._ensure_clip_titles('no markers here', segs) == 'no markers here'

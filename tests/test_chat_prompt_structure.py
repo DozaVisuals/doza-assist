@@ -313,7 +313,9 @@ class TestEndOfPromptReminder:
             analysis_block='', relevant_excerpts_block='', profile_id=None,
             include_final_reminder=False,
         )
-        assert messages[-1]['content'] == "what do you make of her arc?"
+        # Every real turn carries the brevity contract (2026-09-07); the
+        # point here is the absence of clip pressure, not an empty tail.
+        assert messages[-1]['content'] == "what do you make of her arc?" + ai_analysis._BREVITY_TAIL
         assert all('FINAL REMINDER' not in m['content'] for m in messages)
 
 
@@ -347,7 +349,7 @@ class TestDurationTargetPromptLine:
         # turn is exactly message + reminder, nothing else.
         msg = "how should I open the piece?"
         final = self._final_turn(msg)
-        assert final == f'{msg}\n\n{ai_analysis._FINAL_REMINDER}'
+        assert final == f'{msg}\n\n{ai_analysis._FINAL_REMINDER}{ai_analysis._BREVITY_TAIL}'
         assert 'DURATION TARGET' not in final
         assert 'CONTENT QUESTION' not in final
 
@@ -370,7 +372,8 @@ class TestDurationTargetPromptLine:
         # include_final_reminder=False is the conversational-synthesis path.
         msg = "no clips, what happens in the last 2 minutes?"
         final = self._final_turn(msg, include_final_reminder=False)
-        assert final == msg
+        assert final == msg + ai_analysis._BREVITY_TAIL
+        assert 'DURATION TARGET' not in final
 
     def test_positional_duration_mention_is_not_a_target(self):
         final = self._final_turn("find the moment at 14 minutes in")

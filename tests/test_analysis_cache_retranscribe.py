@@ -21,6 +21,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import app as app_module  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_ollama_preflight(monkeypatch):
+    """/analyze pings the local model server before starting a worker when
+    the saved provider is Ollama; these tests fake the model, so skip it."""
+    import ai_analysis
+    monkeypatch.setattr(ai_analysis, '_ollama_is_active', lambda: False)
+
+
 @pytest.fixture
 def client(tmp_path):
     app_module.app.config['PROJECTS_DIR'] = str(tmp_path / 'projects')
@@ -81,7 +89,7 @@ def test_cache_hit_with_dropped_vectors_rebuilds_without_the_model(client, monke
     monkeypatch.setattr('ai_analysis.generate_segment_vectors', _vectors)
 
     resp = _wait(client, pid, type='all')
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.get_json()
     assert resp.get_json()['status'] == 'started'
     assert calls['analyze'] == 0 and calls['vectors'] == 1
     meta = json.loads((Path(app_module.app.config['PROJECTS_DIR']) / pid / 'meta.json').read_text())

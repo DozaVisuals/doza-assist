@@ -730,6 +730,11 @@
                             <div>
                                 <div class="analysis-item-title">{{ beat.label }}</div>
                                 <div class="analysis-item-desc">{{ beat.description }}</div>
+                                <div class="analysis-item-expand" onclick="this.closest('.analysis-item').classList.toggle('expanded')" title="Show the clip's transcript">
+                                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg>
+                                    <span class="clip-expand-label">Show text</span>
+                                </div>
+                                <div class="analysis-item-transcript"></div>
                             </div>
                         </div>
                         <div class="analysis-item-right">
@@ -768,6 +773,11 @@
                                 <div class="analysis-item-title">{{ clip.title }}</div>
                                 <div class="analysis-item-desc">{{ clip.why }}</div>
                                 {% if clip.platform %}<span class="analysis-platform">{{ clip.platform }}</span>{% endif %}
+                                <div class="analysis-item-expand" onclick="this.closest('.analysis-item').classList.toggle('expanded')" title="Show the clip's transcript">
+                                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg>
+                                    <span class="clip-expand-label">Show text</span>
+                                </div>
+                                <div class="analysis-item-transcript"></div>
                             </div>
                         </div>
                         <div class="analysis-item-right">
@@ -2441,6 +2451,23 @@ function fillSoundbiteText() {
     });
 }
 
+// Story beats and social clips (2026-09-07): the same Show text as the
+// soundbites and the clip library — every clip you can play shows its
+// words. The range comes from the row's own data-clip-start / end.
+function fillAnalysisTranscripts() {
+    document.querySelectorAll('.analysis-item:not(.analysis-soundbite)').forEach(item => {
+        const box = item.querySelector('.analysis-item-transcript');
+        const expand = item.querySelector('.analysis-item-expand');
+        if (!box) return;
+        const start = parseTc(item.dataset.clipStart);
+        const rawEnd = parseTc(item.dataset.clipEnd);
+        const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : start + 15;
+        const transcript = Number.isFinite(start) ? window.dozaTranscriptForRange(start, end) : '';
+        box.textContent = transcript || '';
+        if (expand && !transcript) expand.style.display = 'none';
+    });
+}
+
 let _soundbiteTitlesRequested = false;
 window.dozaRequestSoundbiteTitles = async function () {
     if (_soundbiteTitlesRequested) return;
@@ -3135,6 +3162,7 @@ transcriptSearchInit(transcriptContainer);
 // clip already has one.
 window.addEventListener('load', () => {
     try { fillSoundbiteText(); } catch (e) { console.warn('soundbite text', e); }
+    try { fillAnalysisTranscripts(); } catch (e) { console.warn('analysis transcripts', e); }
     setTimeout(() => {
         if (typeof window.dozaRequestClipTitles === 'function') window.dozaRequestClipTitles();
         if (typeof window.dozaRequestSoundbiteTitles === 'function') window.dozaRequestSoundbiteTitles();

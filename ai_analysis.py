@@ -888,7 +888,7 @@ def _build_chat_messages(message, history, project_name, segments,
                         formatted, analysis_block, relevant_excerpts_block,
                         profile_id, labeled_sections=None, speaker_names=None,
                         include_final_reminder=True, language_directive_text='',
-                        followups_hint=False):
+                        followups_hint=False, story_so_far=None):
     """Construct the (system_message, messages_array) pair for an Ollama
     /api/chat call.
 
@@ -1054,6 +1054,9 @@ def _build_chat_messages(message, history, project_name, segments,
             final_content = (
                 f'{relevant_excerpts_block.strip()}\n\n{final_content}'
             )
+        _story_tail = _story_so_far_tail(story_so_far)
+        if _story_tail:
+            final_content = f'{final_content}\n\n{_story_tail}'
         if followups_hint:
             final_content = final_content + _FOLLOWUPS_HINT
         messages.append({'role': 'user', 'content': final_content})
@@ -1063,6 +1066,9 @@ def _build_chat_messages(message, history, project_name, segments,
             final_content = (
                 f'{relevant_excerpts_block.strip()}\n\n{final_content}'
             )
+        _story_tail = _story_so_far_tail(story_so_far)
+        if _story_tail:
+            final_content = f'{final_content}\n\n{_story_tail}'
         if followups_hint:
             final_content = final_content + _FOLLOWUPS_HINT
         messages.append({'role': 'user', 'content': final_content})
@@ -1108,7 +1114,8 @@ def _chat_reply_budget_kwargs(message, segments=None):
 def chat_about_transcript(transcript, message, history=None, project_name="Interview",
                           analysis=None, profile_id=None, segment_vectors=None,
                           paragraph_index=None, labeled_sections=None,
-                          speaker_names=None, output_language=None):
+                          speaker_names=None, output_language=None,
+                          story_so_far=None):
     """
     Chat with AI about the transcript. Supports follow-up questions.
     Returns the AI reply as a string (may contain embedded clip suggestions).
@@ -1184,6 +1191,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
                 profile_id, segment_vectors, labeled_sections, speaker_names,
                 phrases, words, theme_phrases, tfidf_hits,
                 directive, directive_plain, skip_title_anchor,
+                story_so_far=story_so_far,
             )
         # Legacy routing (DOZA_CHAT_LEGACY_CHUNKED=1): conversational divert
         # to summary synthesis, everything else to chunked clip search.
@@ -1234,7 +1242,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         formatted, analysis_block, relevant_excerpts_block, profile_id,
         labeled_sections=labeled_sections, speaker_names=speaker_names,
         language_directive_text=directive,
-        followups_hint=True,
+        followups_hint=True, story_so_far=story_so_far,
     )
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx,
@@ -1298,7 +1306,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
                                          message=message, history=history)
             if extractive else None,
             transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
             min_count=_plural_clip_minimum(message) if extractive else None,
             drop_reemitted=bool(
                 _MORE_CLIPS_RE.search((message or '').lower())),
@@ -1309,9 +1317,10 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         # clips earlier turns already showed.
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, matched, transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
             hard_cap_seconds=parse_duration_bound_seconds(message),
         )
+    cleaned = _drop_passed_markers(cleaned, story_so_far)
     return cleaned
 
 
@@ -1473,7 +1482,8 @@ def _stream_chat_events(system_message, messages, num_ctx, **call_kwargs):
 def chat_about_transcript_stream(transcript, message, history=None, project_name="Interview",
                                  analysis=None, profile_id=None, segment_vectors=None,
                                  paragraph_index=None, labeled_sections=None,
-                                 speaker_names=None, output_language=None):
+                                 speaker_names=None, output_language=None,
+                                 story_so_far=None):
     """Streaming variant of :func:`chat_about_transcript`.
 
     Layer 1 yields ``('token', piece)`` events as Ollama produces them, then
@@ -1544,6 +1554,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
                 profile_id, segment_vectors, labeled_sections, speaker_names,
                 phrases, words, theme_phrases, tfidf_hits,
                 directive, directive_plain, skip_title_anchor,
+                story_so_far=story_so_far,
             ):
                 yield event
             return
@@ -1612,7 +1623,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         formatted, analysis_block, relevant_excerpts_block, profile_id,
         labeled_sections=labeled_sections, speaker_names=speaker_names,
         language_directive_text=directive,
-        followups_hint=True,
+        followups_hint=True, story_so_far=story_so_far,
     )
 
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
@@ -1672,7 +1683,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
                                          message=message, history=history)
             if extractive else None,
             transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
             min_count=_plural_clip_minimum(message) if extractive else None,
             drop_reemitted=bool(
                 _MORE_CLIPS_RE.search((message or '').lower())),
@@ -1682,9 +1693,10 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         # non-streaming variant.
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, matched, transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
             hard_cap_seconds=parse_duration_bound_seconds(message),
         )
+    cleaned = _drop_passed_markers(cleaned, story_so_far)
     if _followups:
         yield ('followups', _followups)
     yield ('done', cleaned)
@@ -6948,6 +6960,82 @@ _SPEAKER_ROLE_WORDS = frozenset({
     'speaker', 'host', 'guest', 'interviewer', 'interviewee', 'subject',
     'narrator', 'unknown', 'staff', 'the', 'and',
 })
+# ── Story So Far ────────────────────────────────────────────────────────────
+# Per-project memory chat maintains with the editor: what they are making
+# and which moments they passed on. Persisted in meta['story_so_far'] by
+# the /story-so-far routes; injected into the FINAL turn (cache-safe) and
+# honoured by retrieval, count top-up and the reply itself.
+_STORY_MAKING_MAX = 300
+_STORY_PASSED_MAX = 100
+_STORY_MAKING_RE = re.compile(
+    r"\b(?:i'?m|i am|we'?re|we are)\s+(?:making|cutting|building|editing|producing)\b"
+    r"|\bthis is for (?:a|an|the)\b|\bmaking (?:a|an)\b",
+    re.IGNORECASE)
+
+
+def _story_passed_spans(story):
+    """``[(start, end), ...]`` from a story-so-far dict; tolerant of junk."""
+    out = []
+    for item in (story or {}).get('passed') or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            a = float(item.get('start', 0) or 0)
+            b = float(item.get('end', a) or a)
+        except (TypeError, ValueError):
+            continue
+        if b > a:
+            out.append((a, b))
+    return out
+
+
+def _story_so_far_tail(story):
+    """Text appended to the final user turn when the story-so-far has
+    content. Empty string otherwise."""
+    if not isinstance(story, dict):
+        return ''
+    lines = []
+    making = (story.get('making') or '').strip()
+    if making:
+        lines.append(f"- I'm making: {making[:_STORY_MAKING_MAX]}")
+    passed = [i for i in (story.get('passed') or []) if isinstance(i, dict)]
+    if passed:
+        bits = []
+        for item in passed[:_STORY_PASSED_MAX]:
+            try:
+                a = float(item.get('start', 0) or 0)
+                b = float(item.get('end', a) or a)
+            except (TypeError, ValueError):
+                continue
+            title = (item.get('title') or 'moment').strip().replace('"', "'")[:80]
+            bits.append(f'"{title}" ({_seconds_to_tc(a)}–{_seconds_to_tc(b)})')
+        if bits:
+            lines.append("- Passed on (I rejected these; do not suggest them again): "
+                         + '; '.join(bits))
+    if not lines:
+        return ''
+    return 'STORY SO FAR (from earlier in this session):\n' + '\n'.join(lines)
+
+
+def _detect_story_making(message):
+    """A one-line "what I'm making" from a message that states it — a
+    duration/format target ("build me a 90 second teaser") or an explicit
+    "I'm making a …". Empty string when the message is not about that."""
+    msg = (message or '').strip()
+    if not msg or len(msg) > 400:
+        return ''
+    low = msg.lower()
+    try:
+        has_target = parse_target_duration_seconds(msg) is not None
+    except Exception:
+        has_target = False
+    toks = set(re.findall(r"[a-z0-9']+", low))
+    has_noun = bool(toks & _DURATION_INTENT_NOUNS)
+    if _STORY_MAKING_RE.search(low) or (has_target and has_noun):
+        return msg[:_STORY_MAKING_MAX]
+    return ''
+
+
 _FOLLOWUPS_HINT = (
     '\n\nAfter your answer, add exactly one final line in this form and '
     'nothing after it:\nFOLLOW-UPS: <question> | <question> | <question>\n'
@@ -7163,7 +7251,7 @@ def _speaker_anchored_paragraphs(paragraphs, message, segment_vectors):
 
 def _chat_long_retrieve(transcript, message, phrases, words, theme_phrases,
                         tfidf_hits, segment_vectors, speaker_names, history=None,
-                        budget_chars=None):
+                        budget_chars=None, passed_spans=None):
     """Deterministic retrieval for the long-interview path: a chronological,
     budget-capped list of paragraph/segment excerpts ranked by evidence
     strength — TF-IDF hits, literal keyword/phrase/theme hits (+ one
@@ -7208,6 +7296,8 @@ def _chat_long_retrieve(transcript, message, phrases, words, theme_phrases,
             exclude = [(float(a), float(b)) for a, b, *_ in _history_clip_spans(history)]
     except Exception:
         exclude = []
+    # Moments the editor passed on never come back as evidence.
+    exclude.extend(list(passed_spans or []))
 
     def _shown(p):
         try:
@@ -7288,9 +7378,18 @@ def _build_long_chat_context(project_name, segments, analysis, labeled_sections,
     )
 
 
+def _drop_passed_markers(text, story_so_far):
+    """Remove markers that re-issue a moment the editor passed on."""
+    spans = _story_passed_spans(story_so_far)
+    if not spans or not text:
+        return text
+    return _drop_reemitted_clip_markers(text, [(a, b, None) for a, b in spans])
+
+
 def _long_chat_prepare(transcript, message, history, project_name, analysis,
                        profile_id, segment_vectors, labeled_sections, speaker_names,
-                       phrases, words, theme_phrases, tfidf_hits, directive):
+                       phrases, words, theme_phrases, tfidf_hits, directive,
+                       story_so_far=None):
     """Shared prep for the blocking and streaming long-path variants."""
     segments = (transcript or {}).get('segments') or []
     named_segments = _apply_speaker_names(segments, speaker_names)
@@ -7303,6 +7402,7 @@ def _long_chat_prepare(transcript, message, history, project_name, analysis,
     excerpts = _chat_long_retrieve(
         transcript, message, phrases, words, theme_phrases, tfidf_hits,
         segment_vectors, speaker_names, history=history, budget_chars=budget,
+        passed_spans=_story_passed_spans(story_so_far),
     )
     excerpts_block = ''
     if excerpts:
@@ -7330,6 +7430,7 @@ def _long_chat_prepare(transcript, message, history, project_name, analysis,
         include_final_reminder=not conversational,
         language_directive_text=directive,
         followups_hint=True,
+        story_so_far=story_so_far,
     )
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
     reply_kwargs = dict(_chat_reply_budget_kwargs(message, segments))
@@ -7340,7 +7441,7 @@ def _long_chat_prepare(transcript, message, history, project_name, analysis,
         'segments': segments, 'conversational': conversational,
         'excerpts': excerpts, 'context': context,
         'system_message': system_message, 'messages': messages, 'num_ctx': num_ctx,
-        'reply_kwargs': reply_kwargs,
+        'reply_kwargs': reply_kwargs, 'story_so_far': story_so_far,
     }
 
 
@@ -7378,7 +7479,7 @@ def _long_chat_finish(raw, prep, transcript, message, history, segment_vectors,
                                          message=message, history=history)
             if extractive else None,
             transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(prep.get('story_so_far')),
             min_count=_plural_clip_minimum(message) if extractive else None,
             # Discussion answers about cards already on screen ("why did
             # you pick those clips?") must not re-deal the same cards.
@@ -7387,21 +7488,24 @@ def _long_chat_finish(raw, prep, transcript, message, history, segment_vectors,
     elif extractive:
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, excerpts, transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(prep.get('story_so_far')),
             hard_cap_seconds=parse_duration_bound_seconds(message),
         )
+    cleaned = _drop_passed_markers(cleaned, prep.get('story_so_far'))
     return cleaned, followups
 
 
 def _chat_long_unified(transcript, message, history, project_name, analysis,
                        profile_id, segment_vectors, labeled_sections, speaker_names,
                        phrases, words, theme_phrases, tfidf_hits,
-                       directive, directive_plain, skip_title_anchor):
+                       directive, directive_plain, skip_title_anchor,
+                       story_so_far=None):
     """Blocking long-interview answer: prose with cards, one LLM call."""
     prep = _long_chat_prepare(
         transcript, message, history, project_name, analysis, profile_id,
         segment_vectors, labeled_sections, speaker_names,
         phrases, words, theme_phrases, tfidf_hits, directive,
+        story_so_far=story_so_far,
     )
     raw = _call_ai_chat(prep['system_message'], prep['messages'], num_ctx=prep['num_ctx'],
                         timing_tag='long-answer', **prep['reply_kwargs'])
@@ -7415,7 +7519,8 @@ def _chat_long_unified(transcript, message, history, project_name, analysis,
 def _chat_long_unified_stream(transcript, message, history, project_name, analysis,
                               profile_id, segment_vectors, labeled_sections, speaker_names,
                               phrases, words, theme_phrases, tfidf_hits,
-                              directive, directive_plain, skip_title_anchor):
+                              directive, directive_plain, skip_title_anchor,
+                              story_so_far=None):
     """Streaming long-interview answer. Yields ``('progress', label)`` while
     retrieving (naming who and when is being read), then the shared token
     stream, an optional ``('followups', [..])`` and the final ``('done', text)``."""
@@ -7425,6 +7530,7 @@ def _chat_long_unified_stream(transcript, message, history, project_name, analys
             transcript, message, history, project_name, analysis, profile_id,
             segment_vectors, labeled_sections, speaker_names,
             phrases, words, theme_phrases, tfidf_hits, directive,
+            story_so_far=story_so_far,
         )
     except Exception as e:
         print(f"[chat-stream] long-path prep failed: {e}", flush=True)

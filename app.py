@@ -4151,6 +4151,7 @@ def chat(project_id):
                 labeled_sections=p.get('labeled_sections') or None,
                 speaker_names=p.get('speaker_names') or None,
                 output_language=resolve_output_language(p),
+                story_so_far=p.get('story_so_far') or None,
             )
         else:
             # Multi-project: combine transcripts with project labels.
@@ -4197,6 +4198,7 @@ def chat(project_id):
                 history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
                 history_log.append({'role': 'assistant', 'content': reply, 'ts': now_iso})
                 stored['chat_history'] = history_log
+                _story_auto_making(stored, message)
                 save_project(pid, stored)
 
         return jsonify({'reply': reply})
@@ -4254,6 +4256,7 @@ def chat_stream(project_id):
             'labeled_sections': p.get('labeled_sections') or None,
             'speaker_names': p.get('speaker_names') or None,
             'output_language': resolve_output_language(p),
+            'story_so_far': p.get('story_so_far') or None,
         }
         single_pid = p['id']
     else:
@@ -4324,6 +4327,7 @@ def chat_stream(project_id):
                     history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
                     history_log.append({'role': 'assistant', 'content': final_reply, 'ts': now_iso})
                     stored['chat_history'] = history_log
+                    _story_auto_making(stored, message)
                     save_project(single_pid, stored)
             except Exception as e:
                 print(f"[chat-stream] history persist failed: {e}")
@@ -4332,6 +4336,112 @@ def chat_stream(project_id):
         'Cache-Control': 'no-cache',
         'X-Accel-Buffering': 'no',  # disable nginx buffering if proxied
     })
+
+
+def _story_auto_making(stored, message):
+    """When the editor states what they are making ("build me a 90 second
+    teaser", "I'm making a recruiting film"), remember it in the Story So
+    Far — only when nothing is stored yet, so a hand-edited line is never
+    overwritten. Mutates ``stored`` in place (caller saves)."""
+    try:
+        from ai_analysis import _detect_story_making
+        story = dict(stored.get('story_so_far') or {})
+        if (story.get('making') or '').strip():
+            return
+        making = _detect_story_making(message)
+        if making:
+            story['making'] = making
+            story['updated_at'] = datetime.now().isoformat()
+            stored['story_so_far'] = story
+    except Exception as e:
+        print(f"[chat] story-so-far auto-making failed: {e}", flush=True)
+
+
+def _story_clean_passed(items):
+    """Validate the passed-on list: dicts with numeric start < end, a short
+    title, deduped by span, capped."""
+    out, seen = [], set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            a = float(item.get('start', 0) or 0)
+            b = float(item.get('end', a) or a)
+        except (TypeError, ValueError):
+            continue
+        if b <= a or a < 0:
+            continue
+        key = (round(a, 2), round(b, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({'start': round(a, 3), 'end': round(b, 3),
+                    'title': str(item.get('title') or 'moment').strip()[:120]})
+        if len(out) >= 100:
+            break
+    return out
+
+
+def _story_so_far_update(project_id, **changes):
+    """Locked read-modify-write of ``meta['story_so_far']``."""
+    with project_lock(project_id):
+        stored = get_project(project_id)
+        if not stored:
+            return None
+        story = dict(stored.get('story_so_far') or {})
+        if 'making' in changes:
+            story['making'] = str(changes['making'] or '').strip()[:300]
+        if 'passed' in changes:
+            story['passed'] = _story_clean_passed(changes['passed'])
+        story['updated_at'] = datetime.now().isoformat()
+        stored['story_so_far'] = story
+        save_project(project_id, stored)
+        return story
+
+
+@app.route('/project/<project_id>/story-so-far', methods=['GET', 'POST'])
+def story_so_far_route(project_id):
+    """The Story So Far rail: what the editor is making and the moments
+    they passed on. GET returns it; POST merges ``making`` and/or
+    ``passed`` (full list) and returns the stored state."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    if request.method == 'GET':
+        return jsonify(project.get('story_so_far') or {})
+    data = request.json or {}
+    changes = {}
+    if 'making' in data:
+        changes['making'] = data.get('making')
+    if 'passed' in data and isinstance(data.get('passed'), list):
+        changes['passed'] = data.get('passed')
+    story = _story_so_far_update(project_id, **changes)
+    if story is None:
+        return jsonify({'error': 'Project not found'}), 404
+    return jsonify(story)
+
+
+@app.route('/project/<project_id>/story-so-far/pass', methods=['POST'])
+def story_so_far_pass(project_id):
+    """Pass on (or, with ``undo``, restore) one moment: ``{start, end,
+    title, undo?}``. Passed moments are excluded from retrieval, count
+    top-ups and replies."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    data = request.json or {}
+    try:
+        a = float(data.get('start')); b = float(data.get('end'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'start and end are required'}), 400
+    passed = list((project.get('story_so_far') or {}).get('passed') or [])
+    if data.get('undo'):
+        passed = [i for i in passed
+                  if not (abs(float(i.get('start', -1)) - a) < 0.5 and abs(float(i.get('end', -1)) - b) < 0.5)]
+    else:
+        passed.append({'start': a, 'end': b, 'title': data.get('title') or 'moment'})
+    story = _story_so_far_update(project_id, passed=passed)
+    return jsonify(story or {})
 
 
 @app.route('/project/<project_id>/chat', methods=['DELETE'])

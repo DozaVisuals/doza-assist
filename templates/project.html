@@ -821,6 +821,20 @@
                             <p class="chat-welcome-hint">or just ask me anything about this interview</p>
                         </div>
                     </div>
+                    <div class="story-rail" id="storyRail">
+                        <div class="story-rail-row">
+                            <span class="story-rail-label">Making</span>
+                            <input class="story-rail-making" id="storyMaking" type="text" maxlength="300"
+                                   placeholder="Tell me what you're making — a 4-minute recruiting film, a 60-second teaser…"
+                                   onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
+                                   onchange="saveStoryMaking(this.value)">
+                        </div>
+                        <div class="story-rail-row story-rail-meta">
+                            <span id="storyKept" class="story-rail-chip" onclick="switchTab('clips')" title="Open the Clips tab"></span>
+                            <span id="storyPassed" class="story-rail-chip" onclick="toggleStoryPassed()" title="Moments you passed on"></span>
+                        </div>
+                        <div class="story-rail-passed" id="storyPassedList" style="display:none;"></div>
+                    </div>
                     <div class="chat-input-area">
                         <button class="my-style-pill" id="chatStylePill" onclick="toggleMyStylePill()" style="display:none;" title="Toggle My Style for AI suggestions">
                             <span class="my-style-pill-dot"></span>
@@ -3494,6 +3508,7 @@ async function sendChat() {
                     streamed.bubble.appendChild(pullPrompt);
                 }
                 renderFollowupChips(streamed.bubble, streamed.followups);
+                try { renderStoryRail(); } catch (_) {}
             }
         } else if (streamed.fallback) {
             // Streaming endpoint failed — try the original /chat endpoint.
@@ -4008,6 +4023,88 @@ function stripFollowupsLine(text) {
     return String(text || '').replace(/^[ \t]*\**[ \t]*FOLLOW[\s-]*UPS?[ \t]*\**[ \t]*:.*$/gim, '').replace(/\s+$/, '');
 }
 
+// ── Story So Far ─────────────────────────────────────────────────────────
+// What the editor is making and the moments they passed on. Persisted per
+// project (/story-so-far); chat reads it on every turn, passed moments are
+// excluded from retrieval, top-ups and replies.
+let storySoFar = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.story_so_far) || { making: '', passed: [] };
+if (!Array.isArray(storySoFar.passed)) storySoFar.passed = [];
+
+function isPassedSpan(start, end) {
+    try {
+        return storySoFar.passed.some(p => {
+            const a = parseFloat(p.start), b = parseFloat(p.end);
+            const overlap = Math.min(end, b) - Math.max(start, a);
+            return overlap > 0 && overlap / Math.max(1, Math.min(end - start, b - a)) > 0.5;
+        });
+    } catch (_) { return false; }
+}
+
+function renderStoryRail() {
+    const rail = document.getElementById('storyRail');
+    if (!rail) return;
+    const making = document.getElementById('storyMaking');
+    if (making && document.activeElement !== making) making.value = storySoFar.making || '';
+    const kept = (typeof _clipCount === 'function') ? _clipCount() : 0;
+    const keptEl = document.getElementById('storyKept');
+    if (keptEl) keptEl.textContent = kept === 1 ? '1 clip kept' : `${kept} clips kept`;
+    const passedEl = document.getElementById('storyPassed');
+    const n = storySoFar.passed.length;
+    if (passedEl) {
+        passedEl.textContent = n === 0 ? 'Nothing passed on' : (n === 1 ? '1 passed on' : `${n} passed on`);
+        passedEl.classList.toggle('story-rail-chip-empty', n === 0);
+    }
+    const list = document.getElementById('storyPassedList');
+    if (list) {
+        list.innerHTML = storySoFar.passed.map(p => {
+            const t = escapeHtml(String(p.title || 'moment'));
+            return `<div class="story-passed-item"><span>${t} <span class="cc-tc">${fmtDisplayTC(parseFloat(p.start))}–${fmtDisplayTC(parseFloat(p.end))}</span></span><button type="button" class="story-passed-restore" onclick="unpassChatClip(${parseFloat(p.start)},${parseFloat(p.end)})">Restore</button></div>`;
+        }).join('');
+        if (n === 0) list.style.display = 'none';
+    }
+    document.querySelectorAll('#chatMessages .cc-card').forEach(card => {
+        const a = parseFloat(card.dataset.start), b = parseFloat(card.dataset.end);
+        card.classList.toggle('cc-passed', isPassedSpan(a, b));
+    });
+}
+
+function toggleStoryPassed() {
+    const list = document.getElementById('storyPassedList');
+    if (!list || storySoFar.passed.length === 0) return;
+    list.style.display = list.style.display === 'none' ? '' : 'none';
+}
+
+async function saveStoryMaking(value) {
+    storySoFar.making = String(value || '').trim().slice(0, 300);
+    try {
+        const r = await fetch(`/project/${PROJECT.id}/story-so-far`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ making: storySoFar.making }) });
+        if (r.ok) { const j = await r.json(); if (j && typeof j === 'object') { storySoFar = Object.assign({ making: '', passed: [] }, j); if (!Array.isArray(storySoFar.passed)) storySoFar.passed = []; } }
+        if (typeof showToast === 'function') showToast(storySoFar.making ? 'Story so far updated' : 'Cleared');
+    } catch (_) { /* offline: keep local state */ }
+    renderStoryRail();
+}
+
+async function passChatClip(start, end, title, btn) {
+    try {
+        const r = await fetch(`/project/${PROJECT.id}/story-so-far/pass`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start, end, title }) });
+        if (r.ok) { const j = await r.json(); storySoFar = Object.assign({ making: '', passed: [] }, j); if (!Array.isArray(storySoFar.passed)) storySoFar.passed = []; }
+        else { storySoFar.passed.push({ start, end, title }); }
+    } catch (_) { storySoFar.passed.push({ start, end, title }); }
+    if (btn) { const card = btn.closest('.cc-card'); if (card) card.classList.add('cc-passed'); }
+    if (typeof showToast === 'function') showToast("Passed on — I won't suggest it again");
+    renderStoryRail();
+}
+
+async function unpassChatClip(start, end) {
+    try {
+        const r = await fetch(`/project/${PROJECT.id}/story-so-far/pass`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start, end, undo: true }) });
+        if (r.ok) { const j = await r.json(); storySoFar = Object.assign({ making: '', passed: [] }, j); if (!Array.isArray(storySoFar.passed)) storySoFar.passed = []; }
+    } catch (_) { storySoFar.passed = storySoFar.passed.filter(p => !(Math.abs(p.start - start) < 0.5 && Math.abs(p.end - end) < 0.5)); }
+    renderStoryRail();
+}
+
+document.addEventListener('DOMContentLoaded', () => { try { renderStoryRail(); } catch (_) {} });
+
 // Three suggested next questions under a reply. Clicking one sends it as
 // the editor's next message — same path as the welcome suggestions.
 function renderFollowupChips(bubble, followups) {
@@ -4103,7 +4200,7 @@ function renderChatReply(text) {
                 ? `<div class="cc-note">${note.trim()}</div>`
                 : '';
 
-            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtDisplayTC(start)}–${fmtDisplayTC(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" title="Add to Clips" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
+            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtDisplayTC(start)}–${fmtDisplayTC(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" title="Add to Clips" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button><button class="cc-pass" title="Not this one — don't suggest it again" onclick="passChatClip(${start},${end},'${safeTitle}',this)">✕</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`.replace('class="cc-card"', isPassedSpan(start, end) ? 'class="cc-card cc-passed"' : 'class="cc-card"');
             const idx = CARD_STASH.length;
             CARD_STASH.push(cardHtml);
             return `\uE000CCCARD${idx}\uE001`;

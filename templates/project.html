@@ -3322,6 +3322,48 @@ function _renderPromptButton(p, isPrimary) {
     return `<button class="${cls}" data-prompt="${promptAttr}"${fillInAttr} onclick="sendSuggestion(this)">${labelText}</button>`;
 }
 
+// Opening brief: the analysis pass already knows what this interview is
+// about and which soundbites are strongest, so the Story Room opens with
+// that instead of an empty box. Zero model calls; nothing when analysis
+// has not run yet (the welcome then reads as before).
+function _openingBriefHtml() {
+    try {
+        const analysis = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.analysis) || null;
+        if (!analysis || typeof analysis !== 'object') return '';
+        const summary = String(analysis.summary || '').trim();
+        const bites = Array.isArray(analysis.strongest_soundbites) ? analysis.strongest_soundbites : [];
+        if (!summary && bites.length === 0) return '';
+        let html = '<div class="chat-brief">';
+        if (summary) {
+            const short = summary.length > 420 ? summary.slice(0, 420).replace(/\s+\S*$/, '') + '…' : summary;
+            html += `<p class="chat-brief-summary">${escapeHtml(short)}</p>`;
+        }
+        const cards = [];
+        for (const sb of bites) {
+            if (!sb || cards.length >= 3) break;
+            const start = parseTc(String(sb.start || ''));
+            const end = parseTc(String(sb.end || ''));
+            if (!(end > start)) continue;
+            const title = String(sb.title || sb.text || 'Moment').trim().slice(0, 90);
+            const marker = `[CLIP: start=${fmtTc(start)} end=${fmtTc(end)} title="${title.replace(/"/g, "'")}"]`;
+            cards.push(marker);
+        }
+        if (cards.length) {
+            html += '<div class="chat-brief-cards">' + renderChatReply(cards.join('\n')) + '</div>';
+        }
+        html += '</div>';
+        return html;
+    } catch (_) {
+        return '';
+    }
+}
+
+function fmtTc(sec) {
+    sec = Math.max(0, Math.floor(Number(sec) || 0));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 function _welcomeHtml() {
     const state = _chatState();
     const header = _welcomeHeaderForState(state);
@@ -3329,10 +3371,12 @@ function _welcomeHtml() {
     // First prompt is the primary "start here" pick — same size, filled
     // accent treatment so it reads as a suggestion without being pushy.
     const buttons = prompts.map((p, i) => _renderPromptButton(p, i === 0)).join('\n                ');
+    const brief = _openingBriefHtml();
     return `
         <div class="chat-welcome" data-chat-state="${state}">
             <h3 class="chat-welcome-title">${header.title}</h3>
             <p class="chat-welcome-subtitle">${header.subtitle}</p>
+            ${brief}
             <div class="chat-suggestions">
                 ${buttons}
             </div>
@@ -3449,6 +3493,7 @@ async function sendChat() {
                         + ` <button class="btn btn-sm chat-pull-btn" onclick="buildStoryFromChatClips(this)" style="margin-left:4px;">Build as Story</button>`;
                     streamed.bubble.appendChild(pullPrompt);
                 }
+                renderFollowupChips(streamed.bubble, streamed.followups);
             }
         } else if (streamed.fallback) {
             // Streaming endpoint failed — try the original /chat endpoint.
@@ -3529,6 +3574,7 @@ async function streamChatReply({ message, typing, progressTimer }) {
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
     let streamedText = '';
+    let followups = [];
     let finalReply = '';
     let sawDone = false;
     let sawBusy = false;
@@ -3549,14 +3595,31 @@ async function streamChatReply({ message, typing, progressTimer }) {
         // will auto-wrap into cards) become "pulling clip" chips; other
         // bracketed text ([inaudible], [laughter] quoted from the
         // transcript) is blanked, not mislabeled as a pending clip.
-        let live = streamedText
+        // Cards materialize as soon as their marker closes: everything up
+        // to the last complete "]" renders through the real renderer, the
+        // unfinished tail is masked as before.
+        let text = stripFollowupsLine(streamedText);
+        let head = text;
+        let tail = '';
+        const openIdx = text.lastIndexOf('[');
+        if (openIdx !== -1 && text.indexOf(']', openIdx) === -1) {
+            head = text.slice(0, openIdx);
+            tail = text.slice(openIdx);
+        }
+        let liveTail = tail
             .replace(/\[\s*CLIP[^\]\n]*\]?/gi, '\ue003')
-            .replace(/\[[^\]\n]*\]?/g, ' ')
-            .trim();
-        if (!live) return;
-        bubble.innerHTML = escapeHtml(live)
+            .replace(/\[[^\]\n]*\]?/g, ' ');
+        let html = '';
+        try {
+            html = head.trim() ? renderChatReply(head) : '';
+        } catch (_) {
+            html = escapeHtml(head.replace(/\[[^\]\n]*\]?/g, ' ')).replace(/\n/g, '<br>');
+        }
+        html += escapeHtml(liveTail)
             .replace(/\ue003/g, '<em style="opacity:.65">⏳ pulling clip…</em>')
-            .replace(/\n/g, '<br>') +
+            .replace(/\n/g, '<br>');
+        if (!html.trim()) return;
+        bubble.innerHTML = html +
             ' <span class="chat-typing"><span></span><span></span><span></span></span>';
     };
 
@@ -3614,10 +3677,14 @@ async function streamChatReply({ message, typing, progressTimer }) {
                         bubble.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> ' + label;
                     }
                 } else if (ev === 'progress') {
-                    // Progress events come from Layer 2 chunked search
-                    // ("Searching across the full interview…"). Show them
-                    // so the user knows work is happening.
-                    if (!streamedText) bubble.textContent = String(payload.data || '');
+                    // Progress events come from the long-interview path
+                    // ("Reading Dana Whitfield 01:27–01:33…"). Show them
+                    // so the user knows what is being read.
+                    if (!streamedText) bubble.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> ' + escapeHtml(String(payload.data || ''));
+                } else if (ev === 'followups') {
+                    // Three follow-up questions the model suggested; the
+                    // caller renders them as chips under the reply.
+                    if (Array.isArray(payload.data)) followups = payload.data.filter(q => typeof q === 'string' && q.trim());
                 } else if (ev === 'done') {
                     finalReply = String(payload.data || '');
                     sawDone = true;
@@ -3648,11 +3715,11 @@ async function streamChatReply({ message, typing, progressTimer }) {
         // Stream cut off mid-reply. If we have any tokens, treat them as the
         // reply; otherwise fall back.
         if (streamedText) {
-            return { ok: true, reply: streamedText, bubble };
+            return { ok: true, reply: stripFollowupsLine(streamedText), bubble };
         }
         return { ok: false, fallback: true };
     }
-    return { ok: true, reply: finalReply || streamedText, bubble, busy: sawBusy };
+    return { ok: true, reply: finalReply || stripFollowupsLine(streamedText), bubble, busy: sawBusy, followups };
 }
 
 // Store pending chat story builds (not yet sent to Story Builder)
@@ -3932,6 +3999,36 @@ function appendChatMessage(role, content, isHtml = false) {
     container.appendChild(msg);
     container.scrollTop = container.scrollHeight;
     return msg;
+}
+
+// The model may end a reply with one "FOLLOW-UPS: a | b | c" line the
+// server turns into chips. Belt-and-braces: never let it paint as prose
+// (live paint runs on raw tokens, before the server strips it).
+function stripFollowupsLine(text) {
+    return String(text || '').replace(/^[ \t]*\**[ \t]*FOLLOW[\s-]*UPS?[ \t]*\**[ \t]*:.*$/gim, '').replace(/\s+$/, '');
+}
+
+// Three suggested next questions under a reply. Clicking one sends it as
+// the editor's next message — same path as the welcome suggestions.
+function renderFollowupChips(bubble, followups) {
+    if (!bubble || !Array.isArray(followups) || followups.length === 0) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'chat-followups';
+    followups.slice(0, 3).forEach((q) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'chat-followup';
+        b.textContent = q;
+        b.addEventListener('click', () => {
+            const input = document.getElementById('chatInput');
+            if (!input || input.disabled) return;
+            input.value = q;
+            autoGrowChatInput(input);
+            sendChat();
+        });
+        wrap.appendChild(b);
+    });
+    bubble.appendChild(wrap);
 }
 
 function renderChatReply(text) {

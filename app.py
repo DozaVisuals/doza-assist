@@ -2040,6 +2040,7 @@ def _prewarm_chat_for_project(project_id):
                     labeled_sections=p.get('labeled_sections') or None,
                     speaker_names=p.get('speaker_names') or None,
                     output_language=resolve_output_language(p),
+                    segment_vectors=load_segment_vectors(project_id) or None,
                 ):
                     return
             warmup_ollama()
@@ -3889,6 +3890,7 @@ def _rewarm_chat_after_heavy_call(project_id):
                         labeled_sections=p.get('labeled_sections') or None,
                         speaker_names=p.get('speaker_names') or None,
                         output_language=resolve_output_language(p),
+                        segment_vectors=load_segment_vectors(project_id) or None,
                     )
             except Exception as e:
                 print(f"[chat-prewarm] rewarm worker failed: {e}", flush=True)

@@ -2038,6 +2038,13 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 .story-clip-tc { font-family: var(--mono); font-size: 10px; color: var(--text-secondary); }
 .story-clip-add { flex-shrink: 0; font-size: 11px !important; padding: 2px 6px !important; }
 
+.chat-followups { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.chat-followup { font: inherit; font-size: 12.5px; padding: 5px 11px; border-radius: 14px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); cursor: pointer; text-align: left; }
+.chat-followup:hover { color: var(--text-primary); border-color: var(--accent); }
+.chat-followup:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat-brief { margin: 6px 0 14px; text-align: left; max-width: 640px; }
+.chat-brief-summary { font-size: 13.5px; line-height: 1.5; color: var(--text-secondary); margin: 0 0 8px; }
+.chat-brief-cards .cc-card { margin: 6px 0; }
 .chat-pull-prompt { margin-top: 12px; padding: 10px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .chat-pull-btn { white-space: nowrap; }
 .chat-pull-btn.clip-added { background: #22c55e; border-color: #22c55e; color: #fff; cursor: default; }

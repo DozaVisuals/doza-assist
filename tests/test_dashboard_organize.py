@@ -50,3 +50,21 @@ def test_unfiled_zone_exists_even_when_everything_is_filed(client, tmp_path):
     html = client.get('/').data.decode()
     assert 'unfiledDropZone' in html
     assert 'Drop here to remove from its folder' in html
+
+
+def test_new_folder_never_nests_inside_the_unfiled_zone(client, tmp_path):
+    """Regression (field report 2026-09-07): with no folders yet, New Folder
+    inserted its group before the first ``.project-list`` — which lives
+    INSIDE ``#unfiledDropZone`` — so a drop on the new folder bubbled to the
+    Unfiled zone too and the "unfile" write landed last: the first project
+    dragged in came straight back out and the folder vanished on reload.
+    The insertion anchor is now the Unfiled zone itself, and a filed drop
+    stops at the innermost target."""
+    import re
+    _seed(tmp_path, 'pa')
+    _seed(tmp_path, 'pb')
+    html = client.get('/').data.decode()
+    assert 'function _newFolderAnchor' in html
+    assert "document.getElementById('unfiledDropZone')" in html
+    assert "querySelector('.project-list') || document.querySelector('.empty-state')" not in html
+    assert re.search(r"stopPropagation\(\);\s*doMove\(projectId", html)

@@ -68,12 +68,55 @@ _CONDITIONAL_ASSEMBLY_VERB_STARTS = (
     'assemble', 'assembles',
 )
 _NO_CLIP_SIGNALS = (
-    'no clip', 'without clip', 'no markers', 'without markers',
+    'no clip', 'without clip', 'without a clip', 'no markers', 'without markers',
     'just talk', 'just tell me', 'just tell me in general', 'in general',
+    'just explain', 'just answer', 'prose only', 'text only', 'no cards',
     "don't pull", "don't find", "don't list", "don't return",
-    "don't surface", 'do not pull', 'do not find', 'do not return',
-    'no need for clips', 'skip the clips', 'skip clips',
+    "don't surface", "don't give me a clip", "don't give me clips",
+    "don't give me any clip", "don't show me clip", "don't attach",
+    'dont pull', 'dont find', 'dont list', 'dont return', 'dont surface',
+    'dont give me a clip', 'dont give me clips', 'dont give me any clip',
+    'dont show me clip', 'dont attach',
+    'do not pull', 'do not find', 'do not return', 'do not give me',
+    'do not attach', 'not clips', 'no need for clips', 'no need for a clip',
+    'skip the clips', 'skip clips',
 )
+
+
+def _no_clip_request(message) -> bool:
+    """True when the editor said, in any spelling, that they want no
+    clips this turn. A hard instruction: markers are stripped from the
+    reply and no salvage, count or duration pass runs."""
+    low = (message or '').lower()
+    return bool(low) and any(sig in low for sig in _NO_CLIP_SIGNALS)
+
+
+_DENIES_COVERAGE_RE = re.compile(
+    r"(?:(?:doesn'?t|does not|don'?t|do not|never|isn'?t|is not|not|no)\s+"
+    r"(?:really\s+|actually\s+|explicitly\s+|directly\s+)?"
+    r"(?:mention(?:ed|s)?|say|says|said|discuss(?:ed|es)?|cover(?:ed|s)?|"
+    r"address(?:ed|es)?|come up|comes up|appear(?:s|ed)?|talk(?:s|ed)? about|"
+    r"in the (?:transcript|footage|interview|recording)|"
+    r"part of (?:this|the) (?:transcript|footage|interview)))"
+    r"|(?:\b(?:nobody|no one|no-one|none of (?:them|the speakers|the interviewees)|neither of them)\b"
+    r"[^.?!\n]{0,40}?\b(?:says?|said|mentions?|mentioned|talks?|talked|discuss(?:es|ed)?|brings? up|brought up)\b)"
+    r"|\bnothing (?:about|on)\b|\bno mention of\b|\boutside (?:of )?(?:this|the) (?:footage|interview|transcript)\b",
+    re.IGNORECASE)
+
+
+def _reply_denies_coverage(text) -> bool:
+    """True when the reply says the footage does not contain what was
+    asked ("The transcript doesn't mention what day it is"). Salvage and
+    count top-ups must not bolt unrelated cards onto such an answer."""
+    head = (text or '').strip()[:400]
+    return bool(head) and bool(_DENIES_COVERAGE_RE.search(head))
+
+
+def _strip_all_markers(text):
+    """Remove every [CLIP:] marker line (and its attached note lines)."""
+    if not text or '[CLIP' not in text:
+        return text
+    return _drop_marker_lines_where(text, lambda marker: True)
 # Clip-seeking nouns: an editor whose message names "moments", "clips",
 # "quotes", "soundbites", or "highlights" wants playable material
 # even when the ask wears question syntax ("What are the strongest
@@ -1058,6 +1101,8 @@ def _build_chat_messages(message, history, project_name, segments,
         if _story_tail:
             final_content = f'{final_content}\n\n{_story_tail}'
         final_content = final_content + _BREVITY_TAIL
+        if _no_clip_request(message):
+            final_content = final_content + _NO_CLIPS_TAIL
         if followups_hint:
             final_content = final_content + _FOLLOWUPS_HINT
         messages.append({'role': 'user', 'content': final_content})
@@ -1071,7 +1116,9 @@ def _build_chat_messages(message, history, project_name, segments,
         if _story_tail:
             final_content = f'{final_content}\n\n{_story_tail}'
         if message != 'ok':  # the prewarm probe keeps the prefix minimal
-            final_content = final_content + _BREVITY_TAIL
+            final_content = final_content + _BREVITY_TAIL_CONVERSATIONAL
+            if _no_clip_request(message):
+                final_content = final_content + _NO_CLIPS_TAIL
         if followups_hint:
             final_content = final_content + _FOLLOWUPS_HINT
         messages.append({'role': 'user', 'content': final_content})
@@ -1257,6 +1304,10 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
     cleaned = _ensure_clip_titles(cleaned, segments)
+    if _no_clip_request(message):
+        # A hard instruction: prose only, whatever the model or the
+        # enforcement passes would otherwise add.
+        return _drop_passed_markers(_strip_all_markers(cleaned), story_so_far)
     # Skip clip salvage when the editor's question is conversational
     # (themes, story, craft, chitchat, or explicit "no clips"). Forcing
     # markers into a discussion answer breaks the orientation contract.
@@ -1266,8 +1317,9 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     # has actual prose, though: salvaging an EMPTY reply on a yes/no
     # content question ("did she ever mention X?") would fabricate an
     # implied 'yes' out of cards for a topic never discussed.
-    if not _is_conversational_query(message, segments=segments) \
-            or (_is_content_lookup_query(message) and cleaned.strip()):
+    if (not _is_conversational_query(message, segments=segments)
+            or (_is_content_lookup_query(message) and cleaned.strip())) \
+            and not _reply_denies_coverage(cleaned):
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
@@ -1311,7 +1363,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
             if extractive else None,
             transcript=transcript,
             exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
-            min_count=_plural_clip_minimum(message) if extractive else None,
+            min_count=_plural_clip_minimum(message) if (extractive and not _reply_denies_coverage(cleaned)) else None,
             drop_reemitted=bool(
                 _MORE_CLIPS_RE.search((message or '').lower())),
         )
@@ -1650,6 +1702,12 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
     cleaned = _ensure_clip_titles(cleaned, segments)
+    if _no_clip_request(message):
+        cleaned = _drop_passed_markers(_strip_all_markers(cleaned), story_so_far)
+        if _followups:
+            yield ('followups', _followups)
+        yield ('done', cleaned)
+        return
     # Salvage pass mirrors the non-streaming path. Adds latency only when
     # the model's first attempt produced zero markers — most calls return
     # immediately. Streamed clients see a brief pause after the prose
@@ -1657,8 +1715,9 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     # Skipped on conversational queries — see _is_conversational_query —
     # except content-lookup asks with surviving prose, which promised
     # playable passages (empty-reply guard: see the non-streaming path).
-    if not _is_conversational_query(message, segments=segments) \
-            or (_is_content_lookup_query(message) and cleaned.strip()):
+    if (not _is_conversational_query(message, segments=segments)
+            or (_is_content_lookup_query(message) and cleaned.strip())) \
+            and not _reply_denies_coverage(cleaned):
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
@@ -1689,7 +1748,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             if extractive else None,
             transcript=transcript,
             exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
-            min_count=_plural_clip_minimum(message) if extractive else None,
+            min_count=_plural_clip_minimum(message) if (extractive and not _reply_denies_coverage(cleaned)) else None,
             drop_reemitted=bool(
                 _MORE_CLIPS_RE.search((message or '').lower())),
         )
@@ -7050,6 +7109,20 @@ _BREVITY_TAIL = (
     'for a list of many clips. Every marker needs a specific title of a '
     'few words that names the moment (never "Clip" or "Moment").'
 )
+_BREVITY_TAIL_CONVERSATIONAL = (
+    '\n\nKEEP IT SHORT: answer like a sharp editor talking, not an essay. '
+    'Plain paragraphs, no headings, no bold labels, no numbered sections, '
+    'no LaTeX or symbols (write "then", not \\rightarrow). About 120 words '
+    'at most. This is a discussion question: attach a [CLIP:] marker only '
+    'when one specific moment directly anchors a point you are making, and '
+    'give it a specific title of a few words. If my question is not about '
+    'this footage at all, answer it plainly in a sentence or two and stop — '
+    'no clips, and no steering back to the footage.'
+)
+_NO_CLIPS_TAIL = (
+    '\n\nNO CLIPS: I asked for no clips this time. Answer in prose only — '
+    'do not write any [CLIP:] marker.'
+)
 
 _FOLLOWUPS_HINT = (
     '\n\nAfter your answer, add exactly one final line in this form and '
@@ -7518,8 +7591,11 @@ def _long_chat_finish(raw, prep, transcript, message, history, segment_vectors,
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
     cleaned = _ensure_clip_titles(cleaned, segments)
+    if _no_clip_request(message):
+        return _drop_passed_markers(_strip_all_markers(cleaned), prep.get('story_so_far')), followups
     conversational = prep['conversational']
-    if not conversational or (_is_content_lookup_query(message) and cleaned.strip()):
+    if (not conversational or (_is_content_lookup_query(message) and cleaned.strip())) \
+            and not _reply_denies_coverage(cleaned):
         source = _format_paragraphs_as_lines(excerpts) if excerpts else prep['context']
         cleaned = _salvage_clips_if_missing(
             cleaned, source, segments, num_ctx=prep['num_ctx'],
@@ -7540,7 +7616,7 @@ def _long_chat_finish(raw, prep, transcript, message, history, segment_vectors,
             if extractive else None,
             transcript=transcript,
             exclude_spans=_history_clip_spans(history) + _story_passed_spans(prep.get('story_so_far')),
-            min_count=_plural_clip_minimum(message) if extractive else None,
+            min_count=_plural_clip_minimum(message) if (extractive and not _reply_denies_coverage(cleaned)) else None,
             # Discussion answers about cards already on screen ("why did
             # you pick those clips?") must not re-deal the same cards.
             drop_reemitted=conversational or bool(_MORE_CLIPS_RE.search((message or '').lower())),

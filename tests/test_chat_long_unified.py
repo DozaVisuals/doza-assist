@@ -355,3 +355,79 @@ def test_untitled_markers_get_a_title_from_the_transcript():
     assert 'title="A real title"' in out
     assert out.count('title=') == 3
     assert A._ensure_clip_titles('no markers here', segs) == 'no markers here'
+
+
+# ── when not to give clips (2026-09-07, Chris's screenshots) ────────────────
+
+@pytest.mark.parametrize('message', [
+    "dont give me a clip, just tell me how you would edit this into a 2 minute testimonial",
+    "don't give me clips, what's the arc?",
+    'no clips please, what is the theme',
+    'prose only: how would you open?',
+    'dont pull anything, just explain the structure',
+])
+def test_no_clip_phrasings_are_hard_instructions(message):
+    assert A._no_clip_request(message) is True
+    assert A._is_conversational_query(message, segments=[{'speaker': 'Mae'}]) is True
+
+
+def test_ordinary_asks_are_not_no_clip():
+    assert A._no_clip_request('find me 3 clips about the fire') is False
+    assert A._no_clip_request("what's the story here?") is False
+
+
+@pytest.mark.parametrize('reply,expected', [
+    ("The transcript doesn't mention what day it is.", True),
+    ('Nobody in the interview says anything about baseball.', True),
+    ("That isn't in the footage.", True),
+    ('The strongest moment is when she describes the fire.', False),
+])
+def test_reply_denies_coverage(reply, expected):
+    assert A._reply_denies_coverage(reply) is expected
+
+
+def test_conversational_turn_gets_the_discussion_contract():
+    segs = _long_transcript(minutes=1)['segments']
+    _s, msgs = A._build_chat_messages('what is major league baseball', [], 'P', segs, 'T', '', '', None,
+                                      include_final_reminder=False)
+    tail = msgs[-1]['content']
+    assert 'not about this footage' in tail and 'no steering back' in tail
+    assert 'NO CLIPS' not in tail
+    _s, msgs = A._build_chat_messages("dont give me a clip, just tell me the arc", [], 'P', segs, 'T', '', '', None,
+                                      include_final_reminder=False)
+    assert 'NO CLIPS' in msgs[-1]['content']
+
+
+def test_no_clip_ask_strips_markers_and_skips_enforcement(monkeypatch):
+    tr = _long_transcript(minutes=5)
+    reply = ('Open on the fire, then the council vote.\n'
+             '[CLIP: start=00:00:40 end=00:00:58 title="The fire"]\n'
+             '[CLIP: start=00:03:00 end=00:03:18 title="Council"]')
+    monkeypatch.setattr(A, '_call_ai_chat', lambda *a, **k: reply)
+    monkeypatch.setattr(A, '_salvage_clips_if_missing', lambda *a, **k: pytest.fail('no salvage on a no-clip ask'))
+    monkeypatch.setattr(A, '_enforce_duration_target', lambda *a, **k: pytest.fail('no duration pass on a no-clip ask'))
+    monkeypatch.setattr(A, '_sticky_chat_num_ctx', lambda *a, **k: 8192)
+    out = A.chat_about_transcript(tr, 'dont give me a clip, just tell me how you would edit this into a 2 minute testimonial',
+                                  history=[], project_name='P')
+    assert '[CLIP:' not in out and 'Open on the fire' in out
+
+
+def test_denial_reply_is_not_salvaged(monkeypatch):
+    tr = _long_transcript(minutes=5)
+    monkeypatch.setattr(A, '_call_ai_chat', lambda *a, **k: "The transcript doesn't mention what day it is.")
+    monkeypatch.setattr(A, '_salvage_clips_if_missing', lambda *a, **k: pytest.fail('salvage must not run on a denial'))
+    monkeypatch.setattr(A, '_sticky_chat_num_ctx', lambda *a, **k: 8192)
+    out = A.chat_about_transcript(tr, 'what day is it?', history=[], project_name='P')
+    assert out.strip() == "The transcript doesn't mention what day it is."
+
+
+def test_stream_no_clip_ask_yields_prose_only(monkeypatch):
+    tr = _long_transcript(minutes=5)
+    reply = 'Just the structure.\n[CLIP: start=00:00:40 end=00:00:58 title="The fire"]\nFOLLOW-UPS: a longer question | b longer question | c longer question'
+    monkeypatch.setattr(A, '_stream_chat_events', _fake_stream(reply))
+    monkeypatch.setattr(A, '_salvage_clips_if_missing', lambda *a, **k: pytest.fail('no salvage'))
+    monkeypatch.setattr(A, '_sticky_chat_num_ctx', lambda *a, **k: 8192)
+    events = list(A.chat_about_transcript_stream(tr, 'no clips, how would you cut this?', history=[], project_name='P'))
+    done = [e for e in events if e[0] == 'done'][0][1]
+    assert '[CLIP:' not in done and 'Just the structure' in done
+    assert any(e[0] == 'followups' for e in events)

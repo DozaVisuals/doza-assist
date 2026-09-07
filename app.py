@@ -649,6 +649,63 @@ def _paragraph_index_path(project_id):
     return os.path.join(app.config['PROJECTS_DIR'], project_id, 'paragraph_index.json')
 
 
+def _segment_vectors_path(project_id):
+    return os.path.join(app.config['PROJECTS_DIR'], project_id, 'segment_vectors.json')
+
+
+def _stash_segment_vectors(project_id):
+    """Retranscribe: park the vectors as ``segment_vectors.stale.json``
+    instead of deleting them. If the new transcript comes back byte-identical
+    (same audio, same engine — the common case), the analysis-time vectors
+    are still valid and :func:`_restore_stashed_vectors` puts them back;
+    regenerating them on a 3-hour interview costs tens of minutes."""
+    live = _segment_vectors_path(project_id)
+    if not os.path.exists(live):
+        return False
+    try:
+        os.replace(live, live.replace('segment_vectors.json', 'segment_vectors.stale.json'))
+        return True
+    except OSError:
+        try:
+            os.remove(live)
+        except OSError:
+            pass
+        return False
+
+
+def _restore_stashed_vectors(project_id, new_transcript_hash):
+    """Transcription finished: restore stashed vectors when the transcript
+    hash matches the one they were built from, otherwise drop the stash.
+    Returns True when vectors are live afterwards."""
+    live = _segment_vectors_path(project_id)
+    stale = live.replace('segment_vectors.json', 'segment_vectors.stale.json')
+    project = get_project(project_id) or {}
+    prev_hash = project.get('prev_transcript_hash')
+    restored = False
+    if os.path.exists(stale):
+        if prev_hash and new_transcript_hash and prev_hash == new_transcript_hash \
+                and not os.path.exists(live):
+            try:
+                os.replace(stale, live)
+                restored = True
+                print(f"[transcribe] transcript unchanged — restored segment vectors for {project_id}", flush=True)
+            except OSError:
+                pass
+        if os.path.exists(stale):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    if restored:
+        update_project(project_id, {}, remove=['derived_stale', 'prev_transcript_hash'])
+    else:
+        # Vectors are gone: the next /analyze must not short-circuit on the
+        # cache (it would restore the analysis but leave chat and Story
+        # Builder without vectors).
+        update_project(project_id, {'derived_stale': True}, remove=['prev_transcript_hash'])
+    return restored
+
+
 def load_paragraph_index(project_id):
     """Load the TF-IDF paragraph retrieval index for a project, or None if
     not yet generated. Used by /chat to rank relevance via cosine similarity
@@ -3204,6 +3261,13 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
                 pass
             except OSError:
                 pass
+        # A retranscribe stashed the vectors; an identical transcript gets
+        # them back, anything else leaves the project flagged so the next
+        # /analyze rebuilds them instead of serving the cache.
+        try:
+            _restore_stashed_vectors(project_id, _transcript_hash(result))
+        except Exception as e:
+            print(f"[transcribe] vector restore check failed for {project_id}: {e}")
 
         # Auto-build the TF-IDF paragraph index (same as the synchronous
         # path used to do). The stale-index clearing above guarantees this
@@ -3654,7 +3718,8 @@ _analysis_threads_lock = threading.Lock()
 _analysis_run_lock = threading.Lock()
 
 
-def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snapshot):
+def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snapshot,
+                         reuse_cached_analysis=False):
     """Background-thread worker for /analyze.
 
     Mirrors what the inline /analyze handler used to do, but detached
@@ -3707,17 +3772,29 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         # it from overlapping pyannote/whisper on small machines. on_wait
         # surfaces 'queued' so the progress card isn't frozen at 'starting'
         # for the duration of whatever holds the gate.
-        with _memory_heavy_stage(
-                'analyze', evict_llm=False,
-                on_wait=lambda h: progress(step=0, total=1, current='queued')):
-            result = analyze_transcript(
-                project['transcript'],
-                project_name=project['name'],
-                analysis_type=analysis_type,
-                segment_vectors=existing_vectors or None,
-                progress_callback=_from_analyzer,
-                output_language=resolve_output_language(project),
-            )
+        _cached_result = None
+        if reuse_cached_analysis and isinstance(cache_snapshot, dict):
+            _bucket = cache_snapshot.get(transcript_hash)
+            _entry = _bucket.get(analysis_type) if isinstance(_bucket, dict) else None
+            if isinstance(_entry, dict) and isinstance(_entry.get('analysis'), dict):
+                _cached_result = _entry['analysis']
+        if _cached_result is not None:
+            # Same transcript, analysis already done: skip the model and
+            # rebuild only the derived files a retranscribe dropped.
+            result = _cached_result
+            _from_analyzer(1, 1, 'restoring analysis from cache')
+        else:
+            with _memory_heavy_stage(
+                    'analyze', evict_llm=False,
+                    on_wait=lambda h: progress(step=0, total=1, current='queued')):
+                result = analyze_transcript(
+                    project['transcript'],
+                    project_name=project['name'],
+                    analysis_type=analysis_type,
+                    segment_vectors=existing_vectors or None,
+                    progress_callback=_from_analyzer,
+                    output_language=resolve_output_language(project),
+                )
         if not (result.get('story_beats') or result.get('social_clips')
                 or result.get('strongest_soundbites')):
             # Empty-but-healthy: the backend responded but produced nothing
@@ -3792,7 +3869,8 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         # meta.json segments stayed pinned at the OSS Parakeet default label.
         # Writing only 'analysis' + 'analysis_cache' preserves all of that AND
         # the chat history / labels the old manual merge still missed.
-        update_project(project_id, {'analysis': result, 'analysis_cache': analysis_cache})
+        update_project(project_id, {'analysis': result, 'analysis_cache': analysis_cache},
+                       remove=['derived_stale', 'prev_transcript_hash'])
         title = result.get('suggested_title') or project.get('name', 'Project')
         log_activity(project_id, 'analyzed', f'AI analysis run · "{title}"')
 
@@ -3958,7 +4036,14 @@ def analyze(project_id):
     cache = project.get('analysis_cache') if isinstance(project.get('analysis_cache'), dict) else {}
     bucket = cache.get(transcript_hash) if isinstance(cache.get(transcript_hash), dict) else {}
     cached_entry = bucket.get(analysis_type) if isinstance(bucket.get(analysis_type), dict) else None
-    if not force and cached_entry and isinstance(cached_entry.get('analysis'), dict):
+    cache_usable = bool(cached_entry and isinstance(cached_entry.get('analysis'), dict))
+    # A retranscribe dropped the vectors (and the analysis on the record).
+    # The cached analysis is still right for this transcript, but serving
+    # it alone would leave chat and Story Builder without vectors — run
+    # the worker, which reuses the cached analysis and rebuilds the rest.
+    derived_dropped = bool(project.get('derived_stale')) and not load_segment_vectors(project_id)
+    reuse_cached_analysis = bool(cache_usable and not force and derived_dropped)
+    if not force and cache_usable and not derived_dropped:
         update_project(project_id, {'analysis': cached_entry['analysis']})
         return jsonify({
             'status': 'cached',
@@ -4015,6 +4100,7 @@ def analyze(project_id):
     t = threading.Thread(
         target=_run_analysis_worker,
         args=(project_id, analysis_type, transcript_hash, cache),
+        kwargs={'reuse_cached_analysis': reuse_cached_analysis},
         daemon=True,
         name=f'analyze-{project_id}',
     )
@@ -6152,6 +6238,13 @@ def clear_transcript(project_id):
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
+    # Remember what the derived files were built from, so identical
+    # re-transcriptions can keep them (see _restore_stashed_vectors).
+    try:
+        project['prev_transcript_hash'] = _transcript_hash(project.get('transcript')) \
+            if project.get('transcript') else None
+    except Exception:
+        project['prev_transcript_hash'] = None
     project['transcript'] = None
     project['analysis'] = None
     project['client_selects'] = []
@@ -6261,6 +6354,13 @@ def retranscribe(project_id):
         project['audio_channel'] = _valid_audio_channel(data.get('audio_channel'))
 
     # Clear existing transcript/analysis
+    # Remember what the derived files were built from, so identical
+    # re-transcriptions can keep them (see _restore_stashed_vectors).
+    try:
+        project['prev_transcript_hash'] = _transcript_hash(project.get('transcript')) \
+            if project.get('transcript') else None
+    except Exception:
+        project['prev_transcript_hash'] = None
     project['transcript'] = None
     project['analysis'] = None
     project['client_selects'] = []
@@ -6289,13 +6389,16 @@ def retranscribe(project_id):
     # OLD transcript text. Letting them survive a retranscribe means the
     # /transcribe handler's idempotent skip would keep serving stale TF-IDF
     # results and the chat would look at the wrong paragraphs forever.
-    for cache_name in ('paragraph_index.json', 'segment_vectors.json'):
-        p = os.path.join(project_dir, cache_name)
-        if os.path.exists(p):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+    # The paragraph index is cheap and is rebuilt when transcription
+    # finishes; the vectors are the expensive analysis-time artifact, so
+    # they are stashed and come back if the transcript is unchanged.
+    p = os.path.join(project_dir, 'paragraph_index.json')
+    if os.path.exists(p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    _stash_segment_vectors(project_id)
 
     # Drop the PREVIOUS run's job state. Leaving a 'done' snapshot (in-memory
     # or in transcribe_status.json) around means the post-reload page could

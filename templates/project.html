@@ -5312,6 +5312,14 @@ async function runAnalysis() {
             resetAnalyzeBtn();
             const prog = document.getElementById('analysisProgress');
             if (prog) prog.style.display = 'none';
+            // The tab is server-rendered from the page load. After a
+            // retranscribe the page has no analysis while the cache does:
+            // the server just restored it, so reload to draw it.
+            if (!(PROJECT && PROJECT.analysis)) {
+                showToast('Analysis restored for this transcript.');
+                setTimeout(() => reloadAndKeepTab('analysis'), 600);
+                return;
+            }
             showToast('Analysis is already up to date for this transcript.');
             return;
         }

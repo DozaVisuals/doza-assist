@@ -182,6 +182,28 @@ def _open_chunk_source(audio_path: str, target_sr: int):
     return read_chunk_mem, len(audio_data), target_sr, 'memory'
 
 
+PARAKEET_REPO = 'mlx-community/parakeet-tdt-0.6b-v2'
+
+
+def parakeet_model_source(repo: str = PARAKEET_REPO) -> str:
+    """The model directory to load from: the local Hugging Face cache when
+    the model is already there, else the repo id (first run, the download
+    the setup step performs).
+
+    parakeet_mlx.from_pretrained hands a repo id to hf_hub_download, which
+    asks huggingface.co for the current revision on EVERY call even when
+    the files are cached — a network request on each transcription. A local
+    directory path skips the hub entirely.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        cfg = hf_hub_download(repo, 'config.json', local_files_only=True)
+        hf_hub_download(repo, 'model.safetensors', local_files_only=True)
+        return os.path.dirname(cfg)
+    except Exception:
+        return repo
+
+
 def transcribe(audio_path: str, speaker_name: str) -> dict:
     import soundfile as sf
     from parakeet_mlx import from_pretrained
@@ -189,7 +211,7 @@ def transcribe(audio_path: str, speaker_name: str) -> dict:
     print("Loading Parakeet TDT model...", flush=True)
     _emit('load_model', 5)
     _apply_mlx_memory_caps()
-    model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
+    model = from_pretrained(parakeet_model_source(PARAKEET_REPO))
 
     print("Opening audio...", flush=True)
     read_chunk, total_samples, sr, source_mode = _open_chunk_source(

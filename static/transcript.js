@@ -354,10 +354,19 @@ function pickSectionExtras(sec) {
 }
 
 async function _doSaveLabels() {
-    const sections = labelSections.map(s => ({
-        start: s.start, end: s.end, color: s.color, text: s.text,
-        ...pickSectionExtras(s),
-    }));
+    // speaker is optional: the Story Brief "+" carries the moment's speaker
+    // (1.0.47); brush-painted and AI Analysis clips have none and omit it.
+    // title / title_auto (1.0.47): the generated or carried display title;
+    // text stays what the add wrote (the transcript fragment for a brush).
+    // Studio: attribution fields (collaborator selects synced into the Clip
+    // Library) ride along via pickSectionExtras().
+    const sections = labelSections.map(s => {
+        const out = { start: s.start, end: s.end, color: s.color, text: s.text, ...pickSectionExtras(s) };
+        if (s.speaker) out.speaker = s.speaker;
+        if (s.title) out.title = s.title;
+        if (s.title_auto) out.title_auto = true;
+        return out;
+    });
     const body = { color_labels: colorLabels, labeled_sections: sections };
     // Clips-tab ordering mode ('time' | 'manual') is owned by the host
     // page (top-level `let clipOrderMode` in project.html — shared via
@@ -375,6 +384,12 @@ async function _doSaveLabels() {
         });
     } catch (err) {
         console.error('Failed to save labels:', err);
+        return;
+    }
+    // Clips saved without a title get one from the titles route (1.0.47).
+    // The project page defines the hook; hosts without it skip this.
+    if (typeof window.dozaRequestClipTitles === 'function') {
+        try { window.dozaRequestClipTitles(); } catch (e) { console.warn('clip titles', e); }
     }
 }
 
@@ -444,17 +459,21 @@ function transcriptInit(opts) {
     const saved = opts.labeledSections || [];
     saved.forEach(sec => {
         const id = ++sectionIdCounter;
-        labelSections.push({
+        const entry = {
             id,
             start: sec.start,
             end: sec.end,
             color: sec.color,
             text: sec.text || '',
-            // Attribution fields (Studio collaborator selects synced into the
-            // Clip Library) ride along untouched. Absent on ordinary clips —
-            // pickSectionExtras() only copies keys that exist.
-            ...pickSectionExtras(sec),
-        });
+        };
+        if (sec.speaker) entry.speaker = sec.speaker;
+        if (sec.title) entry.title = sec.title;
+        if (sec.title_auto) entry.title_auto = true;
+        // Attribution fields (Studio collaborator selects synced into the
+        // Clip Library) ride along untouched. Absent on ordinary clips —
+        // pickSectionExtras() only copies keys that exist.
+        Object.assign(entry, pickSectionExtras(sec));
+        labelSections.push(entry);
     });
 
     // Restore swatch label inputs (DOM owned by the page template).

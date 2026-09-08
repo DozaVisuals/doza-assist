@@ -26,10 +26,13 @@
            the backend without DOZA_TRIAL (license activated). #}
         <a href="{{ doza_buy_url }}" target="_blank" rel="noopener" class="header-trial-pill" title="Transcripts are capped at 2 minutes per file during the free trial — buy a license to unlock full-length transcripts">Free trial · 2-min transcripts — <strong>Buy full version</strong></a>
         {% endif %}
-        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
+        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">Style: Off</span>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
-        <button class="btn btn-sm" onclick="openAIModelModal()" title="AI model settings">AI Model</button>
-        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+        <button class="btn btn-sm" onclick="openAIModelModal()" title="API keys and the local model. Where AI runs is chosen per project.">AI setup</button>
+        {# Appearance is app wide (one localStorage key for every page), so it
+           lives here rather than in a project's gear menu. Icon only; the
+           tooltip names the current state. #}
+        <button class="theme-toggle" id="appearanceToggle" onclick="toggleTheme()" title="Appearance: Dark" aria-label="Appearance">
             <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
             <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
         </button>
@@ -39,16 +42,23 @@
 {% include '_ai_model_modal.html' %}
 
 <script>
+function _paintAppearanceState() {
+    const el = document.getElementById('appearanceToggle');
+    if (!el) return;
+    el.title = 'Appearance: ' + (document.documentElement.getAttribute('data-theme') === 'light' ? 'Light' : 'Dark');
+}
 function toggleTheme() {
     const current = document.documentElement.getAttribute('data-theme') || 'light';
     const next = current === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('doza-theme', next);
+    _paintAppearanceState();
 }
 (function() {
     const saved = localStorage.getItem('doza-theme');
     document.documentElement.setAttribute('data-theme', saved || 'dark');
 })();
+document.addEventListener('DOMContentLoaded', _paintAppearanceState);
 
 async function refreshActivePill() {
     try {
@@ -57,10 +67,10 @@ async function refreshActivePill() {
         const pill = document.getElementById('headerActivePill');
         if (!pill) return;
         if (!data.count) {
-            pill.textContent = 'No active style';
+            pill.textContent = 'Style: Off';
             pill.classList.remove('is-on');
         } else {
-            pill.textContent = 'Active: ' + (data.names || []).join(', ');
+            pill.textContent = 'Style: ' + (data.names || []).join(', ');
             pill.classList.add('is-on');
         }
     } catch (e) { /* non-blocking */ }
@@ -225,6 +235,7 @@ window.addEventListener('DOMContentLoaded', refreshActivePill);
                             {% endfor %}
                         </select>
                         <p id="languageHint" style="display:none; font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem;">
+                            <span id="languageHintAuto" style="display:none;">Auto-detect uses the Whisper engine to identify the language from the first 30 seconds (installed once). English then goes through the fast engine, other languages through Whisper. For English, choosing English is fastest. </span>
                             Non-English uses the Whisper engine. If it isn't installed yet, you'll be prompted to add it (~200&nbsp;MB, one time) when transcription starts.
                         </p>
                     </div>
@@ -948,10 +959,7 @@ function createFolder() {
             </div>
         </div>`;
 
-    // Insert before first folder or project list
-    const firstFolder = document.querySelector('.folder-group');
-    const projectList = document.querySelector('.project-list');
-    const insertBefore = firstFolder || projectList || document.querySelector('.empty-state');
+    const insertBefore = _newFolderAnchor();
     if (insertBefore) insertBefore.parentNode.insertBefore(container, insertBefore);
     else document.querySelector('.container').appendChild(container);
 
@@ -986,9 +994,9 @@ function confirmNewFolder() {
             <div class="project-list" style="padding: 0.5rem; color: var(--text-muted); font-size: 0.8rem;">Drag projects here</div>
         </div>`;
 
-    const firstFolder = document.querySelector('.folder-group');
-    const insertBefore = firstFolder || document.querySelector('.project-list') || document.querySelector('.empty-state');
-    insertBefore.parentNode.insertBefore(group, insertBefore);
+    const insertBefore = _newFolderAnchor();
+    if (insertBefore) insertBefore.parentNode.insertBefore(group, insertBefore);
+    else document.querySelector('.container').appendChild(group);
 
     // textContent, not template interpolation — a folder name with quotes
     // or angle brackets must render as text, never markup.
@@ -996,6 +1004,19 @@ function confirmNewFolder() {
 
     // Same full-surface drop wiring as every server-rendered group.
     wireFolderDropTarget(group);
+}
+
+// Where a new folder group goes: before the first real folder, else before
+// the Unfiled zone, else before the empty state. Never before the first
+// .project-list — with no folders yet that list sits INSIDE #unfiledDropZone,
+// and a group nested in the Unfiled drop target received every drop twice:
+// once for itself and once, bubbling, as "unfile". The unfile write landed
+// last, so the first project dragged into a brand-new folder came straight
+// back out and the folder vanished on reload (field report 2026-09-07).
+function _newFolderAnchor() {
+    return document.querySelector('.folder-group:not(#newFolderInput)')
+        || document.getElementById('unfiledDropZone')
+        || document.querySelector('.empty-state');
 }
 
 function toggleFolder(header) {
@@ -1166,6 +1187,8 @@ function dragProject(e, projectId) {
 function wireDropTarget(el, folderName) {
     el.addEventListener('dragover', (e) => {
         e.preventDefault();
+        // Only the innermost target lights up.
+        e.stopPropagation();
         e.dataTransfer.dropEffect = 'move';
         el.classList.add('drag-over');
     });
@@ -1177,6 +1200,9 @@ function wireDropTarget(el, folderName) {
         el.classList.remove('drag-over');
         const projectId = e.dataTransfer.getData('text/plain');
         if (projectId && !e.dataTransfer.files.length) {
+            // One drop = one move. Stop here so an enclosing target can
+            // never file the same drop a second time (see _newFolderAnchor).
+            e.stopPropagation();
             doMove(projectId, typeof folderName === 'function' ? folderName() : folderName);
         }
     });
@@ -1300,8 +1326,10 @@ function updateLanguageHint() {
     const sel = document.getElementById('language');
     const hint = document.getElementById('languageHint');
     if (!sel || !hint) return;
-    // 'auto' included: auto-detect runs through Whisper as well.
+    // 'auto' included: it may still need Whisper for a non-English file.
     hint.style.display = (sel.value !== 'en') ? 'block' : 'none';
+    const autoLine = document.getElementById('languageHintAuto');
+    if (autoLine) autoLine.style.display = sel.value === 'auto' ? 'inline' : 'none';
 }
 
 // Sticky last-used transcription language (shared key with the Pro import
@@ -1316,7 +1344,10 @@ function getDefaultLanguage() {
     return [...sel.options].some(o => o.value === v && !o.disabled) ? v : 'en';
 }
 function rememberDefaultLanguage(v) {
-    if (v) try { localStorage.setItem(DOZA_LANG_KEY, v); } catch (e) {}
+    // Explicit languages stick; Auto-detect does not, so one Auto-detect
+    // project never turns every later English project into a Whisper run.
+    if (!v || v === 'auto') return;
+    try { localStorage.setItem(DOZA_LANG_KEY, v); } catch (e) {}
 }
 (function applyStickyLanguage() {
     const sel = document.getElementById('language');

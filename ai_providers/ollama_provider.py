@@ -55,6 +55,30 @@ def _budget_num_ctx(kwargs):
 # call would fail the whole interview with "[Errno 61] Connection refused".
 # We retry ONLY connection errors (read timeouts are deliberately left to the
 # caller's model-aware timeout) with backoff, bridging the restart window.
+def _chat_think_enabled() -> bool:
+    """Chat turns run with model-side thinking OFF unless
+    ``DOZA_CHAT_THINK=1``. Measured on gemma4:e4b (2026-09-06): the hidden
+    reasoning pass cost 15-25 s before the first visible token on every
+    chat turn and the stream layer swallowed it silently, so the editor
+    stared at "Reasoning…" for most of the wait. Analysis calls already
+    suppress it for the same reason."""
+    return os.environ.get("DOZA_CHAT_THINK", "").strip() == "1"
+
+
+def _think_rejected_permanently(response) -> bool:
+    """True when a non-200 is a failure the think-less retry cannot fix
+    (model missing, out of memory) — mirrors the analysis path's rule."""
+    try:
+        detail = (response.json().get("error") or "").lower()
+    except (ValueError, json.JSONDecodeError):
+        detail = ""
+    return (
+        response.status_code == 404
+        or "not found" in detail
+        or ("memory" in detail and ("requires more" in detail or "available" in detail))
+    )
+
+
 _CONNECT_BACKOFF = (2, 4, 6, 8)  # seconds between attempts → ~20s total bridge
 
 
@@ -324,9 +348,7 @@ class OllamaProvider(BaseProvider):
 
         # Chat / general path: /api/chat with messages array.
         messages = _ollama_messages(system_prompt, user_or_messages)
-        response = _post_with_reconnect(
-            f"{self.base_url}/api/chat",
-            json={
+        chat_payload = {
                 "model": model,
                 "messages": messages,
                 "stream": False,
@@ -356,9 +378,20 @@ class OllamaProvider(BaseProvider):
                     "min_p": kwargs.get("min_p", 0.05),
                     "stop": kwargs.get("stop", DEFAULT_STOP_TOKENS),
                 },
-            },
-            timeout=kwargs.get("timeout", 900 if task_type != "chat" else 300),
+            }
+        if task_type == "chat" and not _chat_think_enabled():
+            chat_payload["think"] = False
+        _chat_timeout = kwargs.get("timeout", 900 if task_type != "chat" else 300)
+        response = _post_with_reconnect(
+            f"{self.base_url}/api/chat", json=chat_payload, timeout=_chat_timeout,
         )
+        if response.status_code != 200 and "think" in chat_payload \
+                and not _think_rejected_permanently(response):
+            # Older daemons reject the `think` field: retry once without it.
+            chat_payload.pop("think", None)
+            response = _post_with_reconnect(
+                f"{self.base_url}/api/chat", json=chat_payload, timeout=_chat_timeout,
+            )
         if response.status_code != 200:
             _raise_ollama_error(response, model)
         payload = response.json()
@@ -383,9 +416,7 @@ class OllamaProvider(BaseProvider):
         # Through the reconnect bridge: a supervisor-relaunched Ollama used
         # to fail streamed chat instantly with a raw ConnectionError while
         # non-stream calls survived the same blip.
-        with _post_with_reconnect(
-            f"{self.base_url}/api/chat",
-            json={
+        stream_payload = {
                 "model": model,
                 "messages": messages,
                 "stream": True,
@@ -404,12 +435,28 @@ class OllamaProvider(BaseProvider):
                     "min_p": kwargs.get("min_p", 0.05),
                     "stop": kwargs.get("stop", DEFAULT_STOP_TOKENS),
                 },
-            },
-            timeout=(connect_timeout, read_timeout),
-            stream=True,
-        ) as response:
-            if response.status_code != 200:
-                _raise_ollama_error(response, model)
+            }
+        if task_type == "chat" and not _chat_think_enabled():
+            stream_payload["think"] = False
+        # One retry without `think` for daemons that reject the field —
+        # decided on the status line before any token is consumed.
+        for attempt in (0, 1):
+            with _post_with_reconnect(
+                f"{self.base_url}/api/chat",
+                json=stream_payload,
+                timeout=(connect_timeout, read_timeout),
+                stream=True,
+            ) as response:
+                if response.status_code != 200:
+                    if attempt == 0 and "think" in stream_payload \
+                            and not _think_rejected_permanently(response):
+                        stream_payload.pop("think", None)
+                        continue
+                    _raise_ollama_error(response, model)
+                yield from self._consume_stream(response, model, task_type, kwargs)
+                return
+
+    def _consume_stream(self, response, model, task_type, kwargs):
             for line in response.iter_lines():
                 if not line:
                     continue

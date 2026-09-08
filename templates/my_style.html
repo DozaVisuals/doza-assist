@@ -20,7 +20,7 @@
         <span class="app-version" title="Doza Assist version">v{{ app_version }}</span>
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
-        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
+        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">Style: Off</span>
         <a href="/" class="btn btn-sm" style="text-decoration:none;">Projects</a>
         <a href="/my-style" class="btn btn-sm btn-accent" style="text-decoration:none;">My Style</a>
         <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
@@ -61,7 +61,7 @@ function toggleTheme() {
         <input type="file" id="fileInput" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.ts,.m2ts,.mts,.mxf,.fcpxml,.fcpxmld" style="display:none;">
         <input type="file" id="folderInput" webkitdirectory style="display:none;">
     </div>
-    <p class="my-style-privacy">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
+    <p class="my-style-privacy">Your style profile stays on your machine unless a project is set to a cloud provider.</p>
 </div>
 
 {% else %}
@@ -348,7 +348,7 @@ function toggleTheme() {
         <button class="btn" onclick="regenerateAnalysis()">Regenerate analysis</button>
     </div>
 
-    <p class="my-style-privacy">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
+    <p class="my-style-privacy">Your style profile stays on your machine unless a project is set to a cloud provider.</p>
 
     <!-- Imported projects list -->
     <div class="my-style-section">
@@ -405,7 +405,7 @@ function toggleTheme() {
         {% endfor %}
     </div>
     {% endif %}
-    <p class="my-style-privacy" style="margin-top:24px;">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
+    <p class="my-style-privacy" style="margin-top:24px;">Your style profile stays on your machine unless a project is set to a cloud provider.</p>
 </div>
 
 <!-- ==================== DATA & EXPORT TAB ==================== -->
@@ -417,7 +417,7 @@ function toggleTheme() {
         <label for="importFileInput" class="btn" style="cursor:pointer;">Import profile data</label>
         <input type="file" id="importFileInput" accept="application/json" style="display:none;" onchange="importBundle(this.files[0])">
     </div>
-    <p class="my-style-privacy" style="margin-top:24px;">Your style stays on your machine. Nothing is uploaded to the cloud.</p>
+    <p class="my-style-privacy" style="margin-top:24px;">Your style profile stays on your machine unless a project is set to a cloud provider.</p>
 
     <h3 class="edna-section-title" style="margin-top:36px;">Danger zone</h3>
     <p class="edna-muted">Permanently delete the active profile — the system prompt, summary, and all snapshots. This cannot be undone.</p>
@@ -784,10 +784,10 @@ async function refreshActivePill() {
         const pill = document.getElementById('headerActivePill');
         if (!pill) return;
         if (data.count === 0) {
-            pill.textContent = 'No active style';
+            pill.textContent = 'Style: Off';
             pill.classList.remove('is-on');
         } else {
-            pill.textContent = 'Active: ' + (data.names || []).join(', ');
+            pill.textContent = 'Style: ' + (data.names || []).join(', ');
             pill.classList.add('is-on');
         }
     } catch (e) { /* non-blocking */ }

@@ -137,6 +137,8 @@ class FCPXMLExporter(BaseExporter):
         total_clips=0,
         start_tc_frames=0,
         tc_format="NDF",
+        timeline_name=None,
+        event_name=None,
     ) -> ExportResult:
         _guard_exportable(markers, source_path, export_mode)
 
@@ -153,11 +155,19 @@ class FCPXMLExporter(BaseExporter):
             start_tc_frames=start_tc_frames,
             tc_format=tc_format,
             warnings_out=warnings,
+            timeline_name=timeline_name,
+            event_name=event_name,
         )
 
-        filename = _compose_marker_filename(
-            project_name, markers, export_type, total_clips, self.file_extension
-        )
+        # With a timeline name (app.py's "{Project} – Selects N") the file is
+        # named the same, so Finder and Final Cut show one name.
+        if timeline_name:
+            from export_naming import filename_for
+            filename = filename_for(timeline_name, self.file_extension)
+        else:
+            filename = _compose_marker_filename(
+                project_name, markers, export_type, total_clips, self.file_extension
+            )
         file_path = os.path.join(exports_dir, filename)
         os.makedirs(exports_dir, exist_ok=True)
         _write_atomic(file_path, content)
@@ -168,6 +178,7 @@ class FCPXMLExporter(BaseExporter):
             format_name=self.format_name,
             platform_name=self.platform_name,
             warnings=warnings,
+            timeline_name=timeline_name or os.path.splitext(filename)[0],
         )
 
     def export_story(
@@ -184,6 +195,8 @@ class FCPXMLExporter(BaseExporter):
         exports_dir,
         start_tc_frames=0,
         tc_format="NDF",
+        timeline_name=None,
+        event_name=None,
     ) -> ExportResult:
         # A story send is always a pre-cut timeline — same guards as markers.
         _guard_exportable(markers, source_path)
@@ -201,12 +214,18 @@ class FCPXMLExporter(BaseExporter):
             start_tc_frames=start_tc_frames,
             tc_format=tc_format,
             warnings_out=warnings,
+            timeline_name=timeline_name,
+            event_name=event_name,
         )
 
-        filename = (
-            f"{project_name.strip()} - {story_title.strip()}{self.file_extension}"
-            .replace("/", "-")
-        )
+        if timeline_name:
+            from export_naming import filename_for
+            filename = filename_for(timeline_name, self.file_extension)
+        else:
+            filename = (
+                f"{project_name.strip()} - {story_title.strip()}{self.file_extension}"
+                .replace("/", "-")
+            )
         file_path = os.path.join(exports_dir, filename)
         os.makedirs(exports_dir, exist_ok=True)
         _write_atomic(file_path, content)
@@ -217,4 +236,5 @@ class FCPXMLExporter(BaseExporter):
             format_name=self.format_name,
             platform_name=self.platform_name,
             warnings=warnings,
+            timeline_name=timeline_name or os.path.splitext(filename)[0],
         )

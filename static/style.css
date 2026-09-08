@@ -578,6 +578,29 @@ body {
     .page-two-col {
         grid-template-columns: 1fr;
     }
+    /* Single column: the player column stacks above the content and must
+       flow with the page. Left sticky, it pinned a viewport-tall box over
+       the content column (Collection Summary / Speaker Map / Coverage Gaps
+       painted on top of Strongest moments and the arc cards).
+       `.page-two-col > .player-col` outranks the sticky rule declared
+       further down; as a bare `.player-col` this block lost to it and the
+       column stayed pinned in a compressed window. */
+    .page-two-col > .player-col {
+        position: static;
+        max-height: none;
+        overflow-y: visible;
+    }
+    /* A wide, short window would otherwise get a picture taller than the
+       window: cap the player so the controls and the text stay in view. */
+    .page-two-col > .player-col .video-player-box {
+        max-height: 48vh;
+        overflow: hidden;
+    }
+    .page-two-col > .player-col .video-preview-main,
+    .page-two-col > .player-col .audio-waveform-shell {
+        max-height: 48vh;
+        object-fit: contain;
+    }
 }
 
 .player-col {
@@ -1766,7 +1789,7 @@ body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !imp
 .chat-welcome h3 {
     font-size: 1.2rem;
     color: var(--text-primary);
-    margin: 0 0 14px 0;
+    margin: 0 0 22px 0;
     font-weight: 600;
 }
 
@@ -1860,17 +1883,22 @@ body[data-brush="red"] .tw-drag-preview   { background: var(--label-red)    !imp
 .chat-input-area {
     display: flex;
     gap: 0.5rem;
-    padding: 1rem 1.25rem;
+    padding: 0.85rem 1.25rem;
     border-top: 1px solid var(--border);
     background: var(--bg-secondary);
     align-items: flex-end;
 }
+/* the chips sit on the input's centre line while it is one row tall */
+.chat-input-area .my-style-pill,
+.chat-input-area .project-style-selector { margin-bottom: 6px; }
+.chat-input.chat-input-grown { overflow-y: auto; }
 
 .chat-input {
     flex: 1;
-    padding: 0.65rem 1rem;
+    padding: 0.6rem 1rem;
     border: 1px solid var(--border);
     border-radius: 20px;
+    overflow: hidden;
     background: var(--bg-input);
     color: var(--text-primary);
     font-family: var(--font);
@@ -2029,6 +2057,30 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 .story-clip-tc { font-family: var(--mono); font-size: 10px; color: var(--text-secondary); }
 .story-clip-add { flex-shrink: 0; font-size: 11px !important; padding: 2px 6px !important; }
 
+.story-rail { padding: 6px 1.25rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; background: var(--bg-secondary); }
+.story-rail-row { display: flex; align-items: center; gap: 8px; }
+.story-rail-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-secondary); font-weight: 600; min-width: 52px; }
+.story-rail-making { flex: 1; font: inherit; font-size: 13px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-primary); }
+.story-rail-making:focus { outline: none; border-color: var(--accent); }
+.story-rail-meta { gap: 12px; }
+.story-rail-chip { font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.story-rail-chip:hover { color: var(--text-primary); }
+.story-rail-chip-empty { cursor: default; }
+.story-rail-passed { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.story-passed-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: var(--text-secondary); }
+.story-passed-restore { font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); cursor: pointer; }
+.story-passed-restore:hover { color: var(--text-primary); border-color: var(--accent); }
+.cc-pass { font: inherit; font-size: 12px; margin-left: 4px; padding: 2px 7px; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.cc-pass:hover { color: var(--text-primary); border-color: var(--border); }
+.cc-card.cc-passed { opacity: .5; }
+.cc-card.cc-passed .cc-pass { color: var(--accent); }
+.chat-followups { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.chat-followup { font: inherit; font-size: 12.5px; padding: 5px 11px; border-radius: 14px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); cursor: pointer; text-align: left; }
+.chat-followup:hover { color: var(--text-primary); border-color: var(--accent); }
+.chat-followup:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat-brief { margin: 6px 0 14px; text-align: left; max-width: 640px; }
+.chat-brief-summary { font-size: 13.5px; line-height: 1.5; color: var(--text-secondary); margin: 0 0 8px; }
+.chat-brief-cards .cc-card { margin: 6px 0; }
 .chat-pull-prompt { margin-top: 12px; padding: 10px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .chat-pull-btn { white-space: nowrap; }
 .chat-pull-btn.clip-added { background: #22c55e; border-color: #22c55e; color: #fff; cursor: default; }
@@ -2566,6 +2618,29 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 
 .gear-menu-danger { color: var(--red); }
 .gear-menu-danger:hover { background: var(--red-dim); }
+
+/* Current value beside a gear menu picker (right aligned, muted). */
+.gear-menu { min-width: 260px; }
+.gear-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 1.25rem; }
+.gear-menu-value {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 150px;
+    text-align: right;
+}
+
+/* Projects page: labeled appearance switch (app wide). */
+/* Header buttons: a <button> defaults to line-height normal while an <a>
+   inherits the page's, so "AI setup" rendered shorter than "My Style". */
+.app-header .btn { line-height: 1.6; }
+.app-header .theme-toggle { width: 32px; height: 32px; }
+
+/* AI setup (dashboard): the optional key chooser under the local model. */
+.ai-setup-keys { margin-top: 1rem; }
+.ai-setup-keys .ai-provider-tabs { margin-bottom: 0.75rem; }
 
 /* Theme-label: show the ACTION (what you'll switch to) in the menu. */
 .gear-theme-label-dark { display: none; }
@@ -3459,47 +3534,48 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 
 /* My Style toggle pill (for chat & story builder) */
 .my-style-pill {
+    /* Same chip as the header's "Style: Off": outlined, muted when off,
+       accent when a profile is shaping suggestions. One line. */
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 14px;
-    border-radius: 14px;
-    font-weight: 600;
+    gap: 6px;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 500;
     cursor: pointer;
-    transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.1s ease;
-    border: none;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
     user-select: none;
     line-height: 1;
-    /* OFF state — muted red */
-    background: #c23b3b;
-    color: #fff;
-    box-shadow: 0 1px 3px rgba(194, 59, 59, 0.35);
+    white-space: nowrap;
 }
 
 .my-style-pill:hover {
-    transform: translateY(-1px);
-    filter: brightness(1.06);
+    color: var(--text-primary);
+    border-color: var(--accent);
 }
 
 .my-style-pill.active {
-    /* ON state — bright green */
-    background: #16a34a;
-    box-shadow: 0 1px 3px rgba(22, 163, 74, 0.45);
-    color: #fff;
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    font-weight: 600;
 }
 
 .my-style-pill-dot {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.95);
+    background: currentColor;
     flex-shrink: 0;
-    box-shadow: 0 0 6px rgba(255, 255, 255, 0.6);
+    opacity: 0.7;
 }
 
 .my-style-pill.active .my-style-pill-dot {
-    background: #ffffff;
-    animation: myStylePillPulse 1.8s ease-in-out infinite;
+    opacity: 1;
 }
 
 @keyframes myStylePillPulse {
@@ -3508,29 +3584,29 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 }
 
 .my-style-pill-text {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .my-style-pill-label {
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font-size: 0.8rem;
+    font-weight: inherit;
+    letter-spacing: 0;
+    text-transform: none;
 }
 
 .my-style-pill-profile {
-    font-size: 0.65rem;
+    font-size: 0.8rem;
     font-weight: 500;
-    opacity: 0.85;
-    letter-spacing: 0.01em;
+    opacity: 0.75;
     max-width: 140px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+.my-style-pill-profile:empty { display: none; }
 
 /* ========================================================================
    Editorial DNA v2.1 — dashboard, profile selector, evolution
@@ -3840,14 +3916,23 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
 }
 
 .project-style-selector select {
-    background: var(--bg-secondary);
-    color: var(--text-primary);
+    background: transparent;
+    color: var(--text-muted);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 3px 8px;
-    font-size: 12px;
+    border-radius: 999px;
+    padding: 0.35rem 1.6rem 0.35rem 0.75rem;
+    font-size: 0.8rem;
+    line-height: 1;
     font-family: inherit;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12' fill='none' stroke='%238e8e9a' stroke-width='1.6'><path d='M3 4.5l3 3 3-3'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
 }
+.project-style-selector select:hover { color: var(--text-primary); border-color: var(--accent); }
+.project-style-selector select:focus { outline: none; border-color: var(--accent); }
 
 /* ── AI Model settings modal ─────────────────────────────────────────── */
 
@@ -4337,6 +4422,8 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
    =================================================================== */
 
 .header-active-pill {
+    /* Off is a normal state, not an error: the same muted gray as the rest
+       of the header. Red is reserved for actual errors. */
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -4344,33 +4431,20 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     line-height: 1;
     padding: 0.35rem 0.75rem;
     border-radius: 999px;
-    border: 1px solid rgba(239, 68, 68, 0.5);
-    background: rgba(239, 68, 68, 0.10);
-    color: #dc2626;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
     white-space: nowrap;
     max-width: 320px;
     overflow: hidden;
     text-overflow: ellipsis;
-    box-shadow: 0 0 6px rgba(239, 68, 68, 0.25);
-}
-[data-theme="dark"] .header-active-pill {
-    color: #f87171;
-    background: rgba(248, 113, 113, 0.12);
-    border-color: rgba(248, 113, 113, 0.4);
-    box-shadow: 0 0 8px rgba(248, 113, 113, 0.3);
 }
 .header-active-pill.is-on {
-    background: rgba(40, 180, 99, 0.12);
-    border-color: rgba(40, 180, 99, 0.5);
-    color: #1f8a4d;
+    /* A profile is shaping suggestions: the app accent. */
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
     font-weight: 600;
-    box-shadow: 0 0 6px rgba(40, 180, 99, 0.25);
-}
-[data-theme="dark"] .header-active-pill.is-on {
-    color: #4ade80;
-    background: rgba(74, 222, 128, 0.15);
-    border-color: rgba(74, 222, 128, 0.4);
-    box-shadow: 0 0 8px rgba(74, 222, 128, 0.3);
 }
 
 .my-style-multi-active {
@@ -4759,3 +4833,290 @@ h5.chat-h { font-size: 12px; font-weight: 600; color: var(--text-secondary); let
     border-radius: 50%;
     flex-shrink: 0;
 }
+
+/* ── Empty states that point forward (1.0.47) ── */
+
+.empty-state-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: center;
+    margin-top: 0.9rem;
+}
+
+/* Export tab with nothing selectable beyond the transcript: name the two
+   places selects come from instead of a row of disabled checkboxes. */
+.export-empty-hint {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0 0 1rem 0;
+    padding: 0.7rem 0.9rem;
+    border: 1px dashed var(--border-light);
+    border-radius: var(--radius);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+.export-empty-hint > span {
+    flex: 1 1 260px;
+}
+
+/* ── Toast action + clip reveal (1.0.47) ── */
+
+.toast .toast-action {
+    margin-left: 0.9rem;
+    padding: 0.25rem 0.7rem;
+    border: 1px solid var(--border-light);
+    border-radius: 999px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-family: var(--font);
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.toast .toast-action:hover {
+    background: var(--accent);
+    color: #fff;
+}
+
+/* Clips that just landed from a View action (dozaRevealClips). */
+.clip-card.clip-just-added,
+.clip-row.clip-just-added {
+    box-shadow: 0 0 0 2px var(--accent);
+    transition: box-shadow 0.6s ease;
+}
+
+/* Speaker chip on a clip that carries one (Story Brief adds). */
+.clip-speaker {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    white-space: nowrap;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ── Export tab: Story Builder sequences (1.0.47) ── */
+
+.export-stories-note {
+    display: block;
+    margin: 0.35rem 0 0;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+.export-story-meta {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+/* ── Story Builder sidebar: draggable clip cards (1.0.47) ── */
+
+.story-clip-library-list {
+    max-height: none;
+    overflow: visible;
+    gap: 6px;
+}
+.story-clip-item {
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    cursor: grab;
+}
+.story-clip-item:active { cursor: grabbing; }
+.story-clip-item.story-clip-dragging { opacity: 0.45; }
+.story-clip-grip {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    padding-top: 3px;
+    color: var(--text-muted);
+}
+.story-clip-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+.story-clip-title {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.3;
+}
+.story-clip-tc {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.story-clip-excerpt {
+    margin-top: 3px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* Drop targets while a library clip is being dragged. */
+.story-empty.story-drop-target,
+.story-sequence.story-drop-target {
+    outline: 1px dashed var(--border-light);
+    outline-offset: 4px;
+    border-radius: var(--radius);
+}
+.story-empty.story-drop-over,
+.story-sequence.story-drop-over {
+    outline-color: var(--accent);
+    background: var(--accent-dim);
+}
+
+/* Clip titles (1.0.47): generated title, first transcript line under it,
+   whole transcript behind Show text, on cards, rows and the Story Builder
+   sidebar. */
+.clip-title-pending {
+    color: var(--text-muted);
+    font-style: italic;
+    font-weight: 500;
+}
+.clip-card-lead {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    margin: -2px 0 6px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.clip-card.expanded .clip-card-lead { visibility: hidden; height: 0; margin: 0; }
+.clip-card.expanded .clip-card-excerpt {
+    max-height: 1200px;
+    overflow-y: auto;
+    white-space: pre-line;
+}
+.clip-card.expanded .clip-expand-label::after { content: ''; }
+.clip-row.expanded { flex-wrap: wrap; }
+.clip-row-expand {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.clip-row-expand:hover { color: var(--text-secondary); border-color: var(--border); }
+.clip-row.expanded .clip-row-expand .clip-expand-chevron { transform: rotate(180deg); }
+.clip-row-excerpt {
+    display: none;
+    flex-basis: 100%;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    padding: 4px 0 2px 26px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+.clip-row.expanded .clip-row-excerpt { display: block; }
+.story-clip-excerpt {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.story-clip-expand {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    width: fit-content;
+}
+.story-clip-expand:hover { color: var(--text-secondary); }
+.story-clip-item.expanded .story-clip-expand .clip-expand-chevron { transform: rotate(180deg); }
+.story-clip-transcript {
+    display: none;
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    max-height: 260px;
+    overflow-y: auto;
+}
+.story-clip-item.expanded .story-clip-transcript { display: block; }
+.story-clip-item.expanded .story-clip-excerpt { display: none; }
+
+/* AI Analysis soundbites (1.0.47): title, first line, Show text. */
+.analysis-title-pending { color: var(--text-muted); font-style: italic; font-weight: 500; }
+.analysis-item-lead {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    margin-top: 0.15rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.analysis-item.expanded .analysis-item-lead { display: none; }
+.analysis-item-expand {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+}
+.analysis-item-expand:hover { color: var(--text-secondary); }
+.analysis-item.expanded .analysis-item-expand .clip-expand-chevron { transform: rotate(180deg); }
+.analysis-item-transcript {
+    display: none;
+    margin-top: 6px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-height: 320px;
+    overflow-y: auto;
+}
+.analysis-item.expanded .analysis-item-transcript { display: block; }
+
+/* Leave-local confirmation (AI Model modal, project and collection). */
+.ai-confirm-overlay { z-index: 1200; }
+.ai-confirm p { color: var(--text-secondary); font-size: 0.88rem; line-height: 1.55; margin: 0 0 0.75rem; }
+.ai-confirm h2 { margin-bottom: 0.75rem; }
+.ai-confirm-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; flex-wrap: wrap; }
+
+/* Header chip while assistant access is on: muted, not red, not the accent. */
+.header-chip {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.78rem;
+    line-height: 1;
+    padding: 0.35rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    white-space: nowrap;
+    cursor: pointer;
+}
+.header-chip:hover { color: var(--text-secondary); border-color: var(--border-light); }

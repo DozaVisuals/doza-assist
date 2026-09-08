@@ -1,9 +1,15 @@
-{# AI Model settings modal — shared between the dashboard and the project page.
+{# AI Model modal, shared by the dashboard, the project page and collections.
 
-   Callers open it via ``openAIModelModal(optionalProjectId)``. When a project
-   ID is passed (or the page exposes ``window.PROJECT_ID``), per-variant
-   estimates reflect the full analysis time for THAT project. Without a
-   project context, the modal falls back to a generic per-call estimate.
+   Three modes, picked by how it is opened:
+   - openAIModelModal(projectId): the project's own provider chooser (Local,
+     Anthropic, OpenAI). The choice is stored on that project only.
+   - openAIModelModal(null, { collection: slug }): the collection's chooser.
+     A cloud provider is offered only when every member interview already
+     uses it (Rule 3).
+   - openAIModelModal() on the dashboard: "AI setup", API keys and the local
+     model size only. Where AI runs is never chosen app wide.
+   Per-variant estimates reflect the full analysis time for the project when
+   one is known; otherwise a generic per-call estimate.
 
    On successful model switch, if the current page has an ``#analyzeBtn``
    (the project view does; the dashboard doesn't), the modal triggers a
@@ -14,14 +20,24 @@
     <div class="ai-modal">
         <div class="ai-modal-header">
             <div>
-                <h2 class="ai-modal-title">AI Settings</h2>
-                <p class="ai-modal-subtitle" id="aiModalSubtitle">Choose where AI runs. Local uses Ollama on this Mac; Anthropic and OpenAI route through their cloud APIs using your key.</p>
+                <h2 class="ai-modal-title" id="aiModalTitle">AI Model</h2>
+                <p class="ai-modal-subtitle" id="aiModalSubtitle">Choose where this project's AI runs. Local uses Ollama on this Mac; Anthropic and OpenAI route through their cloud APIs using your key.</p>
             </div>
             <button class="ai-modal-close" onclick="closeAIModelModal()" aria-label="Close">×</button>
         </div>
 
-        <div class="ai-provider-section">
-            <div class="ai-provider-tabs" role="radiogroup" aria-label="AI provider">
+        <div class="ai-provider-section" id="aiProviderSection">
+            <p class="ai-provider-desc" id="aiModalCollectionNote" style="display:none;"></p>
+            {# AI setup (dashboard) only: keys sit under the local model, and
+               a provider is picked to reveal its key field. #}
+            <div class="ai-setup-keys" id="aiSetupKeys" style="display:none;">
+                <p class="ai-provider-desc">API keys are optional and saved once for the whole app. A key alone changes nothing: each project chooses where its AI runs from its own AI Model menu.</p>
+                <div class="ai-provider-tabs" role="group" aria-label="API key provider">
+                    <button type="button" class="ai-provider-tab" data-setup-key="anthropic" onclick="setupChooseKey('anthropic')">Anthropic (Claude)</button>
+                    <button type="button" class="ai-provider-tab" data-setup-key="openai" onclick="setupChooseKey('openai')">OpenAI (ChatGPT)</button>
+                </div>
+            </div>
+            <div class="ai-provider-tabs" id="aiProviderTabs" role="radiogroup" aria-label="AI provider">
                 <button type="button" class="ai-provider-tab" data-provider="ollama"    onclick="selectProvider('ollama')"    role="radio">
                     Local (Ollama)
                     <span class="ai-provider-free-badge">Free</span>
@@ -114,29 +130,117 @@
 // Remembered across open/close so button-refresh after a model switch knows
 // which project's estimates to request and which buttons to repaint.
 let _aiModalProjectId = null;
+// 'project' | 'collection' | 'setup' (dashboard: keys and local model only).
+let _aiModalMode = 'setup';
+let _aiModalCollection = null;
+// Collection mode: the provider every member shares ('ollama' when they
+// disagree), so the cloud tabs can be offered or explained.
+let _aiCollectionShared = 'ollama';
+// Whether this project or collection already confirmed leaving local once.
+let _aiProviderConfirmed = false;
 
 // Provider selection lives in this modal alongside the Ollama variant
 // picker. Switching providers swaps which sub-pane is visible: Local shows
 // the existing variant cards; Anthropic / OpenAI show an API-key field.
 let _activeProvider = 'ollama';
 
-async function openAIModelModal(projectId) {
+function _providerEndpoint() {
+    if (_aiModalMode === 'project' && _aiModalProjectId) {
+        return `/project/${encodeURIComponent(_aiModalProjectId)}/ai-provider`;
+    }
+    if (_aiModalMode === 'collection' && _aiModalCollection) {
+        return `/collection/${encodeURIComponent(_aiModalCollection)}/ai-provider`;
+    }
+    return null;
+}
+
+// Setup mode chosen key pane ('' = none shown yet).
+let _aiSetupKey = '';
+
+function _orderSections(localFirst) {
+    // AI setup lists the local model first and the keys under it; the
+    // project and collection choosers keep the provider tabs on top.
+    const provider = document.getElementById('aiProviderSection');
+    const local = document.getElementById('aiOllamaSection');
+    if (!provider || !local || !provider.parentNode) return;
+    const parent = provider.parentNode;
+    if (localFirst && local.nextElementSibling !== provider) parent.insertBefore(local, provider);
+    if (!localFirst && provider.nextElementSibling !== local) parent.insertBefore(provider, local);
+}
+
+function setupChooseKey(name) {
+    _aiSetupKey = (name === _aiSetupKey) ? '' : name;
+    document.querySelectorAll('[data-setup-key]').forEach(b => {
+        b.classList.toggle('is-active', b.getAttribute('data-setup-key') === _aiSetupKey);
+    });
+    const a = document.getElementById('aiProviderPaneAnthropic');
+    const o = document.getElementById('aiProviderPaneOpenai');
+    if (a) a.style.display = _aiSetupKey === 'anthropic' ? '' : 'none';
+    if (o) o.style.display = _aiSetupKey === 'openai' ? '' : 'none';
+}
+
+function _applyModalMode() {
+    const title = document.getElementById('aiModalTitle');
+    const sub = document.getElementById('aiModalSubtitle');
+    const tabs = document.getElementById('aiProviderTabs');
+    const note = document.getElementById('aiModalCollectionNote');
+    const setupKeys = document.getElementById('aiSetupKeys');
+    if (note) note.style.display = 'none';
+    if (setupKeys) setupKeys.style.display = _aiModalMode === 'setup' ? '' : 'none';
+    _orderSections(_aiModalMode === 'setup');
+    if (_aiModalMode === 'setup') {
+        _aiSetupKey = '';
+        if (title) title.textContent = 'AI setup';
+        if (sub) sub.textContent = 'The local model on this Mac, and optional API keys. Where AI runs is chosen per project, from each project\'s AI Model menu.';
+        if (tabs) tabs.style.display = 'none';
+    } else if (_aiModalMode === 'collection') {
+        if (title) title.textContent = 'AI Model for this collection';
+        if (sub) sub.textContent = 'A collection runs local unless every interview in it is on the same cloud provider and you confirm it here.';
+        if (tabs) tabs.style.display = '';
+    } else {
+        if (title) title.textContent = 'AI Model';
+        if (sub) sub.textContent = 'Choose where this project\'s AI runs. Local uses Ollama on this Mac; Anthropic and OpenAI route through their cloud APIs using your key. Every project starts local.';
+        if (tabs) tabs.style.display = '';
+    }
+}
+
+async function openAIModelModal(projectId, opts) {
+    opts = opts || {};
     // Argument takes priority; otherwise fall back to any PROJECT_ID the host
     // page already exposes (project.html defines it; dashboard.html doesn't).
     if (projectId === undefined && typeof PROJECT_ID !== 'undefined') {
         projectId = PROJECT_ID;
     }
     _aiModalProjectId = projectId || null;
+    _aiModalCollection = opts.collection || null;
+    _aiModalMode = _aiModalCollection ? 'collection' : (_aiModalProjectId ? 'project' : 'setup');
+    _aiProviderConfirmed = false;
+    _aiCollectionShared = 'ollama';
+    _applyModalMode();
 
     const modal = document.getElementById('aiModelModal');
     modal.style.display = 'flex';
 
     // Load provider config first so the right pane is visible while the
-    // Ollama status fetch runs. The two are independent — provider config
+    // Ollama status fetch runs. The two are independent: provider config
     // is local-only and never blocks on the backend's hardware probe.
     try {
         const cfg = await fetch('/settings/provider').then(r => r.json());
-        _activeProvider = cfg.active_provider || 'ollama';
+        // Where AI runs belongs to the project (or collection); the config
+        // file only holds keys, so its active_provider is never read here.
+        _activeProvider = 'ollama';
+        const endpoint = _providerEndpoint();
+        if (endpoint) {
+            try {
+                const d = await fetch(endpoint, { cache: 'no-store' }).then(r => r.json());
+                _activeProvider = d.provider || 'ollama';
+                _aiProviderConfirmed = !!d.confirmed;
+                if (_aiModalMode === 'collection') {
+                    _aiCollectionShared = d.shared_member_provider || 'ollama';
+                    _renderCollectionNote(d);
+                }
+            } catch (e) { /* keep local */ }
+        }
         // Keys are returned masked; show as placeholder so the user knows
         // a key is saved without exposing it.
         const ak = document.getElementById('aiProviderKeyAnthropic');
@@ -192,10 +296,36 @@ async function openAIModelModal(projectId) {
     }
 }
 
+function _renderCollectionNote(d) {
+    const note = document.getElementById('aiModalCollectionNote');
+    if (!note) return;
+    const counts = d.member_counts || {};
+    const parts = [];
+    if (counts.ollama) parts.push(`${counts.ollama} local`);
+    if (counts.anthropic) parts.push(`${counts.anthropic} on Anthropic`);
+    if (counts.openai) parts.push(`${counts.openai} on OpenAI`);
+    const members = d.members || 0;
+    let text = `${members} interview${members === 1 ? '' : 's'} in this collection` + (parts.length ? ` (${parts.join(', ')}).` : '.');
+    if (members && d.shared_member_provider === 'ollama' && Object.keys(counts).length > 1) {
+        text += ' The interviews use different providers, so the collection runs local.';
+    } else if (d.shared_member_provider && d.shared_member_provider !== 'ollama' && !d.confirmed) {
+        text += ` They all use ${_providerLabel(d.shared_member_provider)}; confirm below to let the collection use it too.`;
+    }
+    note.textContent = text;
+    note.style.display = '';
+}
+
 function _renderProviderTabs(active) {
     document.querySelectorAll('.ai-provider-tab').forEach(t => {
         const isActive = t.getAttribute('data-provider') === active;
         t.classList.toggle('is-active', isActive);
+        // Collection mode: a cloud tab is offered only when every member
+        // interview already uses that provider.
+        const p = t.getAttribute('data-provider');
+        const blocked = _aiModalMode === 'collection' && p !== 'ollama' && p !== _aiCollectionShared;
+        t.disabled = blocked;
+        t.title = blocked ? `Every interview in this collection must be on ${_providerLabel(p)} first` : '';
+        t.style.opacity = blocked ? '0.5' : '';
         // Drop any pre-existing badge so we re-render exactly once.
         const old = t.querySelector('.ai-provider-active-badge');
         if (old) old.remove();
@@ -214,6 +344,20 @@ function _renderProviderTabs(active) {
     const a = document.getElementById('aiProviderPaneAnthropic');
     const o = document.getElementById('aiProviderPaneOpenai');
     const localSection = document.getElementById('aiOllamaSection');
+    if (_aiModalMode === 'setup') {
+        // Dashboard: no chooser. The local model first; a key pane appears
+        // only once its provider is picked below. Nothing is marked
+        // "Currently active" because nothing is chosen here.
+        if (lo) lo.style.display = 'none';
+        if (a) a.style.display = _aiSetupKey === 'anthropic' ? '' : 'none';
+        if (o) o.style.display = _aiSetupKey === 'openai' ? '' : 'none';
+        if (localSection) localSection.style.display = '';
+        document.querySelectorAll('[data-setup-key]').forEach(b => {
+            b.classList.toggle('is-active', b.getAttribute('data-setup-key') === _aiSetupKey);
+        });
+        document.querySelectorAll('.ai-provider-active-banner').forEach(b => { b.style.display = 'none'; });
+        return;
+    }
     if (lo) lo.style.display = active === 'ollama' ? '' : 'none';
     if (a) a.style.display = active === 'anthropic' ? '' : 'none';
     if (o) o.style.display = active === 'openai' ? '' : 'none';
@@ -226,24 +370,88 @@ function _renderProviderTabs(active) {
     });
 }
 
+// Dialog A (project) / Dialog C (collection): fires once, on the first move
+// from local to a cloud provider. Switching between Anthropic and OpenAI, or
+// back to local, never asks. Resolves true when the user chooses the cloud
+// provider; Escape, the overlay and Stay local all resolve false. The default
+// focused button is Stay local.
+function confirmLeaveLocal(name) {
+    return new Promise((resolve) => {
+        const company = name === 'anthropic' ? 'Anthropic' : 'OpenAI';
+        const subject = _aiModalMode === 'collection'
+            ? "This collection's transcripts, analysis, and chat"
+            : "This project's transcript, analysis, and chat";
+        const scope = _aiModalMode === 'collection' ? 'collection' : 'project';
+        const old = document.getElementById('aiLeaveLocalDialog');
+        if (old) old.remove();
+        const overlay = document.createElement('div');
+        overlay.id = 'aiLeaveLocalDialog';
+        overlay.className = 'modal-overlay active ai-confirm-overlay';
+        overlay.innerHTML = `
+            <div class="modal ai-confirm" role="alertdialog" aria-modal="true" aria-labelledby="aiLeaveLocalTitle" style="max-width: 460px;">
+                <h2 id="aiLeaveLocalTitle">Send transcript text to ${company}?</h2>
+                <p>${subject} will be sent to ${company}'s API using your own key. Your video and audio files stay on this Mac. Nothing goes to Doza.</p>
+                <p>If Style is on, your style profile is included in the request.</p>
+                <p>${company} bills you directly. Their terms and retention apply.</p>
+                <div class="ai-confirm-actions">
+                    <button type="button" class="btn btn-sm btn-primary" id="aiLeaveLocalStay">Stay local</button>
+                    <button type="button" class="btn btn-sm" id="aiLeaveLocalGo">Use ${company} for this ${scope}</button>
+                </div>
+            </div>`;
+        const done = (answer) => { overlay.remove(); resolve(answer); };
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) done(false); });
+        overlay.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); done(false); }
+        });
+        document.body.appendChild(overlay);
+        overlay.querySelector('#aiLeaveLocalStay').addEventListener('click', () => done(false));
+        overlay.querySelector('#aiLeaveLocalGo').addEventListener('click', () => done(true));
+        overlay.querySelector('#aiLeaveLocalStay').focus();
+    });
+}
+
 async function selectProvider(name) {
     if (name !== 'ollama' && name !== 'anthropic' && name !== 'openai') return;
     if (name === _activeProvider) return;
+    const endpoint = _providerEndpoint();
+    if (!endpoint) return;  // setup mode has no chooser
     const previous = _activeProvider;
+    let confirmed = false;
+    if (previous === 'ollama' && name !== 'ollama' && !_aiProviderConfirmed) {
+        _renderProviderTabs(name);
+        const go = await confirmLeaveLocal(name);
+        if (!go) {
+            // Stay local: the picker reverts and nothing is stored.
+            _activeProvider = 'ollama';
+            _renderProviderTabs('ollama');
+            return;
+        }
+        confirmed = true;
+    }
     _activeProvider = name;
     _renderProviderTabs(name);
     try {
-        const r = await fetch('/settings/provider', {
-            method: 'POST',
+        const body = { provider: name };
+        if (confirmed) body.confirmed = true;
+        const r = await fetch(endpoint, {
+            method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ active_provider: name }),
+            body: JSON.stringify(body),
         });
-        if (!r.ok) throw new Error('save failed');
-        _showProviderStatus(name, 'success', `Active provider: ${_providerLabel(name)}`);
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || 'save failed');
+        _activeProvider = data.provider || name;
+        _aiProviderConfirmed = !!data.confirmed;
+        if (_aiModalMode === 'collection') { _aiCollectionShared = data.shared_member_provider || 'ollama'; _renderCollectionNote(data); }
+        _renderProviderTabs(_activeProvider);
+        _showProviderStatus(name, 'success', _aiModalMode === 'collection'
+            ? `This collection uses ${_providerLabel(_activeProvider)}`
+            : `This project uses ${_providerLabel(_activeProvider)}`);
+        if (typeof window.dozaRefreshGearValues === 'function') window.dozaRefreshGearValues();
     } catch (e) {
         _activeProvider = previous;
         _renderProviderTabs(previous);
-        _showProviderStatus(name, 'error', 'Could not save provider choice');
+        _showProviderStatus(name, 'error', e.message || 'Could not save provider choice');
     }
 }
 
@@ -511,7 +719,7 @@ async function _useAIVariant(tier, btn) {
             signal: ctrl.signal,
         });
         if (!resp.ok) throw new Error((await resp.json()).error || resp.status);
-        await openAIModelModal(_aiModalProjectId);
+        await openAIModelModal(_aiModalProjectId, _aiModalCollection ? { collection: _aiModalCollection } : undefined);
     } catch (e) {
         const msg = e.name === 'AbortError'
             ? 'Timed out setting model. Is the backend reachable?'
@@ -606,10 +814,11 @@ async function _downloadAIVariant(tier, btn) {
     } catch (e) {
         // Non-fatal — the user can click "Use this" after refresh.
     }
-    await openAIModelModal(_aiModalProjectId);
+    await openAIModelModal(_aiModalProjectId, _aiModalCollection ? { collection: _aiModalCollection } : undefined);
+    if (typeof window.dozaRefreshGearValues === 'function') window.dozaRefreshGearValues();
 }
 
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeAIModelModal();
+    if (e.key === 'Escape' && !document.getElementById('aiLeaveLocalDialog')) closeAIModelModal();
 });
 </script>

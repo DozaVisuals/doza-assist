@@ -321,6 +321,8 @@ class EDLExporter(BaseExporter):
         total_clips=0,
         start_tc_frames=0,
         tc_format="NDF",  # "DF" renders FCM: DROP FRAME + ';' TC labels
+        timeline_name=None,
+        event_name=None,
     ) -> ExportResult:
         if export_type == "labels" and len(markers) == 1:
             suffix = (markers[0].get("text") or "Clip")[:40].strip()
@@ -351,7 +353,7 @@ class EDLExporter(BaseExporter):
         else:
             ordered = sorted(valid, key=lambda m: float(m.get("start") or 0))
 
-        title = f"{project_name.strip()} - {suffix.strip()}"
+        title = timeline_name or f"{project_name.strip()} - {suffix.strip()}"
         content, extra_warnings = _build_edl(
             title=title,
             markers=ordered,
@@ -364,10 +366,14 @@ class EDLExporter(BaseExporter):
             media_duration=media_duration,
         )
 
-        filename = (
-            f"{_sanitize_for_filename(project_name)} - {_sanitize_for_filename(suffix)}{self.file_extension}"
-            .replace("/", "-")
-        )
+        if timeline_name:
+            from export_naming import filename_for
+            filename = filename_for(timeline_name, self.file_extension)
+        else:
+            filename = (
+                f"{_sanitize_for_filename(project_name)} - {_sanitize_for_filename(suffix)}{self.file_extension}"
+                .replace("/", "-")
+            )
         file_path = os.path.join(exports_dir, filename)
         os.makedirs(exports_dir, exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
@@ -378,6 +384,7 @@ class EDLExporter(BaseExporter):
             filename=filename,
             format_name=self.format_name,
             platform_name=self.platform_name,
+            timeline_name=title,
             warnings=list(_EDL_WARNINGS) + extra_warnings,
         )
 
@@ -395,6 +402,8 @@ class EDLExporter(BaseExporter):
         exports_dir,
         start_tc_frames=0,
         tc_format="NDF",  # "DF" renders FCM: DROP FRAME + ';' TC labels
+        timeline_name=None,
+        event_name=None,
     ) -> ExportResult:
         # Story markers may carry an _order field; preserve it the way the
         # FCPXML story exporter does.
@@ -403,7 +412,7 @@ class EDLExporter(BaseExporter):
             key=lambda m: m.get("_order", 0),
         )
 
-        title = f"{project_name.strip()} - {story_title.strip()}"
+        title = timeline_name or f"{project_name.strip()} - {story_title.strip()}"
         content, extra_warnings = _build_edl(
             title=title,
             markers=ordered,
@@ -415,10 +424,14 @@ class EDLExporter(BaseExporter):
             media_duration=media_duration,
         )
 
-        filename = (
-            f"{_sanitize_for_filename(project_name)} - {_sanitize_for_filename(story_title)}{self.file_extension}"
-            .replace("/", "-")
-        )
+        if timeline_name:
+            from export_naming import filename_for
+            filename = filename_for(timeline_name, self.file_extension)
+        else:
+            filename = (
+                f"{_sanitize_for_filename(project_name)} - {_sanitize_for_filename(story_title)}{self.file_extension}"
+                .replace("/", "-")
+            )
         file_path = os.path.join(exports_dir, filename)
         os.makedirs(exports_dir, exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
@@ -429,5 +442,6 @@ class EDLExporter(BaseExporter):
             filename=filename,
             format_name=self.format_name,
             platform_name=self.platform_name,
+            timeline_name=title,
             warnings=list(_EDL_WARNINGS) + extra_warnings,
         )

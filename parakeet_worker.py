@@ -27,7 +27,7 @@ Contract:
 
 Progress protocol: lines starting with ``DOZA_PROGRESS `` carry a JSON
 event ``{"phase": ..., "pct": ..., ...}`` matching the in-process
-implementation's _emit events (load_model 5 / load_audio 8 /
+implementation's _emit events (load_model 5 / load_audio 8 with audio_sec /
 transcribing 10-90 with audio_sec). All other stdout lines are plain
 logging the parent forwards to the app log.
 """
@@ -131,24 +131,96 @@ def _budget_chunk_sec(default: int = 60) -> int:
         return default
 
 
-def transcribe(audio_path: str, speaker_name: str) -> dict:
+def _open_chunk_source(audio_path: str, target_sr: int):
+    """Return ``(read_chunk, total_samples, sr)`` for ``audio_path``.
+
+    Streaming path (the normal case): the parent always hands us the WAV
+    that ``extract_audio`` wrote (16 kHz mono PCM_16), so it is opened with
+    soundfile and each chunk is read straight from disk. Peak memory is the
+    model plus ONE chunk. The previous whole-file ``load_audio`` decoded the
+    entire signal into a float32 array first, which for a 36-hour file
+    meant roughly 20 GB of unified memory before the first chunk ran; the
+    worker died and the job silently fell back to Whisper. It also meant
+    one MLX array over every sample, which hit MLX's int32 shape limit past
+    2,236 minutes at 16 kHz.
+
+    Fallback path: a file whose sample rate or channel count does not match
+    the model is decoded whole with the library's ``load_audio`` exactly as
+    before (the only correct option without a resampler here). That case is
+    not produced by our own pipeline; it is logged so it shows in server.log.
+    """
     import numpy as np
     import soundfile as sf
-    from parakeet_mlx import from_pretrained
+
+    try:
+        handle = sf.SoundFile(audio_path)
+    except Exception as e:  # not a libsndfile-readable file
+        handle = None
+        print(f"[parakeet-worker] soundfile could not open audio ({e}); "
+              f"decoding whole file", flush=True)
+    if handle is not None and handle.samplerate == target_sr and handle.channels == 1:
+        total_samples = int(handle.frames)
+
+        def read_chunk(start: int, end: int):
+            handle.seek(start)
+            # int16 keeps the chunk bit-exact with the source PCM_16 WAV.
+            return handle.read(end - start, dtype='int16')
+
+        return read_chunk, total_samples, int(handle.samplerate), 'stream'
+
+    if handle is not None:
+        print(f"[parakeet-worker] audio is {handle.samplerate} Hz x "
+              f"{handle.channels} ch, model wants {target_sr} Hz mono; "
+              f"decoding whole file", flush=True)
+        handle.close()
     from parakeet_mlx.audio import load_audio
+    audio_data = load_audio(audio_path, target_sr)
+
+    def read_chunk_mem(start: int, end: int):
+        return np.array(audio_data[start:end])
+
+    return read_chunk_mem, len(audio_data), target_sr, 'memory'
+
+
+PARAKEET_REPO = 'mlx-community/parakeet-tdt-0.6b-v2'
+
+
+def parakeet_model_source(repo: str = PARAKEET_REPO) -> str:
+    """The model directory to load from: the local Hugging Face cache when
+    the model is already there, else the repo id (first run, the download
+    the setup step performs).
+
+    parakeet_mlx.from_pretrained hands a repo id to hf_hub_download, which
+    asks huggingface.co for the current revision on EVERY call even when
+    the files are cached — a network request on each transcription. A local
+    directory path skips the hub entirely.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        cfg = hf_hub_download(repo, 'config.json', local_files_only=True)
+        hf_hub_download(repo, 'model.safetensors', local_files_only=True)
+        return os.path.dirname(cfg)
+    except Exception:
+        return repo
+
+
+def transcribe(audio_path: str, speaker_name: str) -> dict:
+    import soundfile as sf
+    from parakeet_mlx import from_pretrained
 
     print("Loading Parakeet TDT model...", flush=True)
     _emit('load_model', 5)
     _apply_mlx_memory_caps()
-    model = from_pretrained('mlx-community/parakeet-tdt-0.6b-v2')
+    model = from_pretrained(parakeet_model_source(PARAKEET_REPO))
 
-    print("Loading audio...", flush=True)
-    _emit('load_audio', 8)
-    audio_data = load_audio(audio_path, model.preprocessor_config.sample_rate)
-
-    sr = model.preprocessor_config.sample_rate
-    total_samples = len(audio_data)
+    print("Opening audio...", flush=True)
+    read_chunk, total_samples, sr, source_mode = _open_chunk_source(
+        audio_path, model.preprocessor_config.sample_rate)
     total_duration = total_samples / sr
+    # audio_sec is known before any decode, so the UI can show the media
+    # length during the phase that used to be blind.
+    _emit('load_audio', 8, audio_sec=int(total_duration))
+    print(f"Audio: {total_duration:.0f}s ({source_mode})", flush=True)
 
     # 60s chunks + 1s overlap (down from the old in-process 300s): smaller
     # per-chunk command buffers reduce the odds of hitting Metal's error
@@ -165,7 +237,7 @@ def transcribe(audio_path: str, speaker_name: str) -> dict:
 
     while chunk_start < total_samples:
         chunk_end = min(chunk_start + chunk_samples, total_samples)
-        chunk = audio_data[chunk_start:chunk_end]
+        chunk = read_chunk(chunk_start, chunk_end)
         time_offset = chunk_start / sr
 
         chunk_idx += 1
@@ -183,7 +255,7 @@ def transcribe(audio_path: str, speaker_name: str) -> dict:
         # collide on chunk_idx-named files in /tmp.
         fd, tmp_path = tempfile.mkstemp(prefix='parakeet_chunk_', suffix='.wav')
         os.close(fd)
-        sf.write(tmp_path, np.array(chunk), sr)
+        sf.write(tmp_path, chunk, sr, subtype='PCM_16')
 
         try:
             result = model.transcribe(tmp_path)

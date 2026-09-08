@@ -68,12 +68,55 @@ _CONDITIONAL_ASSEMBLY_VERB_STARTS = (
     'assemble', 'assembles',
 )
 _NO_CLIP_SIGNALS = (
-    'no clip', 'without clip', 'no markers', 'without markers',
+    'no clip', 'without clip', 'without a clip', 'no markers', 'without markers',
     'just talk', 'just tell me', 'just tell me in general', 'in general',
+    'just explain', 'just answer', 'prose only', 'text only', 'no cards',
     "don't pull", "don't find", "don't list", "don't return",
-    "don't surface", 'do not pull', 'do not find', 'do not return',
-    'no need for clips', 'skip the clips', 'skip clips',
+    "don't surface", "don't give me a clip", "don't give me clips",
+    "don't give me any clip", "don't show me clip", "don't attach",
+    'dont pull', 'dont find', 'dont list', 'dont return', 'dont surface',
+    'dont give me a clip', 'dont give me clips', 'dont give me any clip',
+    'dont show me clip', 'dont attach',
+    'do not pull', 'do not find', 'do not return', 'do not give me',
+    'do not attach', 'not clips', 'no need for clips', 'no need for a clip',
+    'skip the clips', 'skip clips',
 )
+
+
+def _no_clip_request(message) -> bool:
+    """True when the editor said, in any spelling, that they want no
+    clips this turn. A hard instruction: markers are stripped from the
+    reply and no salvage, count or duration pass runs."""
+    low = (message or '').lower()
+    return bool(low) and any(sig in low for sig in _NO_CLIP_SIGNALS)
+
+
+_DENIES_COVERAGE_RE = re.compile(
+    r"(?:(?:doesn'?t|does not|don'?t|do not|never|isn'?t|is not|not|no)\s+"
+    r"(?:really\s+|actually\s+|explicitly\s+|directly\s+)?"
+    r"(?:mention(?:ed|s)?|say|says|said|discuss(?:ed|es)?|cover(?:ed|s)?|"
+    r"address(?:ed|es)?|come up|comes up|appear(?:s|ed)?|talk(?:s|ed)? about|"
+    r"in the (?:transcript|footage|interview|recording)|"
+    r"part of (?:this|the) (?:transcript|footage|interview)))"
+    r"|(?:\b(?:nobody|no one|no-one|none of (?:them|the speakers|the interviewees)|neither of them)\b"
+    r"[^.?!\n]{0,40}?\b(?:says?|said|mentions?|mentioned|talks?|talked|discuss(?:es|ed)?|brings? up|brought up)\b)"
+    r"|\bnothing (?:about|on)\b|\bno mention of\b|\boutside (?:of )?(?:this|the) (?:footage|interview|transcript)\b",
+    re.IGNORECASE)
+
+
+def _reply_denies_coverage(text) -> bool:
+    """True when the reply says the footage does not contain what was
+    asked ("The transcript doesn't mention what day it is"). Salvage and
+    count top-ups must not bolt unrelated cards onto such an answer."""
+    head = (text or '').strip()[:400]
+    return bool(head) and bool(_DENIES_COVERAGE_RE.search(head))
+
+
+def _strip_all_markers(text):
+    """Remove every [CLIP:] marker line (and its attached note lines)."""
+    if not text or '[CLIP' not in text:
+        return text
+    return _drop_marker_lines_where(text, lambda marker: True)
 # Clip-seeking nouns: an editor whose message names "moments", "clips",
 # "quotes", "soundbites", or "highlights" wants playable material
 # even when the ask wears question syntax ("What are the strongest
@@ -317,6 +360,18 @@ def _is_conversational_query(message: str, segments=None) -> bool:
     for s in _NO_CLIP_SIGNALS:
         if s in msg:
             return True
+    # A clip noun the reference guards already read as conversational
+    # ("why did you pick those Posey clips?", "those Mae clips were
+    # perfect, what's the theme?") is discussion about cards the
+    # conversation already produced — a speaker name in the same sentence
+    # must not override that. Checked BEFORE the speaker anchor because the
+    # anchor returns early; without this order the meta-question guard
+    # never ran on any sentence that named a speaker (audit 2026-09-06).
+    _guard_stripped = msg.lstrip('"\'`([{ \t')
+    _guard_tokens = re.findall(r"[a-z0-9']+", _guard_stripped)
+    if any(t in _CLIP_SEEKING_NOUNS for t in _guard_tokens) \
+            and not _clip_noun_retrieval_targets(_guard_stripped):
+        return True
     # Speaker-name anchor: any token in the message matches a known speaker.
     # Compare on first names too — editors say "do mae" not "do mae babcock".
     if segments:
@@ -875,9 +930,15 @@ def _sticky_chat_num_ctx(project_name, system_message, messages):
 def _build_chat_messages(message, history, project_name, segments,
                         formatted, analysis_block, relevant_excerpts_block,
                         profile_id, labeled_sections=None, speaker_names=None,
-                        include_final_reminder=True, language_directive_text=''):
+                        include_final_reminder=True, language_directive_text='',
+                        followups_hint=False, story_so_far=None):
     """Construct the (system_message, messages_array) pair for an Ollama
     /api/chat call.
+
+    ``followups_hint=True`` asks the model to end with one ``FOLLOW-UPS:``
+    line (three questions the editor might ask next); the chat paths strip
+    it with :func:`_split_followups` and send it to the UI as chips. It
+    rides the final turn only, so the cached prefix is untouched.
 
     Layout:
       system        : CHAT_SYSTEM_PROMPT + storytelling foundation
@@ -1036,6 +1097,14 @@ def _build_chat_messages(message, history, project_name, segments,
             final_content = (
                 f'{relevant_excerpts_block.strip()}\n\n{final_content}'
             )
+        _story_tail = _story_so_far_tail(story_so_far)
+        if _story_tail:
+            final_content = f'{final_content}\n\n{_story_tail}'
+        final_content = final_content + _BREVITY_TAIL
+        if _no_clip_request(message):
+            final_content = final_content + _NO_CLIPS_TAIL
+        if followups_hint:
+            final_content = final_content + _FOLLOWUPS_HINT
         messages.append({'role': 'user', 'content': final_content})
     else:
         final_content = message
@@ -1043,6 +1112,15 @@ def _build_chat_messages(message, history, project_name, segments,
             final_content = (
                 f'{relevant_excerpts_block.strip()}\n\n{final_content}'
             )
+        _story_tail = _story_so_far_tail(story_so_far)
+        if _story_tail:
+            final_content = f'{final_content}\n\n{_story_tail}'
+        if message != 'ok':  # the prewarm probe keeps the prefix minimal
+            final_content = final_content + _BREVITY_TAIL_CONVERSATIONAL
+            if _no_clip_request(message):
+                final_content = final_content + _NO_CLIPS_TAIL
+        if followups_hint:
+            final_content = final_content + _FOLLOWUPS_HINT
         messages.append({'role': 'user', 'content': final_content})
     return system_message, messages
 
@@ -1086,7 +1164,8 @@ def _chat_reply_budget_kwargs(message, segments=None):
 def chat_about_transcript(transcript, message, history=None, project_name="Interview",
                           analysis=None, profile_id=None, segment_vectors=None,
                           paragraph_index=None, labeled_sections=None,
-                          speaker_names=None, output_language=None):
+                          speaker_names=None, output_language=None,
+                          story_so_far=None):
     """
     Chat with AI about the transcript. Supports follow-up questions.
     Returns the AI reply as a string (may contain embedded clip suggestions).
@@ -1153,14 +1232,19 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     #             a RELEVANT EXCERPTS block between transcript and final
     #             reminder so recency bias reinforces the answer.
     # ─────────────────────────────────────────────────────────────────────
-    if duration > _long_chat_threshold():
-        # Conversational divert: long interviews normally go straight to
-        # chunked clip search, which only ever returns clip cards. When the
-        # editor's question is conversational ("what's the story", "no
-        # clips just tell me", greetings), bypass the chunk search and run
-        # a synthesis call against the analysis block + summary instead.
-        # Pass segments so the classifier can detect speaker-name anchors
-        # ("do mae", "what about Posey") and route those to chunk search.
+    if duration > _long_chat_threshold() and not _cloud_full_transcript_ok(transcript):
+        if not _chat_legacy_chunked_enabled():
+            # Unified long path: retrieve, then ONE answer with cards inside
+            # the prose (see the block above _chat_long_unified).
+            return _chat_long_unified(
+                transcript, message, history, project_name, analysis,
+                profile_id, segment_vectors, labeled_sections, speaker_names,
+                phrases, words, theme_phrases, tfidf_hits,
+                directive, directive_plain, skip_title_anchor,
+                story_so_far=story_so_far,
+            )
+        # Legacy routing (DOZA_CHAT_LEGACY_CHUNKED=1): conversational divert
+        # to summary synthesis, everything else to chunked clip search.
         if _is_conversational_query(message, segments=segments):
             return _chat_layer2_conversational_synthesis(
                 message, history, project_name, segments,
@@ -1169,7 +1253,7 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
                 language_directive_text=directive,
                 skip_title_anchor=skip_title_anchor,
             )
-        paragraphs = _build_paragraphs(transcript)
+        paragraphs = _build_paragraphs(transcript, speaker_names=speaker_names)
         return _chat_layer2_chunked_search(
             paragraphs, message, history, project_name,
             phrases, words, profile_id, analysis,
@@ -1185,16 +1269,19 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         # Layer 1 on short interviews: segments have the same shape the
         # paragraph helpers expect, so the matcher runs against segments
         # directly with ±2 context.
+        # Display names applied so excerpts never quote SPEAKER_NN while the
+        # transcript above shows the real name.
+        _named = _apply_speaker_names(segments, speaker_names)
         matched = _find_relevant_paragraphs(
-            segments, phrases, words, context=2, theme_phrases=theme_phrases,
+            _named, phrases, words, context=2, theme_phrases=theme_phrases,
         )
         # Fold in TF-IDF top hits (over the paragraph corpus, not segments).
         # These come pre-ranked by cosine similarity and bring abstract
         # queries onto a sensible answer pool even with zero literal match.
-        matched = _merge_paragraph_lists(matched, tfidf_hits)
+        matched = _merge_paragraph_lists(matched, _apply_speaker_names(tfidf_hits, speaker_names))
         # Augment with high-narrative-score segments overlapping any literal
         # match — when vectors are present, these are pre-curated highlights.
-        matched = _augment_with_high_score_vectors(matched, segments, segment_vectors, theme_phrases)
+        matched = _augment_with_high_score_vectors(matched, _named, segment_vectors, theme_phrases)
         relevant_excerpts_block = _build_relevant_excerpts_block(
             matched, synthesis=_is_synthesis_query(message),
         )
@@ -1205,15 +1292,22 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         formatted, analysis_block, relevant_excerpts_block, profile_id,
         labeled_sections=labeled_sections, speaker_names=speaker_names,
         language_directive_text=directive,
+        followups_hint=True, story_so_far=story_so_far,
     )
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx,
                              **_chat_reply_budget_kwargs(message, segments))
+    response, _followups = _split_followups(response)
     response = _strip_trailing_repetition(response)
     cleaned = _clean_chat_response(response)
     cleaned = _validate_clip_markers_in_text(
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
+    cleaned = _ensure_clip_titles(cleaned, segments)
+    if _no_clip_request(message):
+        # A hard instruction: prose only, whatever the model or the
+        # enforcement passes would otherwise add.
+        return _drop_passed_markers(_strip_all_markers(cleaned), story_so_far)
     # Skip clip salvage when the editor's question is conversational
     # (themes, story, craft, chitchat, or explicit "no clips"). Forcing
     # markers into a discussion answer breaks the orientation contract.
@@ -1223,8 +1317,9 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
     # has actual prose, though: salvaging an EMPTY reply on a yes/no
     # content question ("did she ever mention X?") would fabricate an
     # implied 'yes' out of cards for a topic never discussed.
-    if not _is_conversational_query(message, segments=segments) \
-            or (_is_content_lookup_query(message) and cleaned.strip()):
+    if (not _is_conversational_query(message, segments=segments)
+            or (_is_content_lookup_query(message) and cleaned.strip())) \
+            and not _reply_denies_coverage(cleaned):
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
@@ -1267,8 +1362,8 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
                                          message=message, history=history)
             if extractive else None,
             transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
-            min_count=_plural_clip_minimum(message) if extractive else None,
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
+            min_count=_plural_clip_minimum(message) if (extractive and not _reply_denies_coverage(cleaned)) else None,
             drop_reemitted=bool(
                 _MORE_CLIPS_RE.search((message or '').lower())),
         )
@@ -1278,9 +1373,10 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         # clips earlier turns already showed.
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, matched, transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
             hard_cap_seconds=parse_duration_bound_seconds(message),
         )
+    cleaned = _drop_passed_markers(cleaned, story_so_far)
     return cleaned
 
 
@@ -1442,7 +1538,8 @@ def _stream_chat_events(system_message, messages, num_ctx, **call_kwargs):
 def chat_about_transcript_stream(transcript, message, history=None, project_name="Interview",
                                  analysis=None, profile_id=None, segment_vectors=None,
                                  paragraph_index=None, labeled_sections=None,
-                                 speaker_names=None, output_language=None):
+                                 speaker_names=None, output_language=None,
+                                 story_so_far=None):
     """Streaming variant of :func:`chat_about_transcript`.
 
     Layer 1 yields ``('token', piece)`` events as Ollama produces them, then
@@ -1506,12 +1603,19 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             tfidf_hits = []
     yield ('heartbeat', 'preparing')
 
-    if duration > _long_chat_threshold():
-        # Conversational divert (mirror of the non-streaming variant): when
-        # the editor asked a discussion-style question, skip chunk search
-        # and yield a synthesized prose answer instead. Speaker-name
-        # anchors ("do mae", "Posey's story") count as extractive even
-        # without a verb start, so they reach the chunk search.
+    if duration > _long_chat_threshold() and not _cloud_full_transcript_ok(transcript):
+        if not _chat_legacy_chunked_enabled():
+            for event in _chat_long_unified_stream(
+                transcript, message, history, project_name, analysis,
+                profile_id, segment_vectors, labeled_sections, speaker_names,
+                phrases, words, theme_phrases, tfidf_hits,
+                directive, directive_plain, skip_title_anchor,
+                story_so_far=story_so_far,
+            ):
+                yield event
+            return
+        # Legacy routing (DOZA_CHAT_LEGACY_CHUNKED=1) — mirror of the
+        # non-streaming variant.
         if _is_conversational_query(message, segments=segments):
             for event in _chat_layer2_conversational_synthesis_stream(
                 message, history, project_name, segments,
@@ -1527,7 +1631,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         # so the UI can show "3/8 chunks searched…" instead of a frozen
         # spinner for 30 seconds. Final reply is the same as the
         # non-streaming variant.
-        paragraphs = _build_paragraphs(transcript)
+        paragraphs = _build_paragraphs(transcript, speaker_names=speaker_names)
         for event in _chat_layer2_chunked_search_stream(
             paragraphs, message, history, project_name,
             phrases, words, profile_id, analysis,
@@ -1550,11 +1654,12 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     matched = []
     if phrases or words or theme_phrases or tfidf_hits:
         try:
+            _named = _apply_speaker_names(segments, speaker_names)
             matched = _find_relevant_paragraphs(
-                segments, phrases, words, context=2, theme_phrases=theme_phrases,
+                _named, phrases, words, context=2, theme_phrases=theme_phrases,
             )
-            matched = _merge_paragraph_lists(matched, tfidf_hits)
-            matched = _augment_with_high_score_vectors(matched, segments, segment_vectors, theme_phrases)
+            matched = _merge_paragraph_lists(matched, _apply_speaker_names(tfidf_hits, speaker_names))
+            matched = _augment_with_high_score_vectors(matched, _named, segment_vectors, theme_phrases)
             relevant_excerpts_block = _build_relevant_excerpts_block(
                 matched, synthesis=_is_synthesis_query(message),
             )
@@ -1574,6 +1679,7 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         formatted, analysis_block, relevant_excerpts_block, profile_id,
         labeled_sections=labeled_sections, speaker_names=speaker_names,
         language_directive_text=directive,
+        followups_hint=True, story_so_far=story_so_far,
     )
 
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
@@ -1586,12 +1692,22 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
             break
         yield (_ev, _payload)
 
+    # Follow-up chips ride a final line the model was asked for; strip it
+    # before any cleaner sees it.
+    full, _followups = _split_followups(full)
     # Strip any trailing repetition the model produced before we cut it off.
     full = _strip_trailing_repetition(full)
     cleaned = _clean_chat_response(full)
     cleaned = _validate_clip_markers_in_text(
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
+    cleaned = _ensure_clip_titles(cleaned, segments)
+    if _no_clip_request(message):
+        cleaned = _drop_passed_markers(_strip_all_markers(cleaned), story_so_far)
+        if _followups:
+            yield ('followups', _followups)
+        yield ('done', cleaned)
+        return
     # Salvage pass mirrors the non-streaming path. Adds latency only when
     # the model's first attempt produced zero markers — most calls return
     # immediately. Streamed clients see a brief pause after the prose
@@ -1599,8 +1715,9 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
     # Skipped on conversational queries — see _is_conversational_query —
     # except content-lookup asks with surviving prose, which promised
     # playable passages (empty-reply guard: see the non-streaming path).
-    if not _is_conversational_query(message, segments=segments) \
-            or (_is_content_lookup_query(message) and cleaned.strip()):
+    if (not _is_conversational_query(message, segments=segments)
+            or (_is_content_lookup_query(message) and cleaned.strip())) \
+            and not _reply_denies_coverage(cleaned):
         cleaned = _salvage_clips_if_missing(
             cleaned, formatted, segments, num_ctx=num_ctx,
             matched_paragraphs=matched, user_message=message,
@@ -1630,8 +1747,8 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
                                          message=message, history=history)
             if extractive else None,
             transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
-            min_count=_plural_clip_minimum(message) if extractive else None,
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
+            min_count=_plural_clip_minimum(message) if (extractive and not _reply_denies_coverage(cleaned)) else None,
             drop_reemitted=bool(
                 _MORE_CLIPS_RE.search((message or '').lower())),
         )
@@ -1640,9 +1757,12 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         # non-streaming variant.
         cleaned = _enforce_duration_target(
             cleaned, target_seconds, matched, transcript=transcript,
-            exclude_spans=_history_clip_spans(history),
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(story_so_far),
             hard_cap_seconds=parse_duration_bound_seconds(message),
         )
+    cleaned = _drop_passed_markers(cleaned, story_so_far)
+    if _followups:
+        yield ('followups', _followups)
     yield ('done', cleaned)
 
 
@@ -2219,7 +2339,7 @@ def _enforce_clip_count(text, target, candidates=None, transcript=None,
             continue
         taken.append((s, e, cand_group))
         have += 1
-        start_tc, end_tc = _seconds_to_tc(s), _seconds_to_tc(e)
+        start_tc, end_tc = _seconds_to_tc_frac(s), _seconds_to_tc_frac(e)
         attrs = [f'start={start_tc}', f'end={end_tc}']
         if cand_group:
             # Exact source attribution for multi-project pools: the
@@ -2995,7 +3115,7 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
             # Lone surviving marker still over the named cap: shrink its
             # end so the deliverable honors the user's literal ceiling.
             m, s, _e = markers[0]
-            new_end = _seconds_to_tc(s + hard_cap)
+            new_end = _seconds_to_tc_frac(s + hard_cap)
             capped = re.sub(r'end=[\d:.]+', f'end={new_end}',
                             m.group(0), count=1)
             text = text[:m.start()] + capped + text[m.end():]
@@ -3048,7 +3168,7 @@ def _enforce_duration_target(text, target_seconds, candidates, transcript=None,
             continue
         taken.append((s, e, cand_group))
         total += dur
-        start_tc, end_tc = _seconds_to_tc(s), _seconds_to_tc(e)
+        start_tc, end_tc = _seconds_to_tc_frac(s), _seconds_to_tc_frac(e)
         attrs = [f'start={start_tc}', f'end={end_tc}']
         if cand_group:
             # Exact source attribution — see _enforce_clip_count.
@@ -3634,8 +3754,8 @@ def _deterministic_clip_markers(matched_paragraphs, target_count):
         title = ' '.join(words).rstrip('.,!?;:')[:40] or 'transcript moment'
         # Sanitize title for marker form (no quotes, no brackets)
         title = title.replace('"', "'").replace('[', '(').replace(']', ')')
-        start_tc = _seconds_to_tc(start_sec)
-        end_tc = _seconds_to_tc(end_sec)
+        start_tc = _seconds_to_tc_frac(start_sec)
+        end_tc = _seconds_to_tc_frac(end_sec)
         lines.append(f'[CLIP: start={start_tc} end={end_tc} title="{title}"]')
     return '\n'.join(lines)
 
@@ -4040,7 +4160,7 @@ def _validate_clip_timecodes(clips, segments, *, text_key=None,
         if _anchored(start_sec):
             nc = dict(c)
             if _tc_to_seconds(c.get('end')) > t_end + grace_seconds:
-                nc['end'] = _seconds_to_tc(t_end)
+                nc['end'] = _seconds_to_tc_frac(t_end)
                 clamped += 1
                 print(f"[analysis-validate] {kind} end clamped "
                       f"{c.get('end')}->{nc['end']} (start={raw_start})",
@@ -4053,8 +4173,8 @@ def _validate_clip_timecodes(clips, segments, *, text_key=None,
         anchor = _text_anchor(c.get(text_key)) if text_key else None
         if anchor:
             nc = dict(c)
-            nc['start'] = _seconds_to_tc(anchor[0])
-            nc['end'] = _seconds_to_tc(anchor[1])
+            nc['start'] = _seconds_to_tc_frac(anchor[0])
+            nc['end'] = _seconds_to_tc_frac(anchor[1])
             repaired += 1
             print(f"[analysis-validate] {kind} repaired start "
                   f"{raw_start}->{nc['start']} (verbatim-text match)",
@@ -4920,7 +5040,7 @@ def _build_chat_analysis_index(analysis) -> str:
 
     def _tc(val) -> str:
         if isinstance(val, (int, float)):
-            return _seconds_to_tc(val)
+            return _seconds_to_tc_frac(val)
         return str(val or "").strip()
 
     def _short(text, limit=140) -> str:
@@ -5985,8 +6105,8 @@ def _format_clip_cards_from_candidates(candidates):
                 "answer that. Try rephrasing, or ask about a specific topic or theme.")
 
     def _card(cand, start_sec, end_sec):
-        start_tc = _seconds_to_tc(start_sec)
-        end_tc = _seconds_to_tc(end_sec)
+        start_tc = _seconds_to_tc_frac(start_sec)
+        end_tc = _seconds_to_tc_frac(end_sec)
         raw_title = (cand.get('title') or 'Moment').strip()
         # Strip matching wrapping quotes the model sometimes includes
         # (e.g. "Moment"), then neutralize any remaining internal "/[]
@@ -6140,7 +6260,7 @@ def _find_vector_anchored_chunk_indices(chunks, segment_vectors, score_filter='h
     return [idx for idx, _ in chunk_scores]
 
 
-def _rerank_candidates_globally(candidates, message, top_k=5):
+def _rerank_candidates_globally(candidates, message, top_k=5, profile_id=None):
     """Final low-temp rerank pass over Layer 2 candidates.
 
     Per-chunk scores are local — a chunk full of strong moments produces
@@ -6162,8 +6282,8 @@ def _rerank_candidates_globally(candidates, message, top_k=5):
     for i, c in indexed:
         title = (c.get('title') or 'Moment').strip().replace('\n', ' ')
         why = (c.get('why') or '').strip().replace('\n', ' ')
-        start = _seconds_to_tc(c.get('start_sec', 0))
-        end = _seconds_to_tc(c.get('end_sec', 0))
+        start = _seconds_to_tc_frac(c.get('start_sec', 0))
+        end = _seconds_to_tc_frac(c.get('end_sec', 0))
         menu_lines.append(f"  [{i}] [{start}-{end}] {title} :: {why}")
     menu = '\n'.join(menu_lines)
 
@@ -6174,6 +6294,18 @@ def _rerank_candidates_globally(candidates, message, top_k=5):
         "aren't directly comparable — your job is to choose globally. "
         "Respond in JSON only, no markdown, no prose."
     )
+    # The editor's My Style profile is a selection criterion, not just a
+    # voice: let it weigh the global pick (it never reached this path
+    # before — the profile_id parameter was accepted and unused).
+    try:
+        _style = get_active_style_block(profile_id=profile_id)
+    except Exception:
+        _style = None
+    if _style:
+        system_prompt = (
+            f"{system_prompt}\n\nSTYLE CONTEXT (active My Style profile) — "
+            f"prefer moments that fit this editor's taste:\n{_style}"
+        )
     user_prompt = (
         f"User's question: {message}\n\n"
         f"Candidates (numbered):\n{menu}\n\n"
@@ -6329,7 +6461,21 @@ def _build_speaker_digest(segments) -> str:
     return result
 
 
-def _build_synthesis_context_block(project_name, segments, analysis, labeled_sections, speaker_names=None):
+_COMPACT_DIGEST_CHARS = 1200
+_COMPACT_MAP_CHARS = 1200
+_COMPACT_INDEX_CHARS = 1500
+
+
+def _trim_block(text, max_chars):
+    """Cut ``text`` at the last newline before ``max_chars``."""
+    if not text or len(text) <= max_chars:
+        return text or ''
+    cut = text[:max_chars].rsplit('\n', 1)[0]
+    return cut if cut.strip() else text[:max_chars]
+
+
+def _build_synthesis_context_block(project_name, segments, analysis, labeled_sections, speaker_names=None,
+                                   segment_vectors=None, include_selections=True, compact=False):
     """Compact context block used by the conversational synthesis path on
     long interviews. The full transcript doesn't fit in 32K context for
     100+ minute interviews, but a curated summary + analysis index + the
@@ -6355,7 +6501,7 @@ def _build_synthesis_context_block(project_name, segments, analysis, labeled_sec
         f'PROJECT: {project_name}',
         f'DURATION: {_format_duration_seconds(duration_sec)}',
     ]
-    speakers = _extract_speaker_names(segments)
+    speakers = _extract_speaker_names(_apply_speaker_names(segments, speaker_names))
     if speakers:
         parts.append(f"SPEAKERS: {', '.join(speakers)}")
     parts.append('')
@@ -6373,24 +6519,40 @@ def _build_synthesis_context_block(project_name, segments, analysis, labeled_sec
         themes = analysis.get('themes') or []
         if themes:
             parts.append("THEMES IDENTIFIED IN ANALYSIS:")
-            for t in themes:
+            for t in (themes[:5] if compact else themes):
                 parts.append(f"  - {t}")
             parts.append('')
 
     # Per-speaker voice samples — so the model can discuss individual
     # speakers by name with real quotes, not just the summary's mention
     # of "multiple artists" or "several subjects."
-    digest = _build_speaker_digest(segments)
+    digest = _build_speaker_digest(_apply_speaker_names(segments, speaker_names))
+    if digest and compact:
+        digest = _trim_block(digest, _COMPACT_DIGEST_CHARS)
     if digest:
         parts.append(digest)
         parts.append('')
 
     analysis_block = _build_chat_analysis_index(analysis or {})
+    if analysis_block and compact:
+        analysis_block = _trim_block(analysis_block.strip(), _COMPACT_INDEX_CHARS)
     if analysis_block:
         parts.append(analysis_block.strip())
         parts.append('')
 
-    if labeled_sections:
+    # Interview map: what each stretch of the timeline is about, from the
+    # analysis pass's segment vectors. Gives the model a whole-interview
+    # picture the summary alone cannot ("how would you open this film?"
+    # used to be answered from one paragraph of summary).
+    map_block = _build_interview_map_block(
+        segment_vectors, duration_sec,
+        max_chars=_COMPACT_MAP_CHARS if compact else _LONG_CHAT_MAP_CHARS,
+    )
+    if map_block:
+        parts.append(map_block)
+        parts.append('')
+
+    if labeled_sections and include_selections:
         sel_block = _build_editor_selections_block(labeled_sections, segments, speaker_names)
         if sel_block:
             parts.append(sel_block)
@@ -6471,6 +6633,7 @@ def _finish_synthesis_reply(raw_text, segments, skip_title_anchor=False):
     cleaned = _validate_clip_markers_in_text(
         cleaned, segments, skip_title_anchor=skip_title_anchor,
     )
+    cleaned = _ensure_clip_titles(cleaned, segments)
     # Deliberately skip _salvage_clips_if_missing — this path is only
     # reached on conversational queries.
     return cleaned
@@ -6705,7 +6868,8 @@ def _chat_layer2_chunked_search(paragraphs, message, history, project_name,
     # rerank decides the global best. Falls back to the local-score top-K
     # if the synthesis call fails — better to ship the original aggregator's
     # answer than to drop everything.
-    top = _rerank_candidates_globally(top, message, top_k=final_top_k)
+    top = _rerank_candidates_globally(top, message, top_k=final_top_k,
+                                      profile_id=profile_id)
     if target_seconds is not None and explicit_count is None:
         top = _extend_candidates_to_duration(top, duration_pool, target_seconds)
     return _format_clip_cards_from_candidates(top)
@@ -6826,18 +6990,753 @@ def _chat_layer2_chunked_search_stream(paragraphs, message, history, project_nam
     yield ('progress', 'Picking the best moments…')
     top = _aggregate_chunk_candidates(all_candidates, top_k=pool_top_k)
     duration_pool = list(top)
-    top = _rerank_candidates_globally(top, message, top_k=final_top_k)
+    top = _rerank_candidates_globally(top, message, top_k=final_top_k,
+                                      profile_id=profile_id)
     if target_seconds is not None and explicit_count is None:
         top = _extend_candidates_to_duration(top, duration_pool, target_seconds)
     yield ('done', _format_clip_cards_from_candidates(top))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Long-interview unified answer path (2026-09-06).
+#
+# Replaces chunked search for chat on interviews past the Layer-1 threshold.
+# Chunked search re-read the transcript in ~12K-token LLM calls on every
+# question and returned ONLY clip cards — a misrouted question was never
+# answered, the seven built-in quick prompts all came back card-only, and
+# My Style / speaker names / analysis never reached the path. This path is
+# retrieve-then-answer: deterministic retrieval over the paragraph corpus
+# (TF-IDF, keywords, theme tags, speaker anchors, high-score vectors) →
+# one streamed synthesis call through the shared message builder, so the
+# answer is prose with [CLIP:] markers where they earn a card, and every
+# contract Layer 1 already enforces (marker validation, salvage, count and
+# duration passes, style, names, language) applies unchanged.
+#
+# DOZA_CHAT_LEGACY_CHUNKED=1 restores the chunked-search routing for A/B
+# comparison during testing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LONG_CHAT_MAP_CHARS = 6000
+_LONG_CHAT_EXCERPT_MAX_CHARS = 18000     # ≈ 6K tokens: the per-turn (uncached) prefill that gates first-token latency
+_LONG_CHAT_EXCERPT_MIN_CHARS = 8000
+_LONG_CHAT_RESERVED_TOKENS = 14000       # system prompt + context block + history + reply budget
+_LONG_CHAT_SPEAKER_CAP = 10
+_SPEAKER_ROLE_WORDS = frozenset({
+    'speaker', 'host', 'guest', 'interviewer', 'interviewee', 'subject',
+    'narrator', 'unknown', 'staff', 'the', 'and',
+})
+# ── Story So Far ────────────────────────────────────────────────────────────
+# Per-project memory chat maintains with the editor: what they are making
+# and which moments they passed on. Persisted in meta['story_so_far'] by
+# the /story-so-far routes; injected into the FINAL turn (cache-safe) and
+# honoured by retrieval, count top-up and the reply itself.
+_STORY_MAKING_MAX = 300
+_STORY_PASSED_MAX = 100
+_STORY_MAKING_RE = re.compile(
+    r"\b(?:i'?m|i am|we'?re|we are)\s+(?:making|cutting|building|editing|producing)\b"
+    r"|\bthis is for (?:a|an|the)\b|\bmaking (?:a|an)\b",
+    re.IGNORECASE)
+
+
+def _story_passed_spans(story):
+    """``[(start, end), ...]`` from a story-so-far dict; tolerant of junk."""
+    out = []
+    for item in (story or {}).get('passed') or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            a = float(item.get('start', 0) or 0)
+            b = float(item.get('end', a) or a)
+        except (TypeError, ValueError):
+            continue
+        if b > a:
+            out.append((a, b))
+    return out
+
+
+def _story_so_far_tail(story):
+    """Text appended to the final user turn when the story-so-far has
+    content. Empty string otherwise."""
+    if not isinstance(story, dict):
+        return ''
+    lines = []
+    making = (story.get('making') or '').strip()
+    if making:
+        lines.append(f"- I'm making: {making[:_STORY_MAKING_MAX]}")
+    passed = [i for i in (story.get('passed') or []) if isinstance(i, dict)]
+    if passed:
+        bits = []
+        for item in passed[:_STORY_PASSED_MAX]:
+            try:
+                a = float(item.get('start', 0) or 0)
+                b = float(item.get('end', a) or a)
+            except (TypeError, ValueError):
+                continue
+            title = (item.get('title') or 'moment').strip().replace('"', "'")[:80]
+            bits.append(f'"{title}" ({_seconds_to_tc(a)}–{_seconds_to_tc(b)})')
+        if bits:
+            lines.append("- Passed on (I rejected these; do not suggest them again): "
+                         + '; '.join(bits))
+    if not lines:
+        return ''
+    return 'STORY SO FAR (from earlier in this session):\n' + '\n'.join(lines)
+
+
+def _detect_story_making(message):
+    """A one-line "what I'm making" from a message that states it — a
+    duration/format target ("build me a 90 second teaser") or an explicit
+    "I'm making a …". Empty string when the message is not about that."""
+    msg = (message or '').strip()
+    if not msg or len(msg) > 400:
+        return ''
+    low = msg.lower()
+    try:
+        has_target = parse_target_duration_seconds(msg) is not None
+    except Exception:
+        has_target = False
+    toks = set(re.findall(r"[a-z0-9']+", low))
+    has_noun = bool(toks & _DURATION_INTENT_NOUNS)
+    if _STORY_MAKING_RE.search(low) or (has_target and has_noun):
+        return msg[:_STORY_MAKING_MAX]
+    return ''
+
+
+_BREVITY_TAIL = (
+    '\n\nKEEP IT SHORT: answer like a sharp editor talking, not an essay. '
+    'Plain paragraphs, no headings, no bold labels, no numbered sections, '
+    'no LaTeX or symbols (write "then", not \\rightarrow). About 120 words '
+    'of prose at most, plus the [CLIP:] markers — more only when I asked '
+    'for a list of many clips. Every marker needs a specific title of a '
+    'few words that names the moment (never "Clip" or "Moment").'
+)
+_BREVITY_TAIL_CONVERSATIONAL = (
+    '\n\nKEEP IT SHORT: answer like a sharp editor talking, not an essay. '
+    'Plain paragraphs, no headings, no bold labels, no numbered sections, '
+    'no LaTeX or symbols (write "then", not \\rightarrow). About 120 words '
+    'at most. This is a discussion question: attach a [CLIP:] marker only '
+    'when one specific moment directly anchors a point you are making, and '
+    'give it a specific title of a few words. If my question is not about '
+    'this footage at all, answer it plainly in a sentence or two and stop — '
+    'no clips, and no steering back to the footage.'
+)
+_NO_CLIPS_TAIL = (
+    '\n\nNO CLIPS: I asked for no clips this time. Answer in prose only — '
+    'do not write any [CLIP:] marker.'
+)
+
+_FOLLOWUPS_HINT = (
+    '\n\nAfter your answer, add exactly one final line in this form and '
+    'nothing after it:\nFOLLOW-UPS: <question> | <question> | <question>\n'
+    '(three short follow-up questions an editor might ask you next about '
+    'this footage — specific to what you just said, under twelve words each).'
+)
+_FOLLOWUP_LINE_RE = re.compile(
+    r'^[ \t]*\**[ \t]*FOLLOW[\s-]*UPS?[ \t]*\**[ \t]*:[ \t]*(.+?)[ \t]*$',
+    re.IGNORECASE | re.MULTILINE)
+
+
+def _chat_legacy_chunked_enabled() -> bool:
+    val = os.environ.get('DOZA_CHAT_LEGACY_CHUNKED', '').strip().lower()
+    return val in ('1', 'true', 'yes', 'on')
+
+
+def _split_followups(text):
+    """Strip the model's ``FOLLOW-UPS: a | b | c`` tail from ``text``.
+
+    Returns ``(text_without_tail, [questions])``. The tail is requested by
+    :data:`_FOLLOWUPS_HINT`; a model that ignores the hint simply yields no
+    chips. Only the LAST matching line counts, so a transcript quote that
+    happens to contain the phrase is left alone.
+    """
+    if not text:
+        return text or '', []
+    last = None
+    for last in _FOLLOWUP_LINE_RE.finditer(text):
+        pass
+    if last is None:
+        return text, []
+    items = []
+    for raw in re.split(r'\s*\|\s*', last.group(1)):
+        q = raw.strip(' \t"\'*-•·')
+        q = re.sub(r'^\d+[.)]\s*', '', q).strip()
+        if 6 <= len(q) <= 140:
+            items.append(q)
+    cleaned = (text[:last.start()] + text[last.end():]).rstrip()
+    return cleaned, items[:3]
+
+
+def _build_interview_map_block(segment_vectors, duration_sec, window_seconds=900,
+                               max_chars=None):
+    """One line per 15-minute window naming what that stretch is about,
+    from the analysis pass's segment vectors (``thread_title`` +
+    ``narrative_score``). ★ marks high-score material. Empty string when
+    there are no vectors. Capped at :data:`_LONG_CHAT_MAP_CHARS`."""
+    if not segment_vectors:
+        return ''
+    windows = {}
+    for v in segment_vectors:
+        if not isinstance(v, dict):
+            continue
+        title = (v.get('thread_title') or '').strip().replace('\n', ' ')
+        if not title:
+            continue
+        try:
+            start = float(_tc_to_seconds(v.get('timecode_in')))
+        except Exception:
+            continue
+        idx = int(start // window_seconds)
+        score = str(v.get('narrative_score', 'medium')).lower()
+        windows.setdefault(idx, []).append((score, title))
+    if not windows:
+        return ''
+    order = {'high': 0, 'medium': 1, 'low': 2}
+    lines = ["INTERVIEW MAP (what each stretch of the timeline is about; "
+             "★ = strongest material by the analysis pass):"]
+    try:
+        total = float(duration_sec or 0)
+    except (TypeError, ValueError):
+        total = 0.0
+    for idx in sorted(windows):
+        seen = set()
+        parts = []
+        for score, title in sorted(windows[idx], key=lambda t: order.get(t[0], 1)):
+            key = title.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            parts.append(('★ ' if score == 'high' else '') + title)
+            if len(parts) >= 6:
+                break
+        a = idx * window_seconds
+        b = (idx + 1) * window_seconds
+        if total and b > total:
+            b = total
+        lines.append(f"[{_seconds_to_tc(a)}–{_seconds_to_tc(b)}] " + '; '.join(parts))
+    text = '\n'.join(lines)
+    cap = max_chars or _LONG_CHAT_MAP_CHARS
+    if len(text) > cap:
+        text = text[:cap].rsplit('\n', 1)[0]
+    return text
+
+
+_LONG_CHAT_REPLY_TOKENS = 4096
+_LONG_CHAT_REPLY_TOKENS_TIGHT = 2048     # 8 GB tier: the window is 16K, the reply cannot be a quarter of it
+_LONG_CHAT_TAIL_TOKENS = 1536            # question + contract tails + template overhead
+_LONG_CHAT_EXCERPT_FLOOR_CHARS = 4000    # below this the compact context kicks in
+
+
+def _long_chat_reply_tokens() -> int:
+    return _LONG_CHAT_REPLY_TOKENS_TIGHT if _chat_ctx_ceiling() < 32768 else _LONG_CHAT_REPLY_TOKENS
+
+
+def _chat_ctx_ceiling() -> int:
+    try:
+        from memory_budget import chat_num_ctx_ceiling
+        return int(chat_num_ctx_ceiling())
+    except Exception:
+        return 32768
+
+
+def _long_chat_excerpt_budget_chars(prefix_chars=None) -> int:
+    """Character budget for retrieved excerpts.
+
+    With ``prefix_chars`` (the MEASURED stable prefix: system prompt +
+    context block + selections + ack) the budget is whatever the machine's
+    chat window has left after the prefix, the reply, and the per-turn
+    tails — so the assembled payload always fits and the context block is
+    never evicted. Without it, a conservative estimate is used."""
+    ceiling = _chat_ctx_ceiling()
+    if prefix_chars is None:
+        est = int((ceiling - _LONG_CHAT_RESERVED_TOKENS) * 2.8)
+        return max(_LONG_CHAT_EXCERPT_MIN_CHARS, min(_LONG_CHAT_EXCERPT_MAX_CHARS, est))
+    prefix_tokens = int(prefix_chars / 2.8) + 256
+    room = ceiling - prefix_tokens - _long_chat_reply_tokens() - _LONG_CHAT_TAIL_TOKENS
+    return max(0, min(_LONG_CHAT_EXCERPT_MAX_CHARS, int(room * 2.8)))
+
+
+def _long_chat_prefix_and_budget(project_name, segments, analysis, labeled_sections,
+                                 speaker_names=None, segment_vectors=None,
+                                 language_directive_text=''):
+    """Build the long path's per-project-stable context and size the excerpt
+    budget from what it actually costs in the chat window. When the full
+    context leaves no room for excerpts (8 GB tier: 16K ceiling), rebuild
+    it compact and drops the editor-selections swap (the compact tier
+    keeps its window for transcript). Returns ``(context, budget_chars,
+    labeled_sections_for_prompt)``. Shared by the chat turn and the
+    prewarm so both land on the same rung."""
+    def _measure(ctx, labeled):
+        sysm, msgs = _build_chat_messages(
+            'ok', [], project_name, segments, ctx, '', '', None,
+            labeled_sections=labeled, speaker_names=speaker_names,
+            include_final_reminder=False,
+            language_directive_text=language_directive_text,
+        )
+        return len(sysm) + sum(len(m.get('content') or '') for m in msgs)
+
+    context = _build_long_chat_context(
+        project_name, segments, analysis, labeled_sections,
+        speaker_names=speaker_names, segment_vectors=segment_vectors,
+    )
+    budget = _long_chat_excerpt_budget_chars(prefix_chars=_measure(context, labeled_sections))
+    if budget >= _LONG_CHAT_EXCERPT_FLOOR_CHARS:
+        return context, budget, labeled_sections
+    context = _build_synthesis_context_block(
+        project_name, segments, analysis, labeled_sections,
+        speaker_names=speaker_names, segment_vectors=segment_vectors,
+        include_selections=False, compact=True,
+    )
+    budget = _long_chat_excerpt_budget_chars(prefix_chars=_measure(context, None))
+    return context, max(_LONG_CHAT_EXCERPT_FLOOR_CHARS, budget), None
+
+
+def _speaker_anchored_paragraphs(paragraphs, message, segment_vectors):
+    """Paragraphs by any speaker the message names (display names are
+    already applied to ``paragraphs``). Prefers paragraphs that sit under
+    high-score vectors, then spreads the rest chronologically; capped at
+    :data:`_LONG_CHAT_SPEAKER_CAP`."""
+    msg = (message or '').lower()
+    if not msg or not paragraphs:
+        return []
+    hit_speakers = set()
+    for spk in {(p.get('speaker') or '') for p in paragraphs}:
+        for part in re.findall(r"[a-z0-9']+", spk.lower()):
+            if len(part) < 3 or part in _SPEAKER_ROLE_WORDS:
+                continue
+            if re.search(rf'\b{re.escape(part)}\b', msg):
+                hit_speakers.add(spk)
+                break
+    if not hit_speakers:
+        return []
+    high = []
+    for v in segment_vectors or []:
+        if not isinstance(v, dict) or str(v.get('narrative_score', '')).lower() != 'high':
+            continue
+        try:
+            high.append((float(_tc_to_seconds(v.get('timecode_in'))),
+                         float(_tc_to_seconds(v.get('timecode_out')))))
+        except Exception:
+            continue
+
+    def _under_high(p):
+        try:
+            ps = float(p.get('start', 0) or 0)
+            pe = float(p.get('end', ps) or ps)
+        except (TypeError, ValueError):
+            return False
+        return any(min(pe, b) - max(ps, a) > 0 for a, b in high)
+
+    cand = [p for p in paragraphs if p.get('speaker') in hit_speakers]
+    strong = [p for p in cand if _under_high(p)]
+    rest = [p for p in cand if not _under_high(p)]
+    picked = strong[:_LONG_CHAT_SPEAKER_CAP]
+    if len(picked) < _LONG_CHAT_SPEAKER_CAP and rest:
+        room = _LONG_CHAT_SPEAKER_CAP - len(picked)
+        step = max(1, len(rest) // room)
+        picked.extend(rest[::step][:room])
+    picked.sort(key=lambda p: float(p.get('start', 0) or 0))
+    return picked
+
+
+def _chat_long_retrieve(transcript, message, phrases, words, theme_phrases,
+                        tfidf_hits, segment_vectors, speaker_names, history=None,
+                        budget_chars=None, passed_spans=None):
+    """Deterministic retrieval for the long-interview path: a chronological,
+    budget-capped list of paragraph/segment excerpts ranked by evidence
+    strength — TF-IDF hits, literal keyword/phrase/theme hits (+ one
+    neighbor of context), speaker-anchored paragraphs, and the analysis
+    pass's high-score / theme-matching vectors. No LLM call.
+
+    "More" follow-ups drop excerpts overlapping clips earlier turns already
+    showed, so new footage surfaces instead of the same cards.
+    """
+    paragraphs = _build_paragraphs(transcript, speaker_names=speaker_names)
+    if not paragraphs:
+        return []
+    ranked = {}
+
+    def _add(items, score):
+        for p in items or []:
+            key = (p.get('start'), p.get('end'))
+            prior = ranked.get(key)
+            if prior is None or prior[0] < score:
+                ranked[key] = (score, p)
+
+    named_hits = _apply_speaker_names(tfidf_hits or [], speaker_names)
+    n_hits = len(named_hits)
+    for rank, p in enumerate(named_hits):
+        _add([p], 3.0 + (n_hits - rank) / max(1, n_hits))
+    if phrases or words or theme_phrases:
+        _add(_find_relevant_paragraphs(paragraphs, phrases, words, context=0,
+                                       theme_phrases=theme_phrases), 2.5)
+        _add(_find_relevant_paragraphs(paragraphs, phrases, words, context=1,
+                                       theme_phrases=theme_phrases), 1.0)
+    _add(_speaker_anchored_paragraphs(paragraphs, message, segment_vectors), 2.0)
+    segments = (transcript or {}).get('segments') or []
+    named_segments = _apply_speaker_names(segments, speaker_names)
+    _add(_augment_with_high_score_vectors([], named_segments, segment_vectors,
+                                          theme_phrases), 1.5)
+    if not ranked:
+        return []
+
+    exclude = []
+    try:
+        if history and _MORE_CLIPS_RE.search((message or '').lower()):
+            exclude = [(float(a), float(b)) for a, b, *_ in _history_clip_spans(history)]
+    except Exception:
+        exclude = []
+    # Moments the editor passed on never come back as evidence.
+    exclude.extend(list(passed_spans or []))
+
+    def _shown(p):
+        try:
+            ps = float(p.get('start', 0) or 0)
+            pe = float(p.get('end', ps) or ps)
+        except (TypeError, ValueError):
+            return False
+        return any(min(pe, b) - max(ps, a) > 0 for a, b in exclude)
+
+    order = sorted(ranked.values(), key=lambda t: (-t[0], float(t[1].get('start', 0) or 0)))
+    budget = budget_chars or _long_chat_excerpt_budget_chars()
+    picked, used = [], 0
+    for score, p in order:
+        if exclude and _shown(p):
+            continue
+        cost = len(p.get('text') or '') + 40
+        if picked and used + cost > budget:
+            continue
+        item = dict(p)
+        item['_prio'] = score        # kept for the progress line; never rendered
+        picked.append(item)
+        used += cost
+    picked.sort(key=lambda p: float(p.get('start', 0) or 0))
+    return picked
+
+
+def _describe_reading(excerpts, limit=3):
+    """Progress line while retrieval runs. Kept to one quiet word: the
+    speaker-and-timecode roll call it used to print read as noise in the
+    chat (Chris, 2026-09-07)."""
+    return 'Reading…'
+
+
+def _cloud_full_transcript_ok(transcript) -> bool:
+    """True when the active provider is a cloud model whose window holds the
+    whole transcript — then the full-transcript path is the better one
+    regardless of interview length (routing used to key on RAM class only)."""
+    try:
+        from ai_providers import current_provider_name
+        if (current_provider_name() or 'ollama') == 'ollama':
+            return False
+    except Exception:
+        return False
+    segments = (transcript or {}).get('segments') or []
+    chars = sum(len(seg.get('text') or '') + 40 for seg in segments)
+    return (chars / 2.8) + 16000 < 180000
+
+
+def _build_long_chat_context(project_name, segments, analysis, labeled_sections,
+                             speaker_names=None, segment_vectors=None):
+    """Per-project-stable context for the long path (prefix-cacheable):
+    summary, themes, speaker digest, analysis index, interview map. The
+    editor's selections ride the transcript message's analysis slot via
+    the clip-aware swap in :func:`_build_chat_messages`, so they are NOT
+    repeated here."""
+    return _build_synthesis_context_block(
+        project_name, segments, analysis, labeled_sections,
+        speaker_names=speaker_names, segment_vectors=segment_vectors,
+        include_selections=False,
+    )
+
+
+_GENERIC_CLIP_TITLES = frozenset({'clip', 'moment', 'untitled', 'highlight', 'soundbite', 'excerpt', ''})
+_TITLE_FILLERS = frozenset({'um', 'uh', 'like', 'you', 'know', 'so', 'and', 'but', 'yeah', 'okay', 'ok', 'well', 'i', 'mean'})
+
+
+def _title_from_transcript(segments, start_sec, end_sec, max_words=7):
+    """A short title from the first meaningful words spoken in the span."""
+    words = []
+    for seg in segments or []:
+        try:
+            a = float(seg.get('start', 0) or 0)
+            b = float(seg.get('end', a) or a)
+        except (TypeError, ValueError):
+            continue
+        if b < start_sec or a > end_sec:
+            continue
+        for w in re.findall(r"[A-Za-z0-9'’-]+", seg.get('text') or ''):
+            if not words and w.lower().strip("'’") in _TITLE_FILLERS:
+                continue
+            words.append(w)
+            if len(words) >= max_words:
+                break
+        if len(words) >= max_words:
+            break
+    if not words:
+        return ''
+    title = ' '.join(words).strip(" ,.;:-'’")
+    return (title[0].upper() + title[1:]) if title else ''
+
+
+def _ensure_clip_titles(text, segments):
+    """Give every ``[CLIP:]`` marker whose title is missing or generic
+    ("Clip", "Moment") a title drawn from the transcript words in its span,
+    so a card never reads just "Clip"."""
+    if not text or '[CLIP' not in text:
+        return text
+
+    def _fix(m):
+        marker = m.group(0)
+        tm = re.search(r'title="([^"]*)"', marker)
+        current = (tm.group(1).strip() if tm else '')
+        if current.lower() not in _GENERIC_CLIP_TITLES and not re.fullmatch(r'(?i)clip\s*\d*', current):
+            return marker
+        sm = re.search(r'start=([\d:.]+)', marker)
+        em = re.search(r'end=([\d:.]+)', marker)
+        if not (sm and em):
+            return marker
+        try:
+            a = float(_tc_to_seconds(sm.group(1)))
+            b = float(_tc_to_seconds(em.group(1)))
+        except Exception:
+            return marker
+        new_title = _title_from_transcript(segments, a, max(a, b))
+        if not new_title:
+            return marker
+        new_title = _marker_attr_value(new_title)
+        if tm:
+            return marker[:tm.start(1)] + new_title + marker[tm.end(1):]
+        return marker[:-1].rstrip() + f' title="{new_title}"]'
+
+    return _CLIP_MARKER_RE.sub(_fix, text)
+
+
+def _drop_passed_markers(text, story_so_far):
+    """Remove markers that re-issue a moment the editor passed on."""
+    spans = _story_passed_spans(story_so_far)
+    if not spans or not text:
+        return text
+    return _drop_reemitted_clip_markers(text, [(a, b, None) for a, b in spans])
+
+
+def _long_chat_prepare(transcript, message, history, project_name, analysis,
+                       profile_id, segment_vectors, labeled_sections, speaker_names,
+                       phrases, words, theme_phrases, tfidf_hits, directive,
+                       story_so_far=None):
+    """Shared prep for the blocking and streaming long-path variants."""
+    segments = (transcript or {}).get('segments') or []
+    named_segments = _apply_speaker_names(segments, speaker_names)
+    conversational = _is_conversational_query(message, segments=named_segments)
+    context, budget, labeled_for_prompt = _long_chat_prefix_and_budget(
+        project_name, segments, analysis, labeled_sections,
+        speaker_names=speaker_names, segment_vectors=segment_vectors,
+        language_directive_text=directive,
+    )
+    excerpts = _chat_long_retrieve(
+        transcript, message, phrases, words, theme_phrases, tfidf_hits,
+        segment_vectors, speaker_names, history=history, budget_chars=budget,
+        passed_spans=_story_passed_spans(story_so_far),
+    )
+    excerpts_block = ''
+    if excerpts:
+        excerpts_block = _build_relevant_excerpts_block(
+            excerpts, synthesis=conversational or _is_synthesis_query(message),
+        )
+    ask = message
+    if conversational and _is_content_lookup_query(message):
+        ask = (
+            f'{message}\n\nCONTENT QUESTION: answer with what was actually '
+            f'said — name the speaker and quote their exact words briefly, '
+            f'copied verbatim from the excerpts above, and put a '
+            f'[CLIP: start=HH:MM:SS end=HH:MM:SS title="..."] marker after '
+            f'each passage you cite so I can play it. If the excerpts '
+            f"don't cover it, say so plainly."
+        )
+    system_message, messages = _build_chat_messages(
+        ask, history, project_name, segments,
+        formatted=context,
+        analysis_block='',
+        relevant_excerpts_block=excerpts_block,
+        profile_id=profile_id,
+        labeled_sections=labeled_for_prompt,
+        speaker_names=speaker_names,
+        include_final_reminder=not conversational,
+        language_directive_text=directive,
+        followups_hint=True,
+        story_so_far=story_so_far,
+    )
+    num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
+    reply_kwargs = dict(_chat_reply_budget_kwargs(message, segments))
+    if _chat_ctx_ceiling() < 32768:
+        reply_kwargs['num_predict'] = min(reply_kwargs.get('num_predict', _LONG_CHAT_REPLY_TOKENS),
+                                          _LONG_CHAT_REPLY_TOKENS_TIGHT)
+    return {
+        'segments': segments, 'conversational': conversational,
+        'excerpts': excerpts, 'context': context,
+        'system_message': system_message, 'messages': messages, 'num_ctx': num_ctx,
+        'reply_kwargs': reply_kwargs, 'story_so_far': story_so_far,
+    }
+
+
+def _long_chat_finish(raw, prep, transcript, message, history, segment_vectors,
+                      directive_plain, skip_title_anchor):
+    """Post-processing shared by both long-path variants: strip the
+    follow-up tail, clean, validate markers, salvage/count/duration passes
+    exactly as Layer 1 does. Returns ``(cleaned_text, followups)``."""
+    segments = prep['segments']
+    excerpts = prep['excerpts']
+    raw, followups = _split_followups(raw or '')
+    full = _strip_trailing_repetition(raw)
+    cleaned = _clean_chat_response(full)
+    cleaned = _validate_clip_markers_in_text(
+        cleaned, segments, skip_title_anchor=skip_title_anchor,
+    )
+    cleaned = _ensure_clip_titles(cleaned, segments)
+    if _no_clip_request(message):
+        return _drop_passed_markers(_strip_all_markers(cleaned), prep.get('story_so_far')), followups
+    conversational = prep['conversational']
+    if (not conversational or (_is_content_lookup_query(message) and cleaned.strip())) \
+            and not _reply_denies_coverage(cleaned):
+        source = _format_paragraphs_as_lines(excerpts) if excerpts else prep['context']
+        cleaned = _salvage_clips_if_missing(
+            cleaned, source, segments, num_ctx=prep['num_ctx'],
+            matched_paragraphs=excerpts, user_message=message,
+            language_directive_text=directive_plain,
+            skip_title_anchor=skip_title_anchor,
+        )
+    target_seconds = parse_target_duration_seconds(message)
+    explicit_count = _detect_explicit_clip_count(message)
+    extractive = not conversational
+    if _count_clip_markers(cleaned) >= 2:
+        extractive = True
+    if target_seconds is None or explicit_count is not None:
+        cleaned = _enforce_clip_count(
+            cleaned, explicit_count,
+            candidates=_count_topup_pool(excerpts, segments, segment_vectors,
+                                         message=message, history=history)
+            if extractive else None,
+            transcript=transcript,
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(prep.get('story_so_far')),
+            min_count=_plural_clip_minimum(message) if (extractive and not _reply_denies_coverage(cleaned)) else None,
+            # Discussion answers about cards already on screen ("why did
+            # you pick those clips?") must not re-deal the same cards.
+            drop_reemitted=conversational or bool(_MORE_CLIPS_RE.search((message or '').lower())),
+        )
+    elif extractive:
+        cleaned = _enforce_duration_target(
+            cleaned, target_seconds, excerpts, transcript=transcript,
+            exclude_spans=_history_clip_spans(history) + _story_passed_spans(prep.get('story_so_far')),
+            hard_cap_seconds=parse_duration_bound_seconds(message),
+        )
+    cleaned = _drop_passed_markers(cleaned, prep.get('story_so_far'))
+    return cleaned, followups
+
+
+def _chat_long_unified(transcript, message, history, project_name, analysis,
+                       profile_id, segment_vectors, labeled_sections, speaker_names,
+                       phrases, words, theme_phrases, tfidf_hits,
+                       directive, directive_plain, skip_title_anchor,
+                       story_so_far=None):
+    """Blocking long-interview answer: prose with cards, one LLM call."""
+    prep = _long_chat_prepare(
+        transcript, message, history, project_name, analysis, profile_id,
+        segment_vectors, labeled_sections, speaker_names,
+        phrases, words, theme_phrases, tfidf_hits, directive,
+        story_so_far=story_so_far,
+    )
+    raw = _call_ai_chat(prep['system_message'], prep['messages'], num_ctx=prep['num_ctx'],
+                        timing_tag='long-answer', **prep['reply_kwargs'])
+    cleaned, _followups = _long_chat_finish(
+        raw, prep, transcript, message, history, segment_vectors,
+        directive_plain, skip_title_anchor,
+    )
+    return cleaned
+
+
+def _chat_long_unified_stream(transcript, message, history, project_name, analysis,
+                              profile_id, segment_vectors, labeled_sections, speaker_names,
+                              phrases, words, theme_phrases, tfidf_hits,
+                              directive, directive_plain, skip_title_anchor,
+                              story_so_far=None):
+    """Streaming long-interview answer. Yields ``('progress', label)`` while
+    retrieving (naming who and when is being read), then the shared token
+    stream, an optional ``('followups', [..])`` and the final ``('done', text)``."""
+    yield ('progress', 'Reading…')
+    try:
+        prep = _long_chat_prepare(
+            transcript, message, history, project_name, analysis, profile_id,
+            segment_vectors, labeled_sections, speaker_names,
+            phrases, words, theme_phrases, tfidf_hits, directive,
+            story_so_far=story_so_far,
+        )
+    except Exception as e:
+        print(f"[chat-stream] long-path prep failed: {e}", flush=True)
+        yield ('done', '')
+        return
+    raw = ''
+    try:
+        for _ev, _payload in _stream_chat_events(
+                prep['system_message'], prep['messages'], num_ctx=prep['num_ctx'],
+                timing_tag='long-answer', **prep['reply_kwargs']):
+            if _ev == 'raw':
+                raw = _payload
+                break
+            yield (_ev, _payload)
+    except Exception as e:
+        from ai_providers import ProviderError
+        if isinstance(e, ProviderError):
+            raise
+        print(f"[chat-stream] long-path generation failed: {e}", flush=True)
+        yield ('done', '')
+        return
+    try:
+        cleaned, followups = _long_chat_finish(
+            raw, prep, transcript, message, history, segment_vectors,
+            directive_plain, skip_title_anchor,
+        )
+    except Exception as e:
+        # The editor already watched the answer stream in — never discard it.
+        print(f"[chat-stream] long-path post-processing failed: {e}", flush=True)
+        cleaned, followups = _split_followups(raw or '')
+    if followups:
+        yield ('followups', followups)
+    yield ('done', cleaned)
+
+
 def _seconds_to_tc(sec) -> str:
+    """Whole-second HH:MM:SS. For labels and ranges only; clip EDGES use
+    _seconds_to_tc_frac so the model never sees a floored start or end."""
     try:
         sec = int(sec)
     except (TypeError, ValueError):
         return "00:00:00"
     return f"{sec//3600:02d}:{(sec%3600)//60:02d}:{sec%60:02d}"
+
+
+def _seconds_to_tc_frac(sec) -> str:
+    """HH:MM:SS with up to three decimals, trailing zeros trimmed.
+
+    Every timecode the model copies used to be floored to a whole second on
+    both edges, so each clip could open up to a second early (on the tail
+    of the previous sentence) and close up to a second early (clipping the
+    last word). Every parser downstream already accepts fractional seconds
+    (_tc_to_seconds, the marker regexes, the frontend tcToSec / parseTc,
+    app.py _to_seconds).
+    """
+    try:
+        value = float(sec)
+    except (TypeError, ValueError):
+        return "00:00:00"
+    if value < 0 or value != value:  # negative or NaN
+        return "00:00:00"
+    whole = int(value)
+    frac = round(value - whole, 3)
+    if frac >= 1.0:
+        whole += 1
+        frac = 0.0
+    base = f"{whole//3600:02d}:{(whole%3600)//60:02d}:{whole%60:02d}"
+    if frac <= 0:
+        return base
+    return base + f"{frac:.3f}"[1:].rstrip('0')
 
 
 # Tail chunks shorter than this fold into the previous chunk instead of
@@ -6913,9 +7812,9 @@ def _format_segments_for_ai(segments, speaker_names=None) -> str:
     """
     lines = []
     for seg in segments:
-        start_tc = seg.get('start_formatted', _seconds_to_tc(seg.get('start', 0)))[:8]
+        start_tc = _seconds_to_tc_frac(seg.get('start', 0))
         end_s = seg.get('end', seg.get('start', 0))
-        end_tc = _seconds_to_tc(end_s)
+        end_tc = _seconds_to_tc_frac(end_s)
         raw_speaker = seg.get('speaker', 'Speaker')
         speaker = _display_speaker(raw_speaker, speaker_names)
         text = seg.get('text', '')
@@ -7862,9 +8761,9 @@ def _format_transcript_for_ai(transcript, speaker_names=None):
     # Format all segments with start AND end times so AI can set accurate clip boundaries
     all_lines = []
     for seg in segments:
-        start_tc = seg['start_formatted'][:8]
+        start_tc = _seconds_to_tc_frac(seg.get('start', 0))
         end_s = seg.get('end', seg.get('start', 0))
-        end_tc = f"{int(end_s)//3600:02d}:{(int(end_s)%3600)//60:02d}:{int(end_s)%60:02d}"
+        end_tc = _seconds_to_tc_frac(end_s)
         raw_speaker = seg.get('speaker', 'Speaker')
         speaker = _display_speaker(raw_speaker, speaker_names)
         text = seg['text']
@@ -7874,14 +8773,41 @@ def _format_transcript_for_ai(transcript, speaker_names=None):
     return '\n'.join(all_lines)
 
 
-def _build_paragraphs(transcript, max_paragraph_seconds=60):
+def _apply_speaker_names(items, speaker_names):
+    """Return copies of segment/paragraph dicts with the project's display
+    names applied to ``speaker`` (``SPEAKER_04`` → ``Dana Whitfield``).
+
+    Diarized projects keep raw pyannote labels on the segments and the
+    rename map in ``meta.speaker_names``; every prompt that quotes
+    transcript lines must apply the map or the model sees (and repeats)
+    ``SPEAKER_04``. The full-transcript formatter already does this — the
+    retrieval helpers used to skip it (audit 2026-09-06).
+    """
+    if not speaker_names or not isinstance(speaker_names, dict):
+        return list(items or [])
+    out = []
+    for item in items or []:
+        spk = item.get('speaker')
+        name = speaker_names.get(spk) if spk else None
+        if isinstance(name, str) and name.strip() and name != spk:
+            copy = dict(item)
+            copy['speaker'] = name.strip()
+            out.append(copy)
+        else:
+            out.append(item)
+    return out
+
+
+def _build_paragraphs(transcript, max_paragraph_seconds=60, speaker_names=None):
     """Merge adjacent same-speaker segments into paragraphs of up to
     ``max_paragraph_seconds``. Returns a list of dicts with keys
     ``speaker``, ``start``, ``end``, ``text``.
 
-    Layer 1 (keyword pre-retrieval) and Layer 2 (chunked search) both
-    consume these structured paragraphs, so the grouping logic lives in one
-    place and stays consistent with what the main chat prompt sees.
+    Layer 1 (keyword pre-retrieval) and the long-interview retrieval path
+    both consume these structured paragraphs, so the grouping logic lives
+    in one place and stays consistent with what the main chat prompt sees.
+    ``speaker_names`` (the project's rename map) is applied AFTER merging,
+    so same-speaker grouping still keys on the raw label.
     """
     segments = transcript.get('segments', []) if transcript else []
     paragraphs = []
@@ -7904,6 +8830,8 @@ def _build_paragraphs(transcript, max_paragraph_seconds=60):
             cur = {'speaker': speaker, 'start': start, 'end': end, 'text': text}
     if cur:
         paragraphs.append(cur)
+    if speaker_names:
+        paragraphs = _apply_speaker_names(paragraphs, speaker_names)
     return paragraphs
 
 
@@ -7918,8 +8846,8 @@ def _format_paragraphs_as_lines(paragraphs):
     for p in paragraphs:
         start = p.get('start', 0)
         end = p.get('end', start)
-        start_tc = _seconds_to_tc(start)
-        end_tc = _seconds_to_tc(end)
+        start_tc = _seconds_to_tc_frac(start)
+        end_tc = _seconds_to_tc_frac(end)
         speaker = p.get('speaker', 'Speaker')
         text = (p.get('text') or '').strip()
         lines.append(f"[{start_tc}-{end_tc}] {speaker}: {text}")
@@ -8265,7 +9193,7 @@ def invalidate_prewarm(project_name=None):
 
 def prewarm_chat_context(transcript, project_name="Interview", analysis=None,
                          labeled_sections=None, speaker_names=None,
-                         output_language=None):
+                         output_language=None, segment_vectors=None):
     """Prefill the chat KV prefix so the FIRST question streams immediately.
 
     The plain :func:`warmup_ollama` only loads the model weights — at a
@@ -8307,7 +9235,8 @@ def prewarm_chat_context(transcript, project_name="Interview", analysis=None,
         if not segments:
             return False
         duration = segments[-1].get('end', 0) or 0
-        if duration > _long_chat_threshold():
+        long_path = duration > _long_chat_threshold()
+        if long_path and _chat_legacy_chunked_enabled():
             return False
         key = str(project_name or '')
         fingerprint = (len(segments), round(float(duration), 1),
@@ -8325,8 +9254,21 @@ def prewarm_chat_context(transcript, project_name="Interview", analysis=None,
             while len(_PREWARM_STATE) > _PREWARM_STATE_MAX:
                 _PREWARM_STATE.popitem(last=False)
         directive = language_directive(output_language, chat=True)
-        formatted = _format_transcript_for_ai(transcript, speaker_names)
-        analysis_block = _build_chat_analysis_index(analysis)
+        if long_path:
+            # Long interviews: the per-project-stable prefix is the long
+            # path's context block (summary, digest, analysis index,
+            # interview map) — the same bytes every real turn starts with.
+            formatted, _budget, labeled_sections = _long_chat_prefix_and_budget(
+                project_name, segments, analysis, labeled_sections,
+                speaker_names=speaker_names, segment_vectors=segment_vectors,
+                language_directive_text=directive,
+            )
+            analysis_block = ''
+            pad_chars = _budget + 2000
+        else:
+            formatted = _format_transcript_for_ai(transcript, speaker_names)
+            analysis_block = _build_chat_analysis_index(analysis)
+            pad_chars = 8000
         system_message, messages = _build_chat_messages(
             'ok', [], project_name, segments,
             formatted, analysis_block, '', None,
@@ -8335,9 +9277,10 @@ def prewarm_chat_context(transcript, project_name="Interview", analysis=None,
             language_directive_text=directive,
         )
         # Rung padding: the real turn adds excerpts + reminder tails the
-        # prewarm message lacks (~up to 8K chars). Estimating with the
-        # padding keeps both calls on the same rung.
-        padded = messages + [{'role': 'user', 'content': ' ' * 8000}]
+        # prewarm message lacks (~8K chars on Layer 1, the excerpt budget
+        # on the long path). Estimating with the padding keeps both calls
+        # on the same rung.
+        padded = messages + [{'role': 'user', 'content': ' ' * pad_chars}]
         num_ctx = _sticky_chat_num_ctx(project_name, system_message, padded)
         _call_ai_chat(system_message, messages, num_ctx=num_ctx,
                       num_predict=1, timing_tag='prewarm')
@@ -9044,7 +9987,7 @@ def _enforce_duration_budget(clips, target_seconds, segment_vectors=None):
             if new_span >= span:
                 break
             start = _tc_to_seconds(c.get('start_time'))
-            c['end_time'] = _seconds_to_tc(start + new_span)
+            c['end_time'] = _seconds_to_tc_frac(start + new_span)
             total = sum(_clip_span_seconds(cl) for cl in clips)
             changed = True
 

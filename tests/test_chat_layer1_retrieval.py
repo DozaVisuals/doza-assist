@@ -297,7 +297,11 @@ class TestLayer1IntegrationIntoPrompt:
             f"Only found {len(segment_lines)} segment lines."
         )
 
-    def test_long_interview_bypasses_layer1_single_prompt_path(self):
+    def test_long_interview_bypasses_layer1_single_prompt_path(self, monkeypatch):
+        # Legacy routing pinned: the unified long path (2026-09-06) answers
+        # long interviews through ONE _call_ai_chat call by design; this
+        # test guards the retained chunked path behind its A/B switch.
+        monkeypatch.setenv('DOZA_CHAT_LEGACY_CHUNKED', '1')
         # Long interviews route to Layer 2. For an EXTRACTIVE query
         # ("find … moments") that means the chunked-search path, which runs
         # per-chunk _call_ai_json calls and never touches the single-prompt

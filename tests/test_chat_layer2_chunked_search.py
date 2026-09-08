@@ -17,11 +17,22 @@ responses so the full Layer 2 flow runs deterministically in CI.
 
 import os
 import sys
+
+import pytest
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import ai_analysis  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _legacy_chunked_routing(monkeypatch):
+    """These tests cover the chunked-search path, which the unified long
+    path (2026-09-06) replaced as the DEFAULT routing for long interviews.
+    Pin the legacy routing so the suite keeps guarding the retained code
+    (DOZA_CHAT_LEGACY_CHUNKED=1 is the A/B switch)."""
+    monkeypatch.setenv('DOZA_CHAT_LEGACY_CHUNKED', '1')
 
 
 def _make_paragraphs(n, text_len=400, paragraph_seconds=60, speaker='Chris'):
@@ -681,7 +692,7 @@ class TestLayer2DurationTarget:
         rerank_top_k = []
         orig = ai_analysis._rerank_candidates_globally
 
-        def spy_rerank(candidates, message, top_k=5):
+        def spy_rerank(candidates, message, top_k=5, **_kw):
             rerank_top_k.append(top_k)
             return orig(candidates, message, top_k=top_k)
 
@@ -701,7 +712,7 @@ class TestLayer2DurationTarget:
         rerank_top_k = []
         orig = ai_analysis._rerank_candidates_globally
 
-        def spy_rerank(candidates, message, top_k=5):
+        def spy_rerank(candidates, message, top_k=5, **_kw):
             rerank_top_k.append(top_k)
             return orig(candidates, message, top_k=top_k)
 

@@ -96,6 +96,26 @@ def get_frame_duration(framerate=23.976):
     return frames_to_fcpxml_time(1, framerate)
 
 
+def _effective_tc_format(tc_format, framerate=23.976):
+    """Clamp a requested clip tcFormat to what the emitted <format> can carry.
+
+    Drop-frame timecode only exists on the fractional NTSC timebases whose
+    frame duration is 1001 over a multiple of 30000 (29.97, 59.94, 119.88).
+    The DF flag arrives from the source media's timecode tag, while the
+    format the clip references is built from the EXPORT framerate; when the
+    two disagree (a 29.97 DF camera file exported on a 24 fps grid, or a
+    24p file whose tag happens to use ';') FCP rejects every asset-clip with
+    "Encountered an unexpected value (tcFormat=DF)". The attribute is
+    DTD-legal either way, so this has to be enforced here, not by the DTD.
+    """
+    if tc_format != "DF":
+        return "NDF"
+    timebase, frame_dur = _timebase(framerate)
+    if frame_dur == 1001 and timebase % 30000 == 0:
+        return "DF"
+    return "NDF"
+
+
 def _ascii_safe(text):
     """Fold user text (clip titles, filenames) to ASCII for warning strings.
 
@@ -258,7 +278,7 @@ def _resolve_is_video(source_path, warnings_out=None):
 
 def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
                 anchored_xml, clip_audio_attr, dialogue_srcch,
-                asset_start_str, media_dur_str, is_video=True):
+                asset_start_str, media_dur_str, is_video=True, note_xml=''):
     """One spine edit on the shared asset ``r2``.
 
     With a detected dialogue channel, emit Resolve's connected-clip form: a
@@ -293,6 +313,7 @@ def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
             f'                        <clip name="{clip_name}" '
             f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
             f'format="r1" tcFormat="{tc_format}" enabled="1">'
+            f'{note_xml}'
             f'\n                            <video ref="r2" '
             f'offset="{asset_start_str}" duration="{media_dur_str}" '
             f'start="{asset_start_str}">'
@@ -305,8 +326,32 @@ def _spine_clip(clip_name, offset_str, dur_str, src_start_str, tc_format,
         f'                        <asset-clip name="{clip_name}" ref="r2" '
         f'offset="{offset_str}" duration="{dur_str}" start="{src_start_str}" '
         f'format="r1" tcFormat="{tc_format}"{clip_audio_attr}>'
+        f'{note_xml}'
         f'{anchored_xml}'
         f'\n                        </asset-clip>'
+    )
+
+
+def _clip_note_xml(m):
+    """``<note>`` for one exported clip: the short note plus " — Speaker",
+    a blank line, then the verbatim transcript of the range (built by the
+    collector in app.py as ``m['verbatim']``). Escaped whole, never sliced
+    after escaping; '' when there is nothing to say."""
+    try:
+        from export_notes import compose_clip_note
+        text = compose_clip_note(m.get('note', ''), m.get('speaker', ''), m.get('verbatim', ''))
+    except Exception:
+        text = m.get('note', '') or ''
+    if not text:
+        return ''
+    return f'\n                            <note>{_escape_xml(text)}</note>'
+
+
+def _provenance_keyword_xml(src_start_str, dur_str):
+    """The one provenance keyword on every exported clip (never a name)."""
+    return (
+        f'\n                            <keyword start="{src_start_str}" '
+        f'duration="{dur_str}" value="Doza Assist"/>'
     )
 
 
@@ -324,7 +369,7 @@ def _dropped_clip_warning(m, i, framerate, media_frames):
 def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
                     source_path=None, media_duration=None, mode="cuts",
                     width=1920, height=1080, start_tc_frames=0, tc_format="NDF",
-                    warnings_out=None):
+                    warnings_out=None, timeline_name=None, event_name=None):
     """
     Generate an FCPXML file.
 
@@ -346,6 +391,10 @@ def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
             snapping — an empty-spine timeline reads as a successful export
             with nothing on it.
     """
+    # timeline_name: the FCP project (timeline) name, default "{name} - Selects"
+    # for callers that pass none; event_name defaults to the project name.
+    timeline_name = timeline_name or f"{project_name} - Selects"
+    event_name = event_name or project_name
     # If no source path, fall back to markers-only mode
     if not source_path or not os.path.exists(source_path):
         if mode != "markers":
@@ -356,18 +405,21 @@ def generate_fcpxml(markers, project_name="Interview", framerate=23.976,
         mode = "markers"
 
     if mode == "markers":
-        return _generate_markers_only(markers, project_name, framerate, width, height)
+        return _generate_markers_only(markers, project_name, framerate, width, height,
+                                      timeline_name=timeline_name, event_name=event_name)
 
     return _generate_cuts_timeline(markers, project_name, framerate,
                                    source_path, media_duration, mode, width, height,
                                    start_tc_frames, tc_format=tc_format,
-                                   warnings_out=warnings_out)
+                                   warnings_out=warnings_out,
+                                   timeline_name=timeline_name, event_name=event_name)
 
 
 def _generate_cuts_timeline(markers, project_name, framerate, source_path,
                             media_duration, mode, width=1920, height=1080,
                             start_tc_frames=0,
-                            tc_format="NDF", warnings_out=None):
+                            tc_format="NDF", warnings_out=None,
+                            timeline_name=None, event_name=None):
     """Generate FCPXML with actual cuts on the timeline referencing source media.
 
     ``start_tc_frames`` is the media's embedded start timecode in whole frames.
@@ -378,7 +430,9 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
     reject every clip with "Invalid edit with no respective media."
     """
     frame_dur = get_frame_duration(framerate)
-    safe_name = _escape_xml(project_name)
+    tc_format = _effective_tc_format(tc_format, framerate)
+    safe_event = _escape_xml(event_name or project_name)
+    safe_timeline = _escape_xml(timeline_name or f"{project_name} - Selects")
     uid = f"doza-{uuid.uuid4().hex[:8]}"
 
     # Sort markers by start time — unless the caller tagged an explicit manual
@@ -487,11 +541,12 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
                 f'\n                            <keyword start="{src_start_str}" '
                 f'duration="{dur_str}" value="Speaker: {_escape_xml(speaker)}"/>'
             )
+        keyword_xml += _provenance_keyword_xml(src_start_str, dur_str)
 
         spine_clips.append(_spine_clip(
             clip_name, offset_str, dur_str, src_start_str, tc_format,
             f'{keyword_xml}{marker_xml}', clip_audio_attr, dialogue_srcch,
-            asset_start_str, media_dur_str, is_video))
+            asset_start_str, media_dur_str, is_video, note_xml=_clip_note_xml(m)))
 
         # Accumulate the timeline offset in whole frames so each clip butts
         # exactly against the previous one — summing rounded seconds drifts and
@@ -526,8 +581,8 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
         </asset>
     </resources>
     <library>
-        <event name="{safe_name}">
-            <project name="{safe_name} - Selects" uid="{uid}">
+        <event name="{safe_event}">
+            <project name="{safe_timeline}" uid="{uid}">
                 <sequence format="r1" duration="{timeline_dur_str}" tcStart="0/1s" tcFormat="NDF"{seq_audio_attrs}>
                     <spine>
 {spine_block}
@@ -544,7 +599,7 @@ def _generate_cuts_timeline(markers, project_name, framerate, source_path,
 def generate_story_fcpxml(markers, project_name="Interview", story_title="Story",
                           framerate=23.976, source_path=None, media_duration=None,
                           width=1920, height=1080, start_tc_frames=0, tc_format="NDF",
-                          warnings_out=None):
+                          warnings_out=None, timeline_name=None, event_name=None):
     """
     Generate FCPXML for a Story Builder sequence.
     Creates a single timeline with clips in narrative order as actual edits.
@@ -552,16 +607,20 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
     ``warnings_out`` and the no-placeable-clips ValueError behave as in
     :func:`generate_fcpxml`.
     """
+    timeline_name = timeline_name or story_title
+    event_name = event_name or project_name
     if not source_path or not os.path.exists(source_path):
         _note_warning(warnings_out,
                       'Source media not found'
                       + (f' at "{_ascii_safe(source_path)}"' if source_path else '')
                       + '; exported chapter markers only (no cut clips).')
-        return _generate_markers_only(markers, f"{project_name} - {story_title}", framerate, width, height)
+        return _generate_markers_only(markers, project_name, framerate, width, height,
+                                      timeline_name=timeline_name, event_name=event_name)
 
     frame_dur = get_frame_duration(framerate)
-    safe_name = _escape_xml(project_name)
-    safe_title = _escape_xml(story_title)
+    tc_format = _effective_tc_format(tc_format, framerate)
+    safe_name = _escape_xml(event_name)
+    safe_title = _escape_xml(timeline_name)
     uid = f"doza-story-{uuid.uuid4().hex[:8]}"
 
     markers = [m for _, m in sorted(enumerate(markers), key=lambda iv: iv[1].get('_order', iv[0]))]
@@ -637,10 +696,12 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
                 f'duration="{dur_str}" value="Speaker: {_escape_xml(speaker)}"/>'
             )
 
+        speaker_kw += _provenance_keyword_xml(src_start_str, dur_str)
+
         spine_clips.append(_spine_clip(
             clip_name, offset_str, dur_str, src_start_str, tc_format,
             f'{speaker_kw}{marker_xml}', clip_audio_attr, dialogue_srcch,
-            asset_start_str, media_dur_str, is_video))
+            asset_start_str, media_dur_str, is_video, note_xml=_clip_note_xml(m)))
 
         # Accumulate the timeline offset in whole frames so each clip butts
         # exactly against the previous one — summing rounded seconds drifts and
@@ -687,8 +748,13 @@ def generate_story_fcpxml(markers, project_name="Interview", story_title="Story"
     return fcpxml
 
 
-def _generate_markers_only(markers, project_name, framerate, width=1920, height=1080):
-    """Legacy marker-only export (no source media reference)."""
+def _generate_markers_only(markers, project_name, framerate, width=1920, height=1080,
+                           timeline_name=None, event_name=None):
+    """Marker-only export (no source media reference): the whole source as a
+    gap with a chapter marker per select. Event = project name; timeline =
+    ``timeline_name`` (the caller's "{Project} – Markers N")."""
+    timeline_name = timeline_name or project_name
+    event_name = event_name or project_name
     frame_dur = get_frame_duration(framerate)
 
     if markers:
@@ -734,8 +800,8 @@ def _generate_markers_only(markers, project_name, framerate, width=1920, height=
         <format id="r1"{_format_name_attr(width, height, framerate)} frameDuration="{frame_dur}" width="{width}" height="{height}" colorSpace="1-1-1 (Rec. 709)"/>
     </resources>
     <library>
-        <event name="{_escape_xml(project_name)} Markers">
-            <project name="{_escape_xml(project_name)}" uid="doza-{re.sub(r'[^a-z0-9]+', '-', project_name.lower()).strip('-') or 'project'}">
+        <event name="{_escape_xml(event_name)}">
+            <project name="{_escape_xml(timeline_name)}" uid="doza-{re.sub(r'[^a-z0-9]+', '-', timeline_name.lower()).strip('-') or 'project'}">
                 <sequence format="r1" duration="{total_dur_str}" tcStart="0/1s" tcFormat="NDF">
                     <spine>
                         <gap name="Gap" offset="0/1s" duration="{total_dur_str}" start="0/1s">

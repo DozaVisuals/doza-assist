@@ -1340,7 +1340,9 @@ class TestSelectTrimsStaleAnnotations:
         assert [m.get("value") for m in markers] == ["inside"]
         assert parse_rational(markers[0].get("start")) == 25
         # The keyword [10s, 50s) is clamped to the kept range [20s, 40s).
-        kws = clip.findall("keyword")
+        # (The writer's own "Doza Assist" provenance keyword spans the whole
+        # kept range and is not the subject here.)
+        kws = [k for k in clip.findall("keyword") if k.get("value") != "Doza Assist"]
         assert len(kws) == 1
         assert parse_rational(kws[0].get("start")) == 20
         assert parse_rational(kws[0].get("duration")) == 20

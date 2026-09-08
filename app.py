@@ -16,13 +16,14 @@ import re as _re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
-from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, Response, stream_with_context, g
 from werkzeug.utils import secure_filename
 
 from exporters import get_exporter, PLATFORMS, DEFAULT_PLATFORM
 from exporters.media_probe import (
     get_video_resolution, get_video_framerate, get_video_start_timecode_frames,
     get_video_start_timecode_info, get_video_start_timecode, get_media_duration,
+    summed_media_duration,
     get_media_container_format,
 )
 from fcpxml_export import VIDEO_EXTS
@@ -619,6 +620,21 @@ def _ingest_fcpxml(fcpxml_path: str, project_dir: str, event_clip_index=None) ->
         'stored_fcpxml_path': fcpxml_copy_path,
         'timeline_audio_rendered': parsed.is_multi_source,
     }
+    # Import guardrail input: how much source audio the sequence references
+    # versus how long the timeline is. Unsynced raw camera + recorder files
+    # sum to far more than the timeline (see _long_media_guard). Probing is
+    # best effort and never blocks the import.
+    try:
+        source_paths = [parsed.audio_file_path]
+        for seg in parsed.spine_segments:
+            if seg.audio_source is not None:
+                source_paths.append(seg.audio_source.path)
+            for part in (seg.audio_parts or []):
+                source_paths.append(part.path)
+        fcpxml_source['source_audio_duration_seconds'] = summed_media_duration(source_paths)
+    except Exception as e:
+        print(f"[fcpxml] source duration probe skipped: {e}", flush=True)
+        fcpxml_source['source_audio_duration_seconds'] = None
     if event_import_info is not None:
         fcpxml_source['event_import'] = event_import_info
     return {
@@ -660,6 +676,63 @@ def load_segment_vectors(project_id):
 
 def _paragraph_index_path(project_id):
     return os.path.join(app.config['PROJECTS_DIR'], project_id, 'paragraph_index.json')
+
+
+def _segment_vectors_path(project_id):
+    return os.path.join(app.config['PROJECTS_DIR'], project_id, 'segment_vectors.json')
+
+
+def _stash_segment_vectors(project_id):
+    """Retranscribe: park the vectors as ``segment_vectors.stale.json``
+    instead of deleting them. If the new transcript comes back byte-identical
+    (same audio, same engine — the common case), the analysis-time vectors
+    are still valid and :func:`_restore_stashed_vectors` puts them back;
+    regenerating them on a 3-hour interview costs tens of minutes."""
+    live = _segment_vectors_path(project_id)
+    if not os.path.exists(live):
+        return False
+    try:
+        os.replace(live, live.replace('segment_vectors.json', 'segment_vectors.stale.json'))
+        return True
+    except OSError:
+        try:
+            os.remove(live)
+        except OSError:
+            pass
+        return False
+
+
+def _restore_stashed_vectors(project_id, new_transcript_hash):
+    """Transcription finished: restore stashed vectors when the transcript
+    hash matches the one they were built from, otherwise drop the stash.
+    Returns True when vectors are live afterwards."""
+    live = _segment_vectors_path(project_id)
+    stale = live.replace('segment_vectors.json', 'segment_vectors.stale.json')
+    project = get_project(project_id) or {}
+    prev_hash = project.get('prev_transcript_hash')
+    restored = False
+    if os.path.exists(stale):
+        if prev_hash and new_transcript_hash and prev_hash == new_transcript_hash \
+                and not os.path.exists(live):
+            try:
+                os.replace(stale, live)
+                restored = True
+                print(f"[transcribe] transcript unchanged — restored segment vectors for {project_id}", flush=True)
+            except OSError:
+                pass
+        if os.path.exists(stale):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    if restored:
+        update_project(project_id, {}, remove=['derived_stale', 'prev_transcript_hash'])
+    else:
+        # Vectors are gone: the next /analyze must not short-circuit on the
+        # cache (it would restore the analysis but leave chat and Story
+        # Builder without vectors).
+        update_project(project_id, {'derived_stale': True}, remove=['prev_transcript_hash'])
+    return restored
 
 
 def load_paragraph_index(project_id):
@@ -1335,6 +1408,10 @@ def create_project_from_path(
         # AI prose language: 'match' (follow the interview language)
         # or an explicit code from doza_assist.output_language.LANGUAGES.
         'output_language': _valid_output_language(output_language),
+        # Rule 1: every new project starts on the local model. Nothing copies
+        # another project's provider or an app-wide setting into this field;
+        # only the project's own AI Model picker changes it later.
+        'ai_provider': 'ollama',
         # Which source audio track feeds the transcript: 'all' (mix/default)
         # or a 0-based track index as a string. Picker for camera-mic-vs-lav.
         'audio_channel': _valid_audio_channel(audio_channel),
@@ -1356,6 +1433,162 @@ def create_project_from_path(
     save_project(project_id, meta)
 
     return project_id
+
+
+def _normalize_project_details(data, *, partial=False):
+    """Validate the editable project details the New Project form collects.
+
+    One set of rules for creation (``/create``, ``/upload``) and for the
+    later edit (``PATCH /project/<id>/details``), so the two never drift.
+    ``partial=True`` (the edit) only returns the keys present in ``data``;
+    creation fills the same defaults the form used to. Raises ValueError with
+    a user-facing message.
+    """
+    data = data or {}
+    out = {}
+
+    def _text(key, default, limit=200):
+        if key in data or not partial:
+            val = data.get(key, default)
+            val = ('' if val is None else str(val)).strip()
+            if len(val) > limit:
+                raise ValueError(f'{key.replace("_", " ").capitalize()} is too long (max {limit} characters)')
+            out[key] = val
+
+    if 'project_name' in data or 'name' in data or not partial:
+        raw = data.get('project_name', data.get('name', ''))
+        name = ('' if raw is None else str(raw)).strip()
+        if partial and not name:
+            raise ValueError('Name cannot be empty')
+        if len(name) > 200:
+            raise ValueError('Name is too long (max 200 characters)')
+        out['name'] = name or None
+    _text('client_name', '')
+    _text('interviewer_name', 'Interviewer', 120)
+    _text('subject_name', 'Subject', 120)
+    if 'num_speakers' in data or not partial:
+        try:
+            n = int(data.get('num_speakers', 2))
+        except (TypeError, ValueError):
+            raise ValueError('Number of speakers must be a whole number')
+        if n < 1 or n > 12:
+            raise ValueError('Number of speakers must be between 1 and 12')
+        out['num_speakers'] = n
+    return out
+
+
+# Relinking never re-runs anything: the stored path changes and the
+# transcript, analysis, clips and exports read the new file from then on.
+RELINK_DURATION_TOLERANCE_SECONDS = 1.0
+
+
+def _known_media_duration(project):
+    """The original media length, from the file when it still exists, else
+    from what transcription recorded. None when nothing is known."""
+    old_path = project.get('source_path') or project.get('filepath') or ''
+    if old_path and os.path.exists(old_path):
+        try:
+            d = get_media_duration(old_path)
+            if d:
+                return float(d)
+        except Exception:
+            pass
+    transcript = project.get('transcript') or {}
+    try:
+        d = transcript.get('duration')
+        return float(d) if d else None
+    except (TypeError, ValueError):
+        return None
+
+
+@app.route('/project/<project_id>/relink-media', methods=['POST'])
+def relink_media(project_id):
+    """Point a project at a moved or renamed source file (storage only).
+
+    Body: ``source_path`` (absolute or ~ path), ``force`` (bool). The file
+    must exist and carry a supported extension. When both the original and
+    the new duration are known and differ by more than a second, the reply is
+    409 with ``warning`` so the page can ask before continuing; ``force``
+    relinks anyway.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    body = request.json or {}
+    new_path = os.path.expanduser(str(body.get('source_path') or '').strip())
+    if not new_path:
+        return jsonify({'error': 'Choose a file first'}), 400
+    if not os.path.isfile(new_path):
+        return jsonify({'error': f'File not found: {new_path}'}), 400
+    if not allowed_file(new_path):
+        return jsonify({'error': 'That file type is not supported as project media'}), 400
+    new_path = os.path.abspath(new_path)
+
+    old_duration = _known_media_duration(project)
+    try:
+        new_duration = get_media_duration(new_path)
+    except Exception:
+        new_duration = None
+    mismatch = (old_duration is not None and new_duration
+                and abs(float(new_duration) - old_duration) > RELINK_DURATION_TOLERANCE_SECONDS)
+    if mismatch and not body.get('force'):
+        return jsonify({
+            'warning': True,
+            'message': 'This file is a different length than the original. Timecodes may not line up.',
+            'old_duration': old_duration,
+            'new_duration': float(new_duration),
+        }), 409
+
+    size = os.path.getsize(new_path)
+    old_path = project.get('source_path') or project.get('filepath') or ''
+    update_project(project_id, {
+        'source_path': new_path,
+        'filepath': new_path,
+        'filename': os.path.basename(new_path),
+        'file_size': size,
+        'file_size_formatted': format_file_size(size),
+    })
+    log_activity(project_id, 'media_relinked',
+                 f"Media relinked to {os.path.basename(new_path)}"
+                 + (' (different length, relinked anyway)' if mismatch else ''))
+    return jsonify({'status': 'relinked', 'source_path': new_path,
+                    'filename': os.path.basename(new_path), 'previous_path': old_path,
+                    'length_mismatch': bool(mismatch)})
+
+
+@app.route('/project/<project_id>/details', methods=['PATCH'])
+def update_project_details(project_id):
+    """Edit name, client, interviewer, subject and speaker count after
+    creation. Storage only: no transcription, diarization or analysis runs.
+    Language is not editable here (Retranscribe owns it)."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    body = request.json or {}
+    try:
+        fields = _normalize_project_details(body, partial=True)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if not fields:
+        return jsonify({'error': 'Nothing to update'}), 400
+    updates = {}
+    changed = []
+    for key, value in fields.items():
+        if project.get(key) != value:
+            updates[key] = value
+            changed.append(key)
+    if updates:
+        update_project(project_id, updates)
+        if 'name' in updates:
+            log_activity(project_id, 'renamed',
+                         f"Renamed \"{project.get('name', 'Project')}\" to \"{updates['name']}\"")
+        others = [k for k in changed if k != 'name']
+        if others:
+            log_activity(project_id, 'details_edited',
+                         'Project details updated: ' + ', '.join(k.replace('_', ' ') for k in others))
+    fresh = get_project(project_id) or project
+    return jsonify({'status': 'saved', 'changed': changed, 'project': {
+        k: fresh.get(k) for k in ('name', 'client_name', 'interviewer_name', 'subject_name', 'num_speakers')}})
 
 
 @app.route('/create', methods=['POST'])
@@ -1382,13 +1615,14 @@ def create_project():
             return jsonify({'error': 'event_clip_index must be an integer'}), 400
 
     try:
+        details = _normalize_project_details(data)
         project_id = create_project_from_path(
             expanded,
-            project_name=data.get('project_name', '').strip() or None,
-            client_name=data.get('client_name', '').strip(),
-            interviewer_name=data.get('interviewer_name', 'Interviewer').strip(),
-            subject_name=data.get('subject_name', 'Subject').strip(),
-            num_speakers=int(data.get('num_speakers', 2)),
+            project_name=details['name'],
+            client_name=details['client_name'],
+            interviewer_name=details['interviewer_name'] or 'Interviewer',
+            subject_name=details['subject_name'] or 'Subject',
+            num_speakers=details['num_speakers'],
             language=data.get('language', 'en').strip(),
             output_language=data.get('output_language', 'match').strip(),
             audio_channel=data.get('audio_channel', 'all'),
@@ -1892,6 +2126,7 @@ def _prewarm_chat_for_project(project_id):
                     labeled_sections=p.get('labeled_sections') or None,
                     speaker_names=p.get('speaker_names') or None,
                     output_language=resolve_output_language(p),
+                    segment_vectors=load_segment_vectors(project_id) or None,
                 ):
                     return
             warmup_ollama()
@@ -1908,6 +2143,124 @@ def chat_prewarm(project_id):
     threading.Thread(target=_prewarm_chat_for_project, args=(project_id,),
                      daemon=True).start()
     return jsonify({'ok': True})
+
+
+def _ai_model_label(project):
+    """Human label for the gear menu's AI Model value.
+
+    Local shows the Gemma variant by its plain name ("Gemma 4 4B (local)");
+    cloud shows the company. Never a model tag like gemma4:e4b. The provider
+    is the project's own ``ai_provider`` (missing means local).
+    """
+    provider = (project or {}).get('ai_provider') or 'ollama'
+    if provider == 'anthropic':
+        return 'Anthropic'
+    if provider == 'openai':
+        return 'OpenAI'
+    name = 'Gemma 4'
+    try:
+        from model_config import GEMMA4_VARIANTS, load_model_config
+        cfg = load_model_config() or {}
+        tier = cfg.get('tier')
+        variant = cfg.get('gemma4_variant')
+        desc = ''
+        if tier in GEMMA4_VARIANTS:
+            desc = GEMMA4_VARIANTS[tier][2]
+        else:
+            for _tag, _size, d in GEMMA4_VARIANTS.values():
+                if _tag == variant:
+                    desc = d
+                    break
+        if not desc:
+            desc = GEMMA4_VARIANTS['medium'][2]
+        name = desc.split('·')[0].split('(')[0].strip() or name
+    except Exception:
+        pass
+    return f'{name} (local)'
+
+
+def _output_language_label(project):
+    """Human label for the gear menu's Output Language value."""
+    from doza_assist.output_language import language_name
+    code = ((project or {}).get('output_language') or 'match').strip().lower()
+    if code in ('', 'match'):
+        return 'Match interview'
+    if code == 'auto':
+        return 'Auto'
+    return language_name(code) or code
+
+
+# Request-scoped provider. Every route that names a project in its URL
+# (``/project/<project_id>/...`` in core, the quote sheet, story brief and
+# speaker naming routes in the extensions) runs with that project's own
+# provider; anything else runs local. Background workers set it themselves
+# at job start (see _run_analysis_worker) because a thread starts empty.
+@app.before_request
+def _set_request_provider():
+    from ai_providers import provider_for_project, set_active_provider_name
+    pid = (request.view_args or {}).get('project_id')
+    meta = get_project(pid) if pid else None
+    g._doza_provider_token = set_active_provider_name(provider_for_project(meta))
+
+
+@app.teardown_request
+def _reset_request_provider(_exc=None):
+    from ai_providers import clear_active_provider_name
+    g.pop('_doza_provider_token', None)
+    clear_active_provider_name()
+
+
+@app.route('/project/<project_id>/ai-provider', methods=['GET', 'PUT'])
+def project_ai_provider(project_id):
+    """Read or set where this one project's AI runs.
+
+    PUT body: ``provider`` (ollama | anthropic | openai) and, when leaving
+    local for the first time, ``confirmed`` true after the user accepted the
+    confirmation dialog. ``ai_provider_confirmed`` is stored once per project
+    so the dialog does not repeat. Cloud choices need a saved key.
+    """
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    from ai_providers import has_api_key, normalize_provider_name, provider_for_project
+
+    def _view(meta):
+        return {
+            'provider': provider_for_project(meta),
+            'confirmed': bool(meta.get('ai_provider_confirmed')),
+            'has_anthropic_key': has_api_key('anthropic'),
+            'has_openai_key': has_api_key('openai'),
+            'ai_model_label': _ai_model_label(meta),
+        }
+
+    if request.method == 'GET':
+        return jsonify(_view(project))
+    body = request.json or {}
+    raw = (body.get('provider') or '').strip().lower()
+    name = normalize_provider_name(raw)
+    if name != raw:
+        return jsonify({'error': 'Unknown provider'}), 400
+    if name != 'ollama' and not has_api_key(name):
+        return jsonify({'error': f'Save an API key for {"Anthropic" if name == "anthropic" else "OpenAI"} first'}), 400
+    updates = {'ai_provider': name}
+    if body.get('confirmed'):
+        updates['ai_provider_confirmed'] = True
+    update_project(project_id, updates)
+    return jsonify(_view(get_project(project_id) or {**project, **updates}))
+
+
+@app.route('/project/<project_id>/settings-summary', methods=['GET'])
+def project_settings_summary(project_id):
+    """The current values the project gear menu shows next to its items."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    return jsonify({
+        'ai_provider': project.get('ai_provider') or 'ollama',
+        'ai_model_label': _ai_model_label(project),
+        'output_language': project.get('output_language') or 'match',
+        'output_language_label': _output_language_label(project),
+    })
 
 
 @app.route('/project/<project_id>')
@@ -2045,6 +2398,8 @@ def project_view(project_id):
 
     return render_template('project.html',
                            project=project,
+                           ai_model_label=_ai_model_label(project),
+                           output_language_label=_output_language_label(project),
                            projects=projects,
                            projects_meta=projects_meta,
                            all_projects=all_projects,
@@ -2658,16 +3013,32 @@ def _make_transcribe_progress_writer(project_id):
     likely means a hung model load).
     """
     started_at = datetime.now().isoformat()
+    # Engine memory across events: transcribe.py announces the engine on each
+    # load_model event and says nothing else when Parakeet dies and Whisper
+    # takes over. Remembering the previous engine lets the UI tell the user
+    # WHY a fast job turned into a slow one. Events without an engine (the
+    # memory-gate "queued" event) must not erase what we know.
+    engine_seen = {"current": None, "fallback_from": None, "audio_sec": None}
 
     def writer(event):
+        engine = event.get("engine") or None
+        if engine:
+            prev = engine_seen["current"]
+            if (prev and prev != engine and str(prev).startswith("parakeet")
+                    and str(engine).startswith("whisper")):
+                engine_seen["fallback_from"] = prev
+            engine_seen["current"] = engine
+        if event.get("audio_sec"):
+            engine_seen["audio_sec"] = event.get("audio_sec")
         snapshot = {
             "started_at": started_at,
             "updated_at": datetime.now().isoformat(),
             "phase": event.get("phase", "transcribing"),
             "pct": int(event.get("pct", 0)),
-            "engine": event.get("engine"),
+            "engine": engine or engine_seen["current"],
             "slow_mode": bool(event.get("slow_mode")),
-            "audio_sec": event.get("audio_sec"),
+            "audio_sec": event.get("audio_sec") or engine_seen["audio_sec"],
+            "fallback_from": engine_seen["fallback_from"],
         }
         with _transcribe_jobs_lock:
             _transcribe_jobs[project_id] = snapshot
@@ -2717,6 +3088,42 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
     project_dir = os.path.join(app.config['PROJECTS_DIR'], project_id)
     progress_cb = _make_transcribe_progress_writer(project_id)
 
+    def _resolve_auto_language(lang):
+        """Auto-detect: identify the language of the first 30 s with Whisper.
+        English routes the whole file through Parakeet ('en'); another
+        language is handed to Whisper explicitly; no verdict, or Whisper not
+        installed, keeps 'auto' (the old behavior, install prompt included).
+        """
+        if lang != 'auto':
+            return lang
+        try:
+            import language_probe
+            from transcribe import _find_ffmpeg, extract_audio
+            if not language_probe.whisper_available():
+                print(f"[language probe] {project_id}: Whisper not installed, keeping auto", flush=True)
+                update_project(project_id, {'language_probe': {'language': None, 'probability': 0.0,
+                                                               'error': 'whisper not installed',
+                                                               'method': 'whisper-lid'}})
+                return 'auto'
+            progress_cb({"phase": "detect_language", "pct": 2})
+            wav = extract_audio(source_path, project_dir=project_dir, audio_channel=audio_channel)
+            try:
+                from transcribe import _whisper_cache as _lid_cache
+            except Exception:
+                _lid_cache = None
+            outcome = language_probe.probe_language(
+                wav, _find_ffmpeg(),
+                lambda head: language_probe.whisper_identify(head, _lid_cache))
+            print(f"[language probe] {project_id}: {outcome}", flush=True)
+            update_project(project_id, {'language_probe': outcome})
+            code = outcome.get('language')
+            if code:
+                update_project(project_id, {'detected_language': code})
+                return code
+        except Exception as e:
+            print(f"[language probe] {project_id} skipped: {e}", flush=True)
+        return 'auto'
+
     # Serialize against any other in-flight transcription. If the gate is
     # already held (another clip is transcribing — e.g. a folder import
     # fired several jobs at once), park here at phase="queued" so the
@@ -2731,6 +3138,8 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
                 on_wait=lambda holder: progress_cb(
                     {"phase": "queued", "pct": 0})):
             try:
+                # English always takes Parakeet, even under Auto-detect.
+                language = _resolve_auto_language(language)
                 result = transcribe_file(
                     source_path,
                     project_dir=project_dir,
@@ -2858,10 +3267,19 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
         # detected_language: meta-level copy of the engine's detected (or
         # echoed) language code, so the output-language resolver reads meta
         # only and never digs into the transcript blob.
+        # transcript_engine / engine_fallback_from: which engine produced
+        # this transcript and whether it was a fallback from Parakeet, so
+        # the page can say so after reload (the status file is gone by then).
+        _job_snapshot = _transcribe_jobs.get(project_id, {}) or {}
+        _meta_update = {
+            'transcript': result, 'status': 'transcribed',
+            'detected_language': (result.get('language') or 'en'),
+            'transcript_engine': result.get('engine') or _job_snapshot.get('engine'),
+            'engine_fallback_from': _job_snapshot.get('fallback_from'),
+        }
         project = update_project(
             project_id,
-            {'transcript': result, 'status': 'transcribed',
-             'detected_language': (result.get('language') or 'en')},
+            _meta_update,
             remove=['error'],
         ) or {}
         log_activity(project_id, 'transcribed',
@@ -2880,6 +3298,13 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
                 pass
             except OSError:
                 pass
+        # A retranscribe stashed the vectors; an identical transcript gets
+        # them back, anything else leaves the project flagged so the next
+        # /analyze rebuilds them instead of serving the cache.
+        try:
+            _restore_stashed_vectors(project_id, _transcript_hash(result))
+        except Exception as e:
+            print(f"[transcribe] vector restore check failed for {project_id}: {e}")
 
         # Auto-build the TF-IDF paragraph index (same as the synchronous
         # path used to do). The stale-index clearing above guarantees this
@@ -2932,6 +3357,7 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             "phase": "done",
             "pct": 100,
             "engine": _transcribe_jobs.get(project_id, {}).get("engine"),
+            "fallback_from": _transcribe_jobs.get(project_id, {}).get("fallback_from"),
             "segments": seg_count,
         }
         with _transcribe_jobs_lock:
@@ -2968,6 +3394,92 @@ def _run_transcribe_job(project_id, source_path, num_speakers, language,
             _retranscribe_backups.pop(project_id, None)
 
 
+LONG_MEDIA_HOURS_ENGLISH = 8
+LONG_MEDIA_HOURS_OTHER = 4
+UNSYNCED_SOURCE_RATIO = 2.0
+
+
+def _hours_label(seconds: float) -> str:
+    total_min = int(round(float(seconds) / 60.0))
+    hours, minutes = divmod(total_min, 60)
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes} min"
+
+
+def _long_media_guard(project: dict, source_path: str, language: str) -> dict | None:
+    """Warnings to show BEFORE a transcription starts, or None to proceed.
+
+    Two checks, both advisory (the caller re-posts with confirm_long_media
+    to continue):
+
+    1. Single-project length. English runs on Parakeet and tolerates about
+       8 hours in one piece; every other language (Auto-detect included)
+       runs on plain Whisper, which holds the whole file in memory, so the
+       guideline is 4 hours. Splitting into shorter projects and working
+       across them with a Collection is the recommended shape.
+    2. FCPXML imports whose referenced source media adds up to more than
+       twice the timeline duration. That is the fingerprint of raw camera
+       files and a separate recorder file that were never synced in the
+       NLE. Doza Assist inherits sync from the editor and does not create
+       it, so the warning says to sync there first.
+    """
+    warnings = []
+    duration = None
+    try:
+        duration = get_media_duration(source_path)
+    except Exception:
+        duration = None
+    is_english = (language or 'en') == 'en'
+    limit_hours = LONG_MEDIA_HOURS_ENGLISH if is_english else LONG_MEDIA_HOURS_OTHER
+    if duration and duration > limit_hours * 3600:
+        engine_note = ('English transcription' if is_english
+                       else 'transcription in languages other than English (Auto-detect included)')
+        warnings.append({
+            'kind': 'long_media',
+            'duration_seconds': round(float(duration), 1),
+            'threshold_hours': limit_hours,
+            'message': (
+                f"This project's audio runs {_hours_label(duration)}, longer than the "
+                f"{limit_hours}-hour guideline for {engine_note}. Very long single files "
+                f"are slow and can run out of memory. Recommended: split the recording "
+                f"into shorter projects and use a Collection to work across them."
+            ),
+        })
+    src = project.get('fcpxml_source') or {}
+    try:
+        timeline = float(src.get('timeline_duration_seconds') or 0)
+        summed = float(src.get('source_audio_duration_seconds') or 0)
+    except (TypeError, ValueError):
+        timeline, summed = 0.0, 0.0
+    if timeline > 0 and summed > UNSYNCED_SOURCE_RATIO * timeline:
+        warnings.append({
+            'kind': 'unsynced_sources',
+            'timeline_seconds': round(timeline, 1),
+            'source_audio_seconds': round(summed, 1),
+            'message': (
+                f"The source media behind this FCPXML adds up to {_hours_label(summed)}, more "
+                f"than twice the {_hours_label(timeline)} timeline. Doza Assist inherits sync "
+                f"from your editor and does not create it: raw camera files and separate "
+                f"recorder files need to be synced in the NLE first (a multicam or synced "
+                f"clip), then exported. If this timeline is already synced, continue anyway."
+            ),
+        })
+    if not warnings:
+        return None
+    return {
+        'needs_long_media_confirm': True,
+        'warnings': warnings,
+        'duration_seconds': round(float(duration), 1) if duration else None,
+        # Plain-text summary for callers that only render an error string
+        # (the import queue): tell them where the Continue control lives.
+        'error': ' '.join(w['message'] for w in warnings)
+                 + ' Open the project and choose Continue anyway to transcribe it as is.',
+    }
+
+
 @app.route('/project/<project_id>/transcribe', methods=['POST'])
 def transcribe(project_id):
     """Kick off a background transcription job. Returns immediately
@@ -2980,6 +3492,15 @@ def transcribe(project_id):
     source_path = project.get('source_path', project.get('filepath', ''))
     if not source_path or not os.path.exists(source_path):
         return jsonify({'error': 'Source file not found. It may have been moved or deleted.'}), 404
+
+    # Import guardrail: very long single files and unsynced FCPXML sources
+    # get a warning with Continue anyway before any work starts. The
+    # frontend re-posts with confirm_long_media once the user has read it.
+    body = request.get_json(silent=True) or {}
+    if not body.get('confirm_long_media'):
+        guard = _long_media_guard(project, source_path, project.get('language', 'en'))
+        if guard:
+            return jsonify(guard), 409
 
     # Guard non-English requests when only Parakeet (English-only) is installed.
     requested_language = project.get('language', 'en')
@@ -3234,7 +3755,8 @@ _analysis_threads_lock = threading.Lock()
 _analysis_run_lock = threading.Lock()
 
 
-def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snapshot):
+def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snapshot,
+                         reuse_cached_analysis=False):
     """Background-thread worker for /analyze.
 
     Mirrors what the inline /analyze handler used to do, but detached
@@ -3266,6 +3788,11 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         project = get_project(project_id)
         if not project or not project.get('transcript'):
             return
+        # Rule 1, off the request thread: this worker runs the project's own
+        # provider (meta ai_provider, local when unset) for the analysis and
+        # the speaker naming that follows it. Nothing app-wide is consulted.
+        from ai_providers import set_active_provider_name, provider_for_project
+        set_active_provider_name(provider_for_project(project))
         from ai_analysis import analyze_transcript, generate_segment_vectors, expected_vector_chunks
 
         existing_vectors = load_segment_vectors(project_id)
@@ -3282,17 +3809,29 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         # it from overlapping pyannote/whisper on small machines. on_wait
         # surfaces 'queued' so the progress card isn't frozen at 'starting'
         # for the duration of whatever holds the gate.
-        with _memory_heavy_stage(
-                'analyze', evict_llm=False,
-                on_wait=lambda h: progress(step=0, total=1, current='queued')):
-            result = analyze_transcript(
-                project['transcript'],
-                project_name=project['name'],
-                analysis_type=analysis_type,
-                segment_vectors=existing_vectors or None,
-                progress_callback=_from_analyzer,
-                output_language=resolve_output_language(project),
-            )
+        _cached_result = None
+        if reuse_cached_analysis and isinstance(cache_snapshot, dict):
+            _bucket = cache_snapshot.get(transcript_hash)
+            _entry = _bucket.get(analysis_type) if isinstance(_bucket, dict) else None
+            if isinstance(_entry, dict) and isinstance(_entry.get('analysis'), dict):
+                _cached_result = _entry['analysis']
+        if _cached_result is not None:
+            # Same transcript, analysis already done: skip the model and
+            # rebuild only the derived files a retranscribe dropped.
+            result = _cached_result
+            _from_analyzer(1, 1, 'restoring analysis from cache')
+        else:
+            with _memory_heavy_stage(
+                    'analyze', evict_llm=False,
+                    on_wait=lambda h: progress(step=0, total=1, current='queued')):
+                result = analyze_transcript(
+                    project['transcript'],
+                    project_name=project['name'],
+                    analysis_type=analysis_type,
+                    segment_vectors=existing_vectors or None,
+                    progress_callback=_from_analyzer,
+                    output_language=resolve_output_language(project),
+                )
         if not (result.get('story_beats') or result.get('social_clips')
                 or result.get('strongest_soundbites')):
             # Empty-but-healthy: the backend responded but produced nothing
@@ -3367,7 +3906,8 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         # meta.json segments stayed pinned at the OSS Parakeet default label.
         # Writing only 'analysis' + 'analysis_cache' preserves all of that AND
         # the chat history / labels the old manual merge still missed.
-        update_project(project_id, {'analysis': result, 'analysis_cache': analysis_cache})
+        update_project(project_id, {'analysis': result, 'analysis_cache': analysis_cache},
+                       remove=['derived_stale', 'prev_transcript_hash'])
         title = result.get('suggested_title') or project.get('name', 'Project')
         log_activity(project_id, 'analyzed', f'AI analysis run · "{title}"')
 
@@ -3465,6 +4005,7 @@ def _rewarm_chat_after_heavy_call(project_id):
                         labeled_sections=p.get('labeled_sections') or None,
                         speaker_names=p.get('speaker_names') or None,
                         output_language=resolve_output_language(p),
+                        segment_vectors=load_segment_vectors(project_id) or None,
                     )
             except Exception as e:
                 print(f"[chat-prewarm] rewarm worker failed: {e}", flush=True)
@@ -3532,7 +4073,14 @@ def analyze(project_id):
     cache = project.get('analysis_cache') if isinstance(project.get('analysis_cache'), dict) else {}
     bucket = cache.get(transcript_hash) if isinstance(cache.get(transcript_hash), dict) else {}
     cached_entry = bucket.get(analysis_type) if isinstance(bucket.get(analysis_type), dict) else None
-    if not force and cached_entry and isinstance(cached_entry.get('analysis'), dict):
+    cache_usable = bool(cached_entry and isinstance(cached_entry.get('analysis'), dict))
+    # A retranscribe dropped the vectors (and the analysis on the record).
+    # The cached analysis is still right for this transcript, but serving
+    # it alone would leave chat and Story Builder without vectors — run
+    # the worker, which reuses the cached analysis and rebuilds the rest.
+    derived_dropped = bool(project.get('derived_stale')) and not load_segment_vectors(project_id)
+    reuse_cached_analysis = bool(cache_usable and not force and derived_dropped)
+    if not force and cache_usable and not derived_dropped:
         update_project(project_id, {'analysis': cached_entry['analysis']})
         return jsonify({
             'status': 'cached',
@@ -3589,6 +4137,7 @@ def analyze(project_id):
     t = threading.Thread(
         target=_run_analysis_worker,
         args=(project_id, analysis_type, transcript_hash, cache),
+        kwargs={'reuse_cached_analysis': reuse_cached_analysis},
         daemon=True,
         name=f'analyze-{project_id}',
     )
@@ -3725,6 +4274,7 @@ def chat(project_id):
                 labeled_sections=p.get('labeled_sections') or None,
                 speaker_names=p.get('speaker_names') or None,
                 output_language=resolve_output_language(p),
+                story_so_far=p.get('story_so_far') or None,
             )
         else:
             # Multi-project: combine transcripts with project labels.
@@ -3771,6 +4321,7 @@ def chat(project_id):
                 history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
                 history_log.append({'role': 'assistant', 'content': reply, 'ts': now_iso})
                 stored['chat_history'] = history_log
+                _story_auto_making(stored, message)
                 save_project(pid, stored)
 
         return jsonify({'reply': reply})
@@ -3828,6 +4379,7 @@ def chat_stream(project_id):
             'labeled_sections': p.get('labeled_sections') or None,
             'speaker_names': p.get('speaker_names') or None,
             'output_language': resolve_output_language(p),
+            'story_so_far': p.get('story_so_far') or None,
         }
         single_pid = p['id']
     else:
@@ -3851,8 +4403,14 @@ def chat_stream(project_id):
         }
         single_pid = None
 
+    from ai_providers import current_provider_name as _cur_provider
+    _stream_provider = _cur_provider()
+
     def _generate():
-        from ai_providers import ProviderError
+        from ai_providers import ProviderError, set_active_provider_name
+        # The response streams after the request hook's context is torn
+        # down; keep this project's provider for the whole generation.
+        set_active_provider_name(_stream_provider)
         final_reply = ''
         # Emit a synthetic heartbeat as the very first SSE frame so the
         # browser knows the connection is alive before the model produces
@@ -3892,6 +4450,7 @@ def chat_stream(project_id):
                     history_log.append({'role': 'user', 'content': message, 'ts': now_iso})
                     history_log.append({'role': 'assistant', 'content': final_reply, 'ts': now_iso})
                     stored['chat_history'] = history_log
+                    _story_auto_making(stored, message)
                     save_project(single_pid, stored)
             except Exception as e:
                 print(f"[chat-stream] history persist failed: {e}")
@@ -3900,6 +4459,112 @@ def chat_stream(project_id):
         'Cache-Control': 'no-cache',
         'X-Accel-Buffering': 'no',  # disable nginx buffering if proxied
     })
+
+
+def _story_auto_making(stored, message):
+    """When the editor states what they are making ("build me a 90 second
+    teaser", "I'm making a recruiting film"), remember it in the Story So
+    Far — only when nothing is stored yet, so a hand-edited line is never
+    overwritten. Mutates ``stored`` in place (caller saves)."""
+    try:
+        from ai_analysis import _detect_story_making
+        story = dict(stored.get('story_so_far') or {})
+        if (story.get('making') or '').strip():
+            return
+        making = _detect_story_making(message)
+        if making:
+            story['making'] = making
+            story['updated_at'] = datetime.now().isoformat()
+            stored['story_so_far'] = story
+    except Exception as e:
+        print(f"[chat] story-so-far auto-making failed: {e}", flush=True)
+
+
+def _story_clean_passed(items):
+    """Validate the passed-on list: dicts with numeric start < end, a short
+    title, deduped by span, capped."""
+    out, seen = [], set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            a = float(item.get('start', 0) or 0)
+            b = float(item.get('end', a) or a)
+        except (TypeError, ValueError):
+            continue
+        if b <= a or a < 0:
+            continue
+        key = (round(a, 2), round(b, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({'start': round(a, 3), 'end': round(b, 3),
+                    'title': str(item.get('title') or 'moment').strip()[:120]})
+        if len(out) >= 100:
+            break
+    return out
+
+
+def _story_so_far_update(project_id, **changes):
+    """Locked read-modify-write of ``meta['story_so_far']``."""
+    with project_lock(project_id):
+        stored = get_project(project_id)
+        if not stored:
+            return None
+        story = dict(stored.get('story_so_far') or {})
+        if 'making' in changes:
+            story['making'] = str(changes['making'] or '').strip()[:300]
+        if 'passed' in changes:
+            story['passed'] = _story_clean_passed(changes['passed'])
+        story['updated_at'] = datetime.now().isoformat()
+        stored['story_so_far'] = story
+        save_project(project_id, stored)
+        return story
+
+
+@app.route('/project/<project_id>/story-so-far', methods=['GET', 'POST'])
+def story_so_far_route(project_id):
+    """The Story So Far rail: what the editor is making and the moments
+    they passed on. GET returns it; POST merges ``making`` and/or
+    ``passed`` (full list) and returns the stored state."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    if request.method == 'GET':
+        return jsonify(project.get('story_so_far') or {})
+    data = request.json or {}
+    changes = {}
+    if 'making' in data:
+        changes['making'] = data.get('making')
+    if 'passed' in data and isinstance(data.get('passed'), list):
+        changes['passed'] = data.get('passed')
+    story = _story_so_far_update(project_id, **changes)
+    if story is None:
+        return jsonify({'error': 'Project not found'}), 404
+    return jsonify(story)
+
+
+@app.route('/project/<project_id>/story-so-far/pass', methods=['POST'])
+def story_so_far_pass(project_id):
+    """Pass on (or, with ``undo``, restore) one moment: ``{start, end,
+    title, undo?}``. Passed moments are excluded from retrieval, count
+    top-ups and replies."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    data = request.json or {}
+    try:
+        a = float(data.get('start')); b = float(data.get('end'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'start and end are required'}), 400
+    passed = list((project.get('story_so_far') or {}).get('passed') or [])
+    if data.get('undo'):
+        passed = [i for i in passed
+                  if not (abs(float(i.get('start', -1)) - a) < 0.5 and abs(float(i.get('end', -1)) - b) < 0.5)]
+    else:
+        passed.append({'start': a, 'end': b, 'title': data.get('title') or 'moment'})
+    story = _story_so_far_update(project_id, passed=passed)
+    return jsonify(story or {})
 
 
 @app.route('/project/<project_id>/chat', methods=['DELETE'])
@@ -3963,27 +4628,173 @@ def save_labels(project_id):
     return jsonify({'status': 'saved', 'count': new_count})
 
 
-def _safe_filename(name: str, fallback: str = 'Export') -> str:
-    """Make a user/AI-supplied string safe to use as a single filename.
+def _clip_title_model_call(prompt, system_prompt):
+    """One small local-model call for a batch of clip titles, parsed to a
+    dict. Raises RuntimeError from the provider so the caller can report it
+    per batch instead of failing the whole request."""
+    from ai_analysis import _call_ai, _parse_json_response
+    reply = _call_ai(prompt, system_prompt=system_prompt, task_type='analysis',
+                     force_json=True, num_predict=600)
+    return _parse_json_response(reply or '')
 
-    Story titles and project names are free text (user renames, AI output
-    like "24/7 — The Grind"); a '/' in one used to make ``open()`` treat
-    part of the name as a subdirectory and 500 the export. Replaces '/'
-    and ':' (the legacy HFS separator, which Finder displays as '/') with
-    '-', strips NULs and other control characters, collapses whitespace,
-    and returns ``fallback`` when nothing displayable survives. For
-    filenames only — never feed the result back into user-visible text.
+
+@app.route('/project/<project_id>/clips/titles', methods=['POST'])
+def generate_clip_titles(project_id):
+    """Give clips real titles (1.0.47).
+
+    Body (all optional): ``sections`` = [{start, end, text?}] to title just
+    those clips (they need not be saved yet: the page saves labels on a
+    debounce); omitted = every stored clip without a title.
+    ``include_transcript`` = true adds each clip's transcript to the reply.
+
+    A clip whose text is the transcript talking (brush, Story Brief, AI
+    Analysis soundbites) gets a short model-written headline like Chat
+    already produces; a clip whose text is already a headline keeps it as
+    the title with no model call. Titles are written onto the stored
+    labeled_sections (``title`` + ``title_auto``) and returned so the page
+    can merge them without a reload. Same-origin only, like reordering.
     """
-    cleaned = []
-    for ch in str(name or ''):
-        if ch in '/:':
-            cleaned.append('-')
-        elif ord(ch) < 32 or ch == '\x7f':
-            cleaned.append(' ')
-        else:
-            cleaned.append(ch)
-    out = ' '.join(''.join(cleaned).split())
-    return out or fallback
+    if _request_is_cross_origin():
+        return jsonify({'error': 'Clip titles are generated by the editor\'s own app'}), 403
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    import clip_titles
+    from doza_assist.output_language import language_directive, resolve_output_language
+    data = request.json or {}
+    requested = data.get('sections')
+    if requested is not None and not isinstance(requested, list):
+        return jsonify({'error': 'sections must be a list'}), 400
+    try:
+        directive = language_directive(resolve_output_language(project))
+    except Exception:
+        directive = ''
+    result = clip_titles.title_clips(
+        project, requested, _clip_title_model_call, language_directive=directive,
+        include_transcript=bool(data.get('include_transcript')))
+    if result['changed']:
+        update_project(project_id, {'labeled_sections': result['sections']})
+    return jsonify({
+        'titles': result['items'],
+        'generated': result['generated'],
+        'carried': result['carried'],
+        'kept': result['kept'],
+        'failed': result['failed'],
+        'error': result['error'],
+    })
+
+
+@app.route('/project/<project_id>/analysis/soundbite-titles', methods=['POST'])
+def generate_soundbite_titles(project_id):
+    """Give the AI Analysis soundbites the same short titles the clip
+    library gets (1.0.47). Story beats already carry a label and social
+    clips a title; a soundbite is a quote, so it is titled from the words of
+    its range. Titles are written onto analysis.strongest_soundbites[i].title
+    and returned with each soundbite's index, first line and transcript so
+    the tab can fill in without a reload. Same origin only."""
+    if _request_is_cross_origin():
+        return jsonify({'error': 'Soundbite titles are generated by the editor\'s own app'}), 403
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    import clip_titles
+    from doza_assist.output_language import language_directive, resolve_output_language
+    analysis = project.get('analysis') or {}
+    soundbites = analysis.get('strongest_soundbites') if isinstance(analysis.get('strongest_soundbites'), list) else []
+    force = bool((request.json or {}).get('force'))
+    requested, indexes = [], []
+    for i, sb in enumerate(soundbites):
+        if not isinstance(sb, dict):
+            continue
+        if (sb.get('title') or '').strip() and not force:
+            continue
+        try:
+            start = clip_titles.to_seconds(sb.get('start', 0))
+        except (TypeError, ValueError):
+            continue
+        try:
+            end = clip_titles.to_seconds(sb.get('end')) if sb.get('end') not in (None, '') else start + 15
+        except (TypeError, ValueError):
+            end = start + 15
+        if end <= start:
+            end = start + 15
+        requested.append({'start': start, 'end': end, 'text': sb.get('text') or ''})
+        indexes.append(i)
+    if not requested:
+        return jsonify({'titles': [], 'generated': 0, 'carried': 0, 'failed': 0, 'error': None})
+    try:
+        directive = language_directive(resolve_output_language(project))
+    except Exception:
+        directive = ''
+    scratch = dict(project)
+    scratch['labeled_sections'] = []
+    result = clip_titles.title_clips(scratch, requested, _clip_title_model_call,
+                                     language_directive=directive, include_transcript=True)
+    items, changed = [], False
+    for idx, item in zip(indexes, result['items']):
+        item['index'] = idx
+        items.append(item)
+        if item.get('title') and soundbites[idx].get('title') != item['title']:
+            soundbites[idx]['title'] = item['title']
+            changed = True
+    if changed:
+        analysis['strongest_soundbites'] = soundbites
+        update_project(project_id, {'analysis': analysis})
+    return jsonify({'titles': items, 'generated': result['generated'], 'carried': result['carried'],
+                    'failed': result['failed'], 'error': result['error']})
+
+
+def _safe_filename(name: str, fallback: str = 'Export') -> str:
+    """Filesystem-safe single filename for user/AI-supplied text.
+
+    Shared with the exporters through export_naming.safe_filename so the
+    timeline name and the file name are made safe by one rule.
+    """
+    from export_naming import safe_filename
+    return safe_filename(name, fallback)
+
+
+def _export_kind_for_mode(export_mode: str) -> str:
+    """Raw-media exports: 'markers' mode is a Markers timeline, else Selects."""
+    return 'markers' if (export_mode or 'cuts') == 'markers' else 'selects'
+
+
+def _plan_timeline_name(project, kind, story_title=None, override=None):
+    """(timeline name, counter key, n) for one export about to happen.
+
+    ``n`` is the number this export will carry; the caller bumps the stored
+    counter with :func:`_bump_export_count` once the file is written. An
+    override (the Export tab's Timeline name field) is counter-free: the
+    stored count is left alone.
+    """
+    from export_naming import next_count, story_kind, timeline_name
+    key = story_kind(story_title) if kind == 'story' else kind
+    n = next_count(project, key)
+    name = timeline_name(project, kind, n, story_title=story_title, override=override)
+    return name, key, (None if (override and str(override).strip()) else n)
+
+
+def _bump_export_count(project_id, key, n):
+    """Persist the export number just used (no-op for overrides)."""
+    if not n:
+        return
+    project = get_project(project_id)
+    if not project:
+        return
+    counts = dict(project.get('export_counts') or {})
+    counts[key] = max(int(counts.get(key, 0) or 0), int(n))
+    update_project(project_id, {'export_counts': counts})
+
+
+def _verbatim_for(project, start_s, end_s):
+    """Speaker-labelled verbatim transcript of a range, capped (export_notes)."""
+    try:
+        from export_notes import verbatim_for_range
+        return verbatim_for_range(
+            (project.get('transcript') or {}).get('segments') or [],
+            start_s, end_s, project.get('speaker_names') or {})
+    except Exception:
+        return ''
 
 
 def _resolve_export_framerate(body, detected_fps):
@@ -4109,6 +4920,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'color': 'green',
                 'category': 'Social Clip',
                 'speaker': _speaker_at_range(cs, ce),
+                'verbatim': _verbatim_for(project, cs, ce),
             })
 
     if 'story' in requested:
@@ -4130,6 +4942,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'color': 'purple',
                 'category': 'Story Beat',
                 'speaker': _speaker_at_range(start, end),
+                'verbatim': _verbatim_for(project, start, end),
             })
 
     if 'soundbites' in requested:
@@ -4152,6 +4965,7 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 'color': 'orange',
                 'category': 'Soundbite',
                 'speaker': _speaker_at_range(start, end),
+                'verbatim': _verbatim_for(project, start, end),
             })
 
     if 'labels' in requested:
@@ -4183,10 +4997,11 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
                 # /labels API makes .get return None, and None[:80] used to
                 # TypeError every export for the project. Matches the
                 # round-trip twin in _project_selects_for_fcpxml.
-                'note': (sec.get('text') or '')[:80],
+                'note': (sec.get('title') or sec.get('text') or '')[:80],
                 'color': sec.get('color', 'blue'),
                 'category': label_name,
                 'speaker': _speaker_at_range(ls, le),
+                'verbatim': _verbatim_for(project, ls, le),
             }
             if manual_clip_order:
                 marker['_order'] = len(markers)
@@ -4252,6 +5067,10 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
 
     exporter = get_exporter(platform)
+    # Timeline = "{Project} – Selects N" (or Markers N); event = project name.
+    from export_naming import event_name_for
+    kind = _export_kind_for_mode(export_mode)
+    tl_name, count_key, n = _plan_timeline_name(project, kind, override=body.get('timeline_name'))
     result = exporter.export_markers(
         markers,
         project_name=project['name'],
@@ -4266,8 +5085,30 @@ def _build_nle_export(project: dict, body: dict, force_platform: str | None = No
         total_clips=total_clips,
         start_tc_frames=start_tc_frames,
         tc_format=tc_format,
+        timeline_name=tl_name,
+        event_name=event_name_for(project),
     )
+    if project.get('id'):
+        _bump_export_count(project['id'], count_key, n)
     return result, exporter
+
+
+@app.route('/project/<project_id>/export/timeline-name', methods=['GET'])
+def export_timeline_name(project_id):
+    """The default timeline name the next export would use (for the Export
+    tab's Timeline name field). ``kind`` = selects | markers | story, plus
+    ``story_title`` for a story."""
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    kind = (request.args.get('kind') or 'selects').strip().lower()
+    if kind not in ('selects', 'markers', 'story'):
+        kind = 'selects'
+    name, key, n = _plan_timeline_name(project, kind, story_title=request.args.get('story_title') or None)
+    from export_naming import event_name_for, filename_for
+    return jsonify({'timeline_name': name, 'kind': kind, 'n': n,
+                    'event_name': event_name_for(project),
+                    'filename': filename_for(name)})
 
 
 @app.route('/project/<project_id>/export/fcpxml', methods=['POST'])
@@ -4337,7 +5178,7 @@ def export_fcpxml(project_id):
             result.file_path, nle,
             source_media_path=project.get('source_path') or project.get('filepath'),
             project_name=project.get('name') or '',
-            timeline_name=os.path.splitext(result.filename)[0],
+            timeline_name=getattr(result, 'timeline_name', '') or os.path.splitext(result.filename)[0],
         )
         if opened_in is None:
             return jsonify({'error': info.get('error', 'NLE delivery failed'),
@@ -4550,13 +5391,16 @@ def _app_short_version(app_path: str) -> tuple:
 def _rank_app_paths(paths: list[str]) -> list[str]:
     """Order discovered .app paths most-preferred first.
 
-    Primary key — install location: a copy under /Applications beats one
-    under ~/Applications, which beats anything else (Setapp subdirs,
-    external volumes). Tiebreak — version: the NEWEST install wins within a
-    tier, so a user with both Resolve 20 and 21 in /Applications gets 21
-    driven on a COLD launch (v20-not-v21 bug). When a Resolve is already
-    running we attach to it and never call this (see _find_nle_app_path /
-    resolve_import.running_app_path) — so this governs cold launch only.
+    Primary key: version. The NEWEST install wins, and a copy whose version
+    can be read beats one that cannot. A stale FCP 11 left in /Applications
+    must never be chosen over the FCP 12 the editor actually uses (Jean
+    Thome, 2026-09-02: the handoff launched 11.0.1, which cannot read the
+    1.14 FCPXML the round-trip writer preserves from a 12.x source), and a
+    user with Resolve 20 and 21 gets 21 on a cold launch. Tiebreak: install
+    location. /Applications beats ~/Applications, which beats anything else
+    (Setapp subdirs, external volumes). When a Resolve is already running we
+    attach to it and never call this (see _find_nle_app_path and
+    resolve_import.running_app_path), so this governs cold launch only.
     """
     def location_rank(p: str) -> int:
         if p.startswith('/Applications/'):
@@ -4569,8 +5413,8 @@ def _rank_app_paths(paths: list[str]) -> list[str]:
 
     def sort_key(p: str):
         v = _app_short_version(p)
-        # location asc; known-version before unknown; newest version first.
-        return (location_rank(p), 0 if v else 1, tuple(-n for n in v))
+        # known-version before unknown; newest version first; then location.
+        return (0 if v else 1, tuple(-n for n in v), location_rank(p))
 
     return sorted(paths, key=sort_key)
 
@@ -4603,11 +5447,18 @@ def _find_nle_app_path(nle: str):
         return _nle_path_cache[nle]
 
     found: str | None = None
+    # Query EVERY bundle id for this NLE and rank the merged hits once. A
+    # Mac can hold the purchase SKU (com.apple.FinalCut) and the Creator
+    # Studio subscription copy (matched only by the glob) side by side;
+    # stopping at the first id with hits made the subscription copy
+    # invisible whenever an old purchase copy was still installed.
+    hits: list[str] = []
     for bundle_id in _NLE_BUNDLE_IDS.get(nle, ()):
-        hits = _mdfind_app_by_bundle_id(bundle_id)
-        if hits:
-            found = _rank_app_paths(hits)[0]
-            break
+        for hit in _mdfind_app_by_bundle_id(bundle_id):
+            if hit not in hits:
+                hits.append(hit)
+    if hits:
+        found = _rank_app_paths(hits)[0]
 
     if found is None:
         for candidate in _NLE_FALLBACK_PATHS.get(nle, ()):
@@ -4722,15 +5573,11 @@ def _hand_file_to_nle(file_path: str, nle: str, *,
                 project_name=project_name,
                 timeline_name=timeline_name,
             )
-        # FCP: prefer launching by bundle ID so Launch Services resolves
-        # the install location (works even if the user has FCP outside
-        # /Applications, or has multiple copies). Falls back to -a <path>
-        # if the bundle ID isn't mapped (shouldn't happen for fcp).
-        bundle_id = _nle_bundle_id(nle)
-        if bundle_id:
-            ok, err = _run_open(['-b', bundle_id, file_path])
-        else:
-            ok, err = _run_open(['-a', app_path, file_path])
+        # Launch the copy WE ranked (newest version, then location). Opening
+        # by bundle id let Launch Services pick its own default, which on a
+        # Mac with a stale FCP 11 beside the Creator Studio FCP 12 opened
+        # the old copy and failed on the 1.14 FCPXML (Jean Thome, 2026-09).
+        ok, err = _run_open(['-a', app_path, file_path])
         if not ok:
             # The cached path can go stale (app trashed/moved since the
             # first lookup) — drop it so the next attempt re-runs mdfind.
@@ -5110,9 +5957,10 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                 start_seconds=cs,
                 end_seconds=ce,
                 label=label_name,
-                note=(sec.get('text') or '')[:80],
+                note=(sec.get('title') or sec.get('text') or '')[:80],
                 kind=_kind_for_color(sec.get('color', '')),
                 speaker=_speaker_for_range(cs, ce),
+                verbatim=_verbatim_for(project, cs, ce),
             ))
 
     if 'social' in sources:
@@ -5127,6 +5975,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                 note=clip.get('platform', ''),
                 kind='strong',
                 speaker=_speaker_for_range(cs, ce),
+                verbatim=_verbatim_for(project, cs, ce),
             ))
 
     if 'story' in sources:
@@ -5142,6 +5991,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                 note=(beat.get('description') or '')[:120],
                 kind='strong',
                 speaker=_speaker_for_range(start, end),
+                verbatim=_verbatim_for(project, start, end),
             ))
 
     if 'soundbites' in sources:
@@ -5157,6 +6007,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                 note=(sb.get('why') or '')[:120],
                 kind='strong',
                 speaker=_speaker_for_range(start, end),
+                verbatim=_verbatim_for(project, start, end),
             ))
 
     if 'story_build' in sources:
@@ -5180,6 +6031,7 @@ def _project_selects_for_fcpxml(project: dict, source, story_build_clips=None):
                     note=(clip.get('editorial_note') or '')[:160],
                     kind='strong',
                     speaker=_speaker_for_range(cs, ce),
+                verbatim=_verbatim_for(project, cs, ce),
                 ))
 
     return selects
@@ -5250,35 +6102,39 @@ def _build_nle_multicam_export(project, body):
             'Pick a source with content, or add clip labels first.'
         )
 
+    # Timeline name: "{Project} – Selects N" / "– Markers N" / "– Story: title";
+    # the event keeps the editor's own name from the imported FCPXML.
+    story_title = (body.get('story_title') or '').strip() if (preserve_order and story_build_clips) else ''
+    if story_title:
+        tl_name, count_key, n = _plan_timeline_name(
+            project, 'story', story_title=story_title, override=body.get('timeline_name'))
+    else:
+        tl_name, count_key, n = _plan_timeline_name(
+            project, 'markers' if mode == 'markers_timeline' else 'selects',
+            override=body.get('timeline_name'))
+    event_title = (getattr(parsed, 'event_name', None) or '').strip() or 'Doza Assist'
+
     skipped_selects = []
     try:
         if mode == 'markers_timeline':
             output = write_markers_on_timeline(
-                parsed, selects, skipped_out=skipped_selects,
+                parsed, selects, project_name=tl_name, skipped_out=skipped_selects,
             )
-            suffix = 'Doza Notes'
         else:
             output = write_selects_as_new_project(
                 parsed, selects, preserve_order=preserve_order,
+                project_name=tl_name, event_name=event_title,
                 skipped_out=skipped_selects,
             )
-            suffix = 'Doza Selects'
     except WriterError as e:
         raise MulticamExportError(f'Export failed: {e}')
     skipped_labels = [
         (s.label or f'{s.start_seconds:.1f}s') for s in skipped_selects
     ]
 
-    # Story Builder exports get a more specific filename suffix.
-    if preserve_order and story_build_clips:
-        story_title = (body.get('story_title') or '').strip()
-        if story_title:
-            suffix = f"{story_title}"
-    # Sanitize the COMPOSED filename: story titles are user/AI free text
-    # ("24/7 — The Grind"), and only ``base`` used to get the '/' scrub, so
-    # a slash in the title made open() treat it as a subdirectory and 500.
-    base = (project.get('name') or 'Project').strip()
-    filename = _safe_filename(f"{base} - {suffix}", fallback='Doza Export') + '.fcpxml'
+    # File = timeline name + .fcpxml, made safe by the one shared rule.
+    from export_naming import filename_for
+    filename = filename_for(tl_name, '.fcpxml')
     exports_dir = app.config['EXPORTS_DIR']
     os.makedirs(exports_dir, exist_ok=True)
     out_path = os.path.join(exports_dir, filename)
@@ -5300,6 +6156,8 @@ def _build_nle_multicam_export(project, body):
             pass
         raise MulticamExportError(f'Could not write export file: {e}', status=500)
 
+    if project.get('id'):
+        _bump_export_count(project['id'], count_key, n)
     return out_path, filename, mode, skipped_labels, parse_warnings
 
 
@@ -5476,6 +6334,13 @@ def clear_transcript(project_id):
     if not project:
         return jsonify({'error': 'Project not found'}), 404
 
+    # Remember what the derived files were built from, so identical
+    # re-transcriptions can keep them (see _restore_stashed_vectors).
+    try:
+        project['prev_transcript_hash'] = _transcript_hash(project.get('transcript')) \
+            if project.get('transcript') else None
+    except Exception:
+        project['prev_transcript_hash'] = None
     project['transcript'] = None
     project['analysis'] = None
     project['client_selects'] = []
@@ -5585,6 +6450,13 @@ def retranscribe(project_id):
         project['audio_channel'] = _valid_audio_channel(data.get('audio_channel'))
 
     # Clear existing transcript/analysis
+    # Remember what the derived files were built from, so identical
+    # re-transcriptions can keep them (see _restore_stashed_vectors).
+    try:
+        project['prev_transcript_hash'] = _transcript_hash(project.get('transcript')) \
+            if project.get('transcript') else None
+    except Exception:
+        project['prev_transcript_hash'] = None
     project['transcript'] = None
     project['analysis'] = None
     project['client_selects'] = []
@@ -5613,13 +6485,16 @@ def retranscribe(project_id):
     # OLD transcript text. Letting them survive a retranscribe means the
     # /transcribe handler's idempotent skip would keep serving stale TF-IDF
     # results and the chat would look at the wrong paragraphs forever.
-    for cache_name in ('paragraph_index.json', 'segment_vectors.json'):
-        p = os.path.join(project_dir, cache_name)
-        if os.path.exists(p):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+    # The paragraph index is cheap and is rebuilt when transcription
+    # finishes; the vectors are the expensive analysis-time artifact, so
+    # they are stashed and come back if the transcript is unchanged.
+    p = os.path.join(project_dir, 'paragraph_index.json')
+    if os.path.exists(p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    _stash_segment_vectors(project_id)
 
     # Drop the PREVIOUS run's job state. Leaving a 'done' snapshot (in-memory
     # or in transcribe_status.json) around means the post-reload page could
@@ -6061,6 +6936,8 @@ def _build_nle_story_export(project, body, force_platform=None, warnings_out=Non
             'text': clip.get('title', 'Clip'),
             'note': clip.get('editorial_note', ''),
             '_order': clip.get('order', i),
+            'speaker': (clip.get('speaker') or '').strip(),
+            'verbatim': _verbatim_for(project, start, end),
         })
 
     source_path = project.get('source_path', project.get('filepath', ''))
@@ -6083,6 +6960,10 @@ def _build_nle_story_export(project, body, force_platform=None, warnings_out=Non
         platform = platform_override if platform_override in PLATFORMS else get_project_platform(project)
 
     exporter = get_exporter(platform)
+    # Timeline = "{Project} – Story: {title}" (N from the second export on).
+    from export_naming import event_name_for
+    tl_name, count_key, n = _plan_timeline_name(
+        project, 'story', story_title=story_title, override=body.get('timeline_name'))
     result = exporter.export_story(
         markers,
         project_name=project['name'],
@@ -6095,7 +6976,11 @@ def _build_nle_story_export(project, body, force_platform=None, warnings_out=Non
         exports_dir=app.config['EXPORTS_DIR'],
         start_tc_frames=start_tc_frames,
         tc_format=tc_format,
+        timeline_name=tl_name,
+        event_name=event_name_for(project),
     )
+    if project.get('id'):
+        _bump_export_count(project['id'], count_key, n)
     return result, exporter
 
 
@@ -6158,7 +7043,7 @@ def story_export(project_id):
             result.file_path, nle,
             source_media_path=project.get('source_path') or project.get('filepath'),
             project_name=project.get('name') or '',
-            timeline_name=os.path.splitext(result.filename)[0],
+            timeline_name=getattr(result, 'timeline_name', '') or os.path.splitext(result.filename)[0],
         )
         if opened_in is None:
             return jsonify({'error': info.get('error', 'NLE delivery failed'),

@@ -68,8 +68,11 @@ class TestPrefixCacheHygiene:
 
     def test_no_excerpts_keeps_final_turn_shape(self):
         _, msgs = _build('how should I open the piece?', '')
+        # message → reminder → brevity contract (per-turn tail; the cached
+        # prefix is the transcript message, which this must not touch)
         assert msgs[-1]['content'] == (
-            'how should I open the piece?\n\n' + ai_analysis._FINAL_REMINDER)
+            'how should I open the piece?\n\n' + ai_analysis._FINAL_REMINDER
+            + ai_analysis._BREVITY_TAIL)
 
 
 class TestSalvageDiet:

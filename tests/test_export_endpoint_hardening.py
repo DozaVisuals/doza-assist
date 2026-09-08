@@ -106,12 +106,12 @@ def _stub_multicam_writer(monkeypatch):
     """Bypass the real FCPXML parse/write for route-level multicam tests."""
     monkeypatch.setattr(app_module, 'parse_fcpxml', lambda p: object())
 
-    def _writer(parsed, selects, preserve_order=False, skipped_out=None):
+    def _writer(parsed, selects, preserve_order=False, skipped_out=None, **names):
         return b'<fcpxml version="1.14"/>'
 
     monkeypatch.setattr(app_module, 'write_selects_as_new_project', _writer)
     monkeypatch.setattr(app_module, 'write_markers_on_timeline',
-                        lambda parsed, selects, skipped_out=None: b'<fcpxml/>')
+                        lambda parsed, selects, skipped_out=None, **names: b'<fcpxml/>')
 
 
 # ── C16/C33/C40: filename sanitization ──────────────────────────────────────

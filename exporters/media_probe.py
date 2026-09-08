@@ -482,8 +482,46 @@ def get_media_duration(path: str) -> float | None:
     return None
 
 
+def summed_media_duration(paths) -> float | None:
+    """Total duration in seconds of the DISTINCT existing files in ``paths``.
+
+    Used by the import guardrail to compare an FCPXML's source media against
+    its timeline: raw camera files plus a separate recorder file that were
+    never synced in the NLE add up to far more audio than the timeline
+    holds. Returns None when nothing could be probed; files that fail to
+    probe are skipped rather than counted as zero.
+    """
+    seen = set()
+    total = 0.0
+    probed = False
+    for path in paths or ():
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        duration = get_media_duration(path)
+        if duration:
+            total += float(duration)
+            probed = True
+    return total if probed else None
+
+
 # Separator before FF: ':' = non-drop; ';' (and the rarer '.'/',') = drop.
 _TIMECODE_RE = re.compile(r"^(\d+):(\d+):(\d+)([:;.,])(\d+)$")
+
+
+def is_drop_frame_rate(framerate: float) -> bool:
+    """True only for the fractional NTSC rates that HAVE a drop-frame count
+    (29.97, 59.94, 119.88). Integer rates, 23.976 and 25 never drop frames,
+    so a ';' separator in their timecode tag is a mislabelled camera, not
+    drop-frame timecode."""
+    try:
+        fr = float(framerate)
+    except (TypeError, ValueError):
+        return False
+    nominal = int(round(fr))
+    if nominal <= 0 or nominal % 30 != 0:
+        return False
+    return abs(fr - nominal) > 1e-3
 
 
 def timecode_to_frames(tc: str, framerate: float) -> int | None:
@@ -620,7 +658,11 @@ def get_video_start_timecode(path: str, framerate: float) -> dict | None:
                 if frames is None:
                     continue
                 m = _TIMECODE_RE.match(tc.strip())
-                is_drop = bool(m) and m.group(4) in (";", ".", ",")
+                # The separator says "drop-frame" but only a fractional NTSC
+                # timebase can carry it; a ';' tag on 24/25/30 fps media is
+                # not DF (see is_drop_frame_rate and the FCPXML writer gate).
+                is_drop = (bool(m) and m.group(4) in (";", ".", ",")
+                           and is_drop_frame_rate(framerate))
                 if frames > 0:
                     # First NONZERO wins: dual-tag media (a zero container
                     # tag plus the real camera TC on the tmcd stream, or

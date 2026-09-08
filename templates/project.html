@@ -110,29 +110,49 @@
     </div>
     <div class="btn-group">
         {% if not is_shared %}
-        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">No active style</span>
+        <span id="headerActivePill" class="header-active-pill" title="Profiles currently shaping AI suggestions">Style: Off</span>
         <a href="/" class="btn btn-sm">Projects</a>
         <a href="/my-style" class="btn btn-sm" style="text-decoration:none;">My Style</a>
         {# Tunnel disabled for beta. Re-enable with auth scoping before public release. #}
         <button class="btn btn-sm" onclick="copyShareLink()" title="Copy shareable link" style="display:none;">Share</button>
+        {# Share button + tunnel JS removed from the commercial channels
+           (2026-06-10); the /share routes 404 in app.py. The cloud share
+           portal ships on its own release line. #}
+        {# Appearance: icon only here (the Projects page carries the label). #}
+        <button class="theme-toggle" onclick="toggleTheme()" title="Switch between dark and light appearance" aria-label="Appearance">
+            <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        </button>
         <div class="gear-menu-wrap" id="gearMenuWrap">
             <button class="gear-btn" onclick="toggleGearMenu(event)" title="Settings" aria-label="Settings">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
+            {# Ordered by scope: this project's settings, then actions on its
+               media, then who else may read it, then the one destructive
+               action. Items ending in "..." open something; the others are
+               pickers or toggles and show their current stored value on the
+               right. Appearance lives on the Projects page (app wide). The
+               assistant extension inserts its item before #gearMenuDangerDivider. #}
             <div class="gear-menu" id="gearMenu">
-                <button class="gear-menu-item" onclick="closeGearMenu(); openAIModelModal();">AI Model</button>
+                <button class="gear-menu-item" onclick="closeGearMenu(); openProjectDetails();">Project details...</button>
+                <button class="gear-menu-item" onclick="closeGearMenu(); showOutputLanguage();">
+                    <span>Output Language</span>
+                    <span class="gear-menu-value" id="gearOutputLanguageValue">{{ output_language_label }}</span>
+                </button>
+                <button class="gear-menu-item" onclick="closeGearMenu(); openAIModelModal();">
+                    <span>AI Model</span>
+                    <span class="gear-menu-value" id="gearAIModelValue">{{ ai_model_label }}</span>
+                </button>
+                <div class="gear-menu-divider"></div>
                 {% if project.transcript %}
-                <button class="gear-menu-item" onclick="closeGearMenu(); showRetranscribe();">Retranscribe</button>
+                <button class="gear-menu-item" onclick="closeGearMenu(); showRetranscribe();">Retranscribe...</button>
                 {% endif %}
-                <button class="gear-menu-item" onclick="closeGearMenu(); showOutputLanguage();">Output Language</button>
+                <button class="gear-menu-item" onclick="closeGearMenu(); openRelinkMedia();">Relink media...</button>
                 {% if feature_on('studio.settings') %}
                 <button class="gear-menu-item" id="studioSettingsItem" data-studio="settings" type="button">Studio settings</button>
                 {% endif %}
-                <button class="gear-menu-item" onclick="closeGearMenu(); toggleTheme();">
-                    <span class="gear-theme-label-dark">Light theme</span>
-                    <span class="gear-theme-label-light">Dark theme</span>
-                </button>
                 <div class="gear-menu-divider"></div>
+                <div class="gear-menu-divider" id="gearMenuDangerDivider"></div>
                 <button class="gear-menu-item gear-menu-danger" onclick="closeGearMenu(); deleteProject();">Delete project</button>
             </div>
         </div>
@@ -147,7 +167,7 @@
 
 {% if not is_shared %}{% include '_ai_model_modal.html' %}{% endif %}
 
-<div class="container-wide" data-project-id="{{ project.id }}" data-project-status="{{ project.status }}">
+<div class="container-wide" data-project-id="{{ project.id }}" data-project-status="{{ project.status }}" data-analysis-present="{{ 'true' if project.analysis else 'false' }}">
     <div class="page-title-area">
         <div>
             <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
@@ -284,10 +304,26 @@
                             queued: 'Starting…',
                             extract_audio: 'Extracting audio…',
                             load_model: 'Loading the transcription engine…',
+                            load_audio: 'Reading audio…',
                             transcribing: 'Transcribing…',
                         };
                         statusText.textContent = state.label || PHASE_LABELS[phase]
                             || (phase.charAt(0).toUpperCase() + phase.slice(1).replace(/_/g, ' ')) + '…';
+                    }
+                    // Engine fallback: Parakeet could not run this file and the
+                    // job moved to Whisper. Say so, once, instead of letting the
+                    // bar silently drop back to 5% and crawl.
+                    const FALLBACK_NOTE = state.fallback_from
+                        ? 'Fast engine unavailable on this file, using the slower Whisper engine (this can take several times the media length).'
+                        : '';
+                    if (timeText && phase === 'load_audio') {
+                        const totalMin = state.audio_sec ? Math.max(1, Math.round(state.audio_sec / 60)) : 0;
+                        const parts = [];
+                        if (totalMin) parts.push(`${totalMin} min of audio`);
+                        if (FALLBACK_NOTE) parts.push(FALLBACK_NOTE);
+                        timeText.textContent = parts.join(' · ');
+                    } else if (timeText && phase === 'load_model' && FALLBACK_NOTE) {
+                        timeText.textContent = FALLBACK_NOTE;
                     }
                     if (fill && pct !== null) {
                         fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
@@ -320,6 +356,9 @@
                                 label = (label ? label + ' · ' : '') +
                                     'No progress for a while — the engine may be working through a hard section, or stalled.';
                             }
+                        }
+                        if (FALLBACK_NOTE) {
+                            label = (label ? label + ' · ' : '') + FALLBACK_NOTE;
                         }
                         timeText.textContent = label;
                     }
@@ -501,7 +540,7 @@
 
         <!-- Summary (from AI analysis) -->
         {% if project.analysis and project.analysis.summary %}
-        <div class="left-section sidebar-block sidebar-story">
+        <div class="left-section sidebar-block sidebar-story" id="sidebarSummary">
             <div class="card-title">Summary</div>
             {% if project.analysis.suggested_title %}
             <div class="sidebar-story-title">{{ project.analysis.suggested_title }}</div>
@@ -522,7 +561,7 @@
         <div class="left-section story-only-section" id="storyClipLibrarySidebar" style="display:none;">
             <div class="card-title" style="margin-bottom: 0.5rem;">Your Clips</div>
             <div class="story-clip-library-empty" id="storyClipEmpty">
-                <p>Clips from Transcript or Chat appear here.</p>
+                <p>Clips you pull from any tab appear here. Add one to the current story with + Story.</p>
             </div>
             <div class="story-clip-library-list" id="storyClipList"></div>
         </div>
@@ -578,6 +617,14 @@
 
     <!-- Transcript Tab -->
     <div class="tab-content active" id="tab-transcript">
+                {% if project.engine_fallback_from %}
+                {# Written by the transcribe job when Parakeet could not run this
+                   file and Whisper produced the transcript instead. #}
+                <div class="my-style-banner" id="engineFallbackNote">
+                    Transcribed with the Whisper engine: the fast engine could not process this file.
+                    Transcribe Again retries the fast engine.
+                </div>
+                {% endif %}
                 {% if project.transcript.truncated_for_trial %}
                 {# Trial-truncation notice. transcript.truncated_for_trial is baked
                    into the stored transcript by core/transcribe.py on the trial
@@ -686,8 +733,12 @@
                 <div class="clips-grid" id="clipsPendingGrid"></div>
                 <div class="clips-grid" id="clipsGrid">
                     <div class="empty-state" id="clipsEmpty">
-                        <h3>No clips yet</h3>
-                        <p>Highlight sections in the Transcript tab or ask the AI in Chat to discover clips.</p>
+                        <h3>Nothing pulled yet</h3>
+                        <p>Use + on any moment in AI Analysis, Chat, or Story Brief, or paint a color label over words in the Transcript.</p>
+                        <div class="empty-state-actions">
+                            <button class="btn btn-sm" type="button" onclick="switchTab('analysis')">Go to AI Analysis</button>
+                            <button class="btn btn-sm" type="button" onclick="switchTab('chat')">Go to Chat</button>
+                        </div>
                     </div>
                 </div>
     </div>
@@ -712,16 +763,6 @@
             <button class="btn btn-sm btn-green" onclick="addAllAnalysisClips()">Add All Clips</button>
         </div>
 
-        <!-- Summary -->
-        {% if project.analysis.summary %}
-        <div class="analysis-summary">
-            {% if project.analysis.suggested_title %}
-            <h2 class="analysis-title">{{ project.analysis.suggested_title }}</h2>
-            {% endif %}
-            <p>{{ project.analysis.summary }}</p>
-        </div>
-        {% endif %}
-
         <!-- Soundbites -->
         {% if project.analysis.get('strongest_soundbites', []) %}
         <div class="analysis-section-header">
@@ -734,7 +775,12 @@
         </div>
         <div class="analysis-list">
             {% for sb in project.analysis.strongest_soundbites %}
-            <div class="analysis-item" data-clip-start="{{ sb.start }}" data-clip-end="{{ sb.start }}">
+            {# Soundbites read like clips (1.0.47): a generated title, the first
+               line of the quote under it, the reason, and Show text for the
+               whole transcript of the range. Titles missing here are filled by
+               dozaRequestSoundbiteTitles after load. #}
+            <div class="analysis-item analysis-soundbite" data-clip-start="{{ sb.start }}" data-clip-end="{{ sb.end or sb.start }}" data-sb-index="{{ loop.index0 }}"
+                 data-sb-start="{{ sb.start }}" data-sb-end="{{ sb.end or '' }}" data-sb-title="{{ sb.title or '' }}">
                 <div style="flex:1; min-width:0;">
                     <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;">
                         <div class="analysis-item-left">
@@ -742,14 +788,24 @@
                                 <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="6,3 20,12 6,21"/></svg>
                                 <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
                             </button>
-                            <div>
-                                <div class="analysis-item-title" style="font-style: italic;">"{{ sb.text }}"</div>
-                                <div class="analysis-item-desc">{{ sb.why }}</div>
+                            <div style="min-width:0; flex:1;">
+                                {% if sb.title %}
+                                <div class="analysis-item-title">{{ sb.title }}</div>
+                                {% else %}
+                                <div class="analysis-item-title analysis-title-pending">Naming clip&hellip;</div>
+                                {% endif %}
+                                <div class="analysis-item-lead" data-sb-quote="{{ sb.text }}">{{ sb.text }}</div>
+                                {% if sb.why %}<div class="analysis-item-desc">{{ sb.why }}</div>{% endif %}
+                                <div class="analysis-item-expand" onclick="this.closest('.analysis-item').classList.toggle('expanded')" title="Show the clip's transcript">
+                                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg>
+                                    <span class="clip-expand-label">Show text</span>
+                                </div>
+                                <div class="analysis-item-transcript"></div>
                             </div>
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ sb.start }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ sb.start }}'), parseTc('{{ sb.start }}') + 15, '{{ sb.text[:40] | replace("'", "") }}',this)">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" title="Add to Clips" onclick="addSoundbiteClip(this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -782,11 +838,16 @@
                             <div>
                                 <div class="analysis-item-title">{{ beat.label }}</div>
                                 <div class="analysis-item-desc">{{ beat.description }}</div>
+                                <div class="analysis-item-expand" onclick="this.closest('.analysis-item').classList.toggle('expanded')" title="Show the clip's transcript">
+                                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg>
+                                    <span class="clip-expand-label">Show text</span>
+                                </div>
+                                <div class="analysis-item-transcript"></div>
                             </div>
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ beat.start }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ beat.start }}'), parseTc('{{ beat.end }}'), '{{ beat.label | replace("'", "") }}',this)">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" title="Add to Clips" onclick="addClipFromChat(parseTc('{{ beat.start }}'), parseTc('{{ beat.end }}'), '{{ beat.label | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -820,11 +881,16 @@
                                 <div class="analysis-item-title">{{ clip.title }}</div>
                                 <div class="analysis-item-desc">{{ clip.why }}</div>
                                 {% if clip.platform %}<span class="analysis-platform">{{ clip.platform }}</span>{% endif %}
+                                <div class="analysis-item-expand" onclick="this.closest('.analysis-item').classList.toggle('expanded')" title="Show the clip's transcript">
+                                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg>
+                                    <span class="clip-expand-label">Show text</span>
+                                </div>
+                                <div class="analysis-item-transcript"></div>
                             </div>
                         </div>
                         <div class="analysis-item-right">
                             <span class="analysis-item-tc">{{ clip.start }} – {{ clip.end }}</span>
-                            <button class="btn btn-sm btn-green analysis-add" onclick="addClipFromChat(parseTc('{{ clip.start }}'), parseTc('{{ clip.end }}'), '{{ clip.title | replace("'", "") }}',this)">+ Clip</button>
+                            <button class="btn btn-sm btn-green analysis-add" title="Add to Clips" onclick="addClipFromChat(parseTc('{{ clip.start }}'), parseTc('{{ clip.end }}'), '{{ clip.title | replace("'", "") }}',this)">+ Clip</button>
                         </div>
                     </div>
                     <div class="analysis-scrub" onclick="scrubAnalysisItem(event, this)"><div class="analysis-scrub-fill"></div></div>
@@ -838,7 +904,7 @@
         <div class="card">
             <div class="empty-state" id="preAnalysis">
                 <h3>Run AI Analysis</h3>
-                <p>Analyze the transcript for story structure and social media clip opportunities.</p>
+                <p>Analyze the transcript for story structure and social media clip opportunities. Chat, Story Brief, and the Export tab's AI categories all build on this.</p>
                 <button class="btn btn-purple" style="margin-top: 1rem;" id="runAnalysisBtn" onclick="runAnalysis()">
                     <span class="btn-label">Run Analysis</span>
                 </button>
@@ -873,6 +939,13 @@
                             <p class="chat-welcome-hint">or just ask me anything about this interview</p>
                         </div>
                     </div>
+                    <div class="story-rail" id="storyRail" style="display:none;">
+                        <div class="story-rail-row story-rail-meta">
+                            <span id="storyMakingLine" class="story-rail-chip" style="display:none;" title="What you told me you're making — click to forget it"></span>
+                            <span id="storyPassed" class="story-rail-chip" onclick="toggleStoryPassed()" title="Moments you passed on"></span>
+                        </div>
+                        <div class="story-rail-passed" id="storyPassedList" style="display:none;"></div>
+                    </div>
                     <div class="chat-input-area">
                         <button class="my-style-pill" id="chatStylePill" onclick="toggleMyStylePill()" style="display:none;" title="Toggle My Style for AI suggestions">
                             <span class="my-style-pill-dot"></span>
@@ -882,10 +955,9 @@
                             </span>
                         </button>
                         <span class="project-style-selector" id="chatProfileSelectorWrap" style="display:none;">
-                            style:
-                            <select id="chatProfileSelector" onchange="onSessionProfileChange(this.value)"></select>
+                            <select id="chatProfileSelector" onchange="onSessionProfileChange(this.value)" title="Which My Style profile shapes this chat"></select>
                         </span>
-                        <textarea class="chat-input" id="chatInput" rows="1" placeholder="What story are you looking for?  (Shift+Enter for new line)"
+                        <textarea class="chat-input" id="chatInput" rows="1" placeholder="Ask about this interview…"
                                   oninput="autoGrowChatInput(this)"
                                   onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); }"></textarea>
                         <button class="btn btn-primary chat-send" id="chatSendBtn" onclick="sendChat()">
@@ -926,8 +998,11 @@
             </div>
 
             <!-- Empty state -->
-            <div class="story-empty" id="storyEmpty">
-                <div class="story-empty-text">Describe a story and the AI will build your first cut</div>
+            <div class="story-empty" id="storyEmpty" ondragover="storySeqDragOver(event)" ondragleave="storySeqDragLeave(event)" ondrop="storySeqDrop(event)">
+                <div class="story-empty-text">Send an arc from Story Brief, drag a clip in from the left, or describe the story you want above.</div>
+                <div class="empty-state-actions">
+                    <button class="btn btn-sm" type="button" data-requires-tab="brief" onclick="switchTab('brief')">Go to Story Brief</button>
+                </div>
             </div>
 
             <!-- Loading state -->
@@ -949,7 +1024,7 @@
             </div>
 
             <!-- Sequence container (vertical timeline) -->
-            <div class="story-sequence" id="storySequence" style="display:none;">
+            <div class="story-sequence" id="storySequence" style="display:none;" ondragover="storySeqDragOver(event)" ondragleave="storySeqDragLeave(event)" ondrop="storySeqDrop(event)">
             </div>
         </div>
     </div>
@@ -957,6 +1032,11 @@
 
     <!-- Export Tab -->
     <div class="tab-content" id="tab-export">
+        <div class="export-empty-hint" id="exportEmptyHint" style="display:none;">
+            <span>No selects to export yet. Pull moments into Clips, or build a sequence in Story Builder and export it from there.</span>
+            <button class="btn btn-sm" type="button" onclick="switchTab('clips')">Go to Clips</button>
+            <button class="btn btn-sm" type="button" onclick="switchTab('story')">Go to Story Builder</button>
+        </div>
         <div class="deliver-toggle" id="deliverToggle">
             <span class="deliver-toggle-label">Deliver to</span>
             <div class="deliver-toggle-options" role="radiogroup" aria-label="Delivery method">
@@ -1016,6 +1096,13 @@
                         </label>
                     </div>
                 </div>
+                <div class="form-group export-stories" id="exportStories" style="margin-bottom: 1rem;">
+                    <label class="form-label">Story Builder sequences</label>
+                    <div class="export-categories" id="exportStoriesList">
+                        <span class="export-stories-note">No sequences yet. Build one in Story Builder and it appears here.</span>
+                    </div>
+                    <p class="export-stories-note">Each checked sequence exports as its own timeline, in story order, with the delivery chosen above.</p>
+                </div>
                 <div class="form-row" style="margin-bottom: 1rem;">
                     <div class="form-group">
                         <label class="form-label">Framerate</label>
@@ -1045,6 +1132,13 @@
                                     onclick="setRtMode(this)">Markers</button>
                         </div>
                     </div>
+                </div>
+                {# Timeline name (1.1): prefilled with the name the next export
+                   would get ("{Project} – Selects N"); an edited value is sent as
+                   timeline_name and used as is, with no counter. #}
+                <div class="form-group export-timeline-name" style="margin-bottom: 1rem;">
+                    <label class="form-label" for="rtTimelineName">Timeline name</label>
+                    <input type="text" class="form-input" id="rtTimelineName" data-default="" placeholder="Loading…" autocomplete="off" spellcheck="false" title="The name the timeline gets in Final Cut Pro and the file. Leave as is for the automatic name and number.">
                 </div>
                 <button class="btn btn-primary" id="rtExportBtn" data-export-label-key="rt-export" onclick="exportFCPXMLMulticam()" style="width:100%;">
                     Export to Final Cut Pro
@@ -1077,6 +1171,13 @@
                         </label>
                     </div>
                 </div>
+                <div class="form-group export-stories" id="exportStories" style="margin-bottom: 1rem;">
+                    <label class="form-label">Story Builder sequences</label>
+                    <div class="export-categories" id="exportStoriesList">
+                        <span class="export-stories-note">No sequences yet. Build one in Story Builder and it appears here.</span>
+                    </div>
+                    <p class="export-stories-note">Each checked sequence exports as its own timeline, in story order, with the settings below.</p>
+                </div>
                 <div class="form-row" style="margin-bottom: 1rem;">
                     <div class="form-group">
                         <label class="form-label">Framerate</label>
@@ -1098,12 +1199,17 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">Export Mode</label>
-                        <select class="form-input" id="exportMode">
-                            <option value="cuts" selected>Pre-cut Timeline</option>
-                            <option value="both">Cuts + Markers</option>
-                            <option value="markers">Markers Only</option>
+                        <select class="form-input" id="exportMode" title="Pre-cut Timeline places each select on the timeline as its own clip. Markers Only puts the whole source on the timeline with a marker at each select. Cuts + Markers does both.">
+                            <option value="cuts" selected title="Each select becomes its own clip on the timeline">Pre-cut Timeline</option>
+                            <option value="both" title="Pre-cut clips plus a marker at each select">Cuts + Markers</option>
+                            <option value="markers" title="The whole source on the timeline with a marker at each select">Markers Only</option>
                         </select>
                     </div>
+                </div>
+                {# Timeline name (1.1): see the round-trip panel's twin. #}
+                <div class="form-group export-timeline-name" style="margin-bottom: 1rem;">
+                    <label class="form-label" for="exportTimelineName">Timeline name</label>
+                    <input type="text" class="form-input" id="exportTimelineName" data-default="" placeholder="Loading…" autocomplete="off" spellcheck="false" title="The name the timeline gets in your editor and the file. Leave as is for the automatic name and number.">
                 </div>
                 <button class="btn btn-primary" id="exportFCPXMLBtn" onclick="exportFCPXML()" data-export-label-key="unified" style="width:100%;">
                     Export to FCPX
@@ -1213,6 +1319,8 @@
      same global lexical environment as the inline code that follows
      and references labelSections / colorLabels / saveLabels / etc.) -->
 <script src="/static/transcript.js"></script>
+<!-- Clip library display helpers (title, first line, titles merge; 1.0.47) -->
+<script src="/static/clip_text.js"></script>
 
 <script>
 // ── Theme Toggle ──
@@ -1235,10 +1343,10 @@ async function refreshActivePill() {
         const pill = document.getElementById('headerActivePill');
         if (!pill) return;
         if (!data.count) {
-            pill.textContent = 'No active style';
+            pill.textContent = 'Style: Off';
             pill.classList.remove('is-on');
         } else {
-            pill.textContent = 'Active: ' + (data.names || []).join(', ');
+            pill.textContent = 'Style: ' + (data.names || []).join(', ');
             pill.classList.add('is-on');
         }
     } catch (e) { /* non-blocking */ }
@@ -1407,7 +1515,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 // Hide tab content for tabs not shared, activate first visible tab
 if (IS_SHARED && Object.keys(SHARED_TABS).length > 0) {
-    const allTabNames = ['transcript', 'clips', 'analysis', 'chat', 'story', 'export'];
+    const allTabNames = ['transcript', 'clips', 'analysis', 'chat', 'brief', 'story', 'export'];
     let firstVisible = null;
     allTabNames.forEach(name => {
         if (SHARED_TABS[name] === false) {
@@ -1437,6 +1545,215 @@ document.addEventListener('click', (e) => {
     }
 });
 
+// Current values shown beside the gear menu's pickers. Re-read after the
+// AI Model modal or the Output Language panel saves, so the menu never shows
+// a default when the stored value differs.
+async function dozaRefreshGearValues() {
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/settings-summary`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const d = await res.json();
+        const ai = document.getElementById('gearAIModelValue');
+        const lang = document.getElementById('gearOutputLanguageValue');
+        if (ai && d.ai_model_label) ai.textContent = d.ai_model_label;
+        if (lang && d.output_language_label) lang.textContent = d.output_language_label;
+    } catch (e) { /* menu keeps the value rendered with the page */ }
+}
+window.dozaRefreshGearValues = dozaRefreshGearValues;
+
+// "Project details...": edit name, client, interviewer, subject and speaker
+// count after creation. Same fields and rules as the New Project form (the
+// server validates both through one helper); language stays under
+// Retranscribe. Saving is storage only, nothing re-runs.
+function openProjectDetails() {
+    let overlay = document.getElementById('projectDetailsOverlay');
+    if (overlay) overlay.remove();
+    const esc = (v) => escapeHtml(v === null || v === undefined ? '' : String(v));
+    const n = parseInt(PROJECT.num_speakers, 10) || 2;
+    const speakerOptions = [1, 2, 3, 4].concat(n > 4 ? [n] : []).map(v =>
+        `<option value="${v}"${v === n ? ' selected' : ''}>${v}${v === 1 ? ' (Solo)' : (v === 2 ? ' (Interview)' : '')}</option>`
+    ).join('');
+    overlay = document.createElement('div');
+    overlay.id = 'projectDetailsOverlay';
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 460px;">
+            <h2>Project details</h2>
+            <div class="form-group">
+                <label class="form-label">Project Name</label>
+                <input type="text" class="form-input" id="editProjectName" value="${esc(PROJECT.name)}" placeholder="e.g. Pedro Reyes Artist Profile">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Client</label>
+                <input type="text" class="form-input" id="editClientName" value="${esc(PROJECT.client_name)}" placeholder="e.g. Fidelity Art Collection">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">Interviewer Name</label>
+                    <input type="text" class="form-input" id="editInterviewerName" value="${esc(PROJECT.interviewer_name)}" placeholder="Interviewer">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Subject Name</label>
+                    <input type="text" class="form-input" id="editSubjectName" value="${esc(PROJECT.subject_name)}" placeholder="e.g. Pedro Reyes">
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Number of Speakers</label>
+                <select class="form-input" id="editNumSpeakers">${speakerOptions}</select>
+                <p style="font-size:0.72rem; color:var(--text-muted); margin:0.35rem 0 0; line-height:1.4;">
+                    Changes the stored count only. Transcription and speaker detection do not re-run. Language is changed under Retranscribe.
+                </p>
+            </div>
+            <div id="projectDetailsError" style="display:none; color: var(--red); font-size: 0.82rem; margin-top: 0.5rem;"></div>
+            <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
+                <button class="btn btn-sm" onclick="document.getElementById('projectDetailsOverlay').remove()">Cancel</button>
+                <button class="btn btn-sm btn-primary" id="projectDetailsSaveBtn" onclick="saveProjectDetails()">Save</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    overlay.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); saveProjectDetails(); } });
+    const first = document.getElementById('editProjectName');
+    if (first) { first.focus(); first.select(); }
+}
+window.openProjectDetails = openProjectDetails;
+
+async function saveProjectDetails() {
+    const btn = document.getElementById('projectDetailsSaveBtn');
+    const err = document.getElementById('projectDetailsError');
+    const body = {
+        name: document.getElementById('editProjectName').value,
+        client_name: document.getElementById('editClientName').value,
+        interviewer_name: document.getElementById('editInterviewerName').value,
+        subject_name: document.getElementById('editSubjectName').value,
+        num_speakers: parseInt(document.getElementById('editNumSpeakers').value, 10) || 2,
+    };
+    if (!body.name.trim()) {
+        if (err) { err.textContent = 'Name cannot be empty'; err.style.display = ''; }
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/details`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Could not save project details');
+        const speakersChanged = (data.changed || []).includes('num_speakers');
+        Object.assign(PROJECT, data.project || {});
+        const title = document.querySelector('.page-title');
+        if (title && PROJECT.name) title.textContent = PROJECT.name;
+        document.title = (PROJECT.name || 'Project') + ' - Doza Assist';
+        const overlay = document.getElementById('projectDetailsOverlay');
+        if (overlay) overlay.remove();
+        showToast('Project details saved');
+        // The speaker seeding and the speaker banner are rendered with the
+        // page from the stored count, so a changed count reloads once.
+        if (speakersChanged) setTimeout(() => location.reload(), 600);
+    } catch (e) {
+        if (err) { err.textContent = e.message; err.style.display = ''; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
+}
+
+// "Relink media...": point the project at a moved source file. Storage only:
+// the stored path changes, nothing re-runs and no export code is involved.
+// Electron offers its file dialog through window.dozaBatch; a browser build
+// falls back to typing the full path.
+function openRelinkMedia() {
+    let overlay = document.getElementById('relinkOverlay');
+    if (overlay) overlay.remove();
+    const current = PROJECT.source_path || PROJECT.filepath || '';
+    const canDialog = !!(window.dozaBatch && typeof window.dozaBatch.openFileDialog === 'function');
+    overlay = document.createElement('div');
+    overlay.id = 'relinkOverlay';
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `
+        <div class="modal" style="max-width: 480px;">
+            <h2>Relink media</h2>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                Choose the moved or renamed source file. The transcript, analysis and clips stay as they are.
+            </p>
+            <div class="form-group">
+                <label class="form-label">Current file</label>
+                <div style="font-family: var(--mono); font-size: 0.75rem; color: var(--text-muted); word-break: break-all;">${escapeHtml(current || 'No path recorded')}</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">New file</label>
+                <div style="display:flex; gap:0.5rem; align-items:center;">
+                    <input type="text" class="form-input" id="relinkPath" placeholder="${canDialog ? 'Choose a file' : 'Full path to the file'}" ${canDialog ? 'readonly' : ''} style="flex:1;">
+                    ${canDialog ? '<button class="btn btn-sm" type="button" onclick="chooseRelinkFile()">Choose file...</button>' : ''}
+                </div>
+            </div>
+            <div id="relinkWarning" style="display:none; margin-top: 0.5rem; padding: 0.6rem 0.75rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-hover); font-size: 0.82rem; color: var(--text-primary);"></div>
+            <div id="relinkError" style="display:none; color: var(--red); font-size: 0.82rem; margin-top: 0.5rem;"></div>
+            <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1.25rem;">
+                <button class="btn btn-sm" onclick="document.getElementById('relinkOverlay').remove()">Cancel</button>
+                <button class="btn btn-sm btn-primary" id="relinkBtn" onclick="submitRelink(false)">Relink</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    if (canDialog) chooseRelinkFile();
+    else { const inp = document.getElementById('relinkPath'); if (inp) inp.focus(); }
+}
+window.openRelinkMedia = openRelinkMedia;
+
+async function chooseRelinkFile() {
+    try {
+        const p = await window.dozaBatch.openFileDialog({ title: 'Choose the moved source file' });
+        const inp = document.getElementById('relinkPath');
+        if (p && inp) inp.value = p;
+    } catch (e) { /* cancelled */ }
+}
+
+async function submitRelink(force) {
+    const inp = document.getElementById('relinkPath');
+    const err = document.getElementById('relinkError');
+    const warn = document.getElementById('relinkWarning');
+    const btn = document.getElementById('relinkBtn');
+    const path = (inp && inp.value || '').trim();
+    if (!path) { if (err) { err.textContent = 'Choose a file first'; err.style.display = ''; } return; }
+    if (err) err.style.display = 'none';
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/relink-media`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_path: path, force: !!force }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 409 && data.warning) {
+            // Length differs by more than a second: say so and let the editor
+            // decide. Default focus stays on Cancel, the safe choice.
+            if (warn) {
+                warn.style.display = '';
+                warn.innerHTML = `<div style="margin-bottom:0.5rem;">This file is a different length than the original. Timecodes may not line up.</div>
+                    <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+                        <button class="btn btn-sm" id="relinkCancelBtn" onclick="document.getElementById('relinkOverlay').remove()">Cancel</button>
+                        <button class="btn btn-sm" onclick="submitRelink(true)">Relink anyway</button>
+                    </div>`;
+                const c = document.getElementById('relinkCancelBtn'); if (c) c.focus();
+            }
+            if (btn) { btn.disabled = false; btn.textContent = 'Relink'; }
+            return;
+        }
+        if (!res.ok) throw new Error(data.error || 'Could not relink the media');
+        Object.assign(PROJECT, { source_path: data.source_path, filepath: data.source_path, filename: data.filename });
+        const overlay = document.getElementById('relinkOverlay');
+        if (overlay) overlay.remove();
+        showToast('Media relinked');
+        // The file name, size and the missing-file notice are rendered with
+        // the page, so reload once to show the new source.
+        setTimeout(() => location.reload(), 600);
+    } catch (e) {
+        if (err) { err.textContent = e.message; err.style.display = ''; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Relink'; }
+    }
+}
+
 function toggleGearMenu(e) {
     if (e) e.stopPropagation();
     document.getElementById('gearMenu').classList.toggle('open');
@@ -1445,7 +1762,8 @@ function closeGearMenu() {
     document.getElementById('gearMenu').classList.remove('open');
 }
 
-const KNOWN_TABS = ['transcript', 'clips', 'analysis', 'chat', 'story', 'export'];
+// 'brief' is the Story Brief tab the Pro extension injects after Chat.
+const KNOWN_TABS = ['transcript', 'clips', 'analysis', 'chat', 'brief', 'story', 'export'];
 
 // Reload the page after an action while preserving which tab the user was on.
 // Without this, location.reload() always lands the user back on the transcript
@@ -1457,8 +1775,20 @@ function reloadAndKeepTab(tabName) {
     location.reload();
 }
 
+// Buttons that jump to a tab another extension provides (the Story Brief
+// tab is injected by the Pro extension): hide them when that tab is absent
+// so an empty state never offers a dead link.
+function _syncTabLinks() {
+    document.querySelectorAll('[data-requires-tab]').forEach(el => {
+        const name = el.getAttribute('data-requires-tab');
+        el.style.display = document.getElementById('tab-' + name) ? '' : 'none';
+    });
+}
+window.addEventListener('DOMContentLoaded', _syncTabLinks);
+
 // ── Tab Switching ──
 function switchTab(tab) {
+    _syncTabLinks();
     // Null-guarded: callers may run on page variants where a tab's content
     // div doesn't render (e.g. no transcript yet) — a throw here would
     // abort the caller mid-flight (review-caught in runAnalysis).
@@ -1499,6 +1829,12 @@ function switchTab(tab) {
     const speakerSec = document.getElementById('speakerSection');
     if (speakerSec) {
         speakerSec.style.display = (tab === 'story') ? 'none' : '';
+    }
+    // Story Builder: the left column is for stories and clips; the analysis
+    // summary comes back on every other tab.
+    const summaryBlock = document.getElementById('sidebarSummary');
+    if (summaryBlock) {
+        summaryBlock.style.display = (tab === 'story') ? 'none' : '';
     }
 
     // Load story builds when switching to story tab
@@ -2016,7 +2352,7 @@ window.addEventListener('DOMContentLoaded', initTrackDropdown);
  * set to videoEl or audioEl based on the project's media type.
  */
 window.dozaProjectPlay = function (startSec, endSec) {
-    if (!audio) return;
+    if (!audio) return null;
     try {
         audio.currentTime = startSec;
         audio.play();
@@ -2033,6 +2369,9 @@ window.dozaProjectPlay = function (startSec, endSec) {
         };
         setTimeout(_checkPause, 250);
     }
+    // Hand the element back so extensions can reflect playing state
+    // (the Story Brief lights the beat's play button until pause/end).
+    return audio;
 };
 
 /**
@@ -2064,13 +2403,11 @@ window.addClipsToStoryBuilder = async function (payload) {
         var title = arcTitle;
         if (payload.segments.length > 1) title += ' · pt ' + (i + 1);
         if (speaker) title += ' (' + speaker + ')';
-        // Editorial note: per-segment note if available, otherwise a
-        // truncated transcript excerpt so each clip has unique context
+        // Editorial note: only a per-segment note. The arc-level note is
+        // stored once as build.reasoning (rendered above the cards) instead
+        // of being copied onto every card, and the transcript excerpt has
+        // its own disclosure on the card, so it is not duplicated here.
         var note = s.editorial_note || s.why_it_lands || '';
-        if (!note && quote) {
-            note = quote.length > 160 ? quote.substring(0, 157) + '…' : quote;
-        }
-        if (!note) note = arcNote;
         return {
             id: i,
             start_time: s.timecode_start || '00:00:00',
@@ -2108,6 +2445,266 @@ function _tcToSec(tc) {
     if (parts.length !== 3) return 0;
     return (parseInt(parts[0],10)||0)*3600 + (parseInt(parts[1],10)||0)*60 + (parseInt(parts[2],10)||0);
 }
+
+/**
+ * Add one moment to the project's Clip Library through the same path the
+ * AI Analysis "+ Clip" and Chat "Pull Clips" buttons use: push onto
+ * labelSections, repaint, save via POST /project/<id>/labels, refresh the
+ * Clips tab and the Story Builder's clip sidebar. Called by the Story
+ * Brief tab's per-moment "+" (1.0.47).
+ *
+ * clip: { start, end (seconds), title, speaker, color?, project_id? }
+ * Returns { status: 'added' | 'duplicate' | 'invalid', id } where id is the
+ * labelSections id of the new or matching clip. A duplicate is a clip on
+ * the same project with the same start and end (within half a second).
+ */
+window.dozaAddClipToLibrary = function (clip) {
+    if (!clip) return { status: 'invalid', id: null };
+    const start = Number(clip.start);
+    let end = Number(clip.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return { status: 'invalid', id: null };
+    if (end <= start) end = start + 0.5;
+    const pid = clip.project_id || null;
+    const existing = labelSections.find(s =>
+        Math.abs(s.start - start) < 0.5 && Math.abs(s.end - end) < 0.5
+        && (!pid || !s.project_id || s.project_id === pid));
+    if (existing) return { status: 'duplicate', id: existing.id };
+    const id = ++sectionIdCounter;
+    const entry = {
+        id,
+        start,
+        end,
+        color: clip.color || 'green',
+        text: String(clip.title || 'Clip').slice(0, 200),
+    };
+    if (clip.speaker) entry.speaker = String(clip.speaker).slice(0, 120);
+    if (pid) entry.project_id = pid;
+    labelSections.push(entry);
+    renderAllHighlights();
+    updateSelectCount();
+    saveLabels();
+    renderClipsTab();
+    if (typeof renderStoryClipLibrary === 'function') renderStoryClipLibrary();
+    return { status: 'added', id };
+};
+
+/**
+ * Give untitled clips a real title (1.0.47). Called after every labels save
+ * (transcript.js) and once at load. Sends the clips that still lack a title
+ * to POST /project/<id>/clips/titles, merges the titles it gets back, saves
+ * so the stored array carries them, and re-renders the library views.
+ * Clips the route could not title are left alone for this page load so a
+ * model that is down never causes a save loop.
+ */
+let _clipTitlesInFlight = false;
+let _clipTitlesQueued = false;
+window.dozaRequestClipTitles = async function () {
+    const helpers = window.dozaClipText;
+    if (!helpers) return;
+    if (_clipTitlesInFlight) { _clipTitlesQueued = true; return; }
+    const pending = labelSections.filter(helpers.needsTitle);
+    if (pending.length === 0) return;
+    _clipTitlesInFlight = true;
+    pending.forEach(s => { s._titling = true; });
+    renderClipsTab();
+    if (typeof renderStoryClipLibrary === 'function') renderStoryClipLibrary();
+    let changed = 0;
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/clips/titles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sections: pending.map(s => ({ start: s.start, end: s.end, text: s.text || '' })),
+            }),
+        });
+        const data = res.ok ? await res.json() : {};
+        (data.titles || []).forEach(item => {
+            if (item && item.title && helpers.applyTitle(labelSections, item)) changed++;
+        });
+        if (data.error) console.warn('[clip titles]', data.error);
+    } catch (e) {
+        console.warn('[clip titles] request failed', e);
+    } finally {
+        pending.forEach(s => {
+            delete s._titling;
+            if (!s.title) s._titleFailed = true;
+        });
+        _clipTitlesInFlight = false;
+    }
+    renderClipsTab();
+    if (typeof renderStoryClipLibrary === 'function') renderStoryClipLibrary();
+    if (changed > 0) saveLabels();
+    if (_clipTitlesQueued) {
+        _clipTitlesQueued = false;
+        window.dozaRequestClipTitles();
+    }
+};
+
+/**
+ * AI Analysis soundbites (1.0.47): the same title, first line and Show text
+ * as the clip library. Leads and transcripts come from the page's own
+ * transcript; titles missing from the saved analysis come from
+ * POST /project/<id>/analysis/soundbite-titles, which stores them so the
+ * next load renders them server side.
+ */
+function soundbiteRange(item) {
+    const start = parseTc(item.dataset.sbStart);
+    const rawEnd = item.dataset.sbEnd ? parseTc(item.dataset.sbEnd) : NaN;
+    const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : start + 15;
+    return { start, end };
+}
+
+function fillSoundbiteText() {
+    const helpers = window.dozaClipText;
+    document.querySelectorAll('.analysis-soundbite').forEach(item => {
+        const { start, end } = soundbiteRange(item);
+        const transcript = window.dozaTranscriptForRange(start, end);
+        const lead = item.querySelector('.analysis-item-lead');
+        const box = item.querySelector('.analysis-item-transcript');
+        const quote = lead ? (lead.dataset.sbQuote || lead.textContent) : '';
+        if (lead && helpers) lead.textContent = helpers.firstLine(transcript || quote);
+        if (box) box.textContent = transcript || quote;
+        const expand = item.querySelector('.analysis-item-expand');
+        if (expand && !(transcript || quote)) expand.style.display = 'none';
+    });
+}
+
+// Story beats and social clips (2026-09-07): the same Show text as the
+// soundbites and the clip library — every clip you can play shows its
+// words. The range comes from the row's own data-clip-start / end.
+function fillAnalysisTranscripts() {
+    document.querySelectorAll('.analysis-item:not(.analysis-soundbite)').forEach(item => {
+        const box = item.querySelector('.analysis-item-transcript');
+        const expand = item.querySelector('.analysis-item-expand');
+        if (!box) return;
+        const start = parseTc(item.dataset.clipStart);
+        const rawEnd = parseTc(item.dataset.clipEnd);
+        const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : start + 15;
+        const transcript = Number.isFinite(start) ? window.dozaTranscriptForRange(start, end) : '';
+        box.textContent = transcript || '';
+        if (expand && !transcript) expand.style.display = 'none';
+    });
+}
+
+let _soundbiteTitlesRequested = false;
+window.dozaRequestSoundbiteTitles = async function () {
+    if (_soundbiteTitlesRequested) return;
+    const pending = document.querySelectorAll('.analysis-soundbite:not([data-sb-title]), .analysis-soundbite[data-sb-title=""]');
+    if (pending.length === 0) return;
+    _soundbiteTitlesRequested = true;
+    try {
+        const res = await fetch(`/project/${PROJECT_ID}/analysis/soundbite-titles`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const data = res.ok ? await res.json() : {};
+        (data.titles || []).forEach(t => {
+            if (!t || !t.title) return;
+            const item = document.querySelector(`.analysis-soundbite[data-sb-index="${t.index}"]`);
+            if (!item) return;
+            item.dataset.sbTitle = t.title;
+            const el = item.querySelector('.analysis-item-title');
+            if (el) { el.textContent = t.title; el.classList.remove('analysis-title-pending'); }
+        });
+        if (data.error) console.warn('[soundbite titles]', data.error);
+    } catch (e) {
+        console.warn('[soundbite titles] request failed', e);
+    }
+    // Anything still unnamed shows its quote rather than a stuck label.
+    document.querySelectorAll('.analysis-soundbite .analysis-title-pending').forEach(el => {
+        const lead = el.parentElement.querySelector('.analysis-item-lead');
+        el.textContent = lead ? (lead.dataset.sbQuote || lead.textContent) : 'Soundbite';
+        el.classList.remove('analysis-title-pending');
+    });
+};
+
+function addSoundbiteClip(btn) {
+    const item = btn.closest('.analysis-soundbite');
+    if (!item) return;
+    const { start, end } = soundbiteRange(item);
+    const lead = item.querySelector('.analysis-item-lead');
+    const title = item.dataset.sbTitle || (lead ? (lead.dataset.sbQuote || '').slice(0, 40) : 'Soundbite');
+    addClipFromChat(start, end, title, btn);
+}
+
+/**
+ * Title, first line and full transcript for one library clip.
+ */
+function clipDisplayParts(clip) {
+    const helpers = window.dozaClipText;
+    const transcript = window.dozaTranscriptForRange(clip.start, clip.end);
+    const title = helpers ? helpers.displayTitle(clip) : (clip.title || clip.text || 'Untitled clip');
+    const lead = helpers ? helpers.firstLine(transcript || clip.text) : (transcript || clip.text || '');
+    return { title, lead, transcript: transcript || (clip.text || '') };
+}
+
+/**
+ * The words spoken between two times, read from the transcript's word
+ * spans on this page. Used by the Story Brief's per-moment Transcript
+ * disclosure (1.0.47). Returns '' when the range holds no words.
+ */
+window.dozaTranscriptForRange = function (startSec, endSec) {
+    const s = Number(startSec), e = Number(endSec);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return '';
+    if (typeof allWords === 'undefined' || !allWords || !allWords.length) return '';
+    const words = allWords.filter(w => {
+        const ws = parseFloat(w.dataset.s);
+        return ws >= s && ws < e;
+    });
+    return words.map(w => w.textContent).join('').replace(/\s+/g, ' ').trim();
+};
+
+/**
+ * The speaker who talks most in a time range, resolved through the
+ * project's speaker names, read from the transcript segments this page was
+ * rendered with. Lets a Story Brief built before speaker detection show
+ * the right name (1.0.47). Returns '' when the range has no segments.
+ */
+window.dozaResolveSpeaker = function (startSec, endSec) {
+    const s = Number(startSec), e = Number(endSec);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return '';
+    const proj = (typeof PROJECT !== 'undefined' && PROJECT) ? PROJECT : null;
+    const segs = (proj && proj.transcript && Array.isArray(proj.transcript.segments))
+        ? proj.transcript.segments : [];
+    if (!segs.length) return '';
+    const names = (proj && proj.speaker_names && typeof proj.speaker_names === 'object') ? proj.speaker_names : {};
+    const talk = new Map();
+    for (const seg of segs) {
+        const ss = Number(seg.start), se = Number(seg.end);
+        if (!Number.isFinite(ss)) continue;
+        const segEnd = Number.isFinite(se) && se > ss ? se : ss + 0.01;
+        if (segEnd <= s) continue;
+        if (ss >= e) break;
+        const overlap = Math.min(segEnd, e) - Math.max(ss, s);
+        if (overlap <= 0) continue;
+        const label = String(seg.speaker || '').trim();
+        if (!label) continue;
+        talk.set(label, (talk.get(label) || 0) + overlap);
+    }
+    if (!talk.size) return '';
+    let best = '', bestDur = -1;
+    talk.forEach((dur, label) => { if (dur > bestDur) { bestDur = dur; best = label; } });
+    const mapped = names[best];
+    return (typeof mapped === 'string' && mapped.trim()) ? mapped.trim() : best;
+};
+
+/**
+ * Open the Clips tab and flash the given clips (labelSections ids), the
+ * way the Collection page's View action does.
+ */
+window.dozaRevealClips = function (ids) {
+    const wanted = (ids || []).filter(v => v !== null && v !== undefined);
+    if (typeof switchTab === 'function') switchTab('clips');
+    if (!wanted.length) return;
+    const grid = document.getElementById('clipsGrid');
+    if (!grid) return;
+    const nodes = wanted
+        .map(id => grid.querySelector(`[data-clip-id="${id}"]`))
+        .filter(Boolean);
+    if (!nodes.length) return;
+    nodes[0].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    nodes.forEach(n => n.classList.add('clip-just-added'));
+    setTimeout(() => nodes.forEach(n => n.classList.remove('clip-just-added')), 1800);
+};
 
 // Detect manual scrolling to pause auto-scroll
 if (transcriptContainer) {
@@ -2547,7 +3144,13 @@ window.rebuildWordIndex = function rebuildWordIndex() {
     if (typeof transcriptInit === 'function') {
         transcriptInit({
             colorLabels:     colorLabels,
-            labeledSections: labelSections.map(s => ({ start: s.start, end: s.end, color: s.color, text: s.text })),
+            labeledSections: labelSections.map(s => {
+                const out = { start: s.start, end: s.end, color: s.color, text: s.text };
+                if (s.speaker) out.speaker = s.speaker;
+                if (s.title) out.title = s.title;
+                if (s.title_auto) out.title_auto = true;
+                return out;
+            }),
             segmentVectors:  segmentVectors,
             preserveBrush:   true,
         });
@@ -2672,6 +3275,17 @@ transcriptInit({
 // saveLabels() POST (transcript.js reads this binding via typeof).
 let clipOrderMode = {{ (project.clip_order_mode or 'time')|tojson }};
 transcriptSearchInit(transcriptContainer);
+// Clips saved before 1.0.47 (or while the model was down) have no title
+// yet: ask for them once the page is up. The request is a no-op when every
+// clip already has one.
+window.addEventListener('load', () => {
+    try { fillSoundbiteText(); } catch (e) { console.warn('soundbite text', e); }
+    try { fillAnalysisTranscripts(); } catch (e) { console.warn('analysis transcripts', e); }
+    setTimeout(() => {
+        if (typeof window.dozaRequestClipTitles === 'function') window.dozaRequestClipTitles();
+        if (typeof window.dozaRequestSoundbiteTitles === 'function') window.dozaRequestSoundbiteTitles();
+    }, 1500);
+});
 
 // ── Client feedback (pending) state ──
 // Items the client proposed (clips + highlights) that the editor hasn't
@@ -2742,6 +3356,8 @@ function autoGrowChatInput(el) {
     el.style.height = 'auto';
     const max = 220; // px — about 10 lines
     el.style.height = Math.min(el.scrollHeight, max) + 'px';
+    // One row hides its scrollbar; only a box taller than the cap scrolls.
+    el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
 }
 
 function sendSuggestion(btn) {
@@ -2796,48 +3412,30 @@ function _chatState() {
 // have `fillIn: true` and the `prompt` field is the STEM (with trailing
 // space) that gets dropped into the input field.
 function _promptsForState(state, myStyleOn) {
+    // Five prompts, story first. When the editor has pulled clips, the last
+    // one or two speak to those clips; before that, all five hunt for story.
+    const story = {
+        story:    { label: "What's the story here?", prompt: "Read the full transcript and tell me what story is actually being told. What's the through-line, what's the surprise, and what's the strongest narrative thread? Be specific, not generic. Respond conversationally." },
+        turns:    { label: 'Where does this interview turn?', prompt: 'Find the inflection points in this interview. Moments where the conversation shifts emotionally, the subject opens up, the energy changes, or new ground gets broken. Return each turn as a [CLIP:] marker with a note on what shifts.' },
+        bites:    { label: 'Pull the strongest soundbites', prompt: 'Identify the 8-10 strongest standalone soundbites in this transcript. Strong means quotable, self-contained, and emotionally or narratively distinctive. Return as [CLIP:] markers with a one-line note explaining why each one lands.' },
+        themes:   { label: 'What are the major themes?', prompt: 'Identify the 4-6 major themes running through this interview. For each theme, note 2-3 transcript moments that anchor it and what makes them strong examples. Return moments as [CLIP:] markers and discuss the themes conversationally.' },
+        avoiding: { label: "What's the subject avoiding?", prompt: "Read the full transcript. Where does the subject deflect, change topics, or skim past something that seemed important? These avoidance moments often signal what the real story is. Return as [CLIP:] markers with a note on what's being avoided." },
+    };
+    const clips = {
+        missing: myStyleOn
+            ? { label: 'What am I missing?', prompt: 'Based on the transcript, my selected clips, and my storytelling foundation, what strong moments have I not pulled yet? Prioritize moments that match my editorial patterns. Return suggestions as [CLIP:] markers.' }
+            : { label: 'What am I missing?', prompt: 'Based on the transcript and my selected clips, what strong moments have I not pulled yet? Consider thematic gaps, emotional range, and narrative completeness. Return suggestions as [CLIP:] markers.' },
+        order: myStyleOn
+            ? { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a sequence that matches my storytelling foundation. Return as an ordered list with [CLIP:] markers and note where this sequence follows or breaks from my typical story structure.' }
+            : { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a narrative sequence. Return as an ordered list with [CLIP:] markers and a one-line rationale for the sequence.' },
+    };
     if (state === 'A') {
-        return [
-            { label: "What's the story here?", prompt: "Read the full transcript and tell me what story is actually being told. What's the through-line, what's the surprise, and what's the strongest narrative thread? Be specific, not generic. Respond conversationally." },
-            { label: 'Pull the strongest soundbites', prompt: 'Identify the 8-10 strongest standalone soundbites in this transcript. Strong means quotable, self-contained, and emotionally or narratively distinctive. Return as [CLIP:] markers with a one-line note explaining why each one lands.' },
-            { label: 'What are the major themes?', prompt: 'Identify the 4-6 major themes running through this interview. For each theme, note 2-3 transcript moments that anchor it and what makes them strong examples. Return moments as [CLIP:] markers and discuss the themes conversationally.' },
-            { label: 'Where does this interview turn?', prompt: 'Find the inflection points in this interview. Moments where the conversation shifts emotionally, the subject opens up, the energy changes, or new ground gets broken. Return each turn as a [CLIP:] marker with a note on what shifts.' },
-            { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
-        ];
+        return [story.story, story.turns, story.bites, story.themes, story.avoiding];
     }
     if (state === 'B') {
-        if (myStyleOn) {
-            return [
-                { label: 'What am I missing?', prompt: 'Based on the transcript, my selected clips, and my storytelling foundation, what strong moments have I not pulled yet? Prioritize moments that match my editorial patterns. Return suggestions as [CLIP:] markers.' },
-                { label: 'What story am I building?', prompt: 'Based on my selected clips and my storytelling foundation, what narrative am I assembling? Does the arc match how I typically structure pieces? Where does it diverge from my usual patterns? Respond conversationally.' },
-                { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
-                { label: "What's the subject avoiding?", prompt: "Read the full transcript. Where does the subject deflect, change topics, or skim past something that seemed important? These avoidance moments often signal what the real story is. Return as [CLIP:] markers with a note on what's being avoided." },
-            ];
-        }
-        return [
-            { label: 'What am I missing?', prompt: 'Based on the transcript and my selected clips, what strong moments have I not pulled yet? Consider thematic gaps, emotional range, and narrative completeness. Return suggestions as [CLIP:] markers.' },
-            { label: 'What story am I building?', prompt: 'Based on my selected clips, what narrative am I assembling? Describe the story arc taking shape, any missing pieces, and where the emotional turn point sits. Respond conversationally.' },
-            { label: 'Find every moment about…', prompt: 'Find every moment about ', fillIn: true },
-            { label: "What's the subject avoiding?", prompt: "Read the full transcript. Where does the subject deflect, change topics, or skim past something that seemed important? These avoidance moments often signal what the real story is. Return as [CLIP:] markers with a note on what's being avoided." },
-        ];
+        return [story.story, story.turns, story.bites, story.themes, clips.missing];
     }
-    // State C
-    if (myStyleOn) {
-        return [
-            { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a sequence that matches my storytelling foundation. Return as an ordered list with [CLIP:] markers and note where this sequence follows or breaks from my typical story structure.' },
-            { label: 'Do any of my selects overlap?', prompt: 'Look at my selected clips in the context of my storytelling foundation. Which ones cover the same ground? Based on how I typically build stories, which is strongest and which could I cut?' },
-            { label: 'Where does my cut sag?', prompt: 'Looking at my selected clips in order, where does the pacing or energy drop? Identify any sections that feel redundant, too long, or low-momentum based on my storytelling foundation.' },
-            { label: 'Connect the threads', prompt: 'Find moments in my selected clips and the surrounding transcript that connect to or echo each other thematically. Bookend pairs, motifs that recur, ideas that pay off later. Return as paired [CLIP:] markers with a note on the connection.' },
-            { label: 'What am I missing?', prompt: 'Based on the transcript, my selected clips, and my storytelling foundation, what strong moments have I not pulled yet? Prioritize moments that match my editorial patterns. Return suggestions as [CLIP:] markers.' },
-        ];
-    }
-    return [
-        { label: 'Suggest a running order', prompt: 'Arrange my selected clips into a narrative sequence. Return as an ordered list with [CLIP:] markers and a one-line rationale for the sequence.' },
-        { label: 'Do any of my selects overlap?', prompt: 'Look at my selected clips. Which ones cover the same ground? Which is strongest and which could I cut?' },
-        { label: 'Where does my cut sag?', prompt: 'Looking at my selected clips in order, where does the pacing or energy drop? Identify any sections that feel redundant, too long, or low-momentum.' },
-        { label: 'Connect the threads', prompt: 'Find moments in my selected clips and the surrounding transcript that connect to or echo each other thematically. Bookend pairs, motifs that recur, ideas that pay off later. Return as paired [CLIP:] markers with a note on the connection.' },
-        { label: 'What am I missing?', prompt: 'Based on the transcript and my selected clips, what strong moments have I not pulled yet? Consider thematic gaps, emotional range, and narrative completeness. Return suggestions as [CLIP:] markers.' },
-    ];
+    return [story.story, story.turns, story.bites, clips.missing, clips.order];
 }
 
 function _welcomeHeaderForState(state) {
@@ -2872,6 +3470,48 @@ function _renderPromptButton(p, isPrimary) {
     return `<button class="${cls}" data-prompt="${promptAttr}"${fillInAttr} onclick="sendSuggestion(this)">${labelText}</button>`;
 }
 
+// Opening brief: the analysis pass already knows what this interview is
+// about and which soundbites are strongest, so the Story Room opens with
+// that instead of an empty box. Zero model calls; nothing when analysis
+// has not run yet (the welcome then reads as before).
+function _openingBriefHtml() {
+    try {
+        const analysis = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.analysis) || null;
+        if (!analysis || typeof analysis !== 'object') return '';
+        const summary = String(analysis.summary || '').trim();
+        const bites = Array.isArray(analysis.strongest_soundbites) ? analysis.strongest_soundbites : [];
+        if (!summary && bites.length === 0) return '';
+        let html = '<div class="chat-brief">';
+        if (summary) {
+            const short = summary.length > 420 ? summary.slice(0, 420).replace(/\s+\S*$/, '') + '…' : summary;
+            html += `<p class="chat-brief-summary">${escapeHtml(short)}</p>`;
+        }
+        const cards = [];
+        for (const sb of bites) {
+            if (!sb || cards.length >= 3) break;
+            const start = parseTc(String(sb.start || ''));
+            const end = parseTc(String(sb.end || ''));
+            if (!(end > start)) continue;
+            const title = String(sb.title || sb.text || 'Moment').trim().slice(0, 90);
+            const marker = `[CLIP: start=${fmtTc(start)} end=${fmtTc(end)} title="${title.replace(/"/g, "'")}"]`;
+            cards.push(marker);
+        }
+        if (cards.length) {
+            html += '<div class="chat-brief-cards">' + renderChatReply(cards.join('\n')) + '</div>';
+        }
+        html += '</div>';
+        return html;
+    } catch (_) {
+        return '';
+    }
+}
+
+function fmtTc(sec) {
+    sec = Math.max(0, Math.floor(Number(sec) || 0));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 function _welcomeHtml() {
     const state = _chatState();
     const header = _welcomeHeaderForState(state);
@@ -2879,10 +3519,12 @@ function _welcomeHtml() {
     // First prompt is the primary "start here" pick — same size, filled
     // accent treatment so it reads as a suggestion without being pushy.
     const buttons = prompts.map((p, i) => _renderPromptButton(p, i === 0)).join('\n                ');
+    // Clean and empty on purpose: a title, five prompts, and the input.
+    // The analysis brief and the clip count stay out of the way (the
+    // analysis is still loaded behind the answers).
     return `
         <div class="chat-welcome" data-chat-state="${state}">
             <h3 class="chat-welcome-title">${header.title}</h3>
-            <p class="chat-welcome-subtitle">${header.subtitle}</p>
             <div class="chat-suggestions">
                 ${buttons}
             </div>
@@ -2937,11 +3579,9 @@ async function sendChat() {
     chatHistory.push({ role: 'user', content: message });
     updateChatClearBtn();
 
-    // Detect story-building intent
-    if (isStoryRequest(message)) {
-        await buildStoryFromChat(message);
-        return;
-    }
+    // Story-building asks used to detour into the Story Builder endpoint
+    // from here; they now go through chat like everything else (the reply
+    // carries the cards and a "Build as Story" button).
 
     // Show typing indicator
     const typing = appendChatMessage('assistant', '<span class="chat-typing"><span></span><span></span><span></span></span>', true);
@@ -2999,6 +3639,8 @@ async function sendChat() {
                         + ` <button class="btn btn-sm chat-pull-btn" onclick="buildStoryFromChatClips(this)" style="margin-left:4px;">Build as Story</button>`;
                     streamed.bubble.appendChild(pullPrompt);
                 }
+                renderFollowupChips(streamed.bubble, streamed.followups);
+                try { renderStoryRail(); } catch (_) {}
             }
         } else if (streamed.fallback) {
             // Streaming endpoint failed — try the original /chat endpoint.
@@ -3079,6 +3721,7 @@ async function streamChatReply({ message, typing, progressTimer }) {
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
     let streamedText = '';
+    let followups = [];
     let finalReply = '';
     let sawDone = false;
     let sawBusy = false;
@@ -3099,14 +3742,31 @@ async function streamChatReply({ message, typing, progressTimer }) {
         // will auto-wrap into cards) become "pulling clip" chips; other
         // bracketed text ([inaudible], [laughter] quoted from the
         // transcript) is blanked, not mislabeled as a pending clip.
-        let live = streamedText
+        // Cards materialize as soon as their marker closes: everything up
+        // to the last complete "]" renders through the real renderer, the
+        // unfinished tail is masked as before.
+        let text = liveClean(streamedText);
+        let head = text;
+        let tail = '';
+        const openIdx = text.lastIndexOf('[');
+        if (openIdx !== -1 && text.indexOf(']', openIdx) === -1) {
+            head = text.slice(0, openIdx);
+            tail = text.slice(openIdx);
+        }
+        let liveTail = tail
             .replace(/\[\s*CLIP[^\]\n]*\]?/gi, '\ue003')
-            .replace(/\[[^\]\n]*\]?/g, ' ')
-            .trim();
-        if (!live) return;
-        bubble.innerHTML = escapeHtml(live)
+            .replace(/\[[^\]\n]*\]?/g, ' ');
+        let html = '';
+        try {
+            html = head.trim() ? renderChatReply(head) : '';
+        } catch (_) {
+            html = escapeHtml(head.replace(/\[[^\]\n]*\]?/g, ' ')).replace(/\n/g, '<br>');
+        }
+        html += escapeHtml(liveTail)
             .replace(/\ue003/g, '<em style="opacity:.65">⏳ pulling clip…</em>')
-            .replace(/\n/g, '<br>') +
+            .replace(/\n/g, '<br>');
+        if (!html.trim()) return;
+        bubble.innerHTML = html +
             ' <span class="chat-typing"><span></span><span></span><span></span></span>';
     };
 
@@ -3164,10 +3824,14 @@ async function streamChatReply({ message, typing, progressTimer }) {
                         bubble.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> ' + label;
                     }
                 } else if (ev === 'progress') {
-                    // Progress events come from Layer 2 chunked search
-                    // ("Searching across the full interview…"). Show them
-                    // so the user knows work is happening.
-                    if (!streamedText) bubble.textContent = String(payload.data || '');
+                    // Progress events come from the long-interview path
+                    // ("Reading Dana Whitfield 01:27–01:33…"). Show them
+                    // so the user knows what is being read.
+                    if (!streamedText) bubble.innerHTML = '<span class="chat-typing"><span></span><span></span><span></span></span> ' + escapeHtml(String(payload.data || ''));
+                } else if (ev === 'followups') {
+                    // Three follow-up questions the model suggested; the
+                    // caller renders them as chips under the reply.
+                    if (Array.isArray(payload.data)) followups = payload.data.filter(q => typeof q === 'string' && q.trim());
                 } else if (ev === 'done') {
                     finalReply = String(payload.data || '');
                     sawDone = true;
@@ -3198,11 +3862,11 @@ async function streamChatReply({ message, typing, progressTimer }) {
         // Stream cut off mid-reply. If we have any tokens, treat them as the
         // reply; otherwise fall back.
         if (streamedText) {
-            return { ok: true, reply: streamedText, bubble };
+            return { ok: true, reply: stripFollowupsLine(streamedText), bubble };
         }
         return { ok: false, fallback: true };
     }
-    return { ok: true, reply: finalReply || streamedText, bubble, busy: sawBusy };
+    return { ok: true, reply: finalReply || stripFollowupsLine(streamedText), bubble, busy: sawBusy, followups };
 }
 
 // Store pending chat story builds (not yet sent to Story Builder)
@@ -3484,6 +4148,133 @@ function appendChatMessage(role, content, isHtml = false) {
     return msg;
 }
 
+// The model may end a reply with one "FOLLOW-UPS: a | b | c" line the
+// server turns into chips. Belt-and-braces: never let it paint as prose
+// (live paint runs on raw tokens, before the server strips it).
+function stripFollowupsLine(text) {
+    return String(text || '').replace(/^[ \t]*\**[ \t]*FOLLOW[\s-]*UPS?[ \t]*\**[ \t]*:.*$/gim, '').replace(/\s+$/, '');
+}
+
+// Live paint runs on raw model text before the server's cleaners: mirror
+// the cheap ones here so nothing odd flashes mid-stream (LaTeX arrows,
+// thinking tags, markdown rules) and then vanishes at `done`.
+function liveClean(text) {
+    return stripFollowupsLine(text)
+        .replace(/<\s*think(?:ing)?\s*>[\s\S]*?(<\s*\/\s*think(?:ing)?\s*>|$)/gi, '')
+        .replace(/\$?\\(?:rightarrow|Rightarrow|to)\$?/g, '→')
+        .replace(/^#{1,4}\s*/gm, '')
+        .replace(/^---+\s*$/gm, '');
+}
+
+// ── Story So Far ─────────────────────────────────────────────────────────
+// What the editor is making and the moments they passed on. Persisted per
+// project (/story-so-far); chat reads it on every turn, passed moments are
+// excluded from retrieval, top-ups and replies.
+let storySoFar = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.story_so_far) || { making: '', passed: [] };
+if (!Array.isArray(storySoFar.passed)) storySoFar.passed = [];
+
+function isPassedSpan(start, end) {
+    try {
+        return storySoFar.passed.some(p => {
+            const a = parseFloat(p.start), b = parseFloat(p.end);
+            const overlap = Math.min(end, b) - Math.max(start, a);
+            return overlap > 0 && overlap / Math.max(1, Math.min(end - start, b - a)) > 0.5;
+        });
+    } catch (_) { return false; }
+}
+
+function renderStoryRail() {
+    const rail = document.getElementById('storyRail');
+    if (!rail) return;
+    const making = (storySoFar.making || '').trim();
+    const n = storySoFar.passed.length;
+    // Hidden unless there is something worth a line; the chat stays a chat.
+    rail.style.display = (making || n > 0) ? '' : 'none';
+    const makingEl = document.getElementById('storyMakingLine');
+    if (makingEl) {
+        makingEl.style.display = making ? '' : 'none';
+        makingEl.textContent = making ? `Making: ${making}  ✕` : '';
+        makingEl.onclick = () => saveStoryMaking('');
+    }
+    const passedEl = document.getElementById('storyPassed');
+    if (passedEl) {
+        passedEl.style.display = n > 0 ? '' : 'none';
+        passedEl.textContent = n === 1 ? '1 moment passed on' : `${n} moments passed on`;
+    }
+    const list = document.getElementById('storyPassedList');
+    if (list) {
+        list.innerHTML = storySoFar.passed.map(p => {
+            const t = escapeHtml(String(p.title || 'moment'));
+            return `<div class="story-passed-item"><span>${t} <span class="cc-tc">${fmtDisplayTC(parseFloat(p.start))}–${fmtDisplayTC(parseFloat(p.end))}</span></span><button type="button" class="story-passed-restore" onclick="unpassChatClip(${parseFloat(p.start)},${parseFloat(p.end)})">Restore</button></div>`;
+        }).join('');
+        if (n === 0) list.style.display = 'none';
+    }
+    document.querySelectorAll('#chatMessages .cc-card').forEach(card => {
+        const a = parseFloat(card.dataset.start), b = parseFloat(card.dataset.end);
+        card.classList.toggle('cc-passed', isPassedSpan(a, b));
+    });
+}
+
+function toggleStoryPassed() {
+    const list = document.getElementById('storyPassedList');
+    if (!list || storySoFar.passed.length === 0) return;
+    list.style.display = list.style.display === 'none' ? '' : 'none';
+}
+
+async function saveStoryMaking(value) {
+    storySoFar.making = String(value || '').trim().slice(0, 300);
+    try {
+        const r = await fetch(`/project/${PROJECT.id}/story-so-far`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ making: storySoFar.making }) });
+        if (r.ok) { const j = await r.json(); if (j && typeof j === 'object') { storySoFar = Object.assign({ making: '', passed: [] }, j); if (!Array.isArray(storySoFar.passed)) storySoFar.passed = []; } }
+        if (typeof showToast === 'function') showToast(storySoFar.making ? 'Story so far updated' : 'Cleared');
+    } catch (_) { /* offline: keep local state */ }
+    renderStoryRail();
+}
+
+async function passChatClip(start, end, title, btn) {
+    try {
+        const r = await fetch(`/project/${PROJECT.id}/story-so-far/pass`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start, end, title }) });
+        if (r.ok) { const j = await r.json(); storySoFar = Object.assign({ making: '', passed: [] }, j); if (!Array.isArray(storySoFar.passed)) storySoFar.passed = []; }
+        else { storySoFar.passed.push({ start, end, title }); }
+    } catch (_) { storySoFar.passed.push({ start, end, title }); }
+    if (btn) { const card = btn.closest('.cc-card'); if (card) card.classList.add('cc-passed'); }
+    if (typeof showToast === 'function') showToast("Passed on — I won't suggest it again");
+    renderStoryRail();
+}
+
+async function unpassChatClip(start, end) {
+    try {
+        const r = await fetch(`/project/${PROJECT.id}/story-so-far/pass`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ start, end, undo: true }) });
+        if (r.ok) { const j = await r.json(); storySoFar = Object.assign({ making: '', passed: [] }, j); if (!Array.isArray(storySoFar.passed)) storySoFar.passed = []; }
+    } catch (_) { storySoFar.passed = storySoFar.passed.filter(p => !(Math.abs(p.start - start) < 0.5 && Math.abs(p.end - end) < 0.5)); }
+    renderStoryRail();
+}
+
+document.addEventListener('DOMContentLoaded', () => { try { renderStoryRail(); } catch (_) {} });
+
+// Three suggested next questions under a reply. Clicking one sends it as
+// the editor's next message — same path as the welcome suggestions.
+function renderFollowupChips(bubble, followups) {
+    if (!bubble || !Array.isArray(followups) || followups.length === 0) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'chat-followups';
+    followups.slice(0, 3).forEach((q) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'chat-followup';
+        b.textContent = q;
+        b.addEventListener('click', () => {
+            const input = document.getElementById('chatInput');
+            if (!input || input.disabled) return;
+            input.value = q;
+            autoGrowChatInput(input);
+            sendChat();
+        });
+        wrap.appendChild(b);
+    });
+    bubble.appendChild(wrap);
+}
+
 function renderChatReply(text) {
     // Parse [CLIP: start=X end=Y title="..."] into actionable buttons
     let html = escapeHtml(text);
@@ -3556,7 +4347,7 @@ function renderChatReply(text) {
                 ? `<div class="cc-note">${note.trim()}</div>`
                 : '';
 
-            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top"><b>${title}</b><span class="cc-tc">${fmtDisplayTC(start)}–${fmtDisplayTC(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`;
+            const cardHtml = `<div class="cc-card" id="${clipUid}" data-start="${start}" data-end="${end}"><div class="cc-row-top" onmouseenter="previewChatClip(${start})"><b>${title}</b><span class="cc-tc">${fmtDisplayTC(start)}–${fmtDisplayTC(end)}</span><span class="cc-dur">${duration}s</span></div><div class="cc-row-actions"><button class="cc-play chat-clip-play" onclick="playChatClip('${clipUid}',${start},${end})"><svg class="ccp-play" viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><polygon points="6,3 20,12 6,21"/></svg><svg class="ccp-pause" viewBox="0 0 24 24" fill="currentColor" width="11" height="11" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg></button><div class="clip-card-progress" onclick="scrubChatClip(event,'${clipUid}',${start},${end})"><div class="clip-card-progress-fill" id="ccfill_${clipUid}"></div></div><span class="cc-text-toggle" onclick="this.closest('.cc-card').classList.toggle('cc-open')">Transcript <svg viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg></span><button class="cc-add" title="Add to Clips" onclick="addClipFromChat(${start},${end},'${safeTitle}',this)">+ Clip</button><button class="cc-pass" title="Not this one — don't suggest it again" onclick="passChatClip(${start},${end},'${safeTitle}',this)">✕</button></div>${noteHtml}<div class="cc-excerpt">${escapeHtml(excerpt)}</div></div>`.replace('class="cc-card"', isPassedSpan(start, end) ? 'class="cc-card cc-passed"' : 'class="cc-card"');
             const idx = CARD_STASH.length;
             CARD_STASH.push(cardHtml);
             return `\uE000CCCARD${idx}\uE001`;
@@ -3635,7 +4426,7 @@ function renderChatReply(text) {
         (match) => {
             const secs = tcToSec(match);
             const end = secs + 15;
-            return `<span class="chat-tc-group"><span class="chat-tc-link" onclick="jumpTo(${secs})">${match}</span><button class="chat-tc-add" onclick="addClipFromChat(${secs},${end},'Clip at ${match}',this)" title="Add as clip">+</button></span>`;
+            return `<span class="chat-tc-group"><span class="chat-tc-link" onclick="jumpTo(${secs})">${match}</span><button class="chat-tc-add" onclick="addClipFromChat(${secs},${end},'Clip at ${match}',this)" title="Add to Clips">+</button></span>`;
         }
     );
 
@@ -3689,6 +4480,19 @@ function escapeHtml(text) {
 
 // ── Chat clip playback ──
 let activeChatClip = null;
+
+// Hover a card's title row: park the player on that moment's first frame
+// so the editor sees where it lands before pressing play. Never interrupts
+// something that is already playing or a clip the editor selected.
+function previewChatClip(start) {
+    try {
+        if (!audio || !audio.paused || activeChatClip) return;
+        const t = parseFloat(start);
+        if (!isFinite(t) || t < 0) return;
+        if (Math.abs((audio.currentTime || 0) - t) < 0.25) return;
+        audio.currentTime = t;
+    } catch (_) { /* media not ready */ }
+}
 
 function playChatClip(uid, start, end) {
     const el = document.getElementById(uid);
@@ -3814,9 +4618,9 @@ function addAllAnalysisClips() {
         updateSelectCount();
         saveLabels();
         renderClipsTab();
-        showToast(`Added ${count} clips`);
+        showToast(`Added ${count} clip${count === 1 ? '' : 's'} to the Clips tab`);
     } else {
-        showToast('All clips already added');
+        showToast('All of these are already in the Clips tab');
     }
 }
 
@@ -3831,7 +4635,7 @@ function addAllChatClips(btn) {
         const exists = labelSections.some(s => Math.abs(s.start - start) < 0.5);
         if (!exists) {
             const id = ++sectionIdCounter;
-            labelSections.push({ id, start, end, color: 'green', text: title });
+            labelSections.push({ id, start, end, color: 'green', text: title, title });
             count++;
         }
         // Mark individual + Clips buttons as added
@@ -3848,11 +4652,11 @@ function addAllChatClips(btn) {
         saveLabels();
         renderClipsTab();
         renderStoryClipLibrary();
-        showToast(`Pulled ${count} clips`);
+        showToast(`Pulled ${count} clip${count === 1 ? '' : 's'} to the Clips tab`);
     } else {
-        showToast('All clips already added');
+        showToast('All of these are already in the Clips tab');
     }
-    btn.innerHTML = '✓ Pulled';
+    btn.innerHTML = count > 0 ? '✓ Pulled to Clips' : '✓ Already in Clips';
     btn.disabled = true;
     btn.classList.add('clip-added');
 }
@@ -3870,6 +4674,9 @@ function addClipFromChat(start, end, title, btn) {
     const color = 'green';
     const id = ++sectionIdCounter;
     const text = title;
+    // Chat headlines are real titles; AI Analysis soundbites pass a
+    // transcript fragment here, which the titles route recognizes and
+    // replaces with a generated title (1.0.47).
     labelSections.push({ id, start, end, color, text });
     renderAllHighlights();
     updateSelectCount();
@@ -3907,6 +4714,23 @@ function addClipFromChat(start, end, title, btn) {
 
 // ── Clips Tab ──
 let clipPlaying = null;
+
+// Same markup as the #clipsEmpty node in the template: the grid's first
+// non-empty render wipes that node, so the empty state is re-created from
+// here when the last clip is removed. Keep the two in sync. (A function,
+// not a const, so early callers of renderClipsTab never hit a TDZ error.)
+function clipsEmptyHtml() {
+    return `
+            <div class="empty-state" id="clipsEmpty">
+                <h3>Nothing pulled yet</h3>
+                <p>Use + on any moment in AI Analysis, Chat, or Story Brief, or paint a color label over words in the Transcript.</p>
+                <div class="empty-state-actions">
+                    <button class="btn btn-sm" type="button" onclick="switchTab('analysis')">Go to AI Analysis</button>
+                    <button class="btn btn-sm" type="button" onclick="switchTab('chat')">Go to Chat</button>
+                </div>
+            </div>
+        `;
+}
 
 function renderClipsTab() {
     const grid = document.getElementById('clipsGrid');
@@ -3946,12 +4770,7 @@ function renderClipsTab() {
         // any caller (e.g. saveLabels → clearAllLabels) and stranding their
         // post-save state changes (like the new Undo-button enable).
         grid.className = 'clips-grid';
-        grid.innerHTML = `
-            <div class="empty-state" id="clipsEmpty">
-                <h3>No clips yet</h3>
-                <p>Highlight sections in the Transcript tab or ask the AI in Chat to discover clips.</p>
-            </div>
-        `;
+        grid.innerHTML = clipsEmptyHtml();
         return;
     }
 
@@ -3961,13 +4780,17 @@ function renderClipsTab() {
     grid.innerHTML = sorted.map(clip => {
         const duration = clip.end - clip.start;
         const colorVar = clip.color === 'blue' ? 'accent' : clip.color;
-        const safeTitle = escapeHtml(clip.text || 'Untitled clip');
-
-        // Get transcript excerpt
-        let clipText = '';
-        const words = allWords.filter(w => parseFloat(w.dataset.s) >= clip.start && parseFloat(w.dataset.s) < clip.end);
-        clipText = words.map(w => w.textContent).join('').trim();
-        if (clipText.length > 200) clipText = clipText.substring(0, 200) + '...';
+        // Title = the generated (or carried) title; the transcript's first
+        // line sits under it and the whole transcript is behind Show text
+        // (1.0.47). A clip still waiting on the titles route says so.
+        const parts = clipDisplayParts(clip);
+        const pending = !parts.title && clip._titling;
+        const safeTitle = escapeHtml(parts.title || (pending ? '' : 'Untitled clip'));
+        const titleHtml = pending
+            ? '<span class="clip-title-pending">Naming clip&hellip;</span>'
+            : safeTitle;
+        const safeLead = escapeHtml(parts.lead);
+        const clipText = parts.transcript;
 
         if (viewMode === 'list') {
             return `<div class="clip-row" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}"
@@ -3977,15 +4800,20 @@ function renderClipsTab() {
                 </span>
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
                 <span class="clip-row-dot" style="background: var(--${colorVar});"></span>
-                <span class="clip-row-title" title="${safeTitle}">${safeTitle}</span>
+                <span class="clip-row-title" title="${safeLead}">${titleHtml}</span>
+                ${clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : ''}
                 <span class="clip-row-tc">${fmtDisplayTC(clip.start, clip.project_id)} – ${fmtDisplayTC(clip.end, clip.project_id)}</span>
                 <span class="clip-row-dur">${formatDuration(duration)}</span>
                 <button class="clip-row-play" onclick="playClip(${clip.id}, ${clip.start}, ${clip.end})">
                     <svg class="clip-icon-play" viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="6,3 20,12 6,21"/></svg>
                     <svg class="clip-icon-pause" viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="display:none"><rect x="5" y="3" width="4" height="18"/><rect x="15" y="3" width="4" height="18"/></svg>
                 </button>
+                <button class="clip-row-expand" onclick="event.stopPropagation(); this.closest('.clip-row').classList.toggle('expanded')" title="Show the clip's transcript">
+                    Text <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg>
+                </button>
                 <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
                 <button class="cc-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}')" title="Add to Story Builder" style="font-size:11px;padding:2px 6px;">+ Story</button>
+                <div class="clip-row-excerpt">${escapeHtml(clipText)}</div>
             </div>`;
         }
 
@@ -3997,11 +4825,13 @@ function renderClipsTab() {
                     <svg viewBox="0 0 10 16" fill="currentColor" width="8" height="13"><circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="3" cy="6" r="1.2"/><circle cx="7" cy="6" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="14" r="1.2"/><circle cx="7" cy="14" r="1.2"/></svg>
                 </span>
                 <input type="checkbox" class="clip-check" data-clip-id="${clip.id}" onchange="updateClipSelection()">
-                <span class="clip-card-title" title="${safeTitle}">${safeTitle}</span>
+                <span class="clip-card-title" title="${safeTitle}">${titleHtml}</span>
                 <span class="clip-card-duration">${formatDuration(duration)}</span>
             </div>
+            ${safeLead ? `<div class="clip-card-lead" title="${safeLead}">${safeLead}</div>` : ''}
             <div class="clip-card-meta">
                 <span class="clip-card-dot" style="background: var(--${colorVar});"></span>
+                ${clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : ''}
                 <span class="clip-card-tc">${fmtDisplayTC(clip.start, clip.project_id)} – ${fmtDisplayTC(clip.end, clip.project_id)}</span>
                 <button class="cc-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}')" title="Add to Story Builder" style="font-size:11px;padding:2px 8px;">+ Story</button>
                 <button class="clip-remove-btn" onclick="removeClipFromLibrary(${clip.id})">&times;</button>
@@ -4015,9 +4845,9 @@ function renderClipsTab() {
                     <div class="clip-card-progress-fill" id="clipFill-${clip.id}"></div>
                 </div>
             </div>
-            <div class="clip-card-expand" onclick="this.parentElement.classList.toggle('expanded')">
+            <div class="clip-card-expand" onclick="this.parentElement.classList.toggle('expanded')" title="Show the clip's transcript">
                 <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="10" height="10"><path d="M3 4l3 3 3-3"/></svg>
-                Show text
+                <span class="clip-expand-label">Show text</span>
             </div>
             <div class="clip-card-excerpt">${escapeHtml(clipText)}</div>
         </div>`;
@@ -4734,7 +5564,8 @@ saveLabels = function() {
 };
 
 // ── Transcription ──
-async function startTranscription() {
+async function startTranscription(opts) {
+    opts = opts || {};
     if (document.getElementById('transcribeProgress')) {
         document.getElementById('transcribeProgress').style.display = 'block';
     }
@@ -4765,10 +5596,48 @@ async function startTranscription() {
     }, 1000);
 
     try {
-        const res = await fetch(`/project/${PROJECT_ID}/transcribe`, { method: 'POST' });
+        const res = await fetch(`/project/${PROJECT_ID}/transcribe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm_long_media: !!opts.confirmLongMedia }),
+        });
         clearInterval(progressInterval);
         const data = await res.json();
-        if (data.status === 'transcribed') {
+        if (data.needs_long_media_confirm) {
+            // Import guardrail: the file is very long, or the FCPXML's
+            // sources add up to far more than its timeline. Nothing has
+            // started; show the warning and let the user continue anyway.
+            fill.style.width = '0%';
+            statusText.textContent = 'Check before transcribing';
+            timeText.textContent = '';
+            const banner = document.getElementById('transcribeWhisperBanner');
+            const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+            if (banner) {
+                banner.style.display = 'block';
+                banner.innerHTML = warnings.map(w =>
+                    `<div style="color: var(--text-secondary); margin-bottom: 0.6rem;">${escapeHtml(w.message || '')}</div>`
+                ).join('') + `
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn btn-sm btn-purple" id="longMediaContinueBtn">Continue anyway</button>
+                        <button class="btn btn-sm" id="longMediaCancelBtn">Not now</button>
+                    </div>`;
+                const cont = document.getElementById('longMediaContinueBtn');
+                if (cont) cont.onclick = () => {
+                    banner.style.display = 'none';
+                    statusText.textContent = 'Transcribing...';
+                    startTranscription({ confirmLongMedia: true });
+                };
+                const cancel = document.getElementById('longMediaCancelBtn');
+                if (cancel) cancel.onclick = () => {
+                    banner.style.display = 'none';
+                    statusText.textContent = 'Transcription not started';
+                    const retry = document.getElementById('transcribeRetry');
+                    if (retry) retry.style.display = 'block';
+                };
+            } else {
+                showToast(data.error || 'Check the media length before transcribing.', true);
+            }
+        } else if (data.status === 'transcribed') {
             fill.style.width = '100%';
             statusText.textContent = 'Done!';
             timeText.textContent = `Completed in ${elapsed}s`;
@@ -4887,6 +5756,14 @@ async function runAnalysis() {
             resetAnalyzeBtn();
             const prog = document.getElementById('analysisProgress');
             if (prog) prog.style.display = 'none';
+            // The tab is server-rendered from the page load. After a
+            // retranscribe the page has no analysis while the cache does:
+            // the server just restored it, so reload to draw it.
+            if (!(PROJECT && PROJECT.analysis)) {
+                showToast('Analysis restored for this transcript.');
+                setTimeout(() => reloadAndKeepTab('analysis'), 600);
+                return;
+            }
             showToast('Analysis is already up to date for this transcript.');
             return;
         }
@@ -5170,6 +6047,48 @@ const _CATEGORY_TO_RT_SOURCE = {
     labels: 'client_selects',
 };
 
+// ── Timeline name field (1.1) ─────────────────────────────────────────────
+// The field shows the automatic name the next export would get. Only an
+// EDITED value is sent as timeline_name (used as is, counter-free); an
+// untouched field lets the server number the export. Refreshed after each
+// export so the number advances, and whenever the mode changes.
+function _timelineNameInput(rt) {
+    return document.getElementById(rt ? 'rtTimelineName' : 'exportTimelineName');
+}
+function _timelineKind(rt) {
+    if (rt) {
+        const b = document.querySelector('#rtOutputMode .export-mode-btn.is-active');
+        return (b && b.getAttribute('data-mode') === 'markers_timeline') ? 'markers' : 'selects';
+    }
+    const sel = document.getElementById('exportMode');
+    return (sel && sel.value === 'markers') ? 'markers' : 'selects';
+}
+async function refreshTimelineName(rt) {
+    const input = _timelineNameInput(rt);
+    if (!input) return;
+    const edited = input.value.trim() && input.value.trim() !== input.dataset.default;
+    try {
+        const r = await fetch(`/project/${PROJECT_ID}/export/timeline-name?kind=${_timelineKind(rt)}`, { cache: 'no-store' });
+        if (!r.ok) return;
+        const d = await r.json();
+        input.dataset.default = d.timeline_name || '';
+        input.placeholder = d.timeline_name || 'Timeline name';
+        if (!edited) input.value = d.timeline_name || '';
+    } catch (e) { /* keep whatever is shown */ }
+}
+function timelineNameOverride(rt) {
+    const input = _timelineNameInput(rt);
+    if (!input) return '';
+    const v = input.value.trim();
+    return (v && v !== input.dataset.default) ? v : '';
+}
+window.addEventListener('load', () => {
+    refreshTimelineName(false);
+    refreshTimelineName(true);
+    const sel = document.getElementById('exportMode');
+    if (sel) sel.addEventListener('change', () => refreshTimelineName(false));
+});
+
 async function exportFCPXML(category) {
     // ``category`` is passed by the analysis-section buttons (story/social/
     // soundbites/labels) to export just one bucket; the Export tab calls
@@ -5177,9 +6096,15 @@ async function exportFCPXML(category) {
     const triggerBtn = _exportTriggerButton()
         || (category ? null : document.getElementById('exportFCPXMLBtn'));
     const types = category ? [category] : _collectExportCategories();
-    if (types.length === 0) {
-        showToast('Check at least one category to export.');
+    // Story Builder sequences checked on the Export tab export after the
+    // categories, one timeline each (see _exportCheckedStoryBuilds).
+    const storyPicks = category ? [] : _checkedStoryBuilds();
+    if (types.length === 0 && storyPicks.length === 0) {
+        showToast('Check at least one category or sequence to export.');
         return;
+    }
+    if (types.length === 0) {
+        return _exportCheckedStoryBuilds(storyPicks);
     }
     if (types.includes('labels') && labelSections.length === 0) {
         showToast('No clips to export. Uncheck "My Clips" or highlight some in the transcript first.');
@@ -5231,6 +6156,8 @@ async function exportFCPXML(category) {
             total_clips: labelSections.length,
             deliver_to: delivery, nle,
         };
+        const tlOverride = timelineNameOverride(false);
+        if (tlOverride) exportBody.timeline_name = tlOverride;
         // No #framerate select on this page (FCPXML imports render the
         // round-trip panel instead): omit the key so the backend probes the
         // media / parsed sequence rate rather than trusting a hardcoded UI
@@ -5256,6 +6183,7 @@ async function exportFCPXML(category) {
                 showToast((data && data.error) || 'Export failed', true);
                 return;
             }
+            refreshTimelineName(false);
             showExportOutcome(_directExportSuccessMsg(data, 'Sent'), data);
             if (data.delivery === 'nle') maybeShowResolveSetup(data, runExport);
         } catch (err) {
@@ -5264,6 +6192,7 @@ async function exportFCPXML(category) {
     } finally {
         _endExport();
     }
+    if (storyPicks.length) await _exportCheckedStoryBuilds(storyPicks);
 }
 
 // Client twin of the server gate app.py _round_trip_fcp_only — keep the
@@ -5343,6 +6272,11 @@ async function _exportFCPXMLRoundTrip(opts, summary) {
           nle: typeof EDITING_PLATFORM !== 'undefined' ? EDITING_PLATFORM : 'fcp' },
         opts || {},
     );
+    // The Timeline name field applies to Selects / Markers exports; a story
+    // export is named after its title.
+    const isStory = Array.isArray(body.sources) && body.sources.includes('story_build');
+    const rtOverride = isStory ? '' : timelineNameOverride(true);
+    if (rtOverride) body.timeline_name = rtOverride;
     _rtShowExportBusy(delivery);
     try {
         const res = await exportFetch(`/project/${PROJECT_ID}/export/fcpxml-multicam`, {
@@ -5356,6 +6290,7 @@ async function _exportFCPXMLRoundTrip(opts, summary) {
             showToast((data && data.error) || 'Export failed', true);
             return { ok: false, data };
         }
+        refreshTimelineName(true);
         // Delivery now follows the Edit-in platform (server: nle body
         // field) — describe what actually happened; any Resolve/Premiere
         // import hint arrives via data.hint through showExportOutcome.
@@ -5380,6 +6315,8 @@ async function _exportFCPXMLRoundTrip(opts, summary) {
 function setRtMode(btn) {
     btn.closest('.export-mode-segmented').querySelectorAll('.export-mode-btn').forEach(b => b.classList.remove('is-active'));
     btn.classList.add('is-active');
+    // Markers and New Project are numbered separately.
+    if (typeof refreshTimelineName === 'function') refreshTimelineName(true);
 }
 
 function _collectRtSources() {
@@ -5400,7 +6337,8 @@ function _collectRtSources() {
 function _refreshRtExportButtonState() {
     const btn = document.getElementById('rtExportBtn');
     if (!btn) return;
-    btn.disabled = _collectRtSources().length === 0;
+    btn.disabled = _collectRtSources().length === 0
+        && (typeof _checkedStoryBuilds !== 'function' || _checkedStoryBuilds().length === 0);
 }
 
 function _refreshExportCounts() {
@@ -5445,7 +6383,88 @@ function _refreshExportCounts() {
             if (count === 0) checkbox.checked = false;
         }
     }
+    // Story Builder sequences: list them once builds are known; fetch them
+    // once when the Story tab has not loaded them yet.
+    if (document.getElementById('exportStoriesList')) {
+        if (!_storyBuildsLoaded && typeof loadStoryBuilds === 'function') {
+            _storyBuildsLoaded = true;
+            loadStoryBuilds().then(_renderExportStories).catch(() => {});
+        } else {
+            _renderExportStories();
+        }
+    }
+    // Nothing selectable beyond the transcript: point at the two places
+    // selects come from instead of showing a row of disabled boxes.
+    const emptyHint = document.getElementById('exportEmptyHint');
+    if (emptyHint) {
+        const selectable = clipCount + socialCount + storyCount + soundbiteCount;
+        emptyHint.style.display = (selectable === 0 && _exportableStoryBuilds().length === 0) ? '' : 'none';
+    }
     _refreshRtExportButtonState();
+}
+
+// ── Export tab: Story Builder sequences ──
+//
+// Every build with clips is listed under the categories with its own
+// checkbox. A checked sequence exports as its own timeline through the same
+// path the Story Builder tab's Export button uses (exportStoryBuild), so
+// round-trip projects keep their container and the Export tab's delivery
+// choice applies. Runs after the category export when both are checked.
+let _storyBuildsLoaded = false;   // set once /story/builds has been fetched
+
+function _exportableStoryBuilds() {
+    try {
+        return (Array.isArray(storyBuilds) ? storyBuilds : [])
+            .filter(b => b && Array.isArray(b.clips) && b.clips.length);
+    } catch (_) {
+        return [];  // storyBuilds not declared yet (early call)
+    }
+}
+
+function _renderExportStories() {
+    const list = document.getElementById('exportStoriesList');
+    if (!list) return;
+    const builds = _exportableStoryBuilds();
+    const checked = new Set(Array.from(list.querySelectorAll('.export-cat-story-build:checked'))
+        .map(el => String(el.dataset.buildId)));
+    if (!builds.length) {
+        list.innerHTML = '<span class="export-stories-note">No sequences yet. Build one in Story Builder and it appears here.</span>';
+        if (typeof _refreshRtExportButtonState === 'function') _refreshRtExportButtonState();
+        return;
+    }
+    list.innerHTML = builds.map(b => {
+        let secs = 0;
+        b.clips.forEach(c => {
+            const s = parseTc(c.start_time), e = parseTc(c.end_time);
+            if (e > s) secs += e - s;
+        });
+        const meta = `${b.clips.length} clip${b.clips.length === 1 ? '' : 's'}${secs ? ' · ' + formatDuration(secs) : ''}`;
+        const on = checked.has(String(b.id)) ? ' checked' : '';
+        return `<label class="export-category">
+            <input type="checkbox" class="export-cat-story-build" data-build-id="${escapeHtml(String(b.id))}"${on}>
+            <span>${escapeHtml(b.story_title || 'Untitled story')} <span class="export-story-meta">(${meta})</span></span>
+        </label>`;
+    }).join('');
+    list.querySelectorAll('.export-cat-story-build').forEach(el => {
+        el.addEventListener('change', () => {
+            if (typeof _refreshRtExportButtonState === 'function') _refreshRtExportButtonState();
+        });
+    });
+    if (typeof _refreshRtExportButtonState === 'function') _refreshRtExportButtonState();
+}
+
+function _checkedStoryBuilds() {
+    const ids = Array.from(document.querySelectorAll('#exportStoriesList .export-cat-story-build:checked'))
+        .map(el => String(el.dataset.buildId));
+    if (!ids.length) return [];
+    return _exportableStoryBuilds().filter(b => ids.includes(String(b.id)));
+}
+
+// One timeline per checked sequence, in list order.
+async function _exportCheckedStoryBuilds(builds) {
+    for (const build of builds) {
+        await exportStoryBuild(build, null);
+    }
 }
 
 // Round-trip is FCP-only by construction, so the delivery toggle picks
@@ -5454,9 +6473,15 @@ function _refreshExportCounts() {
 async function exportFCPXMLMulticam() {
     const triggerBtn = _exportTriggerButton() || document.getElementById('rtExportBtn');
     const sources = _collectRtSources();
-    if (sources.length === 0) {
-        showToast('Check at least one category to export.');
+    // Checked Story Builder sequences export after the categories, one
+    // timeline each, through the round-trip story path.
+    const storyPicks = _checkedStoryBuilds();
+    if (sources.length === 0 && storyPicks.length === 0) {
+        showToast('Check at least one category or sequence to export.');
         return;
+    }
+    if (sources.length === 0) {
+        return _exportCheckedStoryBuilds(storyPicks);
     }
     const modeBtn = document.querySelector('#rtOutputMode .export-mode-btn.is-active');
     const mode = modeBtn ? modeBtn.getAttribute('data-mode') : 'selects_project';
@@ -5515,6 +6540,7 @@ async function exportFCPXMLMulticam() {
     } finally {
         _endExport();
     }
+    if (storyPicks.length) await _exportCheckedStoryBuilds(storyPicks);
 }
 
 // ── Documents (Word / PDF / Excel) ──
@@ -6004,6 +7030,7 @@ async function saveOutputLanguage() {
         if (!res.ok) throw new Error(data.error || 'Unknown error');
         PROJECT.output_language = data.output_language || value;
         showToast('Output language saved');
+        dozaRefreshGearValues();
         const notice = document.getElementById('outputLanguageNotice');
         if (data.reanalyze_hint && notice) {
             // Saved analysis was generated under a different language —
@@ -6091,7 +7118,8 @@ function updateWhisperBanner() {
     // install prompt rather than letting non-English fail later. (#36)
     const engines = window._transcriptionEngines || { parakeet: true, whisper: false };
     const lang = sel.value;
-    // 'auto' uses Whisper internally, so it also needs the engine.
+    // 'auto' may still need Whisper for a non-English file; an English
+    // file under Auto-detect goes through Parakeet after a first-minute check.
     const needsWhisper = (lang !== 'en') && !engines.whisper;
 
     if (!needsWhisper) {
@@ -6283,6 +7311,38 @@ function showToast(msg, isError = false, durationMs = 5000) {
 }
 // Expose so inject-cloud-share.js can call it as a fallback after a pull.
 window.showToast = showToast;
+
+// Toast with one action button ("View"). Same single #toast node as
+// showToast, so the two never stack; the action fires on click within
+// durationMs and the toast hides itself either way.
+function showToastWithAction(msg, actionLabel, onAction, durationMs = 5000) {
+    const toast = document.getElementById('toast');
+    if (!toast) return;
+    toast.textContent = '';
+    toast.classList.remove('error');
+    const text = document.createElement('span');
+    text.textContent = msg;
+    toast.appendChild(text);
+    if (actionLabel) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'toast-action';
+        btn.textContent = actionLabel;
+        btn.addEventListener('click', () => {
+            _clearToastHideTimer();
+            toast.classList.remove('show');
+            try { if (typeof onAction === 'function') onAction(); } catch (e) { console.error(e); }
+        });
+        toast.appendChild(btn);
+    }
+    toast.classList.add('show');
+    _clearToastHideTimer();
+    _toastHideTimer = setTimeout(() => {
+        _toastHideTimer = null;
+        toast.classList.remove('show');
+    }, durationMs);
+}
+window.showToastWithAction = showToastWithAction;
 
 // Persistent "working" toast for the Send-to-NLE handoff. The Resolve
 // scripting import can take 30s+ (launching Resolve, conforming media);
@@ -6604,6 +7664,7 @@ async function loadStoryBuilds() {
         const res = await fetch(`/project/${PROJECT_ID}/story/builds`);
         const data = await res.json();
         storyBuilds = data.builds || [];
+        _storyBuildsLoaded = true;
         updateStoryBuildSelect();
         renderStoryList();
         if (storyBuilds.length > 0) {
@@ -6785,7 +7846,7 @@ function storyDragStart(e) {
 
 function storyDragOver(e) {
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
+    e.dataTransfer.dropEffect = (storyLibDragClipId !== null) ? 'copy' : 'move';
 }
 
 function storyDragEnter(e) {
@@ -6802,6 +7863,20 @@ function storyDragLeave(e) {
 function storyDrop(e) {
     e.preventDefault();
     const card = e.target.closest('.story-card');
+    // A clip dragged in from the sidebar library lands before or after the
+    // card it was dropped on (by cursor position), not as a reorder.
+    if (storyLibDragClipId !== null) {
+        e.stopPropagation();
+        if (card) card.classList.remove('story-drag-over');
+        let index = card ? parseInt(card.dataset.idx, 10) : 0;
+        if (card) {
+            const r = card.getBoundingClientRect();
+            if (e.clientY > r.top + r.height / 2) index += 1;
+        }
+        insertLibraryClipIntoStory(storyLibDragClipId, index);
+        storyLibDragClipId = null;
+        return;
+    }
     if (!card || !storyDragItem || card === storyDragItem) return;
     card.classList.remove('story-drag-over');
 
@@ -6826,6 +7901,100 @@ function storyDragEnd(e) {
     e.currentTarget.classList.remove('story-dragging');
     document.querySelectorAll('.story-drag-over').forEach(el => el.classList.remove('story-drag-over'));
     storyDragItem = null;
+}
+
+// ── Drag clips from the sidebar library into the story (1.0.47) ──
+//
+// A library card (renderStoryClipLibrary) is draggable; the sequence, its
+// cards and the empty state accept the drop. Dropping on a card inserts
+// before or after it by cursor position, dropping in the gaps or on the
+// empty state appends, and a project with no story yet gets one started
+// from the dropped clip.
+let storyLibDragClipId = null;
+
+function storyLibDragStart(e) {
+    const item = e.currentTarget;
+    storyLibDragClipId = parseInt(item.dataset.clipId, 10);
+    item.classList.add('story-clip-dragging');
+    e.dataTransfer.effectAllowed = 'copy';
+    try {
+        e.dataTransfer.setData('application/x-doza-clip', String(storyLibDragClipId));
+        e.dataTransfer.setData('text/plain', String(storyLibDragClipId));
+    } catch (_) { /* older WebKit */ }
+    ['storySequence', 'storyEmpty'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('story-drop-target');
+    });
+}
+
+function storyLibDragEnd(e) {
+    e.currentTarget.classList.remove('story-clip-dragging');
+    storyLibDragClipId = null;
+    document.querySelectorAll('.story-drop-target').forEach(el => el.classList.remove('story-drop-target', 'story-drop-over'));
+    document.querySelectorAll('.story-drag-over').forEach(el => el.classList.remove('story-drag-over'));
+}
+
+function storySeqDragOver(e) {
+    if (storyLibDragClipId === null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    e.currentTarget.classList.add('story-drop-over');
+}
+
+function storySeqDragLeave(e) {
+    e.currentTarget.classList.remove('story-drop-over');
+}
+
+function storySeqDrop(e) {
+    if (storyLibDragClipId === null) return;
+    e.preventDefault();
+    e.currentTarget.classList.remove('story-drop-over');
+    // Before the first card whose middle is below the cursor, else at the end.
+    const cards = Array.from(document.querySelectorAll('#storySequence .story-card'));
+    let index = cards.length;
+    for (let i = 0; i < cards.length; i++) {
+        const r = cards[i].getBoundingClientRect();
+        if (e.clientY < r.top + r.height / 2) { index = i; break; }
+    }
+    insertLibraryClipIntoStory(storyLibDragClipId, index);
+    storyLibDragClipId = null;
+}
+
+function insertLibraryClipIntoStory(clipId, index) {
+    const clip = labelSections.find(s => s.id === clipId);
+    if (!clip) return;
+    let build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build) {
+        // No story yet: start one from this clip. PUT on the builds route
+        // upserts, so the new id persists on the first save.
+        build = {
+            id: 'manual_' + Date.now(),
+            story_title: 'New story',
+            reasoning: '',
+            clips: [],
+            created_at: new Date().toISOString(),
+        };
+        storyBuilds.push(build);
+        currentBuildId = build.id;
+        updateStoryBuildSelect();
+        renderStoryList();
+    }
+    const words = allWords.filter(w => parseFloat(w.dataset.s) >= clip.start && parseFloat(w.dataset.s) < clip.end);
+    const entry = {
+        order: 0,
+        title: clip.title || clip.text || 'Clip',
+        start_time: fmtTime(clip.start),
+        end_time: fmtTime(clip.end),
+        transcript: words.map(w => w.textContent).join('').replace(/\s+/g, ' ').trim(),
+        editorial_note: 'Added from the clip library',
+    };
+    if (clip.speaker) entry.speaker = clip.speaker;
+    const at = Math.max(0, Math.min(index, build.clips.length));
+    build.clips.splice(at, 0, entry);
+    build.clips.forEach((c, i) => c.order = i + 1);
+    renderStorySequence(build);
+    saveStoryBuild(build);
+    showToast(`Added "${entry.title}" to the story`);
 }
 
 function removeStoryClip(idx) {
@@ -6868,6 +8037,8 @@ async function deleteCurrentStoryBuild() {
 }
 
 function renderStoryList() {
+    // The Export tab lists the same builds; keep it current.
+    if (typeof _renderExportStories === 'function') _renderExportStories();
     const list = document.getElementById('storySidebarList');
     const empty = document.getElementById('storySidebarEmpty');
     if (!list) return;
@@ -6961,7 +8132,7 @@ function addAllStoryClips() {
         const exists = labelSections.some(s => Math.abs(s.start - start) < 0.5);
         if (!exists) {
             const id = ++sectionIdCounter;
-            labelSections.push({ id, start, end, color: 'purple', text: title });
+            labelSections.push({ id, start, end, color: 'purple', text: title, title });
             count++;
         }
     });
@@ -6970,15 +8141,26 @@ function addAllStoryClips() {
         updateSelectCount();
         saveLabels();
         renderClipsTab();
-        showToast(`Added ${count} clips to library`);
+        showToast(`Added ${count} clip${count === 1 ? '' : 's'} to the Clips tab`);
     } else {
-        showToast('All clips already in library');
+        showToast('All of these are already in the Clips tab');
     }
 }
 
 async function exportStoryFCPXML() {
     const triggerBtn = _exportTriggerButton();  // capture before any await
     const build = storyBuilds.find(b => b.id === currentBuildId);
+    if (!build || !build.clips || build.clips.length === 0) {
+        showToast('No clips to export');
+        return;
+    }
+    return exportStoryBuild(build, triggerBtn);
+}
+
+// Export one Story Builder sequence as its own timeline. Used by the Story
+// Builder tab's Export button (current build) and by the Export tab's
+// "Story Builder sequences" checkboxes (any build).
+async function exportStoryBuild(build, triggerBtn) {
     if (!build || !build.clips || build.clips.length === 0) {
         showToast('No clips to export');
         return;
@@ -7552,16 +8734,36 @@ function renderStoryClipLibrary() {
     }
     empty.style.display = 'none';
 
+    // Fuller cards than the old one-line rows: title, speaker, range and a
+    // short excerpt, draggable straight into the story sequence (1.0.47).
     list.innerHTML = sorted.map(clip => {
         const dur = Math.round(clip.end - clip.start);
-        const safeTitle = escapeHtml(clip.text || 'Untitled');
-        return `<div class="story-clip-item" data-start="${clip.start}" data-end="${clip.end}">
-            <button class="story-clip-play" onclick="jumpTo(${clip.start})">&#9654;</button>
+        // Generated title, first transcript line, full transcript behind
+        // Show text (1.0.47), same as the Clips tab.
+        const parts = clipDisplayParts(clip);
+        const pending = !parts.title && clip._titling;
+        const safeTitle = escapeHtml(parts.title || (pending ? '' : 'Untitled'));
+        const titleHtml = pending ? '<span class="clip-title-pending">Naming clip&hellip;</span>' : safeTitle;
+        const excerpt = parts.lead;
+        const speaker = clip.speaker ? `<span class="clip-speaker" title="Speaker">${escapeHtml(clip.speaker)}</span>` : '';
+        return `<div class="story-clip-item" draggable="true" data-clip-id="${clip.id}" data-start="${clip.start}" data-end="${clip.end}"
+                     ondragstart="storyLibDragStart(event)" ondragend="storyLibDragEnd(event)" title="Drag into the story, or use + Story">
+            <span class="story-clip-grip" aria-hidden="true">
+                <svg viewBox="0 0 10 16" fill="currentColor" width="8" height="13"><circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="3" cy="6" r="1.2"/><circle cx="7" cy="6" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="14" r="1.2"/><circle cx="7" cy="14" r="1.2"/></svg>
+            </span>
             <div class="story-clip-info">
-                <span class="story-clip-title">${safeTitle}</span>
-                <span class="story-clip-tc">${fmtDisplayTC(clip.start)} – ${fmtDisplayTC(clip.end)} &middot; ${dur}s</span>
+                <div class="story-clip-head">
+                    <button class="story-clip-play" onclick="jumpTo(${clip.start})" title="Play">&#9654;</button>
+                    <span class="story-clip-title">${titleHtml}</span>
+                </div>
+                <span class="story-clip-tc">${fmtDisplayTC(clip.start)} – ${fmtDisplayTC(clip.end)} &middot; ${dur}s ${speaker}</span>
+                ${excerpt ? `<div class="story-clip-excerpt" title="${escapeHtml(excerpt)}">${escapeHtml(excerpt)}</div>` : ''}
+                ${parts.transcript ? `<div class="story-clip-expand" onclick="event.stopPropagation(); this.closest('.story-clip-item').classList.toggle('expanded')" title="Show the clip's transcript">
+                    <svg class="clip-expand-chevron" viewBox="0 0 12 12" fill="currentColor" width="9" height="9"><path d="M3 4l3 3 3-3"/></svg> <span class="clip-expand-label">Show text</span>
+                </div>
+                <div class="story-clip-transcript">${escapeHtml(parts.transcript)}</div>` : ''}
             </div>
-            <button class="cc-add story-clip-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}',this)">+ Story</button>
+            <button class="cc-add story-clip-add" onclick="addToStoryBuilder(${clip.start},${clip.end},'${safeTitle.replace(/'/g, "")}',this)" title="Add to the end of the current story">+ Story</button>
         </div>`;
     }).join('');
 }

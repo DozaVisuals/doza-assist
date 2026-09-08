@@ -581,11 +581,25 @@ body {
     /* Single column: the player column stacks above the content and must
        flow with the page. Left sticky, it pinned a viewport-tall box over
        the content column (Collection Summary / Speaker Map / Coverage Gaps
-       painted on top of Strongest moments and the arc cards). */
-    .player-col {
+       painted on top of Strongest moments and the arc cards).
+       `.page-two-col > .player-col` outranks the sticky rule declared
+       further down; as a bare `.player-col` this block lost to it and the
+       column stayed pinned in a compressed window. */
+    .page-two-col > .player-col {
         position: static;
         max-height: none;
         overflow-y: visible;
+    }
+    /* A wide, short window would otherwise get a picture taller than the
+       window: cap the player so the controls and the text stay in view. */
+    .page-two-col > .player-col .video-player-box {
+        max-height: 48vh;
+        overflow: hidden;
+    }
+    .page-two-col > .player-col .video-preview-main,
+    .page-two-col > .player-col .audio-waveform-shell {
+        max-height: 48vh;
+        object-fit: contain;
     }
 }
 

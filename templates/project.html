@@ -5536,10 +5536,17 @@ function renderAnalyzeProgress(data) {
     // wait). "Step 0 of 1" read like a stall — show an honest generic
     // message until a real step count exists.
     const preparing = step === 0;
+    const w = data.waiting_on || null;
+    let waitingLabel = 'Waiting for other AI work to finish…';
+    let waitingTail = '';
+    if (w && w.kind === 'analysis' && w.name) {
+        waitingLabel = `Waiting for the AI analysis of “${w.name}” to finish…`;
+        if (w.total > 0) waitingTail = ` · that one is at step ${w.step} of ${w.total}`;
+    } else if (w && w.name) {
+        waitingLabel = `Waiting for ${w.name} to finish…`;
+    }
     const label = preparing
-        ? (data.current === 'queued'
-            ? 'Waiting for other AI work to finish…'
-            : 'Preparing for analysis…')
+        ? (data.current === 'queued' ? waitingLabel : 'Preparing for analysis…')
         : `Analyzing — ${data.current || 'working'}`;
     labelEl.firstChild && (labelEl.firstChild.textContent = label);
     if (labelEl.childNodes.length === 1) {
@@ -5551,7 +5558,7 @@ function renderAnalyzeProgress(data) {
 
     timesEl.style.display = 'block';
     timesEl.textContent = preparing
-        ? `${formatProgressDuration(elapsedSec)} elapsed`
+        ? `${formatProgressDuration(elapsedSec)} elapsed${data.current === 'queued' ? waitingTail : ''}`
         : `Step ${step} of ${total} · ${formatProgressDuration(elapsedSec)} elapsed` +
           (remainingSec > 0 ? ` · ~${formatProgressDuration(remainingSec)} remaining` : '');
 }

@@ -3676,7 +3676,7 @@ def _make_progress_writer(project_id):
     status_path = _analyze_status_path(project_id)
     started_at = datetime.now().isoformat()
 
-    def _write(step, total, current):
+    def _write(step, total, current, **extra):
         try:
             os.makedirs(os.path.dirname(status_path), exist_ok=True)
             payload = {
@@ -3687,6 +3687,9 @@ def _make_progress_writer(project_id):
                 'updated_at': datetime.now().isoformat(),
                 'done': bool(int(step) >= int(total)),
             }
+            for k, v in extra.items():
+                if v is not None:
+                    payload[k] = v
             with open(status_path, 'w') as f:
                 json.dump(payload, f)
         except Exception:
@@ -3724,6 +3727,43 @@ _analysis_threads_lock = threading.Lock()
 # well inside the (now model-aware) timeout. A queued job parks at
 # current="queued" so the polling UI shows it waiting rather than stalled.
 _analysis_run_lock = threading.Lock()
+# Who holds the run lock right now, so a queued analysis can say what it is
+# waiting for ("the AI analysis of Briarcliff Interviews, step 18 of 21")
+# instead of a bare "other AI work" (Chris, 2026-09-09: it read as stuck).
+_analysis_run_holder = {'project_id': None, 'name': None}
+
+# Friendly names for the memory governor's stage names (small-RAM Macs).
+_STAGE_LABELS = {
+    'analyze': 'another AI analysis',
+    'analyze-vectors': 'another AI analysis',
+    'transcribe': 'transcription',
+    'batch-transcribe': 'batch transcription',
+    'diarize': 'speaker identification',
+    'speaker-naming': 'speaker naming',
+    'collection-analyze': 'a collection analysis',
+    'collection-build': 'a collection build',
+    'batch-analyze': 'batch analysis',
+    'batch-vectors': 'batch analysis',
+    'prewarm': 'the model warm-up',
+}
+
+
+def _waiting_on_payload():
+    """What a queued analysis is waiting for, read live: the run-lock holder's
+    project and its own progress. None when nothing is known."""
+    pid = _analysis_run_holder.get('project_id')
+    if not pid:
+        return None
+    out = {'project_id': pid, 'name': _analysis_run_holder.get('name') or pid, 'kind': 'analysis'}
+    try:
+        st = load_json(_analyze_status_path(pid))
+        if isinstance(st, dict) and not st.get('done'):
+            out['step'] = int(st.get('step') or 0)
+            out['total'] = int(st.get('total') or 0)
+            out['current'] = st.get('current')
+    except Exception:
+        pass
+    return out
 
 
 def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snapshot,
@@ -3751,7 +3791,7 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
     # If the gate is held, park at current="queued" so the UI shows the wait.
     if not _analysis_run_lock.acquire(blocking=False):
         try:
-            progress(step=0, total=1, current="queued")
+            progress(step=0, total=1, current="queued", waiting_on=_waiting_on_payload())
         except Exception:
             pass
         _analysis_run_lock.acquire()
@@ -3759,6 +3799,8 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         project = get_project(project_id)
         if not project or not project.get('transcript'):
             return
+        _analysis_run_holder['project_id'] = project_id
+        _analysis_run_holder['name'] = project.get('name') or project_id
         # Rule 1, off the request thread: this worker runs the project's own
         # provider (meta ai_provider, local when unset) for the analysis and
         # the speaker naming that follows it. Nothing app-wide is consulted.
@@ -3794,7 +3836,9 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         else:
             with _memory_heavy_stage(
                     'analyze', evict_llm=False,
-                    on_wait=lambda h: progress(step=0, total=1, current='queued')):
+                    on_wait=lambda h: progress(
+                        step=0, total=1, current='queued',
+                        waiting_on={'kind': 'stage', 'name': _STAGE_LABELS.get(h, h or 'other AI work')})):
                 result = analyze_transcript(
                     project['transcript'],
                     project_name=project['name'],
@@ -3920,6 +3964,9 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         except Exception as inner:
             print(f"[analyze worker] could not persist error: {inner}")
     finally:
+        if _analysis_run_holder.get('project_id') == project_id:
+            _analysis_run_holder['project_id'] = None
+            _analysis_run_holder['name'] = None
         _analysis_run_lock.release()
         with _analysis_threads_lock:
             _analysis_threads.pop(project_id, None)
@@ -4162,6 +4209,11 @@ def analyze_status(project_id):
                 except OSError:
                     pass
                 return jsonify({'idle': True})
+    if payload.get('current') == 'queued' and not payload.get('done'):
+        # Live: the holder's own progress moves while this one waits.
+        live = _waiting_on_payload()
+        if live and live.get('project_id') != project_id:
+            payload['waiting_on'] = live
     return jsonify(payload)
 
 

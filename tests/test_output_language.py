@@ -257,7 +257,10 @@ class TestDirectiveInjectionCoreSurfaces:
 
         def fake_call(prompt, system_prompt="", task_type="analysis",
                       force_json=True, **kwargs):
-            sys_prompts.append(system_prompt)
+            # The directive rides at the tail of the user prompt since the
+            # per-chunk calls share one system prompt (prefix cache); judge
+            # the whole call text.
+            sys_prompts.append(system_prompt + '\n' + prompt)
             return '{}'
 
         monkeypatch.setattr(ai_analysis, '_call_ai', fake_call)

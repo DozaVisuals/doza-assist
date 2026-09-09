@@ -924,6 +924,48 @@ _NUM_CTX_HWM_MAX = 64
 _NUM_CTX_HWM_LOCK = threading.Lock()
 
 
+# One context size for analysis AND chat. Ollama reloads the model runner
+# whenever num_ctx changes (~2.5 s plus a cold re-read of whatever comes
+# next), so a project that alternates chat turns and analysis paid that on
+# every switch while analysis always asked for 32K and chat asked for its
+# own rung. Both now grow one process-wide high-water mark, kept per active
+# model (a model switch reloads anyway) and clamped to the machine's
+# ceiling for that call type — the editor's model choice and the RAM tier
+# still decide the maximum.
+_SHARED_NUM_CTX_HWM: dict = {}
+_SHARED_NUM_CTX_LOCK = threading.Lock()
+
+
+def _shared_num_ctx_key():
+    try:
+        return str(_get_ollama_model() or '*')
+    except Exception:
+        return '*'
+
+
+def _shared_num_ctx(system_message, messages, ceiling, headroom=1.0):
+    """Rung that fits this payload (with ``headroom``), never below the
+    process-wide high-water mark for the active model, never above
+    ``ceiling``."""
+    est = _estimate_chat_num_ctx(system_message, messages)
+    if headroom > 1.0:
+        total_chars = len(system_message or '') + sum(len(m.get('content') or '') for m in messages or [])
+        needed = int(total_chars / 2.8 * headroom) + 256 + 4096
+        for ctx in (8192, 12288, 16384, 24576, 32768):
+            if needed <= ctx:
+                est = max(est, ctx)
+                break
+        else:
+            est = 32768
+    key = _shared_num_ctx_key()
+    with _SHARED_NUM_CTX_LOCK:
+        prior = _SHARED_NUM_CTX_HWM.get(key, 0)
+        ctx = min(max(est, prior), int(ceiling))
+        if ctx > prior:
+            _SHARED_NUM_CTX_HWM[key] = ctx
+    return ctx
+
+
 def _sticky_chat_num_ctx(project_name, system_message, messages):
     """Payload-aware num_ctx with a grow-only floor per project.
 
@@ -950,7 +992,13 @@ def _sticky_chat_num_ctx(project_name, system_message, messages):
         _NUM_CTX_HWM.move_to_end(key)
         while len(_NUM_CTX_HWM) > _NUM_CTX_HWM_MAX:
             _NUM_CTX_HWM.popitem(last=False)
-    return ctx
+    # Converge on the analysis rung too (see _shared_num_ctx).
+    try:
+        from memory_budget import chat_num_ctx_ceiling
+        chat_ceiling = chat_num_ctx_ceiling()
+    except Exception:
+        chat_ceiling = 32768
+    return max(ctx, _shared_num_ctx(system_message, messages, min(chat_ceiling, 32768)))
 
 
 def _build_chat_messages(message, history, project_name, segments,
@@ -8996,6 +9044,16 @@ def _call_ai(prompt, system_prompt="", task_type="analysis", force_json=True,
         # Only forwarded when set, keeping every default-path provider call
         # byte-identical to before the story-build budget raise.
         extra['num_predict'] = num_predict
+    # Same context size as chat (see _shared_num_ctx): the rung this
+    # payload needs with 15% headroom against a truncated prompt, never
+    # below the mark the session has already reached, never above the
+    # machine's analysis ceiling.
+    try:
+        from memory_budget import analysis_num_ctx_ceiling
+        ceiling = analysis_num_ctx_ceiling()
+    except Exception:
+        ceiling = 32768
+    extra['num_ctx'] = _shared_num_ctx(system_prompt, [{'content': prompt}], ceiling, headroom=1.15)
     return provider.generate(
         system_prompt, prompt, task_type=task_type, force_json=force_json,
         timeout=timeout, **extra,
@@ -10478,6 +10536,39 @@ def _analyze_story(transcript_text, project_name, beats_target=7, soundbites_tar
     }
 
 
+# ── Per-chunk analysis calls share one prefix ────────────────────────
+# Ollama caches the prompt prefix it has already evaluated. The four calls
+# an analysis makes on every chunk (soundbites, story beats, overview,
+# social clips) used to start with four different instructions, so the
+# transcript behind them was read cold four times. They now share ONE
+# system prompt and open the user prompt with the SAME head (project +
+# transcript); each call's own instructions, schema and the output-
+# language directive ride at the tail. Only the first call per chunk
+# reads the transcript; the other three evaluate their tail. Nothing
+# about what each call asks for changes, and this holds for every model
+# the editor can pick — the cache lives in the model server, not the
+# model.
+_ANALYSIS_SHARED_SYSTEM = (
+    "You are an expert documentary film editor. Output JSON only. "
+    "No markdown, no fences, no commentary, no <think> tags. "
+    "Copy HH:MM:SS timecodes exactly from the transcript — "
+    "do not invent or round timecodes."
+)
+
+
+def _analysis_prompt_head(project_name, transcript_text):
+    """The byte-identical opening every per-chunk call shares."""
+    return f"PROJECT: {project_name}\n\nTRANSCRIPT:\n{transcript_text}\n\n"
+
+
+def _analysis_tail(instructions, language_directive_text=''):
+    """A call's own instructions, then the output-language directive."""
+    tail = instructions.rstrip()
+    if language_directive_text:
+        tail = tail + "\n" + language_directive_text.strip()
+    return tail
+
+
 def _analyze_story_soundbites(transcript_text, project_name, soundbites_target,
                               language_directive_text=''):
     """Pass 1: strongest soundbites only.
@@ -10488,20 +10579,8 @@ def _analyze_story_soundbites(transcript_text, project_name, soundbites_target,
     two arrays and truncate before reaching soundbites, or produce
     shallow generic entries when attention was split three ways.
     """
-    system_prompt = (
-        "You are an expert documentary film editor. Output JSON only. "
-        "No markdown, no fences, no commentary, no <think> tags. "
-        "Copy HH:MM:SS timecodes exactly from the transcript — "
-        "do not invent or round timecodes."
-    )
-    if language_directive_text:
-        system_prompt = system_prompt + language_directive_text
-    prompt = f"""PROJECT: {project_name}
-
-TRANSCRIPT:
-{transcript_text}
-
-Return ONLY this JSON object:
+    system_prompt = _ANALYSIS_SHARED_SYSTEM
+    prompt = _analysis_prompt_head(project_name, transcript_text) + _analysis_tail(f"""Return ONLY this JSON object:
 {{
   "strongest_soundbites": [
     {{"text": "the actual verbatim quote from the transcript", "start": "00:02:00", "end": "00:02:18", "why": "why this is editorially powerful"}}
@@ -10513,7 +10592,7 @@ Find the {soundbites_target} BEST soundbites. A great soundbite is a self-contai
 - "start" and "end" MUST be HH:MM:SS timecodes copied from the transcript's timecodes for that passage.
 - "why" is a short phrase explaining editorial value (emotional peak, thesis statement, surprising admission, etc.).
 Be ruthless — return fewer if the transcript only has fewer genuine standouts.
-Return ONLY valid JSON, nothing else."""
+Return ONLY valid JSON, nothing else.""", language_directive_text)
     parsed = _parse_json_response(_call_ai(prompt, system_prompt))
     if isinstance(parsed, dict) and (
         parsed.get('strongest_soundbites') or parsed.get('soundbites')
@@ -10536,20 +10615,8 @@ def _analyze_story_beats(transcript_text, project_name, beats_target,
     identify. Two small arrays in one call is within Gemma 4b's reliable
     output budget.
     """
-    system_prompt = (
-        "You are an expert documentary film editor. Output JSON only. "
-        "No markdown, no fences, no commentary, no <think> tags. "
-        "Copy HH:MM:SS timecodes exactly from the transcript — "
-        "do not invent or round timecodes."
-    )
-    if language_directive_text:
-        system_prompt = system_prompt + language_directive_text
-    prompt = f"""PROJECT: {project_name}
-
-TRANSCRIPT:
-{transcript_text}
-
-Return ONLY this JSON object — fill both lists:
+    system_prompt = _ANALYSIS_SHARED_SYSTEM
+    prompt = _analysis_prompt_head(project_name, transcript_text) + _analysis_tail(f"""Return ONLY this JSON object — fill both lists:
 {{
   "story_beats": [
     {{"order": 1, "label": "Opening Hook", "description": "why this moment works editorially", "start": "00:00:45", "end": "00:01:02"}}
@@ -10562,7 +10629,7 @@ Return ONLY this JSON object — fill both lists:
 Pick the {beats_target} BEST story beats following a documentary arc: hook, context, rising action, emotional peak, resolution, closing. Diversify across beat types — don't stack three hooks.
 Suggest 3-7 b-roll moments. Each one should be a CONCRETE visual idea pinned to the timecode where it would land — describe what you'd specifically want to see, not generic filler like "nature shots" or "stock footage".
 CRITICAL: Copy the exact HH:MM:SS timecodes from the transcript for start and end. Use string format like "00:02:45".
-Return ONLY valid JSON, nothing else."""
+Return ONLY valid JSON, nothing else.""", language_directive_text)
     parsed = _parse_json_response(_call_ai(prompt, system_prompt))
     if isinstance(parsed, dict) and (
         parsed.get('story_beats') or parsed.get('beats')
@@ -10583,18 +10650,8 @@ def _analyze_story_overview(transcript_text, project_name,
     Small schema, no timecodes — easy for Gemma 4b to fill reliably.
     Runs last because the timecoded passes carry higher editorial value.
     """
-    system_prompt = (
-        "You are an expert documentary film editor. Output JSON only. "
-        "No markdown, no fences, no commentary, no <think> tags."
-    )
-    if language_directive_text:
-        system_prompt = system_prompt + language_directive_text
-    prompt = f"""PROJECT: {project_name}
-
-TRANSCRIPT:
-{transcript_text}
-
-Return ONLY this JSON object:
+    system_prompt = _ANALYSIS_SHARED_SYSTEM
+    prompt = _analysis_prompt_head(project_name, transcript_text) + _analysis_tail(f"""Return ONLY this JSON object:
 {{
   "summary": "2-3 sentence overview of the story",
   "suggested_title": "A compelling working title",
@@ -10602,7 +10659,7 @@ Return ONLY this JSON object:
 }}
 
 Pick 3-7 themes — short noun phrases for the recurring topics. An empty list is fine if there aren't real recurring patterns.
-Return ONLY valid JSON, nothing else."""
+Return ONLY valid JSON, nothing else.""", language_directive_text)
     parsed = _parse_json_response(_call_ai(prompt, system_prompt))
     if isinstance(parsed, dict) and (
         parsed.get('summary') or parsed.get('themes')
@@ -10671,19 +10728,9 @@ def _analyze_social(transcript_text, project_name, clips_target=7,
     further if needed.
     """
     clips_target = max(1, int(clips_target))
-    system_prompt = """You are a social media content strategist who specializes in
-repurposing long-form documentary interview content into viral short-form clips.
-You know what performs well on Instagram Reels, TikTok, LinkedIn, and YouTube Shorts.
-Always respond in valid JSON format only. No other text."""
-    if language_directive_text:
-        system_prompt = system_prompt + language_directive_text
-
-    prompt = f"""Analyze this interview transcript and identify the best social media clip opportunities.
-
-PROJECT: {project_name}
-
-TRANSCRIPT:
-{transcript_text}
+    system_prompt = _ANALYSIS_SHARED_SYSTEM
+    prompt = _analysis_prompt_head(project_name, transcript_text) + _analysis_tail(f"""For this task you are a social media content strategist who specializes in repurposing long-form documentary interview content into viral short-form clips. You know what performs well on Instagram Reels, TikTok, LinkedIn, and YouTube Shorts.
+Analyze the interview transcript above and identify the best social media clip opportunities.
 
 Return a JSON object with this exact structure:
 {{
@@ -10712,7 +10759,7 @@ Rules:
 
 CRITICAL: The "start" and "end" values MUST be copied exactly from the [HH:MM:SS] timecodes in the transcript.
 Use the HH:MM:SS format as a string, like "00:02:45". Do NOT convert to decimal numbers.
-Return ONLY valid JSON, no markdown formatting."""
+Return ONLY valid JSON, no markdown formatting.""", language_directive_text)
 
     response = _call_ai(prompt, system_prompt)
     parsed = _parse_json_response(response)
@@ -10728,13 +10775,12 @@ Return ONLY valid JSON, no markdown formatting."""
     )
     if language_directive_text:
         retry_system = retry_system + language_directive_text
-    retry_prompt = (
-        'Re-analyze the interview below for short-form social media clips. '
+    retry_prompt = _analysis_prompt_head(project_name, transcript_text) + (
+        'Re-analyze the interview above for short-form social media clips. '
         'Respond ONLY with this JSON array:\n'
         '[{"rank":1,"title":"...","start":"00:00:00","end":"00:00:00",'
         '"duration_seconds":30,"text":"...","platform":"instagram_reels",'
         '"why":"...","hook":"...","hashtags":["..."]}]\n\n'
-        f'PROJECT: {project_name}\n\nTRANSCRIPT:\n{transcript_text}\n\n'
         f'Pick the {clips_target} BEST clips, 15-60 seconds each, '
         'ranked by predicted engagement. Return ONLY the JSON array, '
         'nothing else.'

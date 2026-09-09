@@ -46,11 +46,16 @@
 `;
 
   // ── state ──────────────────────────────────────────────────────────────
+  const SINGLE_CLICK_DELAY_MS = 320;   // under the macOS double-click interval
+  let _pendingClick = null;  // {tw, timer} a held single click on a word
   let _editor = null;        // {wrap, input, tw, seg, w, original, pid, paraStart}
   const _undo = [];          // [{type, ...}] newest last
   let _busy = false;
 
   function _container() { return document.getElementById('transcriptContainer'); }
+  function _cancelPendingClick() {
+    if (_pendingClick) { clearTimeout(_pendingClick.timer); _pendingClick = null; }
+  }
   function _pid() { return typeof PROJECT_ID !== 'undefined' ? PROJECT_ID : null; }
   function _toast(msg, isError) {
     if (typeof showToast === 'function') showToast(msg, !!isError);
@@ -581,13 +586,28 @@
     tc.dataset.twEditWired = '1';
     _injectCss();
 
-    // The second click of a double-click must not fire the word's inline
-    // jumpTo: stop it in the capture phase before it reaches the span.
+    // A word's inline jumpTo seeks AND plays, and the first click of a
+    // double-click used to fire it before the double-click was known, so
+    // opening the editor started playback. Every single click on a word is
+    // now held briefly in the capture phase; a second click cancels it, so
+    // a double-click never touches the player and a single click still
+    // jumps (a beat later than before).
+    // The click still bubbles (menus that close on an outside click keep
+    // working); only the word's own inline handler is detached for the
+    // duration of the event and replayed after the delay.
     tc.addEventListener('click', e => {
-      if (e.detail >= 2 && e.target.closest && e.target.closest('.tw')) {
-        e.stopPropagation();
-        e.preventDefault();
-      }
+      const tw = e.target.closest && e.target.closest('.tw');
+      if (!tw) return;
+      const handler = tw.onclick;
+      if (typeof handler !== 'function') return;
+      tw.onclick = null;
+      setTimeout(() => { if (tw.onclick === null) tw.onclick = handler; }, 0);
+      _cancelPendingClick();
+      if (e.detail >= 2) return;
+      _pendingClick = { tw, timer: setTimeout(() => {
+        _pendingClick = null;
+        if (tw.isConnected) handler.call(tw, e);
+      }, SINGLE_CLICK_DELAY_MS) };
     }, true);
 
     tc.addEventListener('dblclick', e => {
@@ -595,6 +615,7 @@
       if (!tw) return;
       e.preventDefault();
       e.stopPropagation();
+      _cancelPendingClick();
       const sel = window.getSelection && window.getSelection();
       if (sel && sel.removeAllRanges) sel.removeAllRanges();
       _openEditor(tw);

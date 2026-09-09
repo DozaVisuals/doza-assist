@@ -2141,6 +2141,23 @@ setPlayerView('waveform');
 const TRANSCRIBED_CHANNEL = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.audio_channel != null)
     ? String(PROJECT.audio_channel) : 'all';
 
+// One probe per source file per page: the track dropdown and the
+// retranscribe picker both asked, and a panel refresh asked again — each
+// probe runs ffprobe over the media, which on multi-gigabyte camera files
+// is real work. The answer for a path does not change while the page is
+// open.
+const _dozaProbeCache = {};
+function dozaProbeAudioTracks(path) {
+    if (!_dozaProbeCache[path]) {
+        _dozaProbeCache[path] = fetch('/probe-audio-tracks', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }) })
+            .then(res => res.json().catch(() => ({})))
+            .catch(() => { delete _dozaProbeCache[path]; return {}; });
+    }
+    return _dozaProbeCache[path];
+}
+
 async function initTrackDropdown() {
     const sel = document.getElementById('trackSelect');
     if (!sel) return;
@@ -2148,10 +2165,7 @@ async function initTrackDropdown() {
     if (!path) return;
     let count = 1;
     try {
-        const res = await fetch('/probe-audio-tracks', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path }) });
-        const d = await res.json().catch(() => ({}));
+        const d = await dozaProbeAudioTracks(path);
         count = (d && Number(d.count)) || 1;
     } catch (e) { count = 1; }
     if (count <= 1) return;  // single track: no dropdown
@@ -6684,12 +6698,7 @@ async function populateRetranscribeTracks() {
     if (!path) return;
     let count = 1;
     try {
-        const res = await fetch('/probe-audio-tracks', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path }),
-        });
-        const data = await res.json().catch(() => ({}));
+        const data = await dozaProbeAudioTracks(path);
         count = (data && Number(data.count)) || 1;
     } catch (e) { count = 1; }
     if (count <= 1) { group.style.display = 'none'; return; }

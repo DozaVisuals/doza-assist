@@ -7,6 +7,12 @@ marks ``derived_stale`` so the next Analyze re-runs, stamps
 ``transcript_edited_at``, and rebuilds ``paragraph_index.json`` so chat
 retrieval sees the corrected wording immediately.
 
+Ops that change text also refresh the text snapshots other features keep
+for the edited range (``labeled_sections[].text``, the analysis soundbite
+and social clip ``text``, and the quote sheet's ``raw_text``); see
+:func:`_refresh_snapshots`. ``story_builds.json`` and
+``segment_vectors.json`` are left alone.
+
 Routes (all under ``/project/<project_id>/transcript/``):
 
 - ``GET  paragraph-html?start=<sec>[&end=<sec>]`` re-rendered paragraph
@@ -175,6 +181,129 @@ def _speaker_list(project, segments):
     return [{'raw': raw, 'display': names.get(raw) or raw} for raw in seen]
 
 
+# ── text snapshots kept by other features ────────────────────────────────
+
+LABEL_TEXT_CAP = 200          # transcript.js commitSelection: text.substring(0, 200)
+QUOTE_MATCH_TOLERANCE = 0.25  # pro/quote_sheet/routes.py timecode match rule
+
+
+def _overlaps(a0, a1, b0, b1):
+    return a1 > b0 and a0 < b1
+
+
+def _plain_text_in_range(segments, lo, hi):
+    """The words spoken in ``[lo, hi)`` as one plain string: word-timed when
+    a segment carries words (the page's overlap rule, word.end > lo and
+    word.start < hi), otherwise the whole overlapping segment's text. No
+    speaker prefixes and no paragraph breaks, which is what a select's
+    ``text`` and a soundbite's ``text`` hold."""
+    bits = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            ss, se = float(seg.get('start', 0) or 0), float(seg.get('end', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not _overlaps(ss, se, lo, hi) and not (ss == se and lo <= ss < hi):
+            continue
+        words = seg.get('words') or []
+        if words:
+            for w in words:
+                try:
+                    ws, we = float(w.get('start', 0) or 0), float(w.get('end', 0) or 0)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if we > lo and ws < hi or (ws == we and lo <= ws < hi):
+                    t = _norm(w.get('word'))
+                    if t:
+                        bits.append(t)
+        else:
+            t = _norm(seg.get('text'))
+            if t:
+                bits.append(t)
+    return ' '.join(bits)
+
+
+def _segment_text_in_range(segments, lo, hi):
+    """Whole overlapping segments' text joined: the quote sheet's own
+    ``raw_text`` rule (pro/quote_sheet/routes.py _raw_text_for_window)."""
+    parts = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            ss, se = float(seg.get('start', 0) or 0), float(seg.get('end', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not _overlaps(ss, se, lo, hi):
+            continue
+        t = _norm(seg.get('text'))
+        if t:
+            parts.append(t)
+    return ' '.join(parts)
+
+
+def _seconds(value):
+    from ai_analysis import _tc_to_seconds
+    try:
+        return float(_tc_to_seconds(value))
+    except Exception:
+        return 0.0
+
+
+def _refresh_snapshots(project, segments, lo, hi):
+    """Re-derive the text copies that overlap ``[lo, hi]`` from the live
+    segments. Times are never touched. Returns counts per snapshot kind."""
+    counts = {'labeled_sections': 0, 'strongest_soundbites': 0, 'social_clips': 0, 'quotes': 0}
+    if hi <= lo:
+        return counts
+
+    for sec in project.get('labeled_sections') or []:
+        if not isinstance(sec, dict):
+            continue
+        try:
+            s, e = float(sec.get('start')), float(sec.get('end'))
+        except (TypeError, ValueError):
+            continue
+        if _overlaps(s, e, lo, hi):
+            sec['text'] = _plain_text_in_range(segments, s, e)[:LABEL_TEXT_CAP]
+            counts['labeled_sections'] += 1
+
+    analysis = project.get('analysis') if isinstance(project.get('analysis'), dict) else None
+    if analysis:
+        from export_notes import cap_text
+        for key in ('strongest_soundbites', 'social_clips'):
+            for clip in analysis.get(key) or []:
+                if not isinstance(clip, dict):
+                    continue
+                s, e = _seconds(clip.get('start')), _seconds(clip.get('end'))
+                if e > s and _overlaps(s, e, lo, hi):
+                    text = _plain_text_in_range(segments, s, e)
+                    if text:
+                        clip['text'] = cap_text(text)
+                        counts[key] += 1
+
+    draft = project.get('quote_sheet_draft') if isinstance(project.get('quote_sheet_draft'), dict) else None
+    if draft:
+        for speaker in draft.get('speakers') or []:
+            if not isinstance(speaker, dict):
+                continue
+            for quote in speaker.get('quotes') or []:
+                if not isinstance(quote, dict):
+                    continue
+                try:
+                    qs, qe = float(quote.get('timecode_start')), float(quote.get('timecode_end'))
+                except (TypeError, ValueError):
+                    continue
+                if qe > qs and _overlaps(qs, qe, lo - QUOTE_MATCH_TOLERANCE, hi + QUOTE_MATCH_TOLERANCE):
+                    text = _segment_text_in_range(segments, qs, qe)
+                    if text:
+                        quote['raw_text'] = text   # cleaned_text is the user's copy; untouched
+                        counts['quotes'] += 1
+    return counts
+
+
 def _int_field(payload, key, default=None, required=False):
     value = payload.get(key, default)
     if value is None:
@@ -221,6 +350,9 @@ def _apply(project_id, op):
         if not segments:
             raise EditError(400, {'error': 'No transcript available'})
         result.update(op(current, segments) or {})
+        edited = result.pop('edited_range', None)
+        if edited:
+            result['refreshed'] = _refresh_snapshots(current, segments, float(edited[0]), float(edited[1]))
         current['derived_stale'] = True
         current['transcript_edited_at'] = datetime.now().isoformat()
 
@@ -382,12 +514,13 @@ def edit_word(project_id):
             _check_expected(expected, word.get('word', ''), 'That word')
             word['word'] = _keep_space_convention(word.get('word', ''), text)
             seg['text'] = _rebuild_text(words)
-            return _segment_result(segments, seg_index, w=w_index, word=word)
+            return _segment_result(segments, seg_index, w=w_index, word=word,
+                                   edited_range=(seg['start'], seg['end']))
         _check_expected(expected, seg.get('text', ''), 'That segment')
         if words:
             raise EditError(400, {'error': 'Segment has words; edit them individually'})
         seg['text'] = text
-        return _segment_result(segments, seg_index, w=-1)
+        return _segment_result(segments, seg_index, w=-1, edited_range=(seg['start'], seg['end']))
 
     return _respond(project_id, op)
 
@@ -412,7 +545,8 @@ def delete_word(project_id):
         _check_expected(expected, words[w_index].get('word', ''), 'That word')
         removed = words.pop(w_index)
         seg['text'] = _rebuild_text(words)
-        return _segment_result(segments, seg_index, w=w_index, removed=removed)
+        return _segment_result(segments, seg_index, w=w_index, removed=removed,
+                               edited_range=(seg['start'], seg['end']))
 
     return _respond(project_id, op)
 
@@ -451,7 +585,8 @@ def split_segment(project_id):
         return _segment_result(segments, seg_index, last_index=seg_index + 1,
                                new_seg=seg_index + 1, new_segment=right,
                                speaker=right.get('speaker'), speaker_changed=label is not None,
-                               speakers=_speaker_list(project, segments))
+                               speakers=_speaker_list(project, segments),
+                               edited_range=(seg['start'], right['end']))
 
     return _respond(project_id, op)
 
@@ -488,7 +623,8 @@ def merge_segment(project_id):
         if left.get('speaker_manual') or right.get('speaker_manual'):
             left['speaker_manual'] = True
         segments.pop(seg_index + 1)
-        return _segment_result(segments, seg_index, merged_from=seg_index + 1)
+        return _segment_result(segments, seg_index, merged_from=seg_index + 1,
+                               edited_range=(left['start'], left['end']))
 
     return _respond(project_id, op)
 

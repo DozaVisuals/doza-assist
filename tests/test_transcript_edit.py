@@ -454,3 +454,106 @@ def test_reassign_flips_hash(client, project):
     _post(client, project, 'reassign-speaker', {'seg': 2, 'speaker': 'SPEAKER_00'})
     assert app_module._transcript_hash(_load(project)['transcript']) != h0
     assert _load(project)['derived_stale'] is True
+
+
+# ── commit 5: snapshot refresh ────────────────────────────────────────────
+
+def _with_snapshots(project):
+    meta = _load(project)
+    meta['labeled_sections'] = [
+        {'start': 2.0, 'end': 3.6, 'color': 'blue', 'text': 'Second half was better', 'title': 'keep me'},
+        {'start': 6.0, 'end': 7.6, 'color': 'green', 'text': 'What did you learn'},
+    ]
+    meta['analysis'] = {
+        'summary': 's',
+        'strongest_soundbites': [
+            {'text': 'Second half was better', 'start': '00:00:02', 'end': '00:00:03.6', 'why': 'w'},
+            {'text': 'untouched bite', 'start': '00:00:09', 'end': '00:00:11', 'why': 'w'},
+        ],
+        'social_clips': [
+            {'rank': 1, 'title': 't', 'start': '00:00:00', 'end': '00:00:04', 'text': 'Tale of two halves Second half was better'},
+        ],
+        'story_beats': [{'order': 1, 'label': 'b', 'description': 'd', 'start': '00:00:02', 'end': '00:00:03.6'}],
+    }
+    meta['quote_sheet_draft'] = {'generated_at': 'x', 'mode': 'auto', 'speakers': [
+        {'name': 'Reporter', 'quotes': [
+            {'raw_text': 'Second half was better', 'cleaned_text': 'Second half was better.',
+             'topic_header': 'On halves', 'timecode_start': 2.0, 'timecode_end': 3.6, 'include_in_export': True},
+            {'raw_text': 'segment level only', 'cleaned_text': 'Segment level only.',
+             'topic_header': 'On x', 'timecode_start': 9.0, 'timecode_end': 11.0, 'include_in_export': True},
+        ]},
+    ]}
+    (Path(app_module.app.config['PROJECTS_DIR']) / project / 'meta.json').write_text(json.dumps(meta), encoding='utf-8')
+    return meta
+
+
+def test_edit_refreshes_only_overlapping_snapshots(client, project):
+    before = _with_snapshots(project)
+    resp = _post(client, project, 'edit-word', {'seg': 1, 'w': 3, 'expected': 'better', 'text': 'stronger'})
+    assert resp.status_code == 200
+    assert resp.get_json()['refreshed'] == {'labeled_sections': 1, 'strongest_soundbites': 1,
+                                            'social_clips': 1, 'quotes': 1}
+    after = _load(project)
+    secs = after['labeled_sections']
+    assert secs[0]['text'] == 'Second half was stronger'
+    assert (secs[0]['start'], secs[0]['end'], secs[0]['color'], secs[0]['title']) == (2.0, 3.6, 'blue', 'keep me')
+    assert secs[1] == before['labeled_sections'][1]
+    bites = after['analysis']['strongest_soundbites']
+    assert bites[0]['text'] == 'Second half was stronger'
+    assert (bites[0]['start'], bites[0]['end'], bites[0]['why']) == ('00:00:02', '00:00:03.6', 'w')
+    assert bites[1] == before['analysis']['strongest_soundbites'][1]
+    assert after['analysis']['social_clips'][0]['text'] == 'Tale of two halves Second half was stronger'
+    assert after['analysis']['story_beats'] == before['analysis']['story_beats']
+    quotes = after['quote_sheet_draft']['speakers'][0]['quotes']
+    assert quotes[0]['raw_text'] == 'Second half was stronger'
+    assert quotes[0]['cleaned_text'] == 'Second half was better.'      # the user's copy, untouched
+    assert (quotes[0]['timecode_start'], quotes[0]['timecode_end']) == (2.0, 3.6)
+    assert quotes[1] == before['quote_sheet_draft']['speakers'][0]['quotes'][1]
+
+
+def test_label_text_follows_the_200_char_rule(client, project):
+    meta = _load(project)
+    long_words = _words(2.0, ['w%02d' % i for i in range(120)], step=0.01)
+    meta['transcript']['segments'][1] = {
+        'start': long_words[0]['start'], 'end': long_words[-1]['end'], 'speaker': 'SPEAKER_00',
+        'text': ' '.join(w['word'].strip() for w in long_words), 'words': long_words,
+        'start_formatted': format_timestamp(2.0), 'end_formatted': format_timestamp(long_words[-1]['end']),
+    }
+    meta['labeled_sections'] = [{'start': 2.0, 'end': 3.3, 'color': 'blue', 'text': 'old'}]
+    (Path(app_module.app.config['PROJECTS_DIR']) / project / 'meta.json').write_text(json.dumps(meta), encoding='utf-8')
+    assert _post(client, project, 'edit-word', {'seg': 1, 'w': 0, 'expected': 'w00', 'text': 'first'}).status_code == 200
+    text = _load(project)['labeled_sections'][0]['text']
+    assert text.startswith('first w01 w02') and len(text) == 200
+
+
+def test_reassign_leaves_snapshots_alone(client, project):
+    before = _with_snapshots(project)
+    resp = _post(client, project, 'reassign-speaker', {'seg': 1, 'speaker': 'SPEAKER_01'})
+    assert resp.status_code == 200 and 'refreshed' not in resp.get_json()
+    after = _load(project)
+    assert after['labeled_sections'] == before['labeled_sections']
+    assert after['analysis'] == before['analysis']
+    assert after['quote_sheet_draft'] == before['quote_sheet_draft']
+
+
+def test_split_and_merge_refresh_the_original_range(client, project):
+    _with_snapshots(project)
+    assert _post(client, project, 'split-segment', {'seg': 1, 'at_w': 2}).status_code == 200
+    # Text is unchanged by a split, so the snapshots re-derive to the same words.
+    assert _load(project)['labeled_sections'][0]['text'] == 'Second half was better'
+    assert _load(project)['quote_sheet_draft']['speakers'][0]['quotes'][0]['raw_text'] == 'Second half was better'
+    assert _post(client, project, 'delete-word', {'seg': 2, 'w': 1, 'expected': 'better'}).status_code == 200
+    assert _load(project)['labeled_sections'][0]['text'] == 'Second half was'
+    assert _post(client, project, 'merge-segment', {'seg': 1}).status_code == 200
+    assert _load(project)['analysis']['strongest_soundbites'][0]['text'] == 'Second half was'
+
+
+def test_refresh_survives_missing_or_malformed_snapshots(client, project):
+    meta = _load(project)
+    meta['labeled_sections'] = [{'start': 'x'}, 'junk', {'start': 2.0, 'end': 3.6, 'color': 'blue', 'text': 'old'}]
+    meta['analysis'] = {'strongest_soundbites': ['junk', {'text': 'no times'}]}
+    meta['quote_sheet_draft'] = {'speakers': ['junk', {'quotes': [{'timecode_start': 'x'}]}]}
+    (Path(app_module.app.config['PROJECTS_DIR']) / project / 'meta.json').write_text(json.dumps(meta), encoding='utf-8')
+    resp = _post(client, project, 'edit-word', {'seg': 1, 'w': 0, 'expected': 'Second', 'text': 'Latter'})
+    assert resp.status_code == 200
+    assert _load(project)['labeled_sections'][2]['text'] == 'Latter half was better'

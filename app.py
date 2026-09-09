@@ -2014,6 +2014,10 @@ def group_into_paragraphs(segments):
         'start': segments[0]['start'],
         'start_formatted': segments[0].get('start_formatted', '00:00:00')[:8],
         'segments': [segments[0]],
+        # Index of the paragraph's first segment in transcript.segments.
+        # Paragraph segments are contiguous, so the template derives every
+        # segment's index as first_index + offset (data-seg on .tw spans).
+        'first_index': 0,
     }
     sentence_count = 1
 
@@ -2044,6 +2048,7 @@ def group_into_paragraphs(segments):
                 'start': seg['start'],
                 'start_formatted': seg.get('start_formatted', '00:00:00')[:8],
                 'segments': [seg],
+                'first_index': i,
             }
             sentence_count = 1
         else:
@@ -8006,6 +8011,12 @@ def _load_extensions(flask_app):
 # ``python3 app.py`` direct-run path. Idempotent: Flask's
 # register_blueprint raises on a second register, but the loader catches
 # that as a logged warning rather than crashing the import.
+# Inline transcript correction routes (core, channel-neutral; see
+# transcript_edit.py). Registered before the extensions so a Pro module
+# can rely on the routes being present.
+from transcript_edit import transcript_edit_bp  # noqa: E402
+app.register_blueprint(transcript_edit_bp)
+
 _load_extensions(app)
 
 

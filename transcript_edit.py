@@ -19,6 +19,9 @@ Routes (all under ``/project/<project_id>/transcript/``):
   partial for the paragraphs overlapping that range (same markup as the page).
 - ``POST edit-word``   ``{seg, w, expected, text}``; ``w`` omitted or -1 edits
   a segment with no ``words[]`` (``expected`` is then the segment text).
+- ``POST insert-word`` ``{seg, after_w, text}``; a word the engine missed,
+  after ``words[after_w]`` (-1 = at the segment start). It takes the gap
+  to the next word, or zero duration when there is none.
 - ``POST delete-word`` ``{seg, w, expected}``; the inverse of insert-word.
 - ``POST split-segment`` ``{seg, at_w, new_speaker?}``; ``words[at_w]`` starts
   a new segment. Both halves take start/end from their first/last word.
@@ -53,6 +56,13 @@ class EditError(Exception):
         super().__init__(payload.get('error', 'edit rejected'))
         self.status = status
         self.payload = payload
+
+
+@transcript_edit_bp.errorhandler(EditError)
+def _edit_error(e):
+    """Payload validation raises before the locked update; answer the same
+    way the in-lock path does."""
+    return jsonify(e.payload), e.status
 
 
 def _core():
@@ -521,6 +531,46 @@ def edit_word(project_id):
             raise EditError(400, {'error': 'Segment has words; edit them individually'})
         seg['text'] = text
         return _segment_result(segments, seg_index, w=-1, edited_range=(seg['start'], seg['end']))
+
+    return _respond(project_id, op)
+
+
+@transcript_edit_bp.route('/project/<project_id>/transcript/insert-word', methods=['POST'])
+def insert_word(project_id):
+    """Insert a word the engine missed. ``{seg, after_w, text}``; the new
+    word goes after ``words[after_w]`` (``-1`` puts it first). Timing: it
+    spans the gap between its neighbours when there is one, otherwise it is
+    zero-duration at the boundary. Neighbouring words and the segment's own
+    start/end are never touched."""
+    data = _payload()
+    seg_index = _int_field(data, 'seg', required=True)
+    after_w = _int_field(data, 'after_w', required=True)
+    text = _norm(data.get('text'))
+    if not text:
+        return jsonify({'error': 'text must not be empty'}), 400
+
+    def op(project, segments):
+        seg = _seg_at(segments, seg_index)
+        words = _words_of(seg)
+        if not words:
+            raise EditError(400, {'error': 'Segment has no words; edit its text instead'})
+        if after_w < -1 or after_w >= len(words):
+            raise EditError(400, {'error': f'after_w must be between -1 and {len(words) - 1}'})
+        prev_end = float(words[after_w]['end']) if after_w >= 0 else float(seg.get('start', words[0]['start']))
+        next_start = float(words[after_w + 1]['start']) if after_w + 1 < len(words) \
+            else float(seg.get('end', words[-1]['end']))
+        if next_start - prev_end > 0:
+            start, end = prev_end, next_start
+        else:
+            start = end = prev_end
+        reference = words[after_w]['word'] if after_w >= 0 else words[0]['word']
+        new_word = {'start': round(start, 3), 'end': round(end, 3),
+                    'word': _keep_space_convention(reference, text)}
+        words.insert(after_w + 1, new_word)
+        seg['text'] = _rebuild_text(words)
+        return _segment_result(segments, seg_index, w=after_w + 1, word=new_word,
+                               zero_duration=start == end,
+                               edited_range=(seg['start'], seg['end']))
 
     return _respond(project_id, op)
 

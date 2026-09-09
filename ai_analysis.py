@@ -9310,6 +9310,16 @@ def invalidate_prewarm(project_name=None):
         pass
 
 
+def _segments_digest(segments):
+    """sha256 of the segments list (app._transcript_hash's recipe, kept
+    here to avoid importing the app module)."""
+    try:
+        payload = json.dumps(segments, sort_keys=True, default=str).encode('utf-8')
+        return hashlib.sha256(payload).hexdigest()
+    except Exception:
+        return ''
+
+
 def prewarm_chat_context(transcript, project_name="Interview", analysis=None,
                          labeled_sections=None, speaker_names=None,
                          output_language=None, segment_vectors=None):
@@ -9358,8 +9368,11 @@ def prewarm_chat_context(transcript, project_name="Interview", analysis=None,
         if long_path and _chat_legacy_chunked_enabled():
             return False
         key = str(project_name or '')
+        # Segment count and duration miss a text-only correction (the
+        # inline transcript editor never moves time), so a content hash
+        # prefix rides along; same hashing as app._transcript_hash.
         fingerprint = (len(segments), round(float(duration), 1),
-                       str(output_language or ''))
+                       str(output_language or ''), _segments_digest(segments)[:12])
         now = time.monotonic()
         with _PREWARM_LOCK:
             prior = _PREWARM_STATE.get(key)

@@ -220,7 +220,9 @@
     if (!_editor) return;
     const ed = _editor;
     _editor = null;
-    if (restore && ed.wrap.parentNode) ed.wrap.replaceWith(ed.tw);
+    if (!ed.wrap.parentNode) return;
+    if (ed.insert) ed.wrap.remove();               // the word it followed never left the DOM
+    else if (restore) ed.wrap.replaceWith(ed.tw);
   }
 
   function _button(label, primary, onClick) {
@@ -256,6 +258,7 @@
     const actions = document.createElement('span');
     actions.className = 'tw-edit-actions';
     actions.appendChild(_button('Save', true, () => _saveEdit()));
+    if (w >= 0) actions.appendChild(_button('Insert after', false, () => _insertAfter()));
     if (w > 0) actions.appendChild(_button('Split here', false, () => _splitHere()));
     actions.appendChild(_button('Speaker', false, () => _reassignHere()));
     wrap.appendChild(input);
@@ -277,8 +280,64 @@
     input.select();
   }
 
-  async function _saveEdit() {
+  // "Insert after": put the word back, then open an empty input right
+  // after it; Enter commits through insert-word.
+  function _insertAfter() {
     if (!_editor || _busy) return;
+    const ed = _editor;
+    _closeEditor(true);
+    const para = ed.tw.closest('.para-block');
+    const wrap = document.createElement('span');
+    wrap.className = 'tw-editor tw-editor-insert';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'tw-edit-input';
+    input.placeholder = 'new word';
+    input.size = 8;
+    input.setAttribute('aria-label', 'Insert word');
+    const actions = document.createElement('span');
+    actions.className = 'tw-edit-actions';
+    actions.appendChild(_button('Insert', true, () => _saveInsert()));
+    wrap.appendChild(input);
+    wrap.appendChild(actions);
+    ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu'].forEach(evt =>
+      wrap.addEventListener(evt, e => e.stopPropagation()));
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === 'Return' || e.keyCode === 13) { e.preventDefault(); _saveInsert(); }
+      else if (e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27) { e.preventDefault(); _closeEditor(true); }
+      e.stopPropagation();
+    });
+    input.addEventListener('input', () => { input.size = Math.max(8, input.value.length + 1); });
+    ed.tw.after(wrap);
+    // tw stays in the DOM; on close the wrapper is simply removed.
+    _editor = { wrap, input, tw: null, seg: ed.seg, w: ed.w, original: '', pid: ed.pid,
+                paraStart: para ? parseFloat(para.dataset.start) : NaN, insert: true };
+    input.focus();
+  }
+
+  async function _saveInsert() {
+    if (!_editor || !_editor.insert || _busy) return;
+    const ed = _editor;
+    const text = ed.input.value.trim();
+    if (!text) { _closeEditor(true); return; }
+    _busy = true;
+    try {
+      const data = await _post(ed.pid, 'insert-word', { seg: ed.seg, after_w: ed.w, text });
+      _closeEditor(false);
+      _undo.push({ type: 'insert', pid: ed.pid, seg: ed.seg, w: data.w, text: data.word.word,
+                   paraStart: data.paragraph_start });
+      await refreshParagraph(data.paragraph_start, ed.pid);
+      _showStaleBanner(data.has_analysis);
+    } catch (err) {
+      _closeEditor(true);
+      await _handleError(err, ed.pid, ed.paraStart);
+    } finally {
+      _busy = false;
+    }
+  }
+
+  async function _saveEdit() {
+    if (!_editor || _busy || _editor.insert) return;
     const ed = _editor;
     const text = ed.input.value.trim();
     if (!text || text === ed.original) { _closeEditor(true); return; }

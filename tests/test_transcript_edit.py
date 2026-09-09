@@ -557,3 +557,112 @@ def test_refresh_survives_missing_or_malformed_snapshots(client, project):
     resp = _post(client, project, 'edit-word', {'seg': 1, 'w': 0, 'expected': 'Second', 'text': 'Latter'})
     assert resp.status_code == 200
     assert _load(project)['labeled_sections'][2]['text'] == 'Latter half was better'
+
+
+# ── commit 6: insert-word + prewarm fingerprint ───────────────────────────
+
+def test_insert_word_takes_the_gap_and_touches_nothing_else(client, project):
+    before = _load(project)['transcript']['segments']
+    # Segment 2 words: What(6.0-6.4) did(6.4-6.8) you(6.8-7.2) learn(7.2-7.6). Open a gap after "did".
+    meta = _load(project)
+    meta['transcript']['segments'][2]['words'][2]['start'] = 7.0
+    (Path(app_module.app.config['PROJECTS_DIR']) / project / 'meta.json').write_text(json.dumps(meta), encoding='utf-8')
+    before = _load(project)['transcript']['segments']
+    resp = _post(client, project, 'insert-word', {'seg': 2, 'after_w': 1, 'text': 'really'})
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    seg = _load(project)['transcript']['segments'][2]
+    assert [w['word'] for w in seg['words']] == [' What', ' did', ' really', ' you', ' learn']
+    assert (seg['words'][2]['start'], seg['words'][2]['end']) == (6.8, 7.0)
+    assert data['w'] == 2 and data['zero_duration'] is False
+    assert seg['text'] == 'What did really you learn'
+    # Neighbours and segment bounds untouched.
+    assert seg['words'][:2] == before[2]['words'][:2] and seg['words'][3:] == before[2]['words'][2:]
+    assert (seg['start'], seg['end']) == (before[2]['start'], before[2]['end'])
+    assert _load(project)['transcript']['segments'][3:] == before[3:]
+
+
+def test_insert_word_zero_gap_is_zero_duration(client, project):
+    resp = _post(client, project, 'insert-word', {'seg': 1, 'after_w': 1, 'text': 'really'})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    seg = _load(project)['transcript']['segments'][1]
+    w = seg['words'][2]
+    assert w['word'] == ' really' and w['start'] == w['end'] == 2.8
+    assert data['zero_duration'] is True
+    assert seg['text'] == 'Second half really was better'
+    # At the start (-1) and at the end (last index) both land on the boundary.
+    assert _post(client, project, 'insert-word', {'seg': 1, 'after_w': -1, 'text': 'So'}).status_code == 200
+    seg = _load(project)['transcript']['segments'][1]
+    assert seg['words'][0]['word'] == ' So' and seg['words'][0]['start'] == seg['words'][0]['end'] == 2.0
+    assert _post(client, project, 'insert-word', {'seg': 1, 'after_w': 5, 'text': 'then'}).status_code == 200
+    seg = _load(project)['transcript']['segments'][1]
+    assert seg['words'][-1]['word'] == ' then' and seg['words'][-1]['start'] == seg['words'][-1]['end'] == 3.6
+    assert seg['text'] == 'So Second half really was better then'
+
+
+def test_insert_then_delete_round_trips(client, project):
+    before = _load(project)['transcript']['segments']
+    data = _post(client, project, 'insert-word', {'seg': 0, 'after_w': 0, 'text': 'the'}).get_json()
+    assert _post(client, project, 'delete-word', {'seg': 0, 'w': data['w'], 'expected': 'the'}).status_code == 200
+    assert _load(project)['transcript']['segments'] == before
+
+
+def test_insert_word_rejects_bad_input(client, project):
+    assert _post(client, project, 'insert-word', {'seg': 1, 'after_w': 0, 'text': ''}).status_code == 400
+    assert _post(client, project, 'insert-word', {'seg': 1, 'after_w': 4, 'text': 'x'}).status_code == 400
+    assert _post(client, project, 'insert-word', {'seg': 1, 'after_w': -2, 'text': 'x'}).status_code == 400
+    assert _post(client, project, 'insert-word', {'seg': 3, 'after_w': 0, 'text': 'x'}).status_code == 400  # no words
+    assert _post(client, project, 'insert-word', {'seg': 1, 'text': 'x'}).status_code == 400
+
+
+def test_zero_duration_word_playback_lookup_returns_neighbour(client, project):
+    """Mirror of project.html highlightActiveSegment's binary search over
+    data-s/data-e: a zero-duration word never satisfies s <= t < e, so the
+    lookup lands on its neighbour rather than failing."""
+    _post(client, project, 'insert-word', {'seg': 1, 'after_w': 1, 'text': 'really'})
+    words = [(w['start'], w['end'], w['word']) for s in _load(project)['transcript']['segments'] for w in s.get('words', [])]
+
+    def lookup(t):
+        lo, hi = 0, len(words) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            s, e, _ = words[mid]
+            if s <= t < e:
+                return words[mid][2]
+            if t < s:
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        return None
+
+    assert lookup(2.8) == ' was'          # the neighbour that starts at the boundary
+    assert lookup(2.79) == ' half'
+    assert lookup(2.81) == ' was'
+    assert (2.8, 2.8, ' really') in words
+
+
+def test_insert_refreshes_overlapping_label_text(client, project):
+    _with_snapshots(project)
+    assert _post(client, project, 'insert-word', {'seg': 1, 'after_w': 1, 'text': 'really'}).status_code == 200
+    assert _load(project)['labeled_sections'][0]['text'] == 'Second half really was better'
+
+
+def test_prewarm_text_only_edit_busts_cooldown():
+    """Same segment count, same duration, one word changed: the prefix
+    cache must re-warm (the old fingerprint could not tell)."""
+    import ai_analysis
+    from unittest.mock import patch
+    ai_analysis._PREWARM_STATE.clear()
+    segs = _meta('x')['transcript']['segments']
+    edited = copy.deepcopy(segs)
+    edited[0]['words'][0]['word'] = ' Tail'
+    edited[0]['text'] = 'Tail of two halves'
+    calls = []
+    with patch.object(ai_analysis, '_call_ai_chat', side_effect=lambda *a, **k: calls.append(1) or 'ok'), \
+            patch.object(ai_analysis, '_ollama_is_active', return_value=True):
+        assert ai_analysis.prewarm_chat_context({'segments': segs}, project_name='Edit Test') is True
+        assert ai_analysis.prewarm_chat_context({'segments': segs}, project_name='Edit Test') is True
+        assert len(calls) == 1                       # unchanged transcript: cooldown hit
+        assert ai_analysis.prewarm_chat_context({'segments': edited}, project_name='Edit Test') is True
+    assert len(calls) == 2                           # edited text: re-warmed

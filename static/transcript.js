@@ -40,6 +40,36 @@ let saveLabelTimeout = null;
 // NOT re-attach handlers (we rely on event delegation on a stable
 // container element).
 let _transcriptHandlersWired = false;
+// Live sync with the server (an assistant over the local connector can add
+// selects while the page is open): every sync_id this page has ever held,
+// deleted ones included, and the server's change token from the last poll.
+let _seenSyncIds = new Set();
+let _labelsRev = null;
+let _liveSyncTimer = null;
+let _liveSyncInFlight = false;
+
+// Known fields become the entry's own properties; everything else the server
+// stored (origin, author, sync_id, comment, created_at, source, project_id)
+// rides along in ``_extra`` and goes back verbatim on save. Before this the
+// page's first save turned every assistant select into a plain clip.
+function _entryFromSaved(sec) {
+    const { start, end, color, text, speaker, title, title_auto, id: _id, ...rest } = sec;
+    const entry = { id: ++sectionIdCounter, start, end, color, text: text || '' };
+    if (speaker) entry.speaker = speaker;
+    if (title) entry.title = title;
+    if (title_auto) entry.title_auto = true;
+    if (Object.keys(rest).length) entry._extra = rest;
+    if (rest.sync_id) _seenSyncIds.add(rest.sync_id);
+    return entry;
+}
+
+function _sectionForSave(s) {
+    const out = Object.assign({}, s._extra || {}, { start: s.start, end: s.end, color: s.color, text: s.text });
+    if (s.speaker) out.speaker = s.speaker;
+    if (s.title) out.title = s.title;
+    if (s.title_auto) out.title_auto = true;
+    return out;
+}
 
 
 // ── Segment-vector helpers ──
@@ -343,14 +373,9 @@ async function _doSaveLabels() {
     // (1.0.47); brush-painted and AI Analysis clips have none and omit it.
     // title / title_auto (1.0.47): the generated or carried display title;
     // text stays what the add wrote (the transcript fragment for a brush).
-    const sections = labelSections.map(s => {
-        const out = { start: s.start, end: s.end, color: s.color, text: s.text };
-        if (s.speaker) out.speaker = s.speaker;
-        if (s.title) out.title = s.title;
-        if (s.title_auto) out.title_auto = true;
-        return out;
-    });
-    const body = { color_labels: colorLabels, labeled_sections: sections };
+    const sections = labelSections.map(_sectionForSave);
+    const body = { color_labels: colorLabels, labeled_sections: sections,
+                   seen_sync_ids: Array.from(_seenSyncIds) };
     // Clips-tab ordering mode ('time' | 'manual') is owned by the host
     // page (top-level `let clipOrderMode` in project.html — shared via
     // the global lexical environment, same as labelSections). Hosts
@@ -400,6 +425,58 @@ async function flushSaveLabels() {
 }
 
 
+// ── Live sync ──
+//
+// Every few seconds while the page is visible, ask the server whether the
+// labels changed (a stat, nothing more, when they did not). New selects that
+// carry a sync_id this page has never held — an assistant's, over the local
+// connector — are merged in and painted; the host page is told so it can
+// refresh its Clips tab and say who added what. Only sync_id-bearing
+// entries are adopted: without one there is no way to tell "added
+// elsewhere" from "deleted here a moment ago".
+
+function transcriptLiveSyncStart() {
+    if (_liveSyncTimer) return;
+    _liveSyncTimer = setInterval(_liveSyncTick, 2500);
+}
+
+async function _liveSyncTick() {
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    if (typeof PROJECT_ID === 'undefined' || !PROJECT_ID) return;
+    if (saveLabelTimeout !== null || _liveSyncInFlight) return;   // our own save is pending
+    const pid = PROJECT_ID;
+    _liveSyncInFlight = true;
+    let data = null;
+    try {
+        const r = await fetch(`/project/${pid}/labels?rev=${encodeURIComponent(_labelsRev || '')}`, { cache: 'no-store' });
+        if (r.ok) data = await r.json();
+    } catch (e) { /* offline or restarting: try again next tick */ }
+    _liveSyncInFlight = false;
+    if (!data || pid !== PROJECT_ID) return;         // interview swapped meanwhile
+    if (data.unchanged) return;
+    _labelsRev = data.rev;
+    const added = _mergeExternalSections(data.labeled_sections || []);
+    if (!added.length) return;
+    renderAllHighlights();
+    updateSelectCount();
+    if (typeof window !== 'undefined' && typeof window.onLabelsExternalUpdate === 'function') {
+        try { window.onLabelsExternalUpdate(added); } catch (e) { console.error('[transcript] onLabelsExternalUpdate failed:', e); }
+    }
+}
+
+function _mergeExternalSections(serverSections) {
+    const added = [];
+    serverSections.forEach(sec => {
+        if (!sec || typeof sec !== 'object' || !sec.sync_id) return;
+        if (_seenSyncIds.has(sec.sync_id)) return;
+        const entry = _entryFromSaved(sec);
+        labelSections.push(entry);
+        added.push(entry);
+    });
+    return added;
+}
+
+
 // ── Initialization ──
 
 /**
@@ -439,21 +516,11 @@ function transcriptInit(opts) {
     // Reset and reload labeled sections.
     labelSections = [];
     sectionIdCounter = 0;
+    _seenSyncIds = new Set();
+    _labelsRev = null;
     const saved = opts.labeledSections || [];
-    saved.forEach(sec => {
-        const id = ++sectionIdCounter;
-        const entry = {
-            id,
-            start: sec.start,
-            end: sec.end,
-            color: sec.color,
-            text: sec.text || '',
-        };
-        if (sec.speaker) entry.speaker = sec.speaker;
-        if (sec.title) entry.title = sec.title;
-        if (sec.title_auto) entry.title_auto = true;
-        labelSections.push(entry);
-    });
+    saved.forEach(sec => { labelSections.push(_entryFromSaved(sec)); });
+    transcriptLiveSyncStart();
 
     // Restore swatch label inputs (DOM owned by the page template).
     Object.entries(colorLabels).forEach(([color, name]) => {

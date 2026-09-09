@@ -4614,6 +4614,46 @@ def save_selects(project_id):
     return jsonify({'status': 'saved', 'count': len(selects)})
 
 
+def _labels_rev(project_id):
+    """Cheap change token for a project's labels: meta.json's mtime and
+    size. The open page polls this every few seconds; only a change costs
+    a real read. None when the project is gone."""
+    project_dir = safe_project_dir(project_id)
+    if project_dir is None:
+        return None
+    try:
+        st = os.stat(os.path.join(project_dir, 'meta.json'))
+    except OSError:
+        return None
+    return f'{st.st_mtime_ns}-{st.st_size}'
+
+
+@app.route('/project/<project_id>/labels', methods=['GET'])
+def get_labels(project_id):
+    """Current labels for the open page's live sync.
+
+    ``?rev=<token>``: when the token still matches, answer ``{unchanged}``
+    without reading the project. Otherwise the sections, so a select an
+    assistant just created over the local connector shows up in the open
+    page within seconds instead of after a reload (Chris, 2026-09-09).
+    """
+    rev = _labels_rev(project_id)
+    if rev is None:
+        return jsonify({'error': 'Project not found'}), 404
+    known = request.args.get('rev') or ''
+    if known and known == rev:
+        return jsonify({'unchanged': True, 'rev': rev})
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    return jsonify({
+        'rev': rev,
+        'labeled_sections': project.get('labeled_sections') or [],
+        'color_labels': project.get('color_labels') or {},
+        'clip_order_mode': project.get('clip_order_mode') or 'time',
+    })
+
+
 @app.route('/project/<project_id>/labels', methods=['POST'])
 def save_labels(project_id):
     """Save color label names and labeled transcript sections."""
@@ -4622,8 +4662,23 @@ def save_labels(project_id):
         return jsonify({'error': 'Project not found'}), 404
 
     data = request.json or {}
-    prev_count = len(project.get('labeled_sections', []) or [])
+    prev_sections = [s for s in (project.get('labeled_sections') or []) if isinstance(s, dict)]
+    prev_count = len(prev_sections)
     new_sections = data.get('labeled_sections', [])
+    # An assistant (local connector) may have added a select since the page
+    # loaded. The page posts its whole array, so that select would vanish
+    # here. Clients that send ``seen_sync_ids`` (every select they have ever
+    # held, deleted ones included) get the unseen assistant selects kept;
+    # a select they saw and dropped is a real deletion and stays dropped.
+    seen = data.get('seen_sync_ids')
+    if isinstance(seen, list) and isinstance(new_sections, list):
+        seen_ids = {str(x) for x in seen}
+        posted_ids = {s.get('sync_id') for s in new_sections if isinstance(s, dict) and s.get('sync_id')}
+        kept = [s for s in prev_sections
+                if s.get('origin') == 'ai' and s.get('sync_id')
+                and s['sync_id'] not in posted_ids and s['sync_id'] not in seen_ids]
+        if kept:
+            new_sections = list(new_sections) + kept
     updates = {
         'color_labels': data.get('color_labels', {}),
         'labeled_sections': new_sections,

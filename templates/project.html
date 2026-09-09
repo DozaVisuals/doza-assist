@@ -3056,7 +3056,8 @@ window.rebuildWordIndex = function rebuildWordIndex() {
         transcriptInit({
             colorLabels:     colorLabels,
             labeledSections: labelSections.map(s => {
-                const out = { start: s.start, end: s.end, color: s.color, text: s.text };
+                // Carry the stored extras (assistant attribution, sync_id).
+                const out = Object.assign({}, s._extra || {}, { start: s.start, end: s.end, color: s.color, text: s.text });
                 if (s.speaker) out.speaker = s.speaker;
                 if (s.title) out.title = s.title;
                 if (s.title_auto) out.title_auto = true;
@@ -3180,6 +3181,22 @@ transcriptInit({
     labeledSections: {{ (project.labeled_sections or [])|tojson }},
     segmentVectors: {{ (segment_vectors or [])|tojson }},
 });
+// A select added from outside the page (Claude over the local connector)
+// has just been merged by transcript.js's live sync: refresh the views that
+// list clips and say so, with a way to look.
+window.onLabelsExternalUpdate = function (added) {
+    try { renderClipsTab(); } catch (e) { /* tab not built yet */ }
+    try { if (typeof renderStoryClipLibrary === 'function') renderStoryClipLibrary(); } catch (e) { /* no story rail */ }
+    const n = added.length;
+    const byAssistant = added.some(e => e._extra && e._extra.origin === 'ai');
+    const who = byAssistant ? 'Claude' : 'Another window';
+    const first = added[0] || {};
+    const label = (first.title || first.text || '').trim();
+    const what = n === 1 ? `a clip${label ? ': “' + label.slice(0, 60) + (label.length > 60 ? '…' : '') + '”' : ''}` : `${n} clips`;
+    if (typeof showToastWithAction === 'function') {
+        showToastWithAction(`${who} added ${what}`, 'View', () => switchTab('clips'), 7000);
+    }
+};
 // Clips-tab ordering: 'time' (chronological display, default) or 'manual'
 // (the editor drag-reordered the Clips tab — the labelSections ARRAY order
 // is then canonical; see renderClipsTab/clipDrop). Persisted with every

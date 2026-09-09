@@ -746,7 +746,7 @@ def project_lock(project_id):
         return lock
 
 
-def update_project(project_id, updates, remove=None):
+def update_project(project_id, updates, remove=None, mutate=None):
     """Atomically merge ``updates`` into the project's current on-disk state.
 
     For long-running jobs (/transcribe, /analyze) that loaded the project
@@ -755,11 +755,18 @@ def update_project(project_id, updates, remove=None):
     job ran are preserved instead of being clobbered by the job's stale
     snapshot. ``remove`` lists keys to drop (e.g. a stale 'error'). Returns the
     merged dict, or None if the project no longer exists (deleted mid-job).
+
+    ``mutate(current)``, when given, runs under the lock on the freshly read
+    dict BEFORE ``updates`` are merged: the way to edit nested state (a
+    transcript segment) without a read-then-write race against another
+    writer. If it raises, nothing is written and the exception propagates.
     """
     with project_lock(project_id):
         current = get_project(project_id)
         if current is None:
             return None
+        if mutate is not None:
+            mutate(current)
         current.update(updates)
         for key in (remove or []):
             current.pop(key, None)

@@ -1,30 +1,91 @@
 /* Inline transcript correction.
  *
- * Commit 1: paragraph refresh plumbing only. Exposes
- * window.dozaTranscriptEdit.refreshParagraph(start, projectId) which fetches
- * the re-rendered paragraph partial for the paragraph containing `start`,
- * swaps it into #transcriptContainer, then re-runs the page's word index
- * (window.rebuildWordIndex, project.html) so drag-to-highlight, playback
- * highlighting and the label repaint all see the new .tw nodes. The trim
- * sheet forgets its memoized word list on its own: it watches the container
- * for childList mutations (pro/trim/static/trim.js), and replacing a
- * .para-block node is exactly that.
+ * Double-click a word (.tw) to edit it in place. Text correction only: the
+ * server never changes media timing. Every operation is pushed onto its own
+ * undo stack (Cmd+Z / Ctrl+Z), separate from the label Undo button, and
+ * undone by calling the inverse route.
+ *
+ * Page contract (project.html): PROJECT_ID, PROJECT, window.rebuildWordIndex,
+ * runAnalysis, showToast. Everything is typeof-guarded so a host without
+ * them (Pro Collections) degrades to read-only.
+ *
+ * After any successful op the affected paragraph(s) are re-fetched from
+ * GET /project/<id>/transcript/paragraph-html and swapped in, then
+ * window.rebuildWordIndex() re-runs the word index and transcriptInit, which
+ * repaints labels by time overlap. The trim sheet forgets its memoized word
+ * list on its own: it watches the container for childList mutations
+ * (pro/trim/static/trim.js), and replacing a .para-block node is exactly that.
  */
 (function () {
   'use strict';
 
-  function _container() {
-    return document.getElementById('transcriptContainer');
+  const CSS = `
+.tw-editor { display: inline-flex; align-items: center; gap: 4px; vertical-align: baseline; }
+.tw-edit-input { font: inherit; color: var(--text-primary); background: var(--bg-input);
+  border: 1px solid var(--accent); border-radius: 3px; padding: 0 4px; min-width: 3ch; outline: none; }
+.tw-edit-actions { display: inline-flex; gap: 2px; }
+.tw-edit-actions button { font: inherit; font-size: 0.75em; line-height: 1.4; padding: 0 6px;
+  border: 1px solid var(--border-light); border-radius: 3px; background: var(--bg-card);
+  color: var(--text-secondary); cursor: pointer; }
+.tw-edit-actions button:hover { color: var(--text-primary); border-color: var(--accent); }
+.tw-edit-actions button.tw-edit-primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+.transcript-stale-banner { display: flex; align-items: center; gap: 10px; margin: 0 0 10px;
+  padding: 8px 12px; border: 1px solid var(--border-light); border-left: 3px solid var(--accent);
+  border-radius: 6px; background: var(--bg-card); color: var(--text-secondary); font-size: 0.9em; }
+.transcript-stale-banner button { font: inherit; font-size: 0.9em; padding: 2px 10px;
+  border: 1px solid var(--accent); border-radius: 4px; background: transparent; color: var(--accent); cursor: pointer; }
+.transcript-stale-banner button:hover { background: var(--accent); color: #fff; }
+`;
+
+  // ── state ──────────────────────────────────────────────────────────────
+  let _editor = null;        // {wrap, input, tw, seg, w, original, pid, paraStart}
+  const _undo = [];          // [{type, ...}] newest last
+  let _busy = false;
+
+  function _container() { return document.getElementById('transcriptContainer'); }
+  function _pid() { return typeof PROJECT_ID !== 'undefined' ? PROJECT_ID : null; }
+  function _toast(msg, isError) {
+    if (typeof showToast === 'function') showToast(msg, !!isError);
   }
 
-  function _paraBlockAt(start, projectId) {
+  function _injectCss() {
+    if (document.getElementById('transcriptEditCss')) return;
+    const el = document.createElement('style');
+    el.id = 'transcriptEditCss';
+    el.textContent = CSS;
+    document.head.appendChild(el);
+  }
+
+  // ── server ─────────────────────────────────────────────────────────────
+  async function _post(pid, op, body) {
+    const resp = await fetch(`/project/${encodeURIComponent(pid)}/transcript/${op}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let data = null;
+    try { data = await resp.json(); } catch (e) { data = null; }
+    if (!resp.ok) {
+      const err = new Error((data && data.error) || `${op} failed (${resp.status})`);
+      err.status = resp.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  // ── paragraph refresh ──────────────────────────────────────────────────
+  function _blocksFor(pid) {
     const tc = _container();
-    if (!tc) return null;
+    if (!tc) return [];
+    return Array.from(tc.querySelectorAll('.para-block')).filter(b =>
+      !pid || !b.dataset.project || b.dataset.project === pid);
+  }
+
+  function _paraBlockAt(start, pid) {
     const want = parseFloat(start);
-    const blocks = tc.querySelectorAll('.para-block');
     let best = null;
-    for (const b of blocks) {
-      if (projectId && b.dataset.project && b.dataset.project !== projectId) continue;
+    for (const b of _blocksFor(pid)) {
       const s = parseFloat(b.dataset.start);
       if (isNaN(s)) continue;
       if (s <= want + 1e-6 && (!best || s > parseFloat(best.dataset.start))) best = b;
@@ -40,18 +101,18 @@
   }
 
   /**
-   * Re-render the paragraph containing `start` for `projectId` and swap it
-   * in place. Resolves to the new .para-block, or null when nothing was
-   * swapped (no matching block, request failed).
+   * Re-render every paragraph overlapping [start, end] for `projectId` and
+   * swap them in place of the blocks currently covering that range.
+   * Resolves to the first fresh .para-block, or null when nothing changed.
    */
-  async function refreshParagraph(start, projectId) {
-    const pid = projectId || (typeof PROJECT_ID !== 'undefined' ? PROJECT_ID : null);
+  async function refreshRange(start, end, projectId) {
+    const pid = projectId || _pid();
     if (!pid) return null;
-    const block = _paraBlockAt(start, pid);
-    if (!block) return null;
+    const anchor = _paraBlockAt(start, pid);
+    if (!anchor) return null;
 
-    const params = new URLSearchParams({ start: String(start) });
-    const color = _projectColor(block);
+    const params = new URLSearchParams({ start: String(start), end: String(end == null ? start : end) });
+    const color = _projectColor(anchor);
     if (color) { params.set('multi', '1'); params.set('color', color); }
 
     let data;
@@ -59,22 +120,280 @@
       const resp = await fetch(`/project/${encodeURIComponent(pid)}/transcript/paragraph-html?${params}`);
       if (!resp.ok) return null;
       data = await resp.json();
-    } catch (e) {
-      return null;
-    }
+    } catch (e) { return null; }
     if (!data || !data.html) return null;
 
     const tpl = document.createElement('template');
     tpl.innerHTML = data.html.trim();
-    const fresh = tpl.content.querySelector('.para-block');
-    if (!fresh) return null;
+    const fresh = Array.from(tpl.content.querySelectorAll('.para-block'));
+    if (!fresh.length) return null;
 
-    block.replaceWith(fresh);
+    // Remove every current block whose start lies inside the re-rendered
+    // span, then insert the fresh ones where the first of them stood.
+    const lo = parseFloat(data.start) - 1e-6;
+    const hi = parseFloat(data.end) - 1e-6;
+    const stale = _blocksFor(pid).filter(b => {
+      const s = parseFloat(b.dataset.start);
+      return !isNaN(s) && s >= lo && s < hi;
+    });
+    if (!stale.includes(anchor)) stale.unshift(anchor);
+    const marker = document.createComment('tw-refresh');
+    stale[0].parentNode.insertBefore(marker, stale[0]);
+    stale.forEach(b => b.remove());
+    fresh.forEach(b => marker.parentNode.insertBefore(b, marker));
+    marker.remove();
+
     if (typeof window.rebuildWordIndex === 'function') window.rebuildWordIndex();
-    return fresh;
+    _applySpeakerDisplay(fresh);
+    return fresh[0];
+  }
+
+  // The partial renders raw speaker labels; the page shows display names.
+  // Pro's diarization module owns that mapping when present, otherwise map
+  // through the project's speaker_names snapshot.
+  function _applySpeakerDisplay(blocks) {
+    const locked = document.querySelector('.para-speaker.diar-locked-cycle');
+    if (locked) {
+      blocks.forEach(b => b.querySelectorAll('.para-speaker').forEach(el => {
+        el.classList.add('diar-locked-cycle');
+        el.title = locked.title;
+      }));
+    }
+    if (window.diarization && typeof window.diarization.applySpeakerNamesToDOM === 'function') {
+      window.diarization.applySpeakerNamesToDOM();
+      return;
+    }
+    const names = (typeof PROJECT !== 'undefined' && PROJECT && PROJECT.speaker_names) || null;
+    if (!names) return;
+    blocks.forEach(b => b.querySelectorAll('.para-speaker').forEach(el => {
+      const raw = el.dataset.raw || el.textContent.trim();
+      if (names[raw]) { el.dataset.raw = raw; el.textContent = names[raw]; }
+    }));
+  }
+
+  function refreshParagraph(start, projectId) {
+    return refreshRange(start, start, projectId);
+  }
+
+  // ── stale banner ───────────────────────────────────────────────────────
+  function _showStaleBanner(hasAnalysis) {
+    if (!hasAnalysis) return;
+    const tc = _container();
+    if (!tc || !tc.parentNode) return;
+    let banner = document.getElementById('transcriptStaleBanner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'transcriptStaleBanner';
+      banner.className = 'transcript-stale-banner';
+      const msg = document.createElement('span');
+      msg.textContent = 'Transcript edited since last analysis. Re-run Analysis to update soundbites and story beats.';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Re-run';
+      btn.addEventListener('click', () => {
+        banner.hidden = true;
+        if (typeof runAnalysis === 'function') runAnalysis();
+      });
+      banner.appendChild(msg);
+      banner.appendChild(btn);
+      tc.parentNode.insertBefore(banner, tc);
+    }
+    banner.hidden = false;
+  }
+
+  function _initialStale() {
+    if (typeof PROJECT === 'undefined' || !PROJECT) return;
+    if (PROJECT.derived_stale && PROJECT.analysis) _showStaleBanner(true);
+  }
+
+  // ── inline editor ──────────────────────────────────────────────────────
+  function _closeEditor(restore) {
+    if (!_editor) return;
+    const ed = _editor;
+    _editor = null;
+    if (restore && ed.wrap.parentNode) ed.wrap.replaceWith(ed.tw);
+  }
+
+  function _button(label, primary, onClick) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    if (primary) b.className = 'tw-edit-primary';
+    b.addEventListener('mousedown', e => e.preventDefault()); // keep input focus
+    b.addEventListener('click', e => { e.stopPropagation(); onClick(); });
+    return b;
+  }
+
+  function _openEditor(tw) {
+    const seg = parseInt(tw.dataset.seg, 10);
+    const w = parseInt(tw.dataset.w, 10);
+    if (isNaN(seg) || seg < 0) {
+      _toast('This transcript cannot be edited inline.', true);
+      return;
+    }
+    _closeEditor(true);
+    const para = tw.closest('.para-block');
+    const pid = (para && para.dataset.project) || _pid();
+    const original = tw.textContent.trim();
+
+    const wrap = document.createElement('span');
+    wrap.className = 'tw-editor';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'tw-edit-input';
+    input.value = original;
+    input.size = Math.max(3, original.length + 1);
+    input.setAttribute('aria-label', 'Edit word');
+    const actions = document.createElement('span');
+    actions.className = 'tw-edit-actions';
+    actions.appendChild(_button('Save', true, () => _saveEdit()));
+    wrap.appendChild(input);
+    wrap.appendChild(actions);
+
+    // Keep the brush drag, jumpTo and label context menu out of the editor.
+    ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu'].forEach(evt =>
+      wrap.addEventListener(evt, e => e.stopPropagation()));
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === 'Return' || e.keyCode === 13) { e.preventDefault(); _saveEdit(); }
+      else if (e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27) { e.preventDefault(); _closeEditor(true); }
+      e.stopPropagation();
+    });
+    input.addEventListener('input', () => { input.size = Math.max(3, input.value.length + 1); });
+
+    tw.replaceWith(wrap);
+    _editor = { wrap, input, tw, seg, w, original, pid, paraStart: para ? parseFloat(para.dataset.start) : NaN };
+    input.focus();
+    input.select();
+  }
+
+  async function _saveEdit() {
+    if (!_editor || _busy) return;
+    const ed = _editor;
+    const text = ed.input.value.trim();
+    if (!text || text === ed.original) { _closeEditor(true); return; }
+    const body = { seg: ed.seg, expected: ed.original, text };
+    if (ed.w >= 0) body.w = ed.w;
+    _busy = true;
+    try {
+      const data = await _post(ed.pid, 'edit-word', body);
+      _closeEditor(false);
+      _undo.push({ type: 'edit', pid: ed.pid, seg: ed.seg, w: ed.w, oldText: ed.original, newText: text,
+                   paraStart: data.paragraph_start });
+      await refreshParagraph(data.paragraph_start, ed.pid);
+      _showStaleBanner(data.has_analysis);
+    } catch (err) {
+      _closeEditor(true);
+      await _handleError(err, ed.pid, ed.paraStart);
+    } finally {
+      _busy = false;
+    }
+  }
+
+  async function _handleError(err, pid, paraStart) {
+    if (err.status === 409) {
+      const cur = err.data && err.data.current;
+      _toast(cur ? `That word changed since the page loaded (now "${String(cur).trim()}"). Refreshed.` : err.message, true);
+      if (!isNaN(paraStart)) await refreshParagraph(paraStart, pid);
+    } else {
+      _toast(err.message || 'Edit failed', true);
+    }
+  }
+
+  // ── undo ───────────────────────────────────────────────────────────────
+  async function undo() {
+    if (_busy || !_undo.length) return;
+    const entry = _undo.pop();
+    _busy = true;
+    try {
+      let data;
+      if (entry.type === 'edit') {
+        const body = { seg: entry.seg, expected: entry.newText, text: entry.oldText };
+        if (entry.w >= 0) body.w = entry.w;
+        data = await _post(entry.pid, 'edit-word', body);
+        await refreshParagraph(data.paragraph_start, entry.pid);
+      } else if (entry.type === 'insert') {
+        data = await _post(entry.pid, 'delete-word', { seg: entry.seg, w: entry.w, expected: entry.text });
+        await refreshParagraph(data.paragraph_start, entry.pid);
+      } else if (entry.type === 'split') {
+        data = await _post(entry.pid, 'merge-segment', { seg: entry.seg });
+        if (typeof _shiftSegIndices === 'function') _shiftSegIndices(entry.seg + 1, -1);
+        await refreshRange(data.paragraph_start, data.paragraph_end, entry.pid);
+      } else if (entry.type === 'reassign') {
+        data = await _post(entry.pid, 'reassign-speaker', { seg: entry.seg, speaker: entry.oldSpeaker,
+                                                            speaker_manual: entry.oldManual });
+        await refreshRange(data.paragraph_start, data.paragraph_end, entry.pid);
+      } else {
+        return;
+      }
+      _showStaleBanner(data && data.has_analysis);
+      _toast('Transcript edit undone');
+    } catch (err) {
+      _undo.push(entry);
+      await _handleError(err, entry.pid, entry.paraStart);
+    } finally {
+      _busy = false;
+    }
+  }
+
+  function _isTypingTarget(el) {
+    if (!el) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
+  }
+
+  // ── wiring ─────────────────────────────────────────────────────────────
+  function _wire() {
+    const tc = _container();
+    if (!tc || tc.dataset.twEditWired) return;
+    tc.dataset.twEditWired = '1';
+    _injectCss();
+
+    // The second click of a double-click must not fire the word's inline
+    // jumpTo: stop it in the capture phase before it reaches the span.
+    tc.addEventListener('click', e => {
+      if (e.detail >= 2 && e.target.closest && e.target.closest('.tw')) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    }, true);
+
+    tc.addEventListener('dblclick', e => {
+      const tw = e.target.closest && e.target.closest('.tw');
+      if (!tw) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const sel = window.getSelection && window.getSelection();
+      if (sel && sel.removeAllRanges) sel.removeAllRanges();
+      _openEditor(tw);
+    });
+
+    document.addEventListener('mousedown', e => {
+      if (_editor && !_editor.wrap.contains(e.target)) _closeEditor(true);
+    });
+
+    document.addEventListener('keydown', e => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (e.key.toLowerCase() !== 'z') return;
+      if (_editor || _isTypingTarget(document.activeElement)) return;
+      if (!_undo.length) return;
+      e.preventDefault();
+      undo();
+    });
+
+    _initialStale();
   }
 
   window.dozaTranscriptEdit = Object.assign(window.dozaTranscriptEdit || {}, {
     refreshParagraph,
+    refreshRange,
+    undo,
+    openEditor: _openEditor,
+    undoDepth: () => _undo.length,
+    _pushUndo: entry => _undo.push(entry),
+    _post,
+    showStaleBanner: _showStaleBanner,
   });
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _wire);
+  else _wire();
 })();

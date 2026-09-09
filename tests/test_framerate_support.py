@@ -101,3 +101,26 @@ def test_edl_50fps_timecode_grid():
     assert _seconds_to_timecode(1.5, 50.0) == "00:00:01:25"
     # Frame field must never reach the timebase.
     assert _seconds_to_timecode(0.98, 50.0) == "00:00:00:49"
+
+
+# ── MPEG-2 sources: ffprobe appends a trailing csv field ─────────────────────
+
+class _Probe:
+    def __init__(self, stdout):
+        self.returncode = 0
+        self.stdout = stdout
+        self.stderr = ""
+
+
+@pytest.mark.parametrize("stdout,expected", [
+    ("25/1,\n", 25.0),                          # XDCAM-style MPEG-2 MXF: side data adds a trailing field
+    ("30000/1001,\n30000/1001,\n", 29.97),      # MPEG-TS: listed twice (program + top level) with the field
+    ("24000/1001\n", 23.976),                   # ProRes / H.264: no trailing field, unchanged
+])
+def test_framerate_probe_ignores_trailing_csv_field(monkeypatch, tmp_path, stdout, expected):
+    from exporters import media_probe
+    media = tmp_path / "clip.mxf"
+    media.write_bytes(b"\0" * 64)
+    monkeypatch.setattr(media_probe, "_ffprobe_path", lambda: "/usr/bin/true", raising=False)
+    monkeypatch.setattr(media_probe.subprocess, "run", lambda *a, **k: _Probe(stdout))
+    assert media_probe.get_video_framerate(str(media)) == expected

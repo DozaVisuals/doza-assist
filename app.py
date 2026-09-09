@@ -775,7 +775,7 @@ def project_lock(project_id):
         return lock
 
 
-def update_project(project_id, updates, remove=None):
+def update_project(project_id, updates, remove=None, mutate=None):
     """Atomically merge ``updates`` into the project's current on-disk state.
 
     For long-running jobs (/transcribe, /analyze) that loaded the project
@@ -784,11 +784,18 @@ def update_project(project_id, updates, remove=None):
     job ran are preserved instead of being clobbered by the job's stale
     snapshot. ``remove`` lists keys to drop (e.g. a stale 'error'). Returns the
     merged dict, or None if the project no longer exists (deleted mid-job).
+
+    ``mutate(current)``, when given, runs under the lock on the freshly read
+    dict BEFORE ``updates`` are merged: the way to edit nested state (a
+    transcript segment) without a read-then-write race against another
+    writer. If it raises, nothing is written and the exception propagates.
     """
     with project_lock(project_id):
         current = get_project(project_id)
         if current is None:
             return None
+        if mutate is not None:
+            mutate(current)
         current.update(updates)
         for key in (remove or []):
             current.pop(key, None)
@@ -2043,6 +2050,10 @@ def group_into_paragraphs(segments):
         'start': segments[0]['start'],
         'start_formatted': segments[0].get('start_formatted', '00:00:00')[:8],
         'segments': [segments[0]],
+        # Index of the paragraph's first segment in transcript.segments.
+        # Paragraph segments are contiguous, so the template derives every
+        # segment's index as first_index + offset (data-seg on .tw spans).
+        'first_index': 0,
     }
     sentence_count = 1
 
@@ -2073,6 +2084,7 @@ def group_into_paragraphs(segments):
                 'start': seg['start'],
                 'start_formatted': seg.get('start_formatted', '00:00:00')[:8],
                 'segments': [seg],
+                'first_index': i,
             }
             sentence_count = 1
         else:
@@ -8102,6 +8114,12 @@ def _load_extensions(flask_app):
 # ``python3 app.py`` direct-run path. Idempotent: Flask's
 # register_blueprint raises on a second register, but the loader catches
 # that as a logged warning rather than crashing the import.
+# Inline transcript correction routes (core, channel-neutral; see
+# transcript_edit.py). Registered before the extensions so a Pro module
+# can rely on the routes being present.
+from transcript_edit import transcript_edit_bp  # noqa: E402
+app.register_blueprint(transcript_edit_bp)
+
 _load_extensions(app)
 
 

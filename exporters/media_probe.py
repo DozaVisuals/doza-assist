@@ -130,7 +130,11 @@ def get_video_framerate(path: str) -> float | None:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            num, den = _first_csv_row(result.stdout).split("/")
+            # First csv field only: MPEG-2 streams (XDCAM MXF, MPEG-TS) carry
+            # side data, and ffprobe then prints the row as "25/1," — the
+            # trailing field used to make float() raise and the probe return
+            # None, so those files defaulted to 23.976 everywhere.
+            num, den = _first_csv_row(result.stdout).split(",")[0].split("/")
             fps = float(num) / float(den)
             # Implausible rates (cover-art 90000/1, broken streams) must not
             # snap to a "standard" rate — treat as no-video-stream instead.

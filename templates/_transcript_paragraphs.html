@@ -30,12 +30,16 @@
     </div>
     <p class="para-text">
         {% for seg in para.segments %}
+            {# data-seg = index into transcript.segments, data-w = index into
+               seg.words (-1 on a segment-level span). Used by the inline
+               transcript editor; -1 when the host did not supply first_index. #}
+            {% set seg_i = (para.first_index + loop.index0) if para.first_index is defined else -1 %}
             {% if seg.words %}
                 {% for w in seg.words %}
-                    <span class="tw" data-s="{{ w.start }}" data-e="{{ w.end }}" onclick="jumpTo({{ w.start }}, '{{ para.project_id or project.id }}')">{{ w.word }}</span>
+                    <span class="tw" data-s="{{ w.start }}" data-e="{{ w.end }}" data-seg="{{ seg_i }}" data-w="{{ loop.index0 }}" onclick="jumpTo({{ w.start }}, '{{ para.project_id or project.id }}')">{{ w.word }}</span>
                 {% endfor %}
             {% else %}
-                <span class="tw" data-s="{{ seg.start }}" data-e="{{ seg.end }}" onclick="jumpTo({{ seg.start }}, '{{ para.project_id or project.id }}')"> {{ seg.text }}</span>
+                <span class="tw" data-s="{{ seg.start }}" data-e="{{ seg.end }}" data-seg="{{ seg_i }}" data-w="-1" onclick="jumpTo({{ seg.start }}, '{{ para.project_id or project.id }}')"> {{ seg.text }}</span>
             {% endif %}
         {% endfor %}
     </p>

@@ -375,3 +375,82 @@ def test_speakers_endpoint_resolves_display_names(client, project):
     assert data['speakers'] == [{'raw': 'SPEAKER_00', 'display': 'Reporter'},
                                 {'raw': 'SPEAKER_01', 'display': 'SPEAKER_01'}]
     assert data['new_speaker'] == '__new__'
+
+
+# ── commit 4: reassign-speaker ────────────────────────────────────────────
+
+def _diarize(project):
+    meta = _load(project)
+    meta['diarization'] = {'model': 'x', 'status': 'done', 'completed_at': '2026-09-09T00:00:00',
+                           'speakers': ['SPEAKER_00', 'SPEAKER_01']}
+    (Path(app_module.app.config['PROJECTS_DIR']) / project / 'meta.json').write_text(json.dumps(meta), encoding='utf-8')
+    (Path(app_module.app.config['PROJECTS_DIR']) / project / 'diarization_status.json').write_text(
+        json.dumps({'status': 'done'}), encoding='utf-8')
+
+
+def test_reassign_on_diarized_project_bypasses_gate_and_marks_manual(client, project):
+    _diarize(project)
+    # The existing per-segment route is gated on diarized projects...
+    gated = client.post(f'/project/{project}/update-speaker-range',
+                        json={'start': 6.0, 'end': 8.0, 'speaker': 'SPEAKER_00'})
+    assert gated.status_code == 409
+    # ...the new one is not.
+    before = _load(project)['transcript']['segments']
+    resp = _post(client, project, 'reassign-speaker', {'seg': 2, 'speaker': 'SPEAKER_00'})
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    after = _load(project)['transcript']['segments']
+    assert after[2]['speaker'] == 'SPEAKER_00' and after[2]['speaker_manual'] is True
+    assert data['previous_speaker'] == 'SPEAKER_01' and data['previous_manual'] is False
+    assert data['speaker_changed'] is True
+    # Nothing else moved: same text, same bounds, same words, other segments identical.
+    assert {k: v for k, v in after[2].items() if k not in ('speaker', 'speaker_manual')} == \
+        {k: v for k, v in before[2].items() if k != 'speaker'}
+    assert [s for i, s in enumerate(after) if i != 2] == [s for i, s in enumerate(before) if i != 2]
+    # Segment 2 sits after a 2.4 s gap so it heads its own paragraph either
+    # way; before the change it shared a paragraph with segment 3, so the
+    # refresh range is the union: 6.0 to the end of segment 3.
+    assert data['paragraph_start'] == 6.0 and data['paragraph_end'] == 11.0
+
+
+def test_reassign___new___mints_unused_label_and_extends_diarization_list(client, project):
+    _diarize(project)
+    resp = _post(client, project, 'reassign-speaker', {'seg': 0, 'speaker': '__new__'})
+    assert resp.status_code == 200
+    after = _load(project)
+    assert after['transcript']['segments'][0]['speaker'] == 'SPEAKER_02'
+    assert after['diarization']['speakers'] == ['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_02']
+    assert 'SPEAKER_02' not in after['speaker_names']
+    # Minting again skips the label now in use.
+    resp = _post(client, project, 'reassign-speaker', {'seg': 3, 'speaker': '__new__'})
+    assert _load(project)['transcript']['segments'][3]['speaker'] == 'SPEAKER_03'
+
+
+def test_reassign_without_diarization_list_still_mints(client, project):
+    resp = _post(client, project, 'reassign-speaker', {'seg': 1, 'speaker': '__new__'})
+    assert resp.status_code == 200
+    after = _load(project)
+    assert after['transcript']['segments'][1]['speaker'] == 'SPEAKER_02'
+    assert 'diarization' not in after
+
+
+def test_reassign_undo_restores_label_and_clears_manual(client, project):
+    assert _post(client, project, 'reassign-speaker', {'seg': 2, 'speaker': 'SPEAKER_00'}).status_code == 200
+    resp = _post(client, project, 'reassign-speaker', {'seg': 2, 'speaker': 'SPEAKER_01', 'speaker_manual': False})
+    assert resp.status_code == 200
+    seg = _load(project)['transcript']['segments'][2]
+    assert seg['speaker'] == 'SPEAKER_01' and 'speaker_manual' not in seg
+    assert _load(project)['transcript']['segments'] == _meta(project)['transcript']['segments']
+
+
+def test_reassign_rejects_empty_speaker(client, project):
+    assert _post(client, project, 'reassign-speaker', {'seg': 2, 'speaker': ''}).status_code == 400
+    assert _post(client, project, 'reassign-speaker', {'seg': 2}).status_code == 400
+    assert _post(client, project, 'reassign-speaker', {'seg': 9, 'speaker': 'SPEAKER_00'}).status_code == 404
+
+
+def test_reassign_flips_hash(client, project):
+    h0 = app_module._transcript_hash(_load(project)['transcript'])
+    _post(client, project, 'reassign-speaker', {'seg': 2, 'speaker': 'SPEAKER_00'})
+    assert app_module._transcript_hash(_load(project)['transcript']) != h0
+    assert _load(project)['derived_stale'] is True

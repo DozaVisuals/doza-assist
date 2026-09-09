@@ -257,6 +257,7 @@
     actions.className = 'tw-edit-actions';
     actions.appendChild(_button('Save', true, () => _saveEdit()));
     if (w > 0) actions.appendChild(_button('Split here', false, () => _splitHere()));
+    actions.appendChild(_button('Speaker', false, () => _reassignHere()));
     wrap.appendChild(input);
     wrap.appendChild(actions);
 
@@ -340,14 +341,14 @@
    * through speaker_names, plus "New speaker". Resolves to the chosen raw
    * label, '__new__', or null when dismissed.
    */
-  function _pickSpeaker(anchorEl, speakers, currentRaw) {
+  function _pickSpeaker(anchorEl, speakers, currentRaw, titleText) {
     _closePicker();
     return new Promise(resolve => {
       const box = document.createElement('div');
       box.className = 'tw-picker';
       const title = document.createElement('div');
       title.className = 'tw-picker-title';
-      title.textContent = 'Speaker for the new segment';
+      title.textContent = titleText || 'Speaker for the new segment';
       box.appendChild(title);
       const done = value => { _closePicker(); document.removeEventListener('mousedown', onDoc, true); resolve(value); };
       const add = (label, raw, cls, hint = true) => {
@@ -419,6 +420,32 @@
         _undo.push({ type: 'reassign', pid: ed.pid, seg: data.new_seg, oldSpeaker: currentRaw,
                      oldManual: false, newSpeaker: data.speaker, paraStart: data.paragraph_start });
       }
+      await refreshRange(data.paragraph_start, data.paragraph_end, ed.pid);
+      await _afterSpeakerChange(data, ed.pid);
+      _showStaleBanner(data.has_analysis);
+    } catch (err) {
+      await _handleError(err, ed.pid, ed.paraStart);
+    } finally {
+      _busy = false;
+    }
+  }
+
+  async function _reassignHere() {
+    if (!_editor || _busy) return;
+    const ed = _editor;
+    const block = ed.wrap.closest('.para-block');
+    const currentRaw = _rawSpeakerOf(block);
+    const speakers = await _fetchSpeakers(ed.pid);
+    const choice = await _pickSpeaker(ed.wrap, speakers, currentRaw, 'Speaker for this segment');
+    if (choice === null) return;
+    if (!_editor || _editor !== ed) return;
+    _closeEditor(true);
+    if (!choice || choice === currentRaw) return;
+    _busy = true;
+    try {
+      const data = await _post(ed.pid, 'reassign-speaker', { seg: ed.seg, speaker: choice });
+      _undo.push({ type: 'reassign', pid: ed.pid, seg: ed.seg, oldSpeaker: data.previous_speaker,
+                   oldManual: data.previous_manual, newSpeaker: data.speaker, paraStart: data.paragraph_start });
       await refreshRange(data.paragraph_start, data.paragraph_end, ed.pid);
       await _afterSpeakerChange(data, ed.pid);
       _showStaleBanner(data.has_analysis);

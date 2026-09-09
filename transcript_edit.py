@@ -18,6 +18,8 @@ Routes (all under ``/project/<project_id>/transcript/``):
   a new segment. Both halves take start/end from their first/last word.
 - ``POST merge-segment`` ``{seg}``; joins ``seg`` and ``seg + 1`` (same raw
   speaker only). The inverse of split-segment.
+- ``POST reassign-speaker`` ``{seg, speaker}``; a raw label or ``__new__``.
+  Marks the segment ``speaker_manual`` so diarization leaves it alone.
 - ``GET  speakers`` raw labels in use with their display names, for pickers.
 
 Payload conventions: ``seg`` indexes ``transcript.segments``, ``w`` indexes
@@ -500,3 +502,42 @@ def speakers(project_id):
         return jsonify({'error': 'Project not found'}), 404
     return jsonify({'speakers': _speaker_list(project, _segments(project)),
                     'new_speaker': NEW_SPEAKER})
+
+
+# ── reassign-speaker ────────────────────────────────────────────────────
+
+@transcript_edit_bp.route('/project/<project_id>/transcript/reassign-speaker', methods=['POST'])
+def reassign_speaker(project_id):
+    """Give one segment a different speaker. ``{seg, speaker}`` where
+    ``speaker`` is a raw label (``SPEAKER_NN``) or ``__new__`` (mint the
+    lowest unused one). Sets ``speaker_manual`` so a later diarization pass
+    keeps it (``speaker_manual: false`` in the body clears the flag; undo
+    uses that to restore an untouched segment).
+
+    Deliberately not gated on diarization state: the per-segment
+    ``update-speakers`` routes refuse diarized projects because the rename
+    map owns naming there; this route writes raw labels, which the map still
+    resolves for display."""
+    data = _payload()
+    seg_index = _int_field(data, 'seg', required=True)
+    speaker = data.get('speaker')
+    manual = data.get('speaker_manual', True)
+
+    def op(project, segments):
+        seg = _seg_at(segments, seg_index)
+        pre_start, pre_end = _paragraph_bounds(segments, seg_index)
+        old = seg.get('speaker')
+        old_manual = bool(seg.get('speaker_manual'))
+        label = _apply_speaker(project, segments, seg, speaker)
+        if manual is False:
+            seg.pop('speaker_manual', None)
+        result = _segment_result(segments, seg_index, speaker=label, previous_speaker=old,
+                                 previous_manual=old_manual, speaker_changed=label != old,
+                                 speakers=_speaker_list(project, segments))
+        # A speaker change can re-paragraph its neighbours: re-render the
+        # union of the paragraph it was in and the one it is in now.
+        result['paragraph_start'] = min(pre_start, result['paragraph_start'])
+        result['paragraph_end'] = max(pre_end, result['paragraph_end'])
+        return result
+
+    return _respond(project_id, op)

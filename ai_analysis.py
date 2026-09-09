@@ -844,6 +844,32 @@ def _compact_history_turn(content, cap=1200):
     return compact
 
 
+def _chat_payload_overflows(system_message, messages, num_predict=4096):
+    """True when the assembled chat payload plus the reply budget does not
+    fit the machine's chat window. Ollama resolves an oversized prompt by
+    dropping the oldest non-system message — the transcript — and the
+    model then answers fluently from the system prompt and history alone.
+    Callers route such a turn through the retrieval (long-interview) path
+    instead, which never needs the whole transcript in one window."""
+    total_chars = len(system_message or '')
+    non_ascii = 0
+    for m in messages or []:
+        content = m.get('content') or ''
+        total_chars += len(content)
+        non_ascii += sum(1 for ch in content if ord(ch) > 0x2FFF)
+    divisor = 2.8
+    if total_chars and (non_ascii / total_chars) > 0.15:
+        divisor = 1.6
+    prompt_tokens = int(total_chars / divisor) + 256
+    ceiling = 32768
+    try:
+        from memory_budget import chat_num_ctx_ceiling
+        ceiling = min(ceiling, int(chat_num_ctx_ceiling()))
+    except Exception:
+        pass
+    return (prompt_tokens + num_predict) > ceiling
+
+
 def _estimate_chat_num_ctx(system_message, messages, num_predict=4096):
     """Pick a num_ctx that holds the FULL assembled chat payload plus the
     reply budget.
@@ -1294,6 +1320,19 @@ def chat_about_transcript(transcript, message, history=None, project_name="Inter
         language_directive_text=directive,
         followups_hint=True, story_so_far=story_so_far,
     )
+    # See chat_about_transcript_stream: an oversized payload answers from
+    # retrieval rather than letting the model server evict the transcript.
+    if (_chat_payload_overflows(system_message, messages)
+            and not _chat_legacy_chunked_enabled()):
+        print("[chat] payload exceeds the context window — "
+              "answering from retrieval instead of the full transcript", flush=True)
+        return _chat_long_unified(
+            transcript, message, history, project_name, analysis,
+            profile_id, segment_vectors, labeled_sections, speaker_names,
+            phrases, words, theme_phrases, tfidf_hits,
+            directive, directive_plain, skip_title_anchor,
+            story_so_far=story_so_far,
+        )
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
     response = _call_ai_chat(system_message, messages, num_ctx=num_ctx,
                              **_chat_reply_budget_kwargs(message, segments))
@@ -1682,6 +1721,22 @@ def chat_about_transcript_stream(transcript, message, history=None, project_name
         followups_hint=True, story_so_far=story_so_far,
     )
 
+    # A 36-minute interview with a long conversation reaches the 32K
+    # window before the duration threshold does. Rather than let the model
+    # server evict the transcript, answer this turn from retrieval.
+    if (_chat_payload_overflows(system_message, messages)
+            and not _chat_legacy_chunked_enabled()):
+        print("[chat-stream] payload exceeds the context window — "
+              "answering from retrieval instead of the full transcript", flush=True)
+        for event in _chat_long_unified_stream(
+            transcript, message, history, project_name, analysis,
+            profile_id, segment_vectors, labeled_sections, speaker_names,
+            phrases, words, theme_phrases, tfidf_hits,
+            directive, directive_plain, skip_title_anchor,
+            story_so_far=story_so_far,
+        ):
+            yield event
+        return
     num_ctx = _sticky_chat_num_ctx(project_name, system_message, messages)
     full = ''
     for _ev, _payload in _stream_chat_events(
@@ -8261,7 +8316,13 @@ def analyze_transcript(transcript, project_name="Interview", analysis_type="all"
     for i, chunk in enumerate(chunks):
         chunk_text = _format_segments_for_ai(chunk['segments'])
         range_label = f"{_seconds_to_tc(chunk['start_seconds'])}-{_seconds_to_tc(chunk['end_seconds'])}"
-        chunk_label = f"{project_name} · part {i+1}/{len(chunks)} ({range_label})"
+        # The prompt head ("PROJECT: <name>") stays byte-identical across
+        # chunks so the model server's prefix cache covers the system
+        # prompt and the head of every chunk call; the part label rides at
+        # the END of the transcript text instead of in the project name.
+        chunk_label = project_name
+        chunk_text = (f"{chunk_text}\n\n[Part {i+1} of {len(chunks)} of this interview, "
+                      f"{range_label}]")
         if analysis_type in ('story', 'all'):
             step += 1
             _emit(step, total_steps, f"chunk {i+1}/{chunk_count}: story beats")
@@ -9600,7 +9661,13 @@ def generate_segment_vectors(transcript, project_name="Interview", progress_call
     for i, chunk in enumerate(chunks):
         chunk_text = _format_segments_for_ai(chunk['segments'])
         range_label = f"{_seconds_to_tc(chunk['start_seconds'])}-{_seconds_to_tc(chunk['end_seconds'])}"
-        chunk_label = f"{project_name} · part {i+1}/{len(chunks)} ({range_label})"
+        # The prompt head ("PROJECT: <name>") stays byte-identical across
+        # chunks so the model server's prefix cache covers the system
+        # prompt and the head of every chunk call; the part label rides at
+        # the END of the transcript text instead of in the project name.
+        chunk_label = project_name
+        chunk_text = (f"{chunk_text}\n\n[Part {i+1} of {len(chunks)} of this interview, "
+                      f"{range_label}]")
         _emit(i + 1, len(chunks), f"vectors {i+1}/{len(chunks)}")
         try:
             all_raw.extend(_generate_vectors_single_chunk(chunk_text, chunk_label))

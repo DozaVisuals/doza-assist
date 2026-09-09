@@ -93,7 +93,8 @@ class TestGenerateSegmentVectorsChunking:
         ids = [s['seg_id'] for s in out]
         assert len(ids) == len(set(ids))
         # Chunk labels include the "part X/N" suffix.
-        assert all('part' in name for name in calls)
+        # One stable project name across chunks (the part label rides in the text).
+        assert len(set(calls)) == 1
 
     def test_chunk_failure_is_tolerated(self, monkeypatch):
         call_count = {'n': 0}

@@ -867,6 +867,14 @@ def _relative_time(seconds):
 
 # ── Routes ──────────────────────────────────────────────────────────────
 
+@app.route('/health')
+def health():
+    """Liveness for the wrapper and the MCP connector: 200 as soon as the
+    backend serves requests. Loopback only, no project data."""
+    return jsonify({'ok': True, 'ready': True,
+                    'version': os.environ.get('DOZA_WRAPPER_VERSION') or ''})
+
+
 @app.route('/')
 def dashboard():
     """Main dashboard showing all projects grouped by folder."""

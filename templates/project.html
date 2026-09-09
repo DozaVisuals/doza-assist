@@ -1735,10 +1735,17 @@ function switchTab(tab) {
     // Fire-and-forget; the server enforces a cooldown so repeat switches
     // are free.
     if (tab === 'chat') {
+        // One prewarm per switch: the tab can be selected twice in the
+        // same second (restore + click), and each prewarm re-evaluates
+        // the transcript prefix.
         try {
             const firstId = String(COMBINED_ID).split(',')[0];
-            fetch(`/project/${firstId}/chat-prewarm`, { method: 'POST' })
-                .catch(() => {});
+            const now = Date.now();
+            if (!window._dozaLastPrewarm || now - window._dozaLastPrewarm > 15000) {
+                window._dozaLastPrewarm = now;
+                fetch(`/project/${firstId}/chat-prewarm`, { method: 'POST' })
+                    .catch(() => {});
+            }
         } catch (_) { /* non-fatal */ }
     }
 }
@@ -2381,6 +2388,13 @@ window.dozaAddClipToLibrary = function (clip) {
 let _clipTitlesInFlight = false;
 let _clipTitlesQueued = false;
 window.dozaRequestClipTitles = async function () {
+    // One request at a time: two triggers in the same second used to send
+    // the same untitled clips twice.
+    if (window._dozaClipTitlesInFlight) return window._dozaClipTitlesInFlight;
+    window._dozaClipTitlesInFlight = (async function () { try { return await _dozaRequestClipTitlesOnce(); } finally { window._dozaClipTitlesInFlight = null; } })();
+    return window._dozaClipTitlesInFlight;
+};
+async function _dozaRequestClipTitlesOnce() {
     const helpers = window.dozaClipText;
     if (!helpers) return;
     if (_clipTitlesInFlight) { _clipTitlesQueued = true; return; }

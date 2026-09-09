@@ -38,7 +38,9 @@ def test_chat_payload_overflow_detection(monkeypatch):
     assert aa._chat_payload_overflows('system', mid) is True
 
 
-def test_capped_analysis_output_is_retried_with_a_larger_cap(monkeypatch):
+def test_capped_analysis_output_is_kept_not_rerun(monkeypatch):
+    """Speed first: a reply that hits the cap is logged and salvaged, never
+    re-generated with a bigger cap (that only doubles the wait)."""
     from ai_providers import ollama_provider as op
     calls = []
 
@@ -51,12 +53,8 @@ def test_capped_analysis_output_is_retried_with_a_larger_cap(monkeypatch):
 
     def fake_post(url, json=None, timeout=None):
         calls.append(json['options']['num_predict'])
-        if len(calls) == 1:
-            return _Resp({'response': '{"beats": [', 'done_reason': 'length',
-                          'eval_count': 8192, 'eval_duration': 1e9,
-                          'prompt_eval_count': 100, 'prompt_eval_duration': 1e8})
-        return _Resp({'response': '{"beats": []}', 'done_reason': 'stop',
-                      'eval_count': 12, 'eval_duration': 1e8,
+        return _Resp({'response': '{"beats": [{"title": "a"}, {"title": ', 'done_reason': 'length',
+                      'eval_count': 4096, 'eval_duration': 1e9,
                       'prompt_eval_count': 100, 'prompt_eval_duration': 1e8})
     monkeypatch.setattr(op, '_post_with_reconnect', fake_post)
     prov = op.OllamaProvider.__new__(op.OllamaProvider)
@@ -64,8 +62,9 @@ def test_capped_analysis_output_is_retried_with_a_larger_cap(monkeypatch):
     prov.model = 'gemma4:e4b'
     monkeypatch.setattr(prov, '_resolve_model', lambda override=None: 'gemma4:e4b', raising=False)
     out = prov.generate('sys', 'prompt', task_type='analysis')
-    assert out == '{"beats": []}'
-    assert calls == [8192, 16384]
+    assert calls == [4096]
+    import ai_analysis as aa
+    assert aa._parse_json_response(out)['beats'][0]['title'] == 'a'   # finished items survive
 
 
 def test_capped_output_is_logged(capsys):

@@ -279,13 +279,13 @@ class OllamaProvider(BaseProvider):
                     # AI Analysis tab would show only a summary or
                     # only social clips with no story beats. 4096
                     # gives every realistic schema room to finish.
-                    # 8192 since 1.1: two consecutive 36-minute analysis
-                    # chunks stopped at exactly 4096 tokens (done_reason
-                    # "length"), and format='json' closes the object at the
-                    # cap so the loss was silent. The cap is a ceiling, not
-                    # an allocation; a capped call is retried once below
-                    # with the ceiling doubled.
-                    "num_predict": kwargs.get("num_predict", 8192),
+                    # Kept at 4096 on purpose (2026-09-08): a 15-minute chunk's
+                    # JSON should fit in far less, so a reply that reaches the
+                    # cap is the model padding, and doubling the cap only
+                    # doubles the wait. A capped reply is logged (done_reason
+                    # in [ai-timing]) and _parse_json_response keeps every
+                    # item the model finished.
+                    "num_predict": kwargs.get("num_predict", 4096),
                     # Bumped 12288 → 32768 to match the chat path.
                     # The previous 12288 left only ~8192 input tokens
                     # after num_predict was reserved. With the
@@ -358,21 +358,6 @@ class OllamaProvider(BaseProvider):
             payload = response.json()
             _log_timing(kwargs.get("timing_tag", task_type), model,
                         _budget_num_ctx(kwargs), payload)
-            if payload.get("done_reason") == "length":
-                # The output cap cut the reply off. One retry with the cap
-                # doubled (to 16384 at most) — a JSON analysis that needs
-                # more than that is looping, not longer.
-                cap = int(kwargs.get("num_predict", 8192) or 8192)
-                if cap < 16384:
-                    new_cap = min(16384, cap * 2)
-                    print(f"[ai-warn] tag={kwargs.get('timing_tag', task_type)}: "
-                          f"retrying once with num_predict={new_cap}", flush=True)
-                    retry_kwargs = dict(kwargs)
-                    retry_kwargs["num_predict"] = new_cap
-                    retry_kwargs["_retried_on_length"] = True
-                    if not kwargs.get("_retried_on_length"):
-                        return self.generate(system_prompt, user_or_messages,
-                                             task_type=task_type, **retry_kwargs)
             return payload.get("response", "")
 
         # Chat / general path: /api/chat with messages array.

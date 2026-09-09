@@ -194,9 +194,17 @@ def _log_timing(tag, model, num_ctx, payload):
         def _fmt(count, dur_ns):
             secs = (dur_ns or 0) / 1e9
             return f"{count if count is not None else '?'}tok/{secs:.2f}s"
+        # done_reason: "stop" = the model finished; "length" = the output
+        # cap (num_predict) cut it off. A capped JSON reply is malformed or
+        # missing its tail, so this is the line to grep when analysis
+        # results look thin.
+        reason = payload.get("done_reason") or "?"
         print(f"[ai-timing] tag={tag} model={model} num_ctx={num_ctx} "
               f"prompt_eval={_fmt(pe_count, pe_dur)} "
-              f"eval={_fmt(ev_count, ev_dur)}", flush=True)
+              f"eval={_fmt(ev_count, ev_dur)} done_reason={reason}", flush=True)
+        if reason == "length":
+            print(f"[ai-warn] tag={tag}: output hit the num_predict cap "
+                  f"({ev_count} tokens) — the reply is truncated", flush=True)
     except Exception:
         pass
 
@@ -271,6 +279,12 @@ class OllamaProvider(BaseProvider):
                     # AI Analysis tab would show only a summary or
                     # only social clips with no story beats. 4096
                     # gives every realistic schema room to finish.
+                    # Kept at 4096 on purpose (2026-09-08): a 15-minute chunk's
+                    # JSON should fit in far less, so a reply that reaches the
+                    # cap is the model padding, and doubling the cap only
+                    # doubles the wait. A capped reply is logged (done_reason
+                    # in [ai-timing]) and _parse_json_response keeps every
+                    # item the model finished.
                     "num_predict": kwargs.get("num_predict", 4096),
                     # Bumped 12288 → 32768 to match the chat path.
                     # The previous 12288 left only ~8192 input tokens

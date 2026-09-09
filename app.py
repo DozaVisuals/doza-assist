@@ -896,6 +896,14 @@ def _relative_time(seconds):
 
 # ── Routes ──────────────────────────────────────────────────────────────
 
+@app.route('/health')
+def health():
+    """Liveness for the wrapper and the MCP connector: 200 as soon as the
+    backend serves requests. Loopback only, no project data."""
+    return jsonify({'ok': True, 'ready': True,
+                    'version': os.environ.get('DOZA_WRAPPER_VERSION') or ''})
+
+
 @app.route('/')
 def dashboard():
     """Main dashboard showing all projects grouped by folder."""
@@ -3705,7 +3713,7 @@ def _make_progress_writer(project_id):
     status_path = _analyze_status_path(project_id)
     started_at = datetime.now().isoformat()
 
-    def _write(step, total, current):
+    def _write(step, total, current, **extra):
         try:
             os.makedirs(os.path.dirname(status_path), exist_ok=True)
             payload = {
@@ -3716,6 +3724,9 @@ def _make_progress_writer(project_id):
                 'updated_at': datetime.now().isoformat(),
                 'done': bool(int(step) >= int(total)),
             }
+            for k, v in extra.items():
+                if v is not None:
+                    payload[k] = v
             with open(status_path, 'w') as f:
                 json.dump(payload, f)
         except Exception:
@@ -3753,6 +3764,43 @@ _analysis_threads_lock = threading.Lock()
 # well inside the (now model-aware) timeout. A queued job parks at
 # current="queued" so the polling UI shows it waiting rather than stalled.
 _analysis_run_lock = threading.Lock()
+# Who holds the run lock right now, so a queued analysis can say what it is
+# waiting for ("the AI analysis of Briarcliff Interviews, step 18 of 21")
+# instead of a bare "other AI work" (Chris, 2026-09-09: it read as stuck).
+_analysis_run_holder = {'project_id': None, 'name': None}
+
+# Friendly names for the memory governor's stage names (small-RAM Macs).
+_STAGE_LABELS = {
+    'analyze': 'another AI analysis',
+    'analyze-vectors': 'another AI analysis',
+    'transcribe': 'transcription',
+    'batch-transcribe': 'batch transcription',
+    'diarize': 'speaker identification',
+    'speaker-naming': 'speaker naming',
+    'collection-analyze': 'a collection analysis',
+    'collection-build': 'a collection build',
+    'batch-analyze': 'batch analysis',
+    'batch-vectors': 'batch analysis',
+    'prewarm': 'the model warm-up',
+}
+
+
+def _waiting_on_payload():
+    """What a queued analysis is waiting for, read live: the run-lock holder's
+    project and its own progress. None when nothing is known."""
+    pid = _analysis_run_holder.get('project_id')
+    if not pid:
+        return None
+    out = {'project_id': pid, 'name': _analysis_run_holder.get('name') or pid, 'kind': 'analysis'}
+    try:
+        st = load_json(_analyze_status_path(pid))
+        if isinstance(st, dict) and not st.get('done'):
+            out['step'] = int(st.get('step') or 0)
+            out['total'] = int(st.get('total') or 0)
+            out['current'] = st.get('current')
+    except Exception:
+        pass
+    return out
 
 
 def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snapshot,
@@ -3780,7 +3828,7 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
     # If the gate is held, park at current="queued" so the UI shows the wait.
     if not _analysis_run_lock.acquire(blocking=False):
         try:
-            progress(step=0, total=1, current="queued")
+            progress(step=0, total=1, current="queued", waiting_on=_waiting_on_payload())
         except Exception:
             pass
         _analysis_run_lock.acquire()
@@ -3788,6 +3836,8 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         project = get_project(project_id)
         if not project or not project.get('transcript'):
             return
+        _analysis_run_holder['project_id'] = project_id
+        _analysis_run_holder['name'] = project.get('name') or project_id
         # Rule 1, off the request thread: this worker runs the project's own
         # provider (meta ai_provider, local when unset) for the analysis and
         # the speaker naming that follows it. Nothing app-wide is consulted.
@@ -3823,7 +3873,9 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         else:
             with _memory_heavy_stage(
                     'analyze', evict_llm=False,
-                    on_wait=lambda h: progress(step=0, total=1, current='queued')):
+                    on_wait=lambda h: progress(
+                        step=0, total=1, current='queued',
+                        waiting_on={'kind': 'stage', 'name': _STAGE_LABELS.get(h, h or 'other AI work')})):
                 result = analyze_transcript(
                     project['transcript'],
                     project_name=project['name'],
@@ -3949,6 +4001,9 @@ def _run_analysis_worker(project_id, analysis_type, transcript_hash, cache_snaps
         except Exception as inner:
             print(f"[analyze worker] could not persist error: {inner}")
     finally:
+        if _analysis_run_holder.get('project_id') == project_id:
+            _analysis_run_holder['project_id'] = None
+            _analysis_run_holder['name'] = None
         _analysis_run_lock.release()
         with _analysis_threads_lock:
             _analysis_threads.pop(project_id, None)
@@ -4191,6 +4246,11 @@ def analyze_status(project_id):
                 except OSError:
                     pass
                 return jsonify({'idle': True})
+    if payload.get('current') == 'queued' and not payload.get('done'):
+        # Live: the holder's own progress moves while this one waits.
+        live = _waiting_on_payload()
+        if live and live.get('project_id') != project_id:
+            payload['waiting_on'] = live
     return jsonify(payload)
 
 
@@ -4591,6 +4651,46 @@ def save_selects(project_id):
     return jsonify({'status': 'saved', 'count': len(selects)})
 
 
+def _labels_rev(project_id):
+    """Cheap change token for a project's labels: meta.json's mtime and
+    size. The open page polls this every few seconds; only a change costs
+    a real read. None when the project is gone."""
+    project_dir = safe_project_dir(project_id)
+    if project_dir is None:
+        return None
+    try:
+        st = os.stat(os.path.join(project_dir, 'meta.json'))
+    except OSError:
+        return None
+    return f'{st.st_mtime_ns}-{st.st_size}'
+
+
+@app.route('/project/<project_id>/labels', methods=['GET'])
+def get_labels(project_id):
+    """Current labels for the open page's live sync.
+
+    ``?rev=<token>``: when the token still matches, answer ``{unchanged}``
+    without reading the project. Otherwise the sections, so a select an
+    assistant just created over the local connector shows up in the open
+    page within seconds instead of after a reload (Chris, 2026-09-09).
+    """
+    rev = _labels_rev(project_id)
+    if rev is None:
+        return jsonify({'error': 'Project not found'}), 404
+    known = request.args.get('rev') or ''
+    if known and known == rev:
+        return jsonify({'unchanged': True, 'rev': rev})
+    project = get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    return jsonify({
+        'rev': rev,
+        'labeled_sections': project.get('labeled_sections') or [],
+        'color_labels': project.get('color_labels') or {},
+        'clip_order_mode': project.get('clip_order_mode') or 'time',
+    })
+
+
 @app.route('/project/<project_id>/labels', methods=['POST'])
 def save_labels(project_id):
     """Save color label names and labeled transcript sections."""
@@ -4599,8 +4699,23 @@ def save_labels(project_id):
         return jsonify({'error': 'Project not found'}), 404
 
     data = request.json or {}
-    prev_count = len(project.get('labeled_sections', []) or [])
+    prev_sections = [s for s in (project.get('labeled_sections') or []) if isinstance(s, dict)]
+    prev_count = len(prev_sections)
     new_sections = data.get('labeled_sections', [])
+    # An assistant (local connector) may have added a select since the page
+    # loaded. The page posts its whole array, so that select would vanish
+    # here. Clients that send ``seen_sync_ids`` (every select they have ever
+    # held, deleted ones included) get the unseen assistant selects kept;
+    # a select they saw and dropped is a real deletion and stays dropped.
+    seen = data.get('seen_sync_ids')
+    if isinstance(seen, list) and isinstance(new_sections, list):
+        seen_ids = {str(x) for x in seen}
+        posted_ids = {s.get('sync_id') for s in new_sections if isinstance(s, dict) and s.get('sync_id')}
+        kept = [s for s in prev_sections
+                if s.get('origin') == 'ai' and s.get('sync_id')
+                and s['sync_id'] not in posted_ids and s['sync_id'] not in seen_ids]
+        if kept:
+            new_sections = list(new_sections) + kept
     updates = {
         'color_labels': data.get('color_labels', {}),
         'labeled_sections': new_sections,

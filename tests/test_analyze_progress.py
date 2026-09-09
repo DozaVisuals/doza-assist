@@ -77,6 +77,35 @@ def test_status_endpoint_returns_latest_snapshot(client, project_dir):
     assert body['current'] == "halfway"
 
 
+def test_queued_status_names_the_analysis_it_waits_for(client, project_dir):
+    """A second analysis parks at 'queued' behind the run lock; the status
+    says which project holds it and how far along that one is, live."""
+    pid, _ = project_dir
+    holder = Path(app_module.app.config['PROJECTS_DIR']) / 'holder-1'
+    holder.mkdir(parents=True, exist_ok=True)
+    app_module._make_progress_writer('holder-1')(step=18, total=21, current='vectors 4/6')
+    app_module._analysis_run_holder.update({'project_id': 'holder-1', 'name': 'Briarcliff Interviews'})
+    try:
+        write = app_module._make_progress_writer(pid)
+        write(step=0, total=1, current='queued', waiting_on=app_module._waiting_on_payload())
+        body = client.get(f'/project/{pid}/analyze/status').get_json()
+        assert body['current'] == 'queued'
+        assert body['waiting_on']['name'] == 'Briarcliff Interviews'
+        assert body['waiting_on']['kind'] == 'analysis'
+        assert (body['waiting_on']['step'], body['waiting_on']['total']) == (18, 21)
+        # The holder moves on; the waiter's status follows without a rewrite.
+        app_module._make_progress_writer('holder-1')(step=20, total=21, current='paragraph index')
+        body = client.get(f'/project/{pid}/analyze/status').get_json()
+        assert body['waiting_on']['step'] == 20
+        # A governor-stage wait names the stage in plain words.
+        write(step=0, total=1, current='queued', waiting_on={'kind': 'stage', 'name': app_module._STAGE_LABELS['diarize']})
+        app_module._analysis_run_holder.update({'project_id': None, 'name': None})
+        body = client.get(f'/project/{pid}/analyze/status').get_json()
+        assert body['waiting_on'] == {'kind': 'stage', 'name': 'speaker identification'}
+    finally:
+        app_module._analysis_run_holder.update({'project_id': None, 'name': None})
+
+
 def test_clear_status_removes_file(client, project_dir):
     pid, d = project_dir
     write = app_module._make_progress_writer(pid)

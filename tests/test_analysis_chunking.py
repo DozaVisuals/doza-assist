@@ -114,7 +114,7 @@ class TestAnalyzeTranscriptRouting:
         calls = {'story': [], 'social': []}
 
         def _stub_story(text, name, **kwargs):
-            calls['story'].append(name)
+            calls['story'].append((name, text))
             n = len(calls['story'])
             # Distinct timecodes per chunk so the post-merge dedup pass doesn't
             # collapse identical ranges across chunks. Each chunk returns 2
@@ -173,8 +173,10 @@ class TestAnalyzeTranscriptRouting:
         # Each chunk triggered exactly one story + one social call.
         assert len(calls['story']) == len(calls['social'])
         assert len(calls['story']) >= 4  # 65 min / 15 = ~4-5
-        # Chunk labels include the "part X/N" suffix so the model sees context.
-        assert all('part' in name for name in calls['story'])
+        # The prompt head (project name) is identical across chunks so the
+        # prefix cache holds; the part label rides at the end of the text.
+        assert len({name for name, _ in calls['story']}) == 1
+        assert all('of this interview' in text for _, text in calls['story'])
         # Coverage: chunks merged into the accumulator. The post-merge cap
         # enforces ≤ ANALYSIS_PER_CATEGORY_CAP per category, but chunks stay
         # represented (every list is non-empty when a chunk produced items).

@@ -29,6 +29,14 @@
   color: var(--text-secondary); cursor: pointer; }
 .tw-edit-actions button:hover { color: var(--text-primary); border-color: var(--accent); }
 .tw-edit-actions button.tw-edit-primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+.tw-picker { position: absolute; z-index: 60; min-width: 180px; padding: 6px; border: 1px solid var(--border-light);
+  border-radius: 6px; background: var(--bg-card); box-shadow: 0 6px 24px rgba(0,0,0,0.35); font-size: 0.9em; }
+.tw-picker-title { padding: 2px 6px 6px; color: var(--text-muted); font-size: 0.85em; }
+.tw-picker button { display: block; width: 100%; text-align: left; font: inherit; padding: 4px 8px; border: 0;
+  border-radius: 4px; background: transparent; color: var(--text-primary); cursor: pointer; }
+.tw-picker button:hover, .tw-picker button:focus { background: var(--bg-hover); outline: none; }
+.tw-picker button .tw-picker-raw { color: var(--text-muted); font-size: 0.85em; margin-left: 6px; }
+.tw-picker button.tw-picker-new { color: var(--accent); }
 .transcript-stale-banner { display: flex; align-items: center; gap: 10px; margin: 0 0 10px;
   padding: 8px 12px; border: 1px solid var(--border-light); border-left: 3px solid var(--accent);
   border-radius: 6px; background: var(--bg-card); color: var(--text-secondary); font-size: 0.9em; }
@@ -208,6 +216,7 @@
 
   // ── inline editor ──────────────────────────────────────────────────────
   function _closeEditor(restore) {
+    _closePicker();
     if (!_editor) return;
     const ed = _editor;
     _editor = null;
@@ -247,6 +256,7 @@
     const actions = document.createElement('span');
     actions.className = 'tw-edit-actions';
     actions.appendChild(_button('Save', true, () => _saveEdit()));
+    if (w > 0) actions.appendChild(_button('Split here', false, () => _splitHere()));
     wrap.appendChild(input);
     wrap.appendChild(actions);
 
@@ -299,6 +309,142 @@
     }
   }
 
+  // ── segment index bookkeeping ──────────────────────────────────────────
+  // A split or merge renumbers every later segment. Blocks outside the
+  // re-rendered range keep their DOM, so shift their data-seg in place.
+  function _shiftSegIndices(fromSeg, delta, pid) {
+    _blocksFor(pid).forEach(b => b.querySelectorAll('.tw[data-seg]').forEach(tw => {
+      const i = parseInt(tw.dataset.seg, 10);
+      if (!isNaN(i) && i >= fromSeg) tw.dataset.seg = String(i + delta);
+    }));
+  }
+
+  // ── split + speaker picker ─────────────────────────────────────────────
+  let _picker = null;
+
+  function _closePicker() {
+    if (_picker) { _picker.remove(); _picker = null; }
+  }
+
+  async function _fetchSpeakers(pid) {
+    try {
+      const resp = await fetch(`/project/${encodeURIComponent(pid)}/transcript/speakers`);
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return Array.isArray(data.speakers) ? data.speakers : [];
+    } catch (e) { return []; }
+  }
+
+  /**
+   * Speaker picker anchored under `anchorEl`: the current raw labels resolved
+   * through speaker_names, plus "New speaker". Resolves to the chosen raw
+   * label, '__new__', or null when dismissed.
+   */
+  function _pickSpeaker(anchorEl, speakers, currentRaw) {
+    _closePicker();
+    return new Promise(resolve => {
+      const box = document.createElement('div');
+      box.className = 'tw-picker';
+      const title = document.createElement('div');
+      title.className = 'tw-picker-title';
+      title.textContent = 'Speaker for the new segment';
+      box.appendChild(title);
+      const done = value => { _closePicker(); document.removeEventListener('mousedown', onDoc, true); resolve(value); };
+      const add = (label, raw, cls, hint = true) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        if (hint && raw && raw !== label) {
+          const hint = document.createElement('span');
+          hint.className = 'tw-picker-raw';
+          hint.textContent = raw;
+          b.appendChild(hint);
+        }
+        if (cls) b.classList.add(cls);
+        b.addEventListener('click', e => { e.stopPropagation(); done(raw); });
+        box.appendChild(b);
+        return b;
+      };
+      add(`Keep ${_displayFor(speakers, currentRaw)}`, currentRaw === undefined ? null : currentRaw, null, false);
+      speakers.filter(sp => sp.raw !== currentRaw).forEach(sp => add(sp.display, sp.raw));
+      add('New speaker', '__new__', 'tw-picker-new');
+      ['mousedown', 'mouseup', 'click', 'dblclick'].forEach(evt => box.addEventListener(evt, e => e.stopPropagation()));
+      box.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); done(null); } });
+      const onDoc = e => { if (!box.contains(e.target)) done(null); };
+      document.addEventListener('mousedown', onDoc, true);
+
+      const r = anchorEl.getBoundingClientRect();
+      box.style.left = `${Math.round(r.left + window.scrollX)}px`;
+      box.style.top = `${Math.round(r.bottom + window.scrollY + 4)}px`;
+      document.body.appendChild(box);
+      _picker = box;
+      const first = box.querySelector('button');
+      if (first) first.focus();
+    });
+  }
+
+  function _displayFor(speakers, raw) {
+    const hit = speakers.find(sp => sp.raw === raw);
+    return hit ? hit.display : (raw || 'this speaker');
+  }
+
+  function _rawSpeakerOf(block) {
+    const el = block && block.querySelector('.para-speaker');
+    if (!el) return undefined;
+    return el.dataset.raw || el.textContent.trim();
+  }
+
+  async function _splitHere() {
+    if (!_editor || _busy) return;
+    const ed = _editor;
+    if (ed.w <= 0) { _toast('Split at the first word is not possible.', true); return; }
+    const anchor = ed.wrap;
+    const block = anchor.closest('.para-block');
+    const currentRaw = _rawSpeakerOf(block);
+    const speakers = await _fetchSpeakers(ed.pid);
+    const choice = await _pickSpeaker(anchor, speakers, currentRaw);
+    if (choice === null) return;                       // dismissed
+    if (!_editor || _editor !== ed) return;            // editor went away meanwhile
+    _closeEditor(true);
+    const body = { seg: ed.seg, at_w: ed.w };
+    const changing = choice && choice !== currentRaw;
+    if (changing) body.new_speaker = choice;
+    _busy = true;
+    try {
+      const data = await _post(ed.pid, 'split-segment', body);
+      _shiftSegIndices(ed.seg + 1, 1, ed.pid);
+      _undo.push({ type: 'split', pid: ed.pid, seg: ed.seg, paraStart: data.paragraph_start });
+      if (data.speaker_changed) {
+        // Undo order: the speaker goes back first, then the halves merge.
+        _undo.push({ type: 'reassign', pid: ed.pid, seg: data.new_seg, oldSpeaker: currentRaw,
+                     oldManual: false, newSpeaker: data.speaker, paraStart: data.paragraph_start });
+      }
+      await refreshRange(data.paragraph_start, data.paragraph_end, ed.pid);
+      await _afterSpeakerChange(data, ed.pid);
+      _showStaleBanner(data.has_analysis);
+    } catch (err) {
+      await _handleError(err, ed.pid, ed.paraStart);
+    } finally {
+      _busy = false;
+    }
+  }
+
+  // A new raw label must reach the Speakers sidebar (pro) and the page's
+  // speaker_names snapshot; the display fallback handles the rest.
+  async function _afterSpeakerChange(data, pid) {
+    if (!data || !data.speaker_changed) return;
+    const d = window.diarization;
+    if (!d || typeof d.loadSpeakerNames !== 'function') return;
+    await d.loadSpeakerNames();
+    // The Speakers sidebar (where the user renames the new label) redraws
+    // only on a status poll; ask for one now.
+    if (typeof d.renderSidebarSpeakers !== 'function') return;
+    try {
+      const resp = await fetch(`/diarization/status/${encodeURIComponent(pid || _pid())}`, { cache: 'no-store' });
+      if (resp.ok) d.renderSidebarSpeakers(await resp.json());
+    } catch (e) { /* sidebar catches up on its next poll */ }
+  }
+
   // ── undo ───────────────────────────────────────────────────────────────
   async function undo() {
     if (_busy || !_undo.length) return;
@@ -316,12 +462,13 @@
         await refreshParagraph(data.paragraph_start, entry.pid);
       } else if (entry.type === 'split') {
         data = await _post(entry.pid, 'merge-segment', { seg: entry.seg });
-        if (typeof _shiftSegIndices === 'function') _shiftSegIndices(entry.seg + 1, -1);
+        _shiftSegIndices(entry.seg + 2, -1, entry.pid);
         await refreshRange(data.paragraph_start, data.paragraph_end, entry.pid);
       } else if (entry.type === 'reassign') {
         data = await _post(entry.pid, 'reassign-speaker', { seg: entry.seg, speaker: entry.oldSpeaker,
                                                             speaker_manual: entry.oldManual });
         await refreshRange(data.paragraph_start, data.paragraph_end, entry.pid);
+        await _afterSpeakerChange(Object.assign({ speaker_changed: true }, data), entry.pid);
       } else {
         return;
       }
@@ -390,6 +537,7 @@
     openEditor: _openEditor,
     undoDepth: () => _undo.length,
     _pushUndo: entry => _undo.push(entry),
+    shiftSegIndices: _shiftSegIndices,
     _post,
     showStaleBanner: _showStaleBanner,
   });

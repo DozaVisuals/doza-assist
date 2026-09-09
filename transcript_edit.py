@@ -14,6 +14,11 @@ Routes (all under ``/project/<project_id>/transcript/``):
 - ``POST edit-word``   ``{seg, w, expected, text}``; ``w`` omitted or -1 edits
   a segment with no ``words[]`` (``expected`` is then the segment text).
 - ``POST delete-word`` ``{seg, w, expected}``; the inverse of insert-word.
+- ``POST split-segment`` ``{seg, at_w, new_speaker?}``; ``words[at_w]`` starts
+  a new segment. Both halves take start/end from their first/last word.
+- ``POST merge-segment`` ``{seg}``; joins ``seg`` and ``seg + 1`` (same raw
+  speaker only). The inverse of split-segment.
+- ``GET  speakers`` raw labels in use with their display names, for pickers.
 
 Payload conventions: ``seg`` indexes ``transcript.segments``, ``w`` indexes
 ``segments[seg].words``; ``expected`` is the text the client believes is
@@ -25,6 +30,7 @@ imported lazily to avoid the circular import at module load.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from flask import Blueprint, jsonify, render_template, request
@@ -91,6 +97,80 @@ def _keep_space_convention(reference, text):
 
 def _norm(text):
     return str(text if text is not None else '').strip()
+
+
+def _format_timestamp(seconds):
+    from transcribe import format_timestamp
+    return format_timestamp(seconds)
+
+
+def _set_bounds_from_words(seg):
+    """Segment start/end (and the formatted twins) from its first/last
+    word. Word times themselves are never touched."""
+    words = seg.get('words') or []
+    if not words:
+        return
+    seg['start'] = words[0]['start']
+    seg['end'] = words[-1]['end']
+    seg['start_formatted'] = _format_timestamp(seg['start'])
+    seg['end_formatted'] = _format_timestamp(seg['end'])
+
+
+_LABEL_RE = re.compile(r'^SPEAKER_(\d+)$')
+NEW_SPEAKER = '__new__'
+
+
+def _mint_speaker_label(project, segments):
+    """Lowest unused ``SPEAKER_NN`` across the segments and the diarization
+    speaker list. Added to ``meta.diarization.speakers`` when that list
+    exists; ``speaker_names`` is left unmapped so the raw label shows until
+    the user renames it through the existing rename path."""
+    used = set()
+    for seg in segments:
+        m = _LABEL_RE.match(str(seg.get('speaker', '')))
+        if m:
+            used.add(int(m.group(1)))
+    diar = project.get('diarization') if isinstance(project.get('diarization'), dict) else None
+    diar_list = diar.get('speakers') if diar and isinstance(diar.get('speakers'), list) else None
+    for label in diar_list or []:
+        m = _LABEL_RE.match(str(label))
+        if m:
+            used.add(int(m.group(1)))
+    n = 0
+    while n in used:
+        n += 1
+    label = f'SPEAKER_{n:02d}'
+    if diar_list is not None:
+        diar_list.append(label)
+    return label
+
+
+def _apply_speaker(project, segments, seg, speaker):
+    """Reassign rules shared by split-segment and reassign-speaker:
+    ``speaker`` is a raw label or ``__new__`` (mint one). Marks the segment
+    ``speaker_manual`` so a later diarization pass leaves it alone."""
+    label = _norm(speaker)
+    if not label:
+        raise EditError(400, {'error': 'speaker is required'})
+    if label == NEW_SPEAKER:
+        label = _mint_speaker_label(project, segments)
+    seg['speaker'] = label
+    seg['speaker_manual'] = True
+    return label
+
+
+def _speaker_list(project, segments):
+    names = project.get('speaker_names') if isinstance(project.get('speaker_names'), dict) else {}
+    seen = []
+    for seg in segments:
+        raw = seg.get('speaker')
+        if raw and raw not in seen:
+            seen.append(raw)
+    diar = project.get('diarization') if isinstance(project.get('diarization'), dict) else {}
+    for raw in (diar.get('speakers') or []):
+        if raw and raw not in seen and any(s.get('speaker') == raw for s in segments):
+            seen.append(raw)
+    return [{'raw': raw, 'display': names.get(raw) or raw} for raw in seen]
 
 
 def _int_field(payload, key, default=None, required=False):
@@ -178,11 +258,34 @@ def _payload():
     return data if isinstance(data, dict) else {}
 
 
-def _segment_result(segments, seg_index, **extra):
+def _paragraph_bounds(segments, seg_index, last_index=None):
+    """(start of the paragraph holding ``seg_index``, end of the paragraph
+    holding ``last_index``) so the page knows which blocks to re-render."""
+    core = _core()
+    if last_index is None:
+        last_index = seg_index
+    start = end = None
+    for para in core.group_into_paragraphs(segments):
+        first = para.get('first_index', 0)
+        last = first + len(para['segments']) - 1
+        if start is None and first <= seg_index <= last:
+            start = para['start']
+        if first <= last_index <= last:
+            end = para['segments'][-1].get('end', para['start'])
+    if start is None:
+        start = segments[seg_index]['start']
+    if end is None:
+        end = segments[min(last_index, len(segments) - 1)].get('end', start)
+    return start, end
+
+
+def _segment_result(segments, seg_index, last_index=None, **extra):
+    start, end = _paragraph_bounds(segments, seg_index, last_index)
     out = {
         'seg': seg_index,
         'segment': segments[seg_index],
-        'paragraph_start': _paragraph_start_for_segment(segments, seg_index),
+        'paragraph_start': start,
+        'paragraph_end': end,
     }
     out.update(extra)
     return out
@@ -310,3 +413,90 @@ def delete_word(project_id):
         return _segment_result(segments, seg_index, w=w_index, removed=removed)
 
     return _respond(project_id, op)
+
+
+# ── split-segment / merge-segment ───────────────────────────────────────
+
+@transcript_edit_bp.route('/project/<project_id>/transcript/split-segment', methods=['POST'])
+def split_segment(project_id):
+    """Split so ``words[at_w]`` begins a new segment. ``{seg, at_w,
+    new_speaker?}``. Both halves take start/end from their first/last word;
+    the new segment inherits the speaker unless ``new_speaker`` (a raw label
+    or ``__new__``) is given, in which case it is marked ``speaker_manual``.
+    ``at_w`` must be at least 1 and inside the segment."""
+    data = _payload()
+    seg_index = _int_field(data, 'seg', required=True)
+    at_w = _int_field(data, 'at_w', required=True)
+    new_speaker = data.get('new_speaker')
+
+    def op(project, segments):
+        seg = _seg_at(segments, seg_index)
+        words = _words_of(seg)
+        if not words:
+            raise EditError(400, {'error': 'Segment has no words to split on'})
+        if at_w <= 0 or at_w >= len(words):
+            raise EditError(400, {'error': f'at_w must be between 1 and {len(words) - 1}'})
+        right = {k: v for k, v in seg.items() if k != 'words'}
+        right['words'] = words[at_w:]
+        seg['words'] = words[:at_w]
+        for half in (seg, right):
+            half['text'] = _rebuild_text(half['words'])
+            _set_bounds_from_words(half)
+        segments.insert(seg_index + 1, right)
+        label = None
+        if new_speaker is not None and _norm(new_speaker):
+            label = _apply_speaker(project, segments, right, new_speaker)
+        return _segment_result(segments, seg_index, last_index=seg_index + 1,
+                               new_seg=seg_index + 1, new_segment=right,
+                               speaker=right.get('speaker'), speaker_changed=label is not None,
+                               speakers=_speaker_list(project, segments))
+
+    return _respond(project_id, op)
+
+
+@transcript_edit_bp.route('/project/<project_id>/transcript/merge-segment', methods=['POST'])
+def merge_segment(project_id):
+    """Join ``seg`` and ``seg + 1`` (the inverse of split-segment). ``{seg}``.
+    Only when both share a raw speaker; the merged segment keeps
+    ``speaker_manual`` if either half had it. Word times are untouched."""
+    data = _payload()
+    seg_index = _int_field(data, 'seg', required=True)
+
+    def op(project, segments):
+        left = _seg_at(segments, seg_index)
+        if seg_index + 1 >= len(segments):
+            raise EditError(400, {'error': 'No following segment to merge with'})
+        right = _seg_at(segments, seg_index + 1)
+        if _norm(left.get('speaker')) != _norm(right.get('speaker')):
+            raise EditError(409, {
+                'error': 'Segments have different speakers; reassign one first',
+                'current': [left.get('speaker'), right.get('speaker')],
+            })
+        lw, rw = _words_of(left), _words_of(right)
+        if (lw is None) != (rw is None):
+            raise EditError(400, {'error': 'Cannot merge a worded segment with a segment-level one'})
+        if lw:
+            left['words'] = lw + rw
+            left['text'] = _rebuild_text(left['words'])
+            _set_bounds_from_words(left)
+        else:
+            left['text'] = _norm(left.get('text', '')) + ' ' + _norm(right.get('text', ''))
+            left['end'] = right.get('end', left.get('end'))
+            left['end_formatted'] = _format_timestamp(left['end'])
+        if left.get('speaker_manual') or right.get('speaker_manual'):
+            left['speaker_manual'] = True
+        segments.pop(seg_index + 1)
+        return _segment_result(segments, seg_index, merged_from=seg_index + 1)
+
+    return _respond(project_id, op)
+
+
+@transcript_edit_bp.route('/project/<project_id>/transcript/speakers', methods=['GET'])
+def speakers(project_id):
+    """Raw speaker labels in use, each with its display name."""
+    core = _core()
+    project = core.get_project(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    return jsonify({'speakers': _speaker_list(project, _segments(project)),
+                    'new_speaker': NEW_SPEAKER})

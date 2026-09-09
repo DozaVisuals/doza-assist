@@ -262,3 +262,116 @@ def test_edit_does_not_clobber_concurrent_label_save(client, project):
     after = _load(project)
     assert after['labeled_sections'][0]['color'] == 'blue'
     assert after['transcript']['segments'][2]['words'][0]['word'] == ' So what'
+
+
+# ── commit 3: split-segment / merge-segment ──────────────────────────────
+
+def _all_word_timings(segments):
+    return [(w['start'], w['end']) for s in segments for w in s.get('words', [])]
+
+
+def test_split_segment_recomputes_bounds_and_keeps_word_times(client, project):
+    before = _load(project)['transcript']['segments']
+    resp = _post(client, project, 'split-segment', {'seg': 1, 'at_w': 2})
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    segs = _load(project)['transcript']['segments']
+    assert len(segs) == len(before) + 1
+    left, right = segs[1], segs[2]
+    assert [w['word'] for w in left['words']] == [' Second', ' half']
+    assert [w['word'] for w in right['words']] == [' was', ' better']
+    assert left['text'] == 'Second half' and right['text'] == 'was better'
+    assert (left['start'], left['end']) == (2.0, 2.8)
+    assert (right['start'], right['end']) == (2.8, 3.6)
+    assert left['end_formatted'] == format_timestamp(2.8)
+    assert right['start_formatted'] == format_timestamp(2.8)
+    assert right['speaker'] == 'SPEAKER_00' and 'speaker_manual' not in right
+    # Word timings across the whole transcript are unchanged; later segments untouched.
+    assert _all_word_timings(segs) == _all_word_timings(before)
+    assert segs[3:] == before[2:]
+    assert data['new_seg'] == 2 and data['speaker_changed'] is False
+    assert data['paragraph_start'] == 0.0 and data['paragraph_end'] == 3.6
+
+
+def test_split_rejects_first_word_and_bad_indices(client, project):
+    assert _post(client, project, 'split-segment', {'seg': 1, 'at_w': 0}).status_code == 400
+    assert _post(client, project, 'split-segment', {'seg': 1, 'at_w': 4}).status_code == 400
+    assert _post(client, project, 'split-segment', {'seg': 3, 'at_w': 1}).status_code == 400   # no words
+    assert _post(client, project, 'split-segment', {'seg': 8, 'at_w': 1}).status_code == 404
+    assert len(_load(project)['transcript']['segments']) == 4
+
+
+def test_split_with_new_speaker_label_marks_manual(client, project):
+    resp = _post(client, project, 'split-segment', {'seg': 1, 'at_w': 2, 'new_speaker': 'SPEAKER_01'})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    segs = _load(project)['transcript']['segments']
+    assert segs[2]['speaker'] == 'SPEAKER_01' and segs[2]['speaker_manual'] is True
+    assert segs[1]['speaker'] == 'SPEAKER_00' and 'speaker_manual' not in segs[1]
+    assert data['speaker_changed'] is True and data['speaker'] == 'SPEAKER_01'
+    # The back half now opens its own paragraph, so the refresh range spans both.
+    assert data['paragraph_start'] == 0.0 and data['paragraph_end'] == 3.6
+    assert {s['raw'] for s in data['speakers']} == {'SPEAKER_00', 'SPEAKER_01'}
+
+
+def test_split_with___new___mints_unused_label(client, project):
+    meta = _load(project)
+    meta['diarization'] = {'speakers': ['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_02']}
+    (Path(app_module.app.config['PROJECTS_DIR']) / project / 'meta.json').write_text(json.dumps(meta), encoding='utf-8')
+    resp = _post(client, project, 'split-segment', {'seg': 0, 'at_w': 2, 'new_speaker': '__new__'})
+    assert resp.status_code == 200
+    after = _load(project)
+    assert after['transcript']['segments'][1]['speaker'] == 'SPEAKER_03'
+    assert after['transcript']['segments'][1]['speaker_manual'] is True
+    assert after['diarization']['speakers'][-1] == 'SPEAKER_03'
+    assert 'SPEAKER_03' not in after.get('speaker_names', {})
+    assert resp.get_json()['speaker'] == 'SPEAKER_03'
+
+
+def test_split_then_merge_round_trips(client, project):
+    before = _load(project)['transcript']['segments']
+    assert _post(client, project, 'split-segment', {'seg': 1, 'at_w': 1}).status_code == 200
+    resp = _post(client, project, 'merge-segment', {'seg': 1})
+    assert resp.status_code == 200, resp.get_json()
+    after = _load(project)['transcript']['segments']
+    assert after == before
+    assert resp.get_json()['paragraph_start'] == 0.0
+
+
+def test_merge_refuses_different_speakers(client, project):
+    resp = _post(client, project, 'merge-segment', {'seg': 1})   # SPEAKER_00 + SPEAKER_01
+    assert resp.status_code == 409
+    assert resp.get_json()['current'] == ['SPEAKER_00', 'SPEAKER_01']
+    assert _post(client, project, 'merge-segment', {'seg': 3}).status_code == 400   # nothing after
+    assert len(_load(project)['transcript']['segments']) == 4
+
+
+def test_merge_keeps_speaker_manual_if_either_half_had_it(client, project):
+    assert _post(client, project, 'split-segment', {'seg': 1, 'at_w': 2, 'new_speaker': 'SPEAKER_00'}).status_code == 200
+    segs = _load(project)['transcript']['segments']
+    assert segs[2]['speaker_manual'] is True and 'speaker_manual' not in segs[1]
+    assert _post(client, project, 'merge-segment', {'seg': 1}).status_code == 200
+    merged = _load(project)['transcript']['segments'][1]
+    assert merged['speaker_manual'] is True
+    assert merged['text'] == 'Second half was better' and (merged['start'], merged['end']) == (2.0, 3.6)
+
+
+def test_merge_segment_level_pair(client, project):
+    meta = _load(project)
+    meta['transcript']['segments'].append({'start': 11.0, 'end': 12.0, 'text': 'and more', 'speaker': 'SPEAKER_01',
+                                           'start_formatted': '00:00:11.000', 'end_formatted': '00:00:12.000'})
+    (Path(app_module.app.config['PROJECTS_DIR']) / project / 'meta.json').write_text(json.dumps(meta), encoding='utf-8')
+    assert _post(client, project, 'merge-segment', {'seg': 3}).status_code == 200
+    seg = _load(project)['transcript']['segments'][3]
+    assert seg['text'] == 'segment level only and more' and seg['end'] == 12.0
+    # Mixed worded / segment-level pair is refused.
+    assert _post(client, project, 'merge-segment', {'seg': 2}).status_code == 400
+
+
+def test_speakers_endpoint_resolves_display_names(client, project):
+    resp = client.get(f'/project/{project}/transcript/speakers')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['speakers'] == [{'raw': 'SPEAKER_00', 'display': 'Reporter'},
+                                {'raw': 'SPEAKER_01', 'display': 'SPEAKER_01'}]
+    assert data['new_speaker'] == '__new__'

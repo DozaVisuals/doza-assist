@@ -62,7 +62,7 @@ function toggleTheme() {
         <input type="file" id="fileInput" multiple accept="video/*,audio/*,.mp4,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.ts,.m2ts,.mts,.mxf,.fcpxml,.fcpxmld" style="display:none;">
         <input type="file" id="folderInput" webkitdirectory style="display:none;">
     </div>
-    <p class="my-style-privacy">Your style profile stays on your machine unless a project is set to a cloud provider.</p>
+    <p class="my-style-privacy">Local by default. Nothing leaves your Mac unless you connect your own API key.</p>
 </div>
 
 {% else %}
@@ -349,7 +349,7 @@ function toggleTheme() {
         <button class="btn" onclick="regenerateAnalysis()">Regenerate analysis</button>
     </div>
 
-    <p class="my-style-privacy">Your style profile stays on your machine unless a project is set to a cloud provider.</p>
+    <p class="my-style-privacy">Local by default. Nothing leaves your Mac unless you connect your own API key.</p>
 
     <!-- Imported projects list -->
     <div class="my-style-section">
@@ -406,7 +406,7 @@ function toggleTheme() {
         {% endfor %}
     </div>
     {% endif %}
-    <p class="my-style-privacy" style="margin-top:24px;">Your style profile stays on your machine unless a project is set to a cloud provider.</p>
+    <p class="my-style-privacy" style="margin-top:24px;">Local by default. Nothing leaves your Mac unless you connect your own API key.</p>
 </div>
 
 <!-- ==================== DATA & EXPORT TAB ==================== -->
@@ -418,7 +418,7 @@ function toggleTheme() {
         <label for="importFileInput" class="btn" style="cursor:pointer;">Import profile data</label>
         <input type="file" id="importFileInput" accept="application/json" style="display:none;" onchange="importBundle(this.files[0])">
     </div>
-    <p class="my-style-privacy" style="margin-top:24px;">Your style profile stays on your machine unless a project is set to a cloud provider.</p>
+    <p class="my-style-privacy" style="margin-top:24px;">Local by default. Nothing leaves your Mac unless you connect your own API key.</p>
 
     <h3 class="edna-section-title" style="margin-top:36px;">Danger zone</h3>
     <p class="edna-muted">Permanently delete the active profile — the system prompt, summary, and all snapshots. This cannot be undone.</p>

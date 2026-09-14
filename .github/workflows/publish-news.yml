@@ -1,0 +1,35 @@
+name: Publish scheduled news posts
+
+# Runs daily at 08:00 America/New_York (12:00 UTC during EDT). Builds every
+# post in docs/articles dated today or earlier, commits the output, and pings
+# the Netlify build hook if one is configured as the NETLIFY_BUILD_HOOK secret.
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build posts due today
+        run: python3 site/news/build.py
+      - name: Commit built pages
+        run: |
+          git config user.name "doza-news-bot"
+          git config user.email "news@doza.ai"
+          git add site/news
+          git diff --cached --quiet || git commit -m "news: publish posts due $(date -u +%F)"
+          git push
+      - name: Trigger Netlify deploy
+        if: ${{ env.HOOK != '' }}
+        env:
+          HOOK: ${{ secrets.NETLIFY_BUILD_HOOK }}
+        run: curl -fsS -X POST "$HOOK"

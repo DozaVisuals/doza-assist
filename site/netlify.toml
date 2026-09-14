@@ -1,0 +1,9 @@
+# If doza.ai deploys from this repo, point Netlify at this folder:
+#   Base directory: (leave blank)   Publish directory: site
+[build]
+  publish = "site"
+
+[[headers]]
+  for = "/news/*"
+  [headers.values]
+    Cache-Control = "public, max-age=600"

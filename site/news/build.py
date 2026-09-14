@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Build the doza.ai newsroom from docs/articles/*.md.
 
-    python3 site/news/build.py            # writes site/news/index.html + one folder per post
+    python3 site/news/build.py                 # posts dated today or earlier
+    python3 site/news/build.py --all           # every post, including future-dated drafts
+    python3 site/news/build.py --as-of 2026-09-18
 
 Each markdown file needs YAML-ish front matter (title, slug, date, author,
 description, category). Everything after the front matter is the body.
 """
-import html, re, sys, datetime
+import html, re, sys, datetime, shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -207,7 +209,19 @@ def index_page(arts):
     return shell('News \\ Doza', 'Announcements and perspectives from Doza, makers of Doza Assist.', f'{SITE}/news/', body)
 
 def main():
+    argv = sys.argv[1:]
+    as_of = datetime.date.today()
+    if '--as-of' in argv:
+        as_of = datetime.date.fromisoformat(argv[argv.index('--as-of') + 1])
     arts = sorted((parse(p) for p in SRC.glob('*.md') if 'slug:' in p.read_text()), key=lambda a: a['date_obj'], reverse=True)
+    if '--all' not in argv:
+        skipped = [a['slug'] for a in arts if a['date_obj'] > as_of]
+        arts = [a for a in arts if a['date_obj'] <= as_of]
+        for s in skipped:
+            print(f'holding {s} (scheduled after {as_of})')
+    for stale in OUT.iterdir():
+        if stale.is_dir() and stale.name not in {a['slug'] for a in arts}:
+            shutil.rmtree(stale)
     if not arts:
         sys.exit('no articles found in docs/articles')
     for a in arts:

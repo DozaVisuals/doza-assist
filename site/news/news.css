@@ -91,3 +91,12 @@ time{font-variant-numeric:tabular-nums}
 .foot-cols a:hover{color:var(--ink)}
 .foot-inner.legal{padding-block:0 32px;font-size:13px;color:var(--ink-3)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* faq */
+.faq{margin-top:3em;border-top:1px solid var(--rule);padding-top:1.5em}
+.faq h2{margin-top:0;font-size:24px}
+.faq details{border-bottom:1px solid var(--rule);padding:14px 0}
+.faq summary{cursor:pointer;font-weight:600;color:var(--ink);font-size:17px;list-style:none;display:flex;justify-content:space-between;gap:16px}
+.faq summary::after{content:"+";color:var(--ink-3);flex:none}
+.faq details[open] summary::after{content:"\2013"}
+.faq details p{margin:10px 0 0;font-size:16px;color:var(--body)}

@@ -24,6 +24,36 @@ def inline(s):
     s = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', s)
     return s
 
+def split_faq(body):
+    """Return (body_without_faq, [(q, a), ...]) for a trailing '## FAQ' section."""
+    m = re.search(r'\n## FAQ\s*\n(.*?)(?=\n---|\Z)', body, re.S)
+    if not m:
+        return body, []
+    faq = []
+    for block in re.split(r'\n(?=### )', m.group(1).strip()):
+        q, _, a = block.partition('\n')
+        faq.append((q.lstrip('# ').strip(), a.strip()))
+    return body[:m.start()] + body[m.end():], faq
+
+def faq_html(faq):
+    if not faq:
+        return ''
+    items = ''.join(f'<details><summary>{inline(q)}</summary><p>{inline(a)}</p></details>' for q, a in faq)
+    return f'<section class="faq"><h2>Frequently asked questions</h2>{items}</section>'
+
+def json_ld(a, url, faq):
+    import json
+    art = {"@context": "https://schema.org", "@type": "Article", "headline": a['title'],
+           "description": a['description'], "datePublished": a['date'], "dateModified": a['date'],
+           "author": {"@type": "Person", "name": a['author']},
+           "publisher": {"@type": "Organization", "name": "Doza Visuals", "url": SITE},
+           "mainEntityOfPage": url}
+    blocks = [art]
+    if faq:
+        blocks.append({"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [
+            {"@type": "Question", "name": q, "acceptedAnswer": {"@type": "Answer", "text": a_}} for q, a_ in faq]})
+    return ''.join(f'<script type="application/ld+json">{json.dumps(b_, ensure_ascii=False)}</script>' for b_ in blocks)
+
 def md_to_html(body):
     out = []
     for para in re.split(r'\n\s*\n', body.strip()):
@@ -59,7 +89,7 @@ def parse(path):
     meta.setdefault('author', 'Doza Visuals')
     return meta
 
-def shell(title, description, canonical, body, is_article=False, meta=None):
+def shell(title, description, canonical, body, is_article=False, meta=None, extra_head=''):
     og = ''
     if is_article and meta:
         og = f'''
@@ -79,6 +109,7 @@ def shell(title, description, canonical, body, is_article=False, meta=None):
 <meta property="og:url" content="{canonical}">
 <meta property="og:site_name" content="Doza">
 <meta name="twitter:card" content="summary_large_image">{og}
+{extra_head}
 <style>
 {CSS}
 </style>
@@ -129,6 +160,7 @@ def article_page(a, others):
       <a class="card" href="https://discord.gg/TTM3hWXM8"><span class="eyebrow">Community</span><h3>Join the Discord</h3><p>Editors comparing notes on local AI and story-first cutting.</p></a>
     </div></div></section>'''
     url = f"{SITE}/news/{a['slug']}/"
+    body_md, faq = split_faq(a['body'])
     body = f'''
 <main class="article">
   <header class="article-head">
@@ -137,7 +169,8 @@ def article_page(a, others):
     <p class="dek">{html.escape(a['description'])}</p>
   </header>
   <div class="prose">
-{md_to_html(a['body'])}
+{md_to_html(body_md)}
+{faq_html(faq)}
   </div>
   <aside class="share">
     <span>Share</span>
@@ -147,7 +180,7 @@ def article_page(a, others):
   </aside>
 </main>
 {related}'''
-    return shell(a['title'] + ' \\ Doza', a['description'], url, body, True, a)
+    return shell(a['title'] + ' \\ Doza', a['description'], url, body, True, a, json_ld(a, url, faq))
 
 def index_page(arts):
     lead, rest = arts[0], arts[1:]

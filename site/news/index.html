@@ -12,6 +12,7 @@
 <meta property="og:url" content="https://doza.ai/news/">
 <meta property="og:site_name" content="Doza">
 <meta name="twitter:card" content="summary_large_image">
+
 <style>
 :root{
   /* Doza Assist tokens (static/style.css), dark-first */
@@ -107,6 +108,15 @@ time{font-variant-numeric:tabular-nums}
 .foot-inner.legal{padding-block:0 32px;font-size:13px;color:var(--ink-3)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 
+/* faq */
+.faq{margin-top:3em;border-top:1px solid var(--rule);padding-top:1.5em}
+.faq h2{margin-top:0;font-size:24px}
+.faq details{border-bottom:1px solid var(--rule);padding:14px 0}
+.faq summary{cursor:pointer;font-weight:600;color:var(--ink);font-size:17px;list-style:none;display:flex;justify-content:space-between;gap:16px}
+.faq summary::after{content:"+";color:var(--ink-3);flex:none}
+.faq details[open] summary::after{content:"\2013"}
+.faq details p{margin:10px 0 0;font-size:16px;color:var(--body)}
+
 </style>
 </head>
 <body>
@@ -125,13 +135,18 @@ time{font-variant-numeric:tabular-nums}
 <main class="news">
   <header class="news-head"><h1>News</h1><p>Announcements, perspectives, and notes from building local AI for editors.</p></header>
   
-  <a class="featured" href="https://doza.ai/news/sovereign-ai-without-the-data-center/">
-    <span class="eyebrow">Perspectives · Sep 11, 2026</span>
-    <h2>Sovereign AI Shouldn&#x27;t Require a Data Center</h2>
-    <p>IBC 2026 is talking about sovereign AI for media: owned models, owned infrastructure, footage that never leaves the building. Doza Assist has run that way since day one, on a Mac.</p>
+  <a class="featured" href="https://doza.ai/news/local-first-frontier-models-mcp/">
+    <span class="eyebrow">Perspectives · Sep 14, 2026</span>
+    <h2>Local First, Frontier When You Want It: Why Doza Assist Gives Editors a Choice of AI Model</h2>
+    <p>Doza Assist runs a local model by default and lets you switch to Claude or GPT with your own key. With the MCP connector, Claude Desktop can read your transcripts too. Here&#x27;s why choice matters.</p>
     <span class="readmore">Read the article</span>
   </a>
-  
+  <div class="rows">
+    <a class="row" href="https://doza.ai/news/sovereign-ai-without-the-data-center/">
+      <span class="eyebrow">Perspectives</span>
+      <h3>Sovereign AI Shouldn&#x27;t Require a Data Center</h3>
+      <time datetime="2026-09-11">Sep 11, 2026</time>
+    </a></div>
 </main>
 <footer class="foot">
   <div class="foot-inner">

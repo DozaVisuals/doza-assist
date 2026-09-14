@@ -2,7 +2,7 @@
 title: "AI That Edits Like You: What 'My Style' Learns From Your Cuts"
 slug: ai-that-edits-like-you-my-style
 date: 2026-09-17
-author: Chris Doza
+author: Chris Cardoza
 description: "Most AI video editing tools sound generic because they've never seen your work. My Style in Doza Assist builds an editorial profile from your finished cuts, locally, and filters every suggestion through it."
 category: Product
 ---
@@ -64,4 +64,4 @@ Yes. It's fully included in Doza Assist Core under the MIT license.
 
 ---
 
-*Chris Doza is a documentary filmmaker and the creator of Doza Assist. Try My Style in [Doza Assist Core](https://github.com/DozaVisuals/doza-assist).*
+*Chris Cardoza is a documentary filmmaker and the creator of Doza Assist. Try My Style in [Doza Assist Core](https://github.com/DozaVisuals/doza-assist).*

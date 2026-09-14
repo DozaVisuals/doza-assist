@@ -2,7 +2,7 @@
 title: "Sovereign AI Shouldn't Require a Data Center"
 slug: sovereign-ai-without-the-data-center
 date: 2026-09-11
-author: Chris Doza
+author: Chris Cardoza
 description: "IBC 2026 is talking about sovereign AI for media: owned models, owned infrastructure, footage that never leaves the building. Doza Assist has run that way since day one, on a Mac."
 category: Perspectives
 ---
@@ -57,4 +57,4 @@ Sovereignty shouldn't require a data center. It should require a download.
 
 ---
 
-*Chris Doza is a documentary filmmaker and the creator of Doza Assist. Try it at [doza.ai](https://doza.ai) or read the source on [GitHub](https://github.com/DozaVisuals/doza-assist).*
+*Chris Cardoza is a documentary filmmaker and the creator of Doza Assist. Try it at [doza.ai](https://doza.ai) or read the source on [GitHub](https://github.com/DozaVisuals/doza-assist).*

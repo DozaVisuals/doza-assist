@@ -2,7 +2,7 @@
 title: "How to Transcribe Video Locally on a Mac (No Cloud, No Subscription)"
 slug: transcribe-video-locally-mac
 date: 2026-09-16
-author: Chris Doza
+author: Chris Cardoza
 description: "A practical guide to offline video transcription on Apple Silicon: which models to use, what hardware you need, how to get word-level timestamps, and how to do it free with Doza Assist Core."
 category: Guides
 ---
@@ -72,4 +72,4 @@ A few minutes with Parakeet on a base M-series Mac. WhisperX takes longer, rough
 
 ---
 
-*Chris Doza is a documentary filmmaker and the creator of Doza Assist. Get [Doza Assist Core on GitHub](https://github.com/DozaVisuals/doza-assist).*
+*Chris Cardoza is a documentary filmmaker and the creator of Doza Assist. Get [Doza Assist Core on GitHub](https://github.com/DozaVisuals/doza-assist).*

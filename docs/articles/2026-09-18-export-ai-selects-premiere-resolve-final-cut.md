@@ -2,7 +2,7 @@
 title: "Premiere, Resolve, or Final Cut: Getting AI Selects Into Your NLE Without Re-Cutting"
 slug: export-ai-selects-premiere-resolve-final-cut
 date: 2026-09-18
-author: Chris Doza
+author: Chris Cardoza
 description: "A practical comparison of FCPXML, Premiere XML, and CMX 3600 EDL for moving selects from a transcription tool into Final Cut Pro, Premiere Pro, and DaVinci Resolve. What each format carries and what it loses."
 category: Guides
 ---
@@ -65,4 +65,4 @@ Integer and fractional NTSC rates, including 23.976, 24, 25, 29.97, 30, 59.94, a
 
 ---
 
-*Chris Doza is a documentary filmmaker and the creator of Doza Assist. All three exporters are open source in [Doza Assist Core](https://github.com/DozaVisuals/doza-assist).*
+*Chris Cardoza is a documentary filmmaker and the creator of Doza Assist. All three exporters are open source in [Doza Assist Core](https://github.com/DozaVisuals/doza-assist).*

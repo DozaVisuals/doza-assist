@@ -2,7 +2,7 @@
 title: "Local First, Frontier When You Want It: Why Doza Assist Gives Editors a Choice of AI Model"
 slug: local-first-frontier-models-mcp
 date: 2026-09-14
-author: Chris Doza
+author: Chris Cardoza
 description: "Doza Assist runs a local model by default and lets you switch to Claude or GPT with your own key. With the MCP connector, Claude Desktop can read your transcripts too. Here's why choice matters."
 category: Perspectives
 ---
@@ -76,4 +76,4 @@ Not yet. The open-source Core doesn't have the assistant-access panel that gates
 
 ---
 
-*Chris Doza is a documentary filmmaker and the creator of Doza Assist. The MCP connector is open source at [github.com/DozaVisuals/doza-assist-claude-extension](https://github.com/DozaVisuals/doza-assist-claude-extension).*
+*Chris Cardoza is a documentary filmmaker and the creator of Doza Assist. The MCP connector is open source at [github.com/DozaVisuals/doza-assist-claude-extension](https://github.com/DozaVisuals/doza-assist-claude-extension).*

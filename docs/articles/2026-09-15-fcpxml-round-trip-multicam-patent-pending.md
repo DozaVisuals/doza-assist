@@ -2,7 +2,7 @@
 title: "Why FCPXML Round-Trips Break, and How We Fixed It (Patent Pending)"
 slug: fcpxml-round-trip-multicam-patent-pending
 date: 2026-09-15
-author: Chris Doza
+author: Chris Cardoza
 description: "Most tools that write FCPXML lose your multicam angles and bookmarks, so selects come back into Final Cut Pro with audio but no video. Here's why, and how Doza Assist's patent-pending round-trip keeps the container intact."
 category: Engineering
 ---
@@ -62,4 +62,4 @@ The method of extracting the enabled audio angle from a multicam or synchronized
 
 ---
 
-*Chris Doza is a documentary filmmaker and the creator of Doza Assist. The FCPXML parser is part of [Doza Assist Core](https://github.com/DozaVisuals/doza-assist), free and open source.*
+*Chris Cardoza is a documentary filmmaker and the creator of Doza Assist. The FCPXML parser is part of [Doza Assist Core](https://github.com/DozaVisuals/doza-assist), free and open source.*
